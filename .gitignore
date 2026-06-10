@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.tmp/
+*.egg-info/
+*.dist-info/
+build/
+dist/
+
+.env
+logs/*
+!logs/.gitkeep
+contexts/sessions/*.jsonl
+!contexts/sessions/.gitkeep
