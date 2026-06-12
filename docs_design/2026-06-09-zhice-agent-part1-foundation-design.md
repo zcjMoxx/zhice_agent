@@ -8,7 +8,7 @@
 
 ## 1. 第一部分要开发什么
 
-第一部分建议开发“可运行底座”，目标是让 Zhice-Agent 从空仓库变成一个能启动、能读取配置、能加载 Prompt、能保存会话消息的最小 Python 项目。
+第一部分建议开发“可运行底座”，目标是让 ZhiCe-Agent 从空仓库变成一个能启动、能读取配置、能加载 Prompt、能保存会话消息的最小 Python 项目。
 
 这一部分不接真实 LLM，也不实现工具调用。它主要为后续 AgentLoop、LLMProvider、ToolRegistry、SkillLoader 打地基。
 
@@ -251,7 +251,7 @@ class PromptLoader:
 ```text
 $ python -m pip install -e .
 $ zcagent --session default
-ZC-Agent
+ZhiCe-Agent
 workspace: ...
 session: default
 > hello

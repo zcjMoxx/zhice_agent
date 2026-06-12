@@ -4,7 +4,7 @@
 >
 > 承接文档：`docs_design/2026-06-10-zhice-agent-part2-no-tool-chat-design.md`
 >
-> 参考规范：`AGENTS.md`、`DEVELOPMENT_STANDARDS.md`
+> 参考规范：`AGENTS.md`
 >
 > 开发范围：Milestone 2 工具调用，先实现只读本地工具闭环
 
@@ -12,7 +12,7 @@
 
 ## 1. 第三部分要开发什么
 
-第三部分建议开发“工具调用”能力，目标是让 Zhice-Agent 从“只能调用 LLM 聊天”的最小 Agent，升级为“能把可用工具声明给 LLM、识别模型返回的 tool calls、执行工具、回填工具结果、再让模型生成最终回答”的可扩展 AgentLoop。
+第三部分建议开发“工具调用”能力，目标是让 ZhiCe-Agent 从“只能调用 LLM 聊天”的最小 Agent，升级为“能把可用工具声明给 LLM、识别模型返回的 tool calls、执行工具、回填工具结果、再让模型生成最终回答”的可扩展 AgentLoop。
 
 这一部分仍保持轻量，优先实现只读本地工具，不做任意命令执行，不做文件写入，不接 Skill。工具系统先把协议边界、注册表、安全路径、输出截断和 session 保存顺序立住，为后续 `exec` 工具和 SkillLoader 打地基。
 
