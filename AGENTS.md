@@ -1,6 +1,6 @@
-# Zhice-Agent 开发规范
+# ZhiCe-Agent 开发规范
 
-> 本规范用于约束 Zhice-Agent 的日常开发，优先服务轻量、清晰、可逐步演进的 Agent 内核。
+> 本规范用于约束 ZhiCe-Agent 的日常开发，优先服务轻量、清晰、可逐步演进的 Agent 内核。
 
 ## 1. 核心边界
 
@@ -37,7 +37,9 @@ skills  -> no agent imports
 
 - 所有运行路径从 `ZHICE_AGENT_WORKSPACE` 派生。
 - 配置文件统一放在 `config/`。
-- Secret 不进仓库，只放环境变量；仓库只提交 `.env.example`。
+- 仓库不提交真实 Secret；仓库只提交 `config/.env.example` 和不含真实 key 的示例配置。
+- 本地开发可在工作目录 `config/llm_endpoints.json` 写入 `api_key`，因为工作目录不属于仓库。
+- Docker、云部署、CI 等环境优先通过 `.env`、env-file 或平台 Secret 注入 Secret；`config/llm_endpoints.json` 里仍统一使用 `api_key`，可写明文，也可写 `${ENV_VAR}` 占位。
 - 文件、工具、exec 默认限制在 workspace 内，禁止默认访问 workspace 外路径。
 
 ## 5. Tool 规范
@@ -101,7 +103,7 @@ python -m pytest
 
 ## 9. 暂不纳入第一阶段的内容
 
-Zhice-Agent 第一阶段先保持轻量，暂不纳入：
+ZhiCe-Agent 第一阶段先保持轻量，暂不纳入：
 
 - 多用户和多渠道隔离。
 - Skill 市场、审批流、自进化。
