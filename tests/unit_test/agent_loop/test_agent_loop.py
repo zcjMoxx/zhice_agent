@@ -1,0 +1,239 @@
+"""Tests for the minimal no-tool AgentLoop."""
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from agent.message import Message
+from agent.protocols.session import SessionState
+
+
+def test_run_turn_returns_assistant_text_and_appends_session_messages(tmp_path):
+    """A successful turn should save user and assistant messages exactly once."""
+
+    from agent.loop import AgentLoop
+    from agent.protocols.llm import LLMResponse
+
+    llm = FakeLLM(LLMResponse(content="hi there", metadata={"model": "fake"}))
+    sessions = InMemorySessionStore()
+    context_builder = FakeContextBuilder()
+    loop = AgentLoop(llm=llm, sessions=sessions, context_builder=context_builder, workspace=tmp_path)
+
+    result = loop.run_turn("default", "hello")
+
+    assert result == "hi there"
+    assert llm.calls == [{"messages": [{"role": "user", "content": "hello"}], "tools": None}]
+    assert [(message.role, message.content) for message in sessions.appended["default"]] == [
+        ("user", "hello"),
+        ("assistant", "hi there"),
+    ]
+    assert sessions.appended["default"][1].metadata == {"model": "fake"}
+
+
+def test_run_turn_passes_existing_history_to_context_builder(tmp_path):
+    """The current user message should be separate from loaded session history."""
+
+    from agent.loop import AgentLoop
+    from agent.protocols.llm import LLMResponse
+
+    history = [Message(role="user", content="before")]
+    sessions = InMemorySessionStore(states={"default": SessionState("default", history)})
+    context_builder = FakeContextBuilder(messages=[{"role": "user", "content": "from context"}])
+    loop = AgentLoop(
+        llm=FakeLLM(LLMResponse(content="ok")),
+        sessions=sessions,
+        context_builder=context_builder,
+        workspace=tmp_path,
+    )
+
+    loop.run_turn("default", "current")
+
+    assert context_builder.calls == [
+        {
+            "history": history,
+            "user_message": Message(role="user", content="current"),
+            "workspace": tmp_path,
+            "session_id": "default",
+        }
+    ]
+
+
+def test_run_turn_records_error_marker_when_llm_raises(tmp_path):
+    """LLM failures should leave a complete session turn without leaking details."""
+
+    from agent.loop import AgentLoop
+
+    llm = RaisingLLM(RuntimeError("upstream rejected secret sk-test"))
+    sessions = InMemorySessionStore()
+    loop = AgentLoop(
+        llm=llm,
+        sessions=sessions,
+        context_builder=FakeContextBuilder(),
+        workspace=tmp_path,
+    )
+
+    result = loop.run_turn("default", "hello")
+
+    assert "LLM" in result
+    assert "sk-test" not in result
+    appended = sessions.appended["default"]
+    assert [(message.role, message.content) for message in appended] == [
+        ("user", "hello"),
+        ("assistant", result),
+    ]
+    assert appended[1].metadata["is_error"] is True
+
+
+def test_run_turn_explains_missing_api_key(tmp_path):
+    """Configuration errors should tell the user exactly what to set."""
+
+    from agent.loop import AgentLoop
+    from agent.protocols.llm import LLMConfigurationError
+
+    llm = RaisingLLM(LLMConfigurationError("LLM API key is missing. Set api_key in llm_endpoints.json."))
+    sessions = InMemorySessionStore()
+    loop = AgentLoop(
+        llm=llm,
+        sessions=sessions,
+        context_builder=FakeContextBuilder(),
+        workspace=tmp_path,
+    )
+
+    result = loop.run_turn("default", "hello")
+
+    assert "missing API key" in result
+    assert "Choose one" in result
+    assert "api_key" in result
+    assert "${YOUR_ENV_NAME}" in result
+    assert str(tmp_path / "config" / "llm_endpoints.json") in result
+
+
+def test_run_turn_explains_missing_placeholder_environment_variable(tmp_path):
+    """Missing ${ENV_VAR} references should tell the user what variable to define."""
+
+    from agent.loop import AgentLoop
+    from agent.protocols.llm import LLMConfigurationError
+
+    llm = RaisingLLM(
+        LLMConfigurationError(
+            "LLM endpoint 'default' references missing environment variable "
+            "'ZHICE_LLM_OPENAI_API_KEY' in field api_key"
+        )
+    )
+    sessions = InMemorySessionStore()
+    loop = AgentLoop(
+        llm=llm,
+        sessions=sessions,
+        context_builder=FakeContextBuilder(),
+        workspace=tmp_path,
+    )
+
+    result = loop.run_turn("default", "hello")
+
+    assert "missing environment variable" in result
+    assert "ZHICE_LLM_OPENAI_API_KEY" in result
+    assert "config/.env" in result
+    assert "api_key" in result
+
+
+def test_run_turn_explains_provider_request_failure(tmp_path):
+    """Provider errors should point to endpoint configuration."""
+
+    from agent.loop import AgentLoop
+    from agent.protocols.llm import LLMProviderError
+
+    llm = RaisingLLM(LLMProviderError("LLM HTTP request failed with status 401: bad key"))
+    sessions = InMemorySessionStore()
+    loop = AgentLoop(
+        llm=llm,
+        sessions=sessions,
+        context_builder=FakeContextBuilder(),
+        workspace=tmp_path,
+    )
+
+    result = loop.run_turn("default", "hello")
+
+    assert "llm_endpoints.json" in result
+    assert "base_url" in result
+    assert "api_key" in result
+
+
+def test_run_turn_reports_session_save_failure(tmp_path):
+    """Saving history failures should not hide the LLM/configuration message."""
+
+    from agent.loop import AgentLoop
+    from agent.protocols.llm import LLMResponse
+
+    loop = AgentLoop(
+        llm=FakeLLM(LLMResponse(content="ok")),
+        sessions=FailingSessionStore(),
+        context_builder=FakeContextBuilder(),
+        workspace=tmp_path,
+    )
+
+    result = loop.run_turn("default", "hello")
+
+    assert "ok" in result
+    assert "Cannot save session history" in result
+    assert "contexts" in result
+
+
+@dataclass
+class InMemorySessionStore:
+    states: dict[str, SessionState] = field(default_factory=dict)
+    appended: dict[str, list[Message]] = field(default_factory=dict)
+
+    def load(self, session_id: str) -> SessionState:
+        return self.states.get(session_id, SessionState(session_id=session_id, messages=[]))
+
+    def append(self, session_id: str, messages: list[Message]) -> None:
+        self.appended.setdefault(session_id, []).extend(messages)
+
+
+class FakeContextBuilder:
+    def __init__(self, messages: list[dict[str, str]] | None = None):
+        self.messages = messages
+        self.calls: list[dict[str, Any]] = []
+
+    def build(
+        self,
+        history: list[Message],
+        user_message: Message,
+        workspace: Path,
+        session_id: str,
+    ) -> list[dict[str, str]]:
+        self.calls.append(
+            {
+                "history": history,
+                "user_message": user_message,
+                "workspace": workspace,
+                "session_id": session_id,
+            }
+        )
+        return self.messages or [{"role": user_message.role, "content": user_message.content}]
+
+
+class FakeLLM:
+    def __init__(self, response):
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+
+    def chat(self, messages, tools=None):
+        self.calls.append({"messages": messages, "tools": tools})
+        return self.response
+
+
+class RaisingLLM:
+    def __init__(self, error: Exception):
+        self.error = error
+
+    def chat(self, messages, tools=None):
+        raise self.error
+
+
+class FailingSessionStore:
+    def load(self, session_id: str) -> SessionState:
+        return SessionState(session_id=session_id, messages=[])
+
+    def append(self, session_id: str, messages: list[Message]) -> None:
+        raise PermissionError("no write access")

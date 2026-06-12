@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.message import Message, Role
-from agent.protocols.session import SessionState
+from agent.protocols.session import SessionState, SessionSummary
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _MESSAGE_FIELDS = {"role", "content", "name", "tool_call_id", "tool_calls", "metadata"}
@@ -61,6 +61,50 @@ class JsonlSessionStore:
                 record = self._record_from_message(message)
                 file.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
                 file.write("\n")
+
+    def clear(self, session_id: str) -> None:
+        """Delete the persisted JSONL file for a session if it exists."""
+
+        path = self._path_for(session_id)
+        if path.exists():
+            path.unlink()
+
+    def list_sessions(self) -> list[SessionSummary]:
+        """Return stored sessions sorted by recent update time."""
+
+        if not self.sessions_dir.exists():
+            return []
+
+        summaries: list[SessionSummary] = []
+        for path in sorted(self.sessions_dir.glob("*.jsonl")):
+            session_id = path.stem
+            self._path_for(session_id)
+
+            messages: list[Message] = []
+            with path.open("r", encoding="utf-8") as file:
+                for line in file:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    messages.append(self._message_from_record(json.loads(stripped)))
+
+            updated_at = path.stat().st_mtime
+            for message in reversed(messages):
+                timestamp = message.metadata.get("timestamp")
+                if isinstance(timestamp, int | float):
+                    updated_at = float(timestamp)
+                    break
+
+            summaries.append(
+                SessionSummary(
+                    session_id=session_id,
+                    preview=_session_preview(messages),
+                    updated_at=updated_at,
+                    message_count=len(messages),
+                )
+            )
+
+        return sorted(summaries, key=lambda item: item.updated_at, reverse=True)
 
     def _path_for(self, session_id: str) -> Path:
         """Resolve and validate the JSONL path for a session id."""
@@ -116,3 +160,20 @@ def validate_role(role: str) -> Role:
     if role not in {"system", "user", "assistant", "tool"}:
         raise ValueError(f"unknown message role: {role}")
     return role  # type: ignore[return-value]
+
+
+def _session_preview(messages: list[Message]) -> str:
+    """Build a short preview from the first user message in a session."""
+
+    for message in messages:
+        if message.role != "user":
+            continue
+        text = " ".join(message.content.split())
+        if text:
+            return text[:40] + "..." if len(text) > 40 else text
+
+    for message in messages:
+        text = " ".join(message.content.split())
+        if text:
+            return text[:40] + "..." if len(text) > 40 else text
+    return "(empty)"

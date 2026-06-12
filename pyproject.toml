@@ -1,14 +1,16 @@
 [project]
 name = "zcagent"
 version = "0.1.0"
-description = "A lightweight local Agent foundation for ZC-Agent."
+description = "A lightweight local Agent foundation for ZhiCe-Agent."
 requires-python = ">=3.11"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "ZC-Agent contributors" }
+    { name = "ZhiCe-Agent contributors" }
 ]
-dependencies = []
+dependencies = [
+    "colorama>=0.4.6",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -20,11 +22,11 @@ dev = [
 zcagent = "agent.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-include = ["agent*"]
+[tool.hatch.build.targets.wheel]
+packages = ["agent"]
 
 [tool.ruff]
 line-length = 100
@@ -36,3 +38,4 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+

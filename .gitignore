@@ -8,8 +8,9 @@ __pycache__/
 build/
 dist/
 
-.env
-logs/*
-!logs/.gitkeep
-contexts/sessions/*.jsonl
-!contexts/sessions/.gitkeep
+/.env
+config/.env
+config/llm_endpoints.json
+contexts/
+logs/
+skills/

@@ -21,6 +21,16 @@ class SessionState:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class SessionSummary:
+    """Compact metadata used to render a session list in the CLI."""
+
+    session_id: str
+    preview: str
+    updated_at: float
+    message_count: int
+
+
 class SessionStore(Protocol):
     """Minimal persistence contract used by the Agent runtime."""
 
@@ -29,3 +39,9 @@ class SessionStore(Protocol):
 
     def append(self, session_id: str, messages: list[Message]) -> None:
         """Append messages to a session without rewriting existing history."""
+
+    def clear(self, session_id: str) -> None:
+        """Remove all persisted messages for a session."""
+
+    def list_sessions(self) -> list[SessionSummary]:
+        """Return stored sessions ordered for CLI presentation."""

@@ -1,5 +1,98 @@
-"""Context assembly placeholder.
+"""Build LLM message context for one Agent turn."""
 
-The first stage does not build LLM messages yet. This module exists as the
-future home for ContextBuilder so the project skeleton matches the design.
-"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from agent.message import Message
+from agent.prompt_loader import PromptLoader
+
+DEFAULT_CONTEXT_PROMPTS = ["identity", "tool_use_policy", "skills_intro"]
+
+
+class ContextBuilder:
+    """Assemble system prompt, recent history, and the current user message."""
+
+    def __init__(
+        self,
+        prompt_loader: PromptLoader,
+        max_history_messages: int = 30,
+        max_message_chars: int = 8000,
+    ):
+        if max_history_messages < 0:
+            raise ValueError("max_history_messages must be non-negative")
+        if max_message_chars <= 0:
+            raise ValueError("max_message_chars must be positive")
+
+        self.prompt_loader = prompt_loader
+        self.max_history_messages = max_history_messages
+        self.max_message_chars = max_message_chars
+
+    def build(
+        self,
+        history: list[Message],
+        user_message: Message,
+        workspace: Path,
+        session_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return OpenAI-style messages for the no-tool chat path."""
+
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": self._build_system_prompt(workspace=workspace, session_id=session_id),
+            }
+        ]
+
+        recent_history = history[-self.max_history_messages :] if self.max_history_messages else []
+        for message in recent_history:
+            converted = self._message_to_llm_dict(message)
+            if converted is not None:
+                messages.append(converted)
+
+        current_user = self._message_to_llm_dict(user_message)
+        if current_user is None or current_user["role"] != "user":
+            raise ValueError("user_message must have role 'user'")
+        messages.append(current_user)
+        return messages
+
+    def _build_system_prompt(self, workspace: Path, session_id: str) -> str:
+        prompts = self.prompt_loader.load_many(DEFAULT_CONTEXT_PROMPTS)
+        return "\n\n".join(
+            [
+                "# 你的身份",
+                prompts["identity"].strip(),
+                "# 工具使用规则",
+                prompts["tool_use_policy"].strip(),
+                "# Skill 使用规则",
+                prompts["skills_intro"].strip(),
+                "# 当前阶段限制",
+                "当前 CLI 不提供任何工具调用或 Skill 执行能力。",
+                "不要输出 XML 标签、伪工具调用、函数调用 JSON，或类似 <zhi-ce_use_file_system_tool> 的内容。",
+                "如果用户让你查看文件、列目录、执行命令或调用工具，直接说明当前阶段还不能执行这些操作。",
+                "# 运行环境",
+                f"workspace={workspace}",
+                f"session_id={session_id}",
+            ]
+        )
+
+    def _message_to_llm_dict(self, message: Message) -> dict[str, Any] | None:
+        if message.role not in {"system", "user", "assistant"}:
+            return None
+
+        converted: dict[str, Any] = {
+            "role": message.role,
+            "content": self._truncate(message.content),
+        }
+        if message.name:
+            converted["name"] = message.name
+        if message.tool_calls:
+            converted["tool_calls"] = message.tool_calls
+        return converted
+
+    def _truncate(self, content: str) -> str:
+        if len(content) <= self.max_message_chars:
+            return content
+        marker = "[truncated]"
+        return f"{content[: self.max_message_chars]}{marker}"

@@ -88,3 +88,38 @@ def test_unknown_json_fields_are_ignored(tmp_path):
     assert len(state.messages) == 1
     assert state.messages[0].content == "hello"
     assert state.messages[0].metadata == {"source": "test", "timestamp": 3.0}
+
+
+def test_clear_removes_persisted_session_file(tmp_path):
+    """Resetting a session should remove its JSONL file."""
+
+    store = JsonlSessionStore(tmp_path)
+    store.append("default", [Message(role="user", content="hello")])
+
+    store.clear("default")
+
+    assert not (tmp_path / "default.jsonl").exists()
+    assert store.load("default").messages == []
+
+
+def test_list_sessions_returns_preview_and_recent_order(tmp_path):
+    """Session listings should include a simple preview and sort by recency."""
+
+    store = JsonlSessionStore(tmp_path)
+    store.append(
+        "older",
+        [
+            Message(role="assistant", content="preface", metadata={"timestamp": 1.0}),
+            Message(role="user", content="first older question", metadata={"timestamp": 2.0}),
+        ],
+    )
+    store.append(
+        "newer",
+        [Message(role="user", content="first newer question", metadata={"timestamp": 5.0})],
+    )
+
+    summaries = store.list_sessions()
+
+    assert [summary.session_id for summary in summaries] == ["newer", "older"]
+    assert summaries[0].preview == "first newer question"
+    assert summaries[1].preview == "first older question"
