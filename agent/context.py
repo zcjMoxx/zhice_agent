@@ -36,7 +36,7 @@ class ContextBuilder:
         workspace: Path,
         session_id: str,
     ) -> list[dict[str, Any]]:
-        """Return OpenAI-style messages for the no-tool chat path."""
+        """Return OpenAI-style messages for one chat turn."""
 
         messages: list[dict[str, Any]] = [
             {
@@ -61,24 +61,21 @@ class ContextBuilder:
         prompts = self.prompt_loader.load_many(DEFAULT_CONTEXT_PROMPTS)
         return "\n\n".join(
             [
-                "# 你的身份",
+                "# Identity",
                 prompts["identity"].strip(),
-                "# 工具使用规则",
+                "# Tool Use Policy",
                 prompts["tool_use_policy"].strip(),
-                "# Skill 使用规则",
+                "# Skill Use Policy",
                 prompts["skills_intro"].strip(),
-                "# 当前阶段限制",
-                "当前 CLI 不提供任何工具调用或 Skill 执行能力。",
-                "不要输出 XML 标签、伪工具调用、函数调用 JSON，或类似 <zhi-ce_use_file_system_tool> 的内容。",
-                "如果用户让你查看文件、列目录、执行命令或调用工具，直接说明当前阶段还不能执行这些操作。",
-                "# 运行环境",
+                "# Runtime",
+                "Use tools only through the provided tool schemas.",
                 f"workspace={workspace}",
                 f"session_id={session_id}",
             ]
         )
 
     def _message_to_llm_dict(self, message: Message) -> dict[str, Any] | None:
-        if message.role not in {"system", "user", "assistant"}:
+        if message.role not in {"system", "user", "assistant", "tool"}:
             return None
 
         converted: dict[str, Any] = {
@@ -87,6 +84,8 @@ class ContextBuilder:
         }
         if message.name:
             converted["name"] = message.name
+        if message.tool_call_id:
+            converted["tool_call_id"] = message.tool_call_id
         if message.tool_calls:
             converted["tool_calls"] = message.tool_calls
         return converted

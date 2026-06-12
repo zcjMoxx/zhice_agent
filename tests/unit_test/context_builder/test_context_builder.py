@@ -1,4 +1,4 @@
-"""Tests for second-stage no-tool chat context assembly."""
+"""Tests for chat context assembly."""
 
 from pathlib import Path
 
@@ -27,8 +27,7 @@ def test_build_includes_system_prompt_and_current_user_message(tmp_path):
     assert "identity prompt" in messages[0]["content"]
     assert "tool policy prompt" in messages[0]["content"]
     assert "skills intro prompt" in messages[0]["content"]
-    assert "当前 CLI 不提供任何工具调用或 Skill 执行能力。" in messages[0]["content"]
-    assert "<zhi-ce_use_file_system_tool>" in messages[0]["content"]
+    assert "Use tools only through the provided tool schemas." in messages[0]["content"]
     assert f"workspace={tmp_path}" in messages[0]["content"]
     assert "session_id=default" in messages[0]["content"]
     assert messages[-1] == {"role": "user", "content": "hello"}
@@ -79,8 +78,8 @@ def test_build_truncates_oversized_history_messages(tmp_path):
     assert messages[1]["content"] == "01234567[truncated]"
 
 
-def test_build_skips_tool_messages_for_no_tool_chat(tmp_path):
-    """The second-stage chat path should only send system/user/assistant roles."""
+def test_build_includes_tool_messages_and_ids(tmp_path):
+    """Tool results are part of session context once tool calling is enabled."""
 
     from agent.context import ContextBuilder
 
@@ -89,7 +88,7 @@ def test_build_skips_tool_messages_for_no_tool_chat(tmp_path):
 
     messages = builder.build(
         history=[
-            Message(role="tool", content="old tool result", tool_call_id="call_1"),
+            Message(role="tool", content='{"status":"success"}', name="read_file", tool_call_id="call_1"),
             Message(role="assistant", content="kept"),
         ],
         user_message=Message(role="user", content="current"),
@@ -97,8 +96,51 @@ def test_build_skips_tool_messages_for_no_tool_chat(tmp_path):
         session_id="default",
     )
 
-    assert [message["role"] for message in messages] == ["system", "assistant", "user"]
-    assert "old tool result" not in str(messages)
+    assert messages[1] == {
+        "role": "tool",
+        "content": '{"status":"success"}',
+        "name": "read_file",
+        "tool_call_id": "call_1",
+    }
+    assert [message["role"] for message in messages] == ["system", "tool", "assistant", "user"]
+
+
+def test_build_preserves_assistant_tool_calls(tmp_path):
+    """Assistant tool request messages must be replayable for the provider."""
+
+    from agent.context import ContextBuilder
+
+    prompts_dir = _write_required_prompts(tmp_path)
+    builder = ContextBuilder(PromptLoader(prompts_dir))
+    tool_calls = [{"id": "call_1", "type": "function"}]
+
+    messages = builder.build(
+        history=[Message(role="assistant", content="", tool_calls=tool_calls)],
+        user_message=Message(role="user", content="current"),
+        workspace=tmp_path,
+        session_id="default",
+    )
+
+    assert messages[1] == {"role": "assistant", "content": "", "tool_calls": tool_calls}
+
+
+def test_build_truncates_tool_messages(tmp_path):
+    """Tool output should still obey the context message character limit."""
+
+    from agent.context import ContextBuilder
+
+    prompts_dir = _write_required_prompts(tmp_path)
+    builder = ContextBuilder(PromptLoader(prompts_dir), max_message_chars=8)
+
+    messages = builder.build(
+        history=[Message(role="tool", content="0123456789abcdef", tool_call_id="call_1")],
+        user_message=Message(role="user", content="current"),
+        workspace=tmp_path,
+        session_id="default",
+    )
+
+    assert messages[1]["content"] == "01234567[truncated]"
+    assert messages[1]["tool_call_id"] == "call_1"
 
 
 def test_build_raises_clear_error_when_required_prompt_is_missing(tmp_path):

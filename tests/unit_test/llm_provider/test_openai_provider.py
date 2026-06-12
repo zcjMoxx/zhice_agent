@@ -75,6 +75,57 @@ def test_openai_provider_uses_local_json_api_key(monkeypatch):
     assert _headers_lower(recorder.headers[0])["authorization"] == "Bearer json-secret"
 
 
+def test_openai_provider_sends_tools_when_non_empty():
+    """OpenAI-compatible tools should be included only when provided."""
+
+    from agent.llm.openai_provider import OpenAIProvider
+
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {}}}]
+    recorder = UrlopenRecorder({"choices": [{"message": {"content": "ok"}}]})
+
+    OpenAIProvider(_endpoint(api_key="json-secret"), urlopen=recorder).chat(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=tools,
+    )
+
+    request_body = json.loads(recorder.bodies[0])
+    assert request_body["tools"] == tools
+
+
+def test_openai_provider_omits_tools_when_empty():
+    """Empty tool lists should not be sent to the provider."""
+
+    from agent.llm.openai_provider import OpenAIProvider
+
+    recorder = UrlopenRecorder({"choices": [{"message": {"content": "ok"}}]})
+
+    OpenAIProvider(_endpoint(api_key="json-secret"), urlopen=recorder).chat(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    )
+
+    request_body = json.loads(recorder.bodies[0])
+    assert "tools" not in request_body
+
+
+def test_openai_provider_preserves_multiple_tool_calls_order():
+    """Provider parsing should keep tool call order stable."""
+
+    from agent.llm.openai_provider import OpenAIProvider
+
+    tool_calls = [
+        {"id": "call_1", "type": "function"},
+        {"id": "call_2", "type": "function"},
+    ]
+    recorder = UrlopenRecorder({"choices": [{"message": {"content": "", "tool_calls": tool_calls}}]})
+
+    response = OpenAIProvider(_endpoint(api_key="json-secret"), urlopen=recorder).chat(
+        messages=[{"role": "user", "content": "hello"}]
+    )
+
+    assert response.tool_calls == tool_calls
+
+
 def test_openai_provider_http_error_does_not_leak_secret(monkeypatch):
     """HTTP failures should be converted to a safe provider error."""
 

@@ -1,12 +1,43 @@
-# LLM provider unit cases
+# LLM Provider 单元测试用例
 
-These tests pin the second-stage HTTP provider boundary without real network
-access.
+## 测试目标
 
-- OpenAI-compatible provider sends `/chat/completions` requests with model,
-  sanitized messages, and Bearer auth from the configured environment variable.
-- OpenAI-compatible provider normalizes content, reasoning content, usage,
-  finish reason, and tool calls into `LLMResponse`.
-- Anthropic, Gemini, DeepSeek, and other non-OpenAI providers are intentionally
-  reserved for a future `LiteLLMProvider` implementation.
-- Missing API keys and HTTP failures raise clear errors without leaking secrets.
+验证 LLMProvider 边界稳定：AgentLoop 只依赖协议，OpenAIProvider 负责 OpenAI-compatible HTTP 请求、响应归一化和错误脱敏。
+
+## 用例覆盖
+
+### Case 1: 发送 chat completions 请求
+
+- 输入：system、assistant、user messages。
+- 预期：向 `/chat/completions` 发送模型、消息、max_tokens、temperature。
+- 检查点：过滤未知 message 字段；空 assistant tool-call content 转为 `None`；空普通 content 转为 `(empty)`。
+
+### Case 2: API key 处理
+
+- 输入：endpoint 中包含或缺失 `api_key`。
+- 预期：有 key 时写入 Bearer Authorization；缺失 key 时请求前失败。
+- 检查点：错误提示指向 `llm_endpoints.json`。
+
+### Case 3: tools 请求体
+
+- 输入：`tools=None`、空列表、非空工具 schema。
+- 预期：只有非空 tools 会写入请求体。
+- 检查点：不会把空 tools 发送给 provider。
+
+### Case 4: 响应归一化
+
+- 输入：OpenAI-compatible 原始响应。
+- 预期：返回 `LLMResponse`。
+- 检查点：保留 content、reasoning_content、usage、finish_reason 和多个 tool_calls 的顺序。
+
+### Case 5: HTTP 错误脱敏
+
+- 输入：HTTPError 响应体中包含 API key。
+- 预期：抛出安全的 provider 错误。
+- 检查点：错误文本不泄露 secret。
+
+### Case 6: LiteLLM 暂未实现
+
+- 输入：`protocol="litellm"` 的 endpoint。
+- 预期：`create_llm_provider` 明确抛出配置错误。
+- 检查点：Anthropic、Gemini、DeepSeek 等非 OpenAI 直连 provider 暂不绕过 LiteLLM 边界。

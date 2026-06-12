@@ -1,20 +1,36 @@
-"""Minimal no-tool Agent loop."""
+"""Agent loop with optional tool-calling support."""
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from agent.console import console
 from agent.context import ContextBuilder
 from agent.message import Message
 from agent.protocols.llm import LLMConfigurationError, LLMProvider, LLMProviderError
 from agent.protocols.session import SessionStore
+from agent.protocols.tool import ToolProvider, ToolResult
 
 ASSISTANT_ERROR_TEXT = "LLM call failed. Check the workspace configuration and retry."
+TOOL_ITERATION_LIMIT_TEXT = "Tool call limit reached. Please retry with a narrower request."
+
+
+@dataclass
+class ParsedToolCall:
+    """Decoded tool call request from an LLM response."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
+    error: ToolResult | None = None
 
 
 class AgentLoop:
-    """Run one no-tool chat turn and persist the resulting session messages."""
+    """Run one chat turn, execute requested tools, and persist session messages."""
 
     def __init__(
         self,
@@ -22,14 +38,21 @@ class AgentLoop:
         sessions: SessionStore,
         context_builder: ContextBuilder,
         workspace: Path,
+        tools: ToolProvider | None = None,
+        max_tool_iterations: int = 4,
     ):
+        if max_tool_iterations < 0:
+            raise ValueError("max_tool_iterations must be non-negative")
+
         self.llm = llm
         self.sessions = sessions
         self.context_builder = context_builder
         self.workspace = Path(workspace).expanduser().resolve()
+        self.tools = tools
+        self.max_tool_iterations = max_tool_iterations
 
     def run_turn(self, session_id: str, user_text: str) -> str:
-        """Run one user turn, saving user and assistant/error messages."""
+        """Run one user turn, saving user, assistant, and tool messages."""
 
         session = self.sessions.load(session_id)
         user_msg = Message(role="user", content=user_text)
@@ -40,33 +63,205 @@ class AgentLoop:
             session_id=session_id,
         )
 
-        try:
-            response = self.llm.chat(messages=messages, tools=None)
-        except Exception as exc:  # noqa: BLE001 - the loop must persist failed turns.
-            error_text = _format_llm_error(exc, self.workspace)
+        pending_session_messages = [user_msg]
+        tool_definitions = self.tools.definitions() if self.tools else None
+        tool_iterations = 0
+
+        while True:
+            try:
+                response = self.llm.chat(messages=list(messages), tools=tool_definitions)
+            except Exception as exc:  # noqa: BLE001 - the loop must persist failed turns.
+                error_text = _format_llm_error(exc, self.workspace)
+                assistant_msg = Message(
+                    role="assistant",
+                    content=error_text,
+                    metadata={
+                        "is_error": True,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                pending_session_messages.append(assistant_msg)
+                save_error = _append_session_messages(
+                    self.sessions,
+                    session_id,
+                    pending_session_messages,
+                    self.workspace,
+                )
+                return _with_save_error(error_text, save_error)
+
             assistant_msg = Message(
                 role="assistant",
-                content=error_text,
-                metadata={
-                    "is_error": True,
-                    "error_type": type(exc).__name__,
-                },
+                content=str(response.content),
+                tool_calls=list(getattr(response, "tool_calls", []) or []),
+                metadata=dict(getattr(response, "metadata", {}) or {}),
             )
-            save_error = _append_session_messages(
-                self.sessions, session_id, [user_msg, assistant_msg], self.workspace
-            )
-            return _with_save_error(error_text, save_error)
+            pending_session_messages.append(assistant_msg)
+            messages.append(_message_to_llm_dict(assistant_msg))
 
-        assistant_msg = Message(
-            role="assistant",
-            content=str(response.content),
-            tool_calls=list(getattr(response, "tool_calls", []) or []),
-            metadata=dict(getattr(response, "metadata", {}) or {}),
+            if not assistant_msg.tool_calls:
+                save_error = _append_session_messages(
+                    self.sessions,
+                    session_id,
+                    pending_session_messages,
+                    self.workspace,
+                )
+                return _with_save_error(assistant_msg.content, save_error)
+
+            if tool_iterations >= self.max_tool_iterations:
+                for index, raw_call in enumerate(assistant_msg.tool_calls):
+                    call = _parse_tool_call(raw_call, index)
+                    result = ToolResult(
+                        output=TOOL_ITERATION_LIMIT_TEXT,
+                        is_error=True,
+                        metadata={"code": "TOOL_ITERATION_LIMIT", "tool_name": call.name},
+                    )
+                    tool_msg = _tool_result_to_message(call, call.error or result)
+                    pending_session_messages.append(tool_msg)
+                limit_msg = Message(
+                    role="assistant",
+                    content=TOOL_ITERATION_LIMIT_TEXT,
+                    metadata={"is_error": True, "code": "TOOL_ITERATION_LIMIT"},
+                )
+                pending_session_messages.append(limit_msg)
+                save_error = _append_session_messages(
+                    self.sessions,
+                    session_id,
+                    pending_session_messages,
+                    self.workspace,
+                )
+                return _with_save_error(TOOL_ITERATION_LIMIT_TEXT, save_error)
+
+            tool_iterations += 1
+            for index, raw_call in enumerate(assistant_msg.tool_calls):
+                call = _parse_tool_call(raw_call, index)
+                result = call.error or _execute_tool(self.tools, call)
+                tool_msg = _tool_result_to_message(call, result)
+                pending_session_messages.append(tool_msg)
+                messages.append(_message_to_llm_dict(tool_msg))
+
+
+def _execute_tool(tools: ToolProvider | None, call: ParsedToolCall) -> ToolResult:
+    if tools is None:
+        return ToolResult(
+            output="Tool provider is not configured.",
+            is_error=True,
+            metadata={"code": "TOOLS_UNAVAILABLE", "tool_name": call.name},
         )
-        save_error = _append_session_messages(
-            self.sessions, session_id, [user_msg, assistant_msg], self.workspace
+    return tools.execute(call.name, call.arguments)
+
+
+def _parse_tool_call(raw_call: object, index: int) -> ParsedToolCall:
+    generated_id = False
+    if isinstance(raw_call, dict):
+        raw_id = raw_call.get("id")
+        call_id = raw_id if isinstance(raw_id, str) and raw_id else f"call_{index}"
+        generated_id = call_id != raw_id
+        function = raw_call.get("function") if isinstance(raw_call.get("function"), dict) else {}
+        raw_name = function.get("name") or raw_call.get("name")
+        raw_arguments = function.get("arguments") if "arguments" in function else raw_call.get("arguments", {})
+    else:
+        call_id = f"call_{index}"
+        generated_id = True
+        raw_name = None
+        raw_arguments = {}
+
+    metadata = {"generated_tool_call_id": generated_id} if generated_id else {}
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        return ParsedToolCall(
+            id=call_id,
+            name="unknown_tool",
+            arguments={},
+            metadata=metadata,
+            error=ToolResult(
+                output="Tool call is missing a function name.",
+                is_error=True,
+                metadata={"code": "MISSING_TOOL_NAME"},
+            ),
         )
-        return _with_save_error(assistant_msg.content, save_error)
+
+    name = raw_name.strip()
+    if raw_arguments in (None, ""):
+        arguments: dict[str, Any] = {}
+    elif isinstance(raw_arguments, str):
+        try:
+            decoded = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            return ParsedToolCall(
+                id=call_id,
+                name=name,
+                arguments={},
+                metadata=metadata,
+                error=ToolResult(
+                    output="Tool arguments were not valid JSON.",
+                    is_error=True,
+                    metadata={"code": "INVALID_ARGUMENT_JSON"},
+                ),
+            )
+        if not isinstance(decoded, dict):
+            return ParsedToolCall(
+                id=call_id,
+                name=name,
+                arguments={},
+                metadata=metadata,
+                error=ToolResult(
+                    output="Tool arguments must be a JSON object.",
+                    is_error=True,
+                    metadata={"code": "INVALID_PARAM"},
+                ),
+            )
+        arguments = decoded
+    elif isinstance(raw_arguments, dict):
+        arguments = dict(raw_arguments)
+    else:
+        return ParsedToolCall(
+            id=call_id,
+            name=name,
+            arguments={},
+            metadata=metadata,
+            error=ToolResult(
+                output="Tool arguments must be a JSON object.",
+                is_error=True,
+                metadata={"code": "INVALID_PARAM"},
+            ),
+        )
+
+    return ParsedToolCall(id=call_id, name=name, arguments=arguments, metadata=metadata)
+
+
+def _tool_result_to_message(call: ParsedToolCall, result: ToolResult) -> Message:
+    metadata = {
+        "tool_name": call.name,
+        "is_error": result.is_error,
+        **call.metadata,
+        **result.metadata,
+    }
+    content = json.dumps(
+        {
+            "status": "error" if result.is_error else "success",
+            "output": result.output,
+            "metadata": {"tool_name": call.name, **call.metadata, **result.metadata},
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return Message(
+        role="tool",
+        content=content,
+        name=call.name,
+        tool_call_id=call.id,
+        metadata=metadata,
+    )
+
+
+def _message_to_llm_dict(message: Message) -> dict[str, Any]:
+    converted: dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.name:
+        converted["name"] = message.name
+    if message.tool_call_id:
+        converted["tool_call_id"] = message.tool_call_id
+    if message.tool_calls:
+        converted["tool_calls"] = message.tool_calls
+    return converted
 
 
 def _format_llm_error(exc: Exception, workspace: Path) -> str:

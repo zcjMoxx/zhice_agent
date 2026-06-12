@@ -23,6 +23,7 @@ from agent.llm import LLMConfigurationError, create_llm_provider
 from agent.loop import AgentLoop
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.session import JsonlSessionStore
+from agent.tools import create_default_tool_registry
 
 DEFAULT_PROMPTS = ["identity", "tool_use_policy", "skills_intro"]
 
@@ -71,11 +72,13 @@ def _run_chat(argv: Sequence[str]) -> int:
     session_store = JsonlSessionStore(config.sessions_dir)
     context_builder = ContextBuilder(prompt_loader)
     llm = _build_llm_provider(config.config_dir, args.endpoint)
+    tool_registry = create_default_tool_registry(config.workspace)
     agent_loop = AgentLoop(
         llm=llm,
         sessions=session_store,
         context_builder=context_builder,
         workspace=config.workspace,
+        tools=tool_registry,
     )
     if not _load_startup_prompts(prompt_loader):
         return 1
@@ -115,6 +118,9 @@ def _run_chat(argv: Sequence[str]) -> int:
             continue
         if user_text == "/prompts":
             _print_prompts(prompt_loader)
+            continue
+        if user_text == "/tools":
+            _print_tools(tool_registry)
             continue
 
         print(agent_loop.run_turn(session_id, user_text))
@@ -355,6 +361,20 @@ def _print_prompts(prompt_loader: PromptLoader) -> None:
         print(console.path(name))
 
 
+def _print_tools(tool_registry) -> None:
+    """Print registered tool names for local debugging."""
+
+    definitions = tool_registry.definitions()
+    if not definitions:
+        print(console.warning("(no tools)"))
+        return
+    for definition in definitions:
+        function = definition.get("function", {})
+        name = function.get("name", "")
+        description = function.get("description", "")
+        print(f"{console.command(str(name)):<18}{description}")
+
+
 def _print_help() -> None:
     """Print available slash commands for the local CLI."""
 
@@ -365,6 +385,7 @@ def _print_help() -> None:
         ("/sessions", "list stored sessions and previews"),
         ("/history", "print recent messages from the current session"),
         ("/prompts", "list loaded prompt files"),
+        ("/tools", "list registered read-only tools"),
         ("/exit", "leave the CLI"),
     ]
     for name, description in commands:
