@@ -385,7 +385,7 @@ def _print_help() -> None:
         ("/sessions", "list stored sessions and previews"),
         ("/history", "print recent messages from the current session"),
         ("/prompts", "list loaded prompt files"),
-        ("/tools", "list registered read-only tools"),
+        ("/tools", "list registered tools"),
         ("/exit", "leave the CLI"),
     ]
     for name, description in commands:

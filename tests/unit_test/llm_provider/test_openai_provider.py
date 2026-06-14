@@ -139,11 +139,12 @@ def test_openai_provider_http_error_does_not_leak_secret(monkeypatch):
     assert "secret-openai" not in str(exc_info.value)
 
 
-def test_create_llm_provider_rejects_future_litellm_until_implemented():
-    """Only OpenAI direct provider is implemented in the second stage."""
+def test_create_llm_provider_creates_litellm_provider():
+    """LiteLLM proxy endpoints should use the LiteLLMProvider adapter."""
 
     from agent.llm import create_llm_provider
-    from agent.protocols.llm import LLMConfigurationError, LLMEndpoint
+    from agent.llm.litellm_provider import LiteLLMProvider
+    from agent.protocols.llm import LLMEndpoint
 
     endpoint = LLMEndpoint(
         name="claude",
@@ -153,8 +154,58 @@ def test_create_llm_provider_rejects_future_litellm_until_implemented():
         model="anthropic/claude-sonnet-4",
     )
 
-    with pytest.raises(LLMConfigurationError, match="LiteLLMProvider"):
-        create_llm_provider(endpoint)
+    provider = create_llm_provider(endpoint)
+
+    assert isinstance(provider, LiteLLMProvider)
+
+
+def test_litellm_provider_sends_proxy_chat_completion_request():
+    """LiteLLMProvider should speak to LiteLLM proxy's OpenAI-compatible API."""
+
+    from agent.llm.litellm_provider import LiteLLMProvider
+    from agent.protocols.llm import LLMEndpoint
+
+    tools = [{"type": "function", "function": {"name": "exec", "parameters": {}}}]
+    recorder = UrlopenRecorder(
+        {
+            "model": "anthropic/claude-sonnet-4",
+            "choices": [
+                {
+                    "message": {
+                        "content": "ok",
+                        "tool_calls": [{"id": "call_1", "type": "function"}],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+        }
+    )
+
+    endpoint = LLMEndpoint(
+        name="claude",
+        protocol="litellm",
+        base_url="http://127.0.0.1:4000/v1",
+        api_key="litellm-secret",
+        model="anthropic/claude-sonnet-4",
+        max_tokens=256,
+        temperature=0.1,
+    )
+
+    response = LiteLLMProvider(endpoint, urlopen=recorder).chat(
+        messages=[{"role": "user", "content": "run"}],
+        tools=tools,
+    )
+
+    assert recorder.urls == ["http://127.0.0.1:4000/v1/chat/completions"]
+    request_body = json.loads(recorder.bodies[0])
+    assert request_body["model"] == "anthropic/claude-sonnet-4"
+    assert request_body["tools"] == tools
+    assert _headers_lower(recorder.headers[0])["authorization"] == "Bearer litellm-secret"
+    assert response.content == "ok"
+    assert response.tool_calls == [{"id": "call_1", "type": "function"}]
+    assert response.metadata["finish_reason"] == "tool_calls"
+    assert response.metadata["usage"] == {"prompt_tokens": 5, "completion_tokens": 3}
 
 
 def _endpoint(api_key=""):

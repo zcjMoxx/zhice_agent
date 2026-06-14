@@ -46,10 +46,7 @@ class ContextBuilder:
         ]
 
         recent_history = history[-self.max_history_messages :] if self.max_history_messages else []
-        for message in recent_history:
-            converted = self._message_to_llm_dict(message)
-            if converted is not None:
-                messages.append(converted)
+        messages.extend(self._history_to_llm_dicts(recent_history))
 
         current_user = self._message_to_llm_dict(user_message)
         if current_user is None or current_user["role"] != "user":
@@ -90,8 +87,61 @@ class ContextBuilder:
             converted["tool_calls"] = message.tool_calls
         return converted
 
+    def _history_to_llm_dicts(self, history: list[Message]) -> list[dict[str, Any]]:
+        """Convert history while preserving OpenAI-compatible tool call blocks."""
+
+        converted: list[dict[str, Any]] = []
+        index = 0
+        while index < len(history):
+            message = history[index]
+            if message.role == "tool":
+                index += 1
+                continue
+
+            if message.role == "assistant" and message.tool_calls:
+                tool_call_ids = _tool_call_ids(message.tool_calls)
+                block: list[dict[str, Any]] = []
+                assistant_message = self._message_to_llm_dict(message)
+                if assistant_message is not None:
+                    block.append(assistant_message)
+
+                seen_tool_call_ids: set[str] = set()
+                cursor = index + 1
+                while cursor < len(history) and history[cursor].role == "tool":
+                    tool_message = history[cursor]
+                    tool_call_id = tool_message.tool_call_id
+                    if tool_call_id in tool_call_ids and tool_call_id not in seen_tool_call_ids:
+                        tool_dict = self._message_to_llm_dict(tool_message)
+                        if tool_dict is not None:
+                            block.append(tool_dict)
+                            seen_tool_call_ids.add(tool_call_id)
+                    cursor += 1
+
+                if tool_call_ids and seen_tool_call_ids == set(tool_call_ids):
+                    converted.extend(block)
+                index = cursor
+                continue
+
+            message_dict = self._message_to_llm_dict(message)
+            if message_dict is not None:
+                converted.append(message_dict)
+            index += 1
+        return converted
+
     def _truncate(self, content: str) -> str:
         if len(content) <= self.max_message_chars:
             return content
         marker = "[truncated]"
         return f"{content[: self.max_message_chars]}{marker}"
+
+
+def _tool_call_ids(tool_calls: list[dict[str, Any]]) -> list[str]:
+    ids: list[str] = []
+    for tool_call in tool_calls:
+        raw_id = tool_call.get("id") if isinstance(tool_call, dict) else None
+        if not isinstance(raw_id, str) or not raw_id:
+            return []
+        if raw_id in ids:
+            return []
+        ids.append(raw_id)
+    return ids

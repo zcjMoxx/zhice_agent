@@ -138,13 +138,41 @@ class LLMProvider(Protocol):
 - 只负责协议适配与传输，不负责 Prompt 拼装、Session 保存、CLI 输出。
 - 使用标准库 `urllib.request`，避免在第二部分引入更重依赖。
 - 对错误返回进行脱敏，不能把真实 `api_key` 回显给用户。
-- 暂不实现 `litellm`；若选择该协议，统一报“后续实现”错误。
+- `OpenAIProvider` 保留为直连 OpenAI-compatible endpoint 的默认实现。
 
 消息清洗规则：
 
 - 只保留 `role`、`content`、`tool_calls`、`tool_call_id`、`name`
 - assistant 在存在 `tool_calls` 且 `content` 为空时，传 `None`
 - 其他空内容统一转成 `"(empty)"`，避免上游接口校验失败
+
+### 4.2.1 `agent/llm/litellm_provider.py`
+
+负责通过 LiteLLM Proxy 接入 Anthropic、Gemini、DeepSeek 等非 OpenAI 模型商。
+
+当前实现方式：
+
+- 不直接引入 `litellm` Python 包。
+- 不在 ZhiCe-Agent 进程里聚合各家模型 SDK。
+- 通过 LiteLLM Proxy 暴露的 OpenAI-compatible `/chat/completions` 接口调用模型。
+- 复用 OpenAI-compatible 的消息清洗、tools 传递、响应解析和错误脱敏逻辑。
+
+配置示例：
+
+```json
+{
+  "claude": {
+    "protocol": "litellm",
+    "base_url": "http://127.0.0.1:4000/v1",
+    "api_key": "${ZHICE_LLM_LITELLM_API_KEY}",
+    "model": "anthropic/claude-sonnet-4",
+    "max_tokens": 4096,
+    "temperature": 0.7
+  }
+}
+```
+
+启动时通过 `zcagent --endpoint claude` 选择该 endpoint。LiteLLM Proxy 本身由用户单独启动和配置真实模型商密钥，ZhiCe-Agent 只负责调用 proxy。
 
 ### 4.3 `agent/context.py`
 
@@ -428,7 +456,7 @@ sequenceDiagram
 - Provider 请求失败时能指向 `llm_endpoints.json`
 - Session 保存失败时不会覆盖原本的 LLM 返回
 
-### 8.3 `OpenAIProvider`
+### 8.3 `OpenAIProvider` / `LiteLLMProvider`
 
 验证：
 
@@ -436,7 +464,9 @@ sequenceDiagram
 - `tool_calls` 与空内容处理符合兼容要求
 - 可从本地工作目录 JSON 提供 API key
 - HTTP 错误不会泄漏 secret
-- `litellm` 协议当前会被明确拒绝
+- `protocol="openai"` 创建 `OpenAIProvider`
+- `protocol="litellm"` 创建 `LiteLLMProvider`
+- `LiteLLMProvider` 会向 LiteLLM Proxy 的 `/chat/completions` 发送请求
 
 ### 8.4 CLI
 

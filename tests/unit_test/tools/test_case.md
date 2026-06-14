@@ -2,7 +2,7 @@
 
 ## 测试目标
 
-验证第三部分只读工具系统的协议、注册表、workspace guard、结构化错误和输出截断能力，为后续 exec 与 Skill 工具复用同一入口打基础。
+验证第三部分只读工具系统和第四部分安全 `exec` 工具的协议、注册表、workspace guard、结构化错误、命令拦截、超时和输出截断能力，为后续 Skill 工具复用同一入口打基础。
 
 ## 用例覆盖
 
@@ -47,3 +47,15 @@
 - 输入：工具实现内部抛出未预期异常。
 - 预期：BaseTool 或 ToolRegistry 把异常转换为 `ToolResult(is_error=True)`。
 - 检查点：不把 Python traceback 交给 AgentLoop。
+
+### Case 8: shell_policy 命令策略
+
+- 输入：普通单命令、复杂 shell 语法、危险命令、网络/安装命令、环境导出命令。
+- 预期：普通单命令允许，其余命令在进入 subprocess 前返回结构化拦截结果。
+- 检查点：错误码分别为 `UNSUPPORTED_SHELL_SYNTAX`、`DESTRUCTIVE_COMMAND_BLOCKED`、`NETWORK_COMMAND_BLOCKED`、`ENV_DUMP_BLOCKED`。
+
+### Case 9: exec 工具执行
+
+- 输入：workspace 内安全命令、子目录 cwd、非 0 exit code、超时命令、长输出和 secret-like 输出。
+- 预期：成功命令返回 stdout/stderr/exit_code；失败、超时、cwd 越界和策略拦截都返回 `ToolResult(is_error=True)`。
+- 检查点：命令只在 workspace 内执行；输出会截断；疑似 secret 会脱敏；危险命令不会真实执行。

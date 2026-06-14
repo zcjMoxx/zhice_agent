@@ -2,7 +2,7 @@
 
 ## 测试目标
 
-验证 LLMProvider 边界稳定：AgentLoop 只依赖协议，OpenAIProvider 负责 OpenAI-compatible HTTP 请求、响应归一化和错误脱敏。
+验证 LLMProvider 边界稳定：AgentLoop 只依赖协议，OpenAIProvider 与 LiteLLMProvider 负责各自 OpenAI-compatible HTTP 请求、响应归一化和错误脱敏。
 
 ## 用例覆盖
 
@@ -36,8 +36,8 @@
 - 预期：抛出安全的 provider 错误。
 - 检查点：错误文本不泄露 secret。
 
-### Case 6: LiteLLM 暂未实现
+### Case 6: LiteLLMProvider
 
 - 输入：`protocol="litellm"` 的 endpoint。
-- 预期：`create_llm_provider` 明确抛出配置错误。
-- 检查点：Anthropic、Gemini、DeepSeek 等非 OpenAI 直连 provider 暂不绕过 LiteLLM 边界。
+- 预期：`create_llm_provider` 返回 `LiteLLMProvider`。
+- 检查点：请求发往 LiteLLM proxy 的 `/chat/completions`，模型名、tools、tool_calls 与 usage 正常透传。

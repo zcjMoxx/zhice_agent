@@ -15,7 +15,7 @@ ZhiCe-Agent 是一个按阶段逐步搭建的轻量本地 Agent 项目。
 - `ContextBuilder` 会基于 prompts、历史消息和当前输入组装 LLM messages。
 - `AgentLoop.run_turn` 会调用 `LLMProvider`，写入 `user` 与 `assistant` 消息，并返回回复文本。
 - `OpenAIProvider` 是一个 OpenAI 兼容接口的 `LLMProvider` 实现。
-- Anthropic、Gemini、DeepSeek 等其他提供方，后续再通过 `LiteLLMProvider` 扩展。
+- `LiteLLMProvider` 可以通过 LiteLLM Proxy 接入 Anthropic、Gemini、DeepSeek 等模型商。
 - 本地 endpoint 配置放在运行工作目录，不放在源码仓库里。
 
 ## 快速开始
@@ -91,6 +91,27 @@ ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
     "model": "gpt-5"
   }
 }
+```
+
+通过 LiteLLM Proxy 接其他模型商时，可以新增 endpoint：
+
+```json
+{
+  "claude": {
+    "protocol": "litellm",
+    "base_url": "http://127.0.0.1:4000/v1",
+    "api_key": "${ZHICE_LLM_LITELLM_API_KEY}",
+    "model": "anthropic/claude-sonnet-4",
+    "max_tokens": 4096,
+    "temperature": 0.7
+  }
+}
+```
+
+启动时选择：
+
+```bash
+zcagent --endpoint claude
 ```
 
 项目 `config/.env` 示例：

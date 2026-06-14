@@ -24,11 +24,11 @@
 - 预期：内容被截断并带 `[truncated]` 标记。
 - 检查点：assistant、tool 等历史内容都受同一长度限制。
 
-### Case 4: tool 消息进入上下文
+### Case 4: 完整 tool 调用块进入上下文
 
-- 输入：历史中存在 `role="tool"` 的消息。
-- 预期：tool 消息进入 LLM messages。
-- 检查点：保留 `tool_call_id` 和可选 `name`。
+- 输入：历史中存在 `assistant(tool_calls) -> tool` 消息块。
+- 预期：完整工具调用块进入 LLM messages。
+- 检查点：保留 `assistant.tool_calls`、`tool_call_id` 和可选 `name`。
 
 ### Case 5: assistant tool_calls 保留
 
@@ -36,7 +36,13 @@
 - 预期：assistant 消息原样保留 `tool_calls`。
 - 检查点：后续 provider 能重放完整工具调用轨迹。
 
-### Case 6: prompt 缺失
+### Case 6: 孤立或不完整工具消息过滤
+
+- 输入：历史裁剪后只剩 `tool` 消息，或只剩未配对 tool 结果的 `assistant(tool_calls)`。
+- 预期：不合法的工具历史块不会进入 LLM messages。
+- 检查点：OpenAI-compatible provider 不会收到孤立 `tool` 消息。
+
+### Case 7: prompt 缺失
 
 - 输入：缺少必需 prompt 文件。
 - 预期：构造上下文时抛出可定位的错误。

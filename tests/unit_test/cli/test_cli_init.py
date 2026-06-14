@@ -229,8 +229,8 @@ def test_cli_sessions_lists_previews(tmp_path, capsys, monkeypatch):
     assert "first beta message" in output
 
 
-def test_cli_tools_lists_default_readonly_tools(tmp_path, capsys, monkeypatch):
-    """The /tools debug command should show the default read-only registry."""
+def test_cli_tools_lists_default_tools(tmp_path, capsys, monkeypatch):
+    """The /tools debug command should show the default registry."""
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
@@ -246,6 +246,7 @@ def test_cli_tools_lists_default_readonly_tools(tmp_path, capsys, monkeypatch):
     assert "list_dir" in output
     assert "read_file" in output
     assert "grep" in output
+    assert "exec" in output
 
 
 def _write_runtime_prompts(workspace):

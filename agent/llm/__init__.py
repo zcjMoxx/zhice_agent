@@ -1,5 +1,6 @@
 """LLM provider implementations."""
 
+from agent.llm.litellm_provider import LiteLLMProvider
 from agent.llm.openai_provider import OpenAIProvider
 from agent.protocols.llm import (
     LLMConfigurationError,
@@ -16,10 +17,7 @@ def create_llm_provider(endpoint: LLMEndpoint) -> LLMProvider:
     if endpoint.protocol == "openai":
         return OpenAIProvider(endpoint)
     if endpoint.protocol == "litellm":
-        raise LLMConfigurationError(
-            "LiteLLMProvider is not implemented yet. Anthropic, Gemini, DeepSeek, "
-            "and other non-OpenAI providers should be routed through LiteLLM later."
-        )
+        return LiteLLMProvider(endpoint)
     raise LLMConfigurationError(f"Unsupported LLM protocol: {endpoint.protocol}")
 
 
@@ -30,5 +28,6 @@ __all__ = [
     "LLMProvider",
     "LLMProviderError",
     "LLMResponse",
+    "LiteLLMProvider",
     "OpenAIProvider",
 ]

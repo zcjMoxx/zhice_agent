@@ -78,35 +78,8 @@ def test_build_truncates_oversized_history_messages(tmp_path):
     assert messages[1]["content"] == "01234567[truncated]"
 
 
-def test_build_includes_tool_messages_and_ids(tmp_path):
-    """Tool results are part of session context once tool calling is enabled."""
-
-    from agent.context import ContextBuilder
-
-    prompts_dir = _write_required_prompts(tmp_path)
-    builder = ContextBuilder(PromptLoader(prompts_dir))
-
-    messages = builder.build(
-        history=[
-            Message(role="tool", content='{"status":"success"}', name="read_file", tool_call_id="call_1"),
-            Message(role="assistant", content="kept"),
-        ],
-        user_message=Message(role="user", content="current"),
-        workspace=tmp_path,
-        session_id="default",
-    )
-
-    assert messages[1] == {
-        "role": "tool",
-        "content": '{"status":"success"}',
-        "name": "read_file",
-        "tool_call_id": "call_1",
-    }
-    assert [message["role"] for message in messages] == ["system", "tool", "assistant", "user"]
-
-
-def test_build_preserves_assistant_tool_calls(tmp_path):
-    """Assistant tool request messages must be replayable for the provider."""
+def test_build_includes_complete_tool_messages_and_ids(tmp_path):
+    """Complete assistant/tool blocks are part of session context."""
 
     from agent.context import ContextBuilder
 
@@ -115,7 +88,99 @@ def test_build_preserves_assistant_tool_calls(tmp_path):
     tool_calls = [{"id": "call_1", "type": "function"}]
 
     messages = builder.build(
-        history=[Message(role="assistant", content="", tool_calls=tool_calls)],
+        history=[
+            Message(role="assistant", content="", tool_calls=tool_calls),
+            Message(role="tool", content='{"status":"success"}', name="read_file", tool_call_id="call_1"),
+            Message(role="assistant", content="kept"),
+        ],
+        user_message=Message(role="user", content="current"),
+        workspace=tmp_path,
+        session_id="default",
+    )
+
+    assert messages[1] == {"role": "assistant", "content": "", "tool_calls": tool_calls}
+    assert messages[2] == {
+        "role": "tool",
+        "content": '{"status":"success"}',
+        "name": "read_file",
+        "tool_call_id": "call_1",
+    }
+    assert [message["role"] for message in messages] == [
+        "system",
+        "assistant",
+        "tool",
+        "assistant",
+        "user",
+    ]
+
+
+def test_build_drops_orphan_tool_messages_after_history_trimming(tmp_path):
+    """OpenAI-compatible providers reject tool messages without tool_calls."""
+
+    from agent.context import ContextBuilder
+
+    prompts_dir = _write_required_prompts(tmp_path)
+    builder = ContextBuilder(PromptLoader(prompts_dir), max_history_messages=2)
+
+    messages = builder.build(
+        history=[
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[{"id": "call_1", "type": "function"}],
+            ),
+            Message(role="tool", content='{"status":"success"}', name="read_file", tool_call_id="call_1"),
+            Message(role="assistant", content="kept"),
+        ],
+        user_message=Message(role="user", content="current"),
+        workspace=tmp_path,
+        session_id="default",
+    )
+
+    assert [message["role"] for message in messages] == ["system", "assistant", "user"]
+    assert messages[1]["content"] == "kept"
+
+
+def test_build_drops_incomplete_assistant_tool_call_blocks(tmp_path):
+    """Assistant tool_calls are replayed only with their matching tool results."""
+
+    from agent.context import ContextBuilder
+
+    prompts_dir = _write_required_prompts(tmp_path)
+    builder = ContextBuilder(PromptLoader(prompts_dir))
+
+    messages = builder.build(
+        history=[
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[{"id": "call_1", "type": "function"}],
+            ),
+            Message(role="assistant", content="kept"),
+        ],
+        user_message=Message(role="user", content="current"),
+        workspace=tmp_path,
+        session_id="default",
+    )
+
+    assert [message["role"] for message in messages] == ["system", "assistant", "user"]
+    assert messages[1]["content"] == "kept"
+
+
+def test_build_preserves_complete_assistant_tool_calls(tmp_path):
+    """Assistant tool request messages are replayed with matching tool output."""
+
+    from agent.context import ContextBuilder
+
+    prompts_dir = _write_required_prompts(tmp_path)
+    builder = ContextBuilder(PromptLoader(prompts_dir))
+    tool_calls = [{"id": "call_1", "type": "function"}]
+
+    messages = builder.build(
+        history=[
+            Message(role="assistant", content="", tool_calls=tool_calls),
+            Message(role="tool", content='{"status":"success"}', tool_call_id="call_1"),
+        ],
         user_message=Message(role="user", content="current"),
         workspace=tmp_path,
         session_id="default",
@@ -131,16 +196,20 @@ def test_build_truncates_tool_messages(tmp_path):
 
     prompts_dir = _write_required_prompts(tmp_path)
     builder = ContextBuilder(PromptLoader(prompts_dir), max_message_chars=8)
+    tool_calls = [{"id": "call_1", "type": "function"}]
 
     messages = builder.build(
-        history=[Message(role="tool", content="0123456789abcdef", tool_call_id="call_1")],
+        history=[
+            Message(role="assistant", content="", tool_calls=tool_calls),
+            Message(role="tool", content="0123456789abcdef", tool_call_id="call_1"),
+        ],
         user_message=Message(role="user", content="current"),
         workspace=tmp_path,
         session_id="default",
     )
 
-    assert messages[1]["content"] == "01234567[truncated]"
-    assert messages[1]["tool_call_id"] == "call_1"
+    assert messages[2]["content"] == "01234567[truncated]"
+    assert messages[2]["tool_call_id"] == "call_1"
 
 
 def test_build_raises_clear_error_when_required_prompt_is_missing(tmp_path):
