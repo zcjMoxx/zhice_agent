@@ -12,6 +12,8 @@ from agent.config import (
     init_runtime_files,
     load_config,
     load_llm_endpoint,
+    load_llm_endpoints,
+    resolve_llm_endpoint_alias,
 )
 from agent.protocols.llm import LLMConfigurationError
 
@@ -137,11 +139,11 @@ def test_load_llm_endpoint_reads_openai_endpoint(tmp_path):
         json.dumps(
             {
                 "default": {
-                    "name": "default",
                     "protocol": "openai",
                     "base_url": "https://example.test/v1",
                     "api_key": "local-json-secret",
                     "model": "gpt-test",
+                    "supported_models": ["gpt-test", "gpt-alt", "gpt-*"],
                     "max_tokens": 128,
                     "temperature": 0.2,
                 }
@@ -156,8 +158,197 @@ def test_load_llm_endpoint_reads_openai_endpoint(tmp_path):
     assert endpoint.base_url == "https://example.test/v1"
     assert endpoint.api_key == "local-json-secret"
     assert endpoint.model == "gpt-test"
+    assert endpoint.provider == ""
+    assert endpoint.supported_models == ("gpt-test", "gpt-alt", "gpt-*")
     assert endpoint.max_tokens == 128
     assert endpoint.temperature == 0.2
+    assert endpoint.priority == 1
+    assert endpoint.enabled is True
+    assert endpoint.role == "default"
+
+
+def test_load_llm_endpoints_reads_priority_and_enabled_keyed_config(tmp_path):
+    """Endpoint failover should be able to load every configured endpoint."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_endpoints.json").write_text(
+        json.dumps(
+            {
+                "_comment": "ignored",
+                "default": {
+                    "protocol": "openai",
+                    "base_url": "https://a.test/v1",
+                    "api_key": "a-key",
+                    "model": "model-a",
+                    "priority": 2,
+                },
+                "backup": {
+                    "protocol": "openai",
+                    "base_url": "https://b.test/v1",
+                    "api_key": "b-key",
+                    "model": "model-b",
+                    "priority": 1,
+                    "enabled": False,
+                    "role": "default",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    endpoints = load_llm_endpoints(config_dir)
+
+    assert [endpoint.name for endpoint in endpoints] == ["default", "backup"]
+    assert endpoints[0].priority == 2
+    assert endpoints[1].priority == 1
+    assert endpoints[1].enabled is False
+
+
+def test_load_llm_endpoint_allows_default_string_alias(tmp_path):
+    """A top-level default alias should avoid duplicating endpoint config."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_endpoints.json").write_text(
+        json.dumps(
+            {
+                "default": "litellm_anthropic",
+                "litellm_anthropic": {
+                    "protocol": "litellm",
+                    "provider": "anthropic",
+                    "api_key": "anthropic-key",
+                    "model": "claude-sonnet-4",
+                    "priority": 1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    endpoints = load_llm_endpoints(config_dir)
+    endpoint = load_llm_endpoint(config_dir)
+
+    assert [item.name for item in endpoints] == ["litellm_anthropic"]
+    assert endpoint.name == "litellm_anthropic"
+    assert endpoint.provider == "anthropic"
+    assert endpoint.model == "claude-sonnet-4"
+    assert resolve_llm_endpoint_alias(config_dir, "default") == "litellm_anthropic"
+
+
+def test_load_llm_endpoint_keeps_litellm_models_unprefixed(tmp_path):
+    """LiteLLM endpoints should keep local model names separate from provider prefixes."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_endpoints.json").write_text(
+        json.dumps(
+            {
+                "default": {
+                    "protocol": "litellm",
+                    "provider": "anthropic",
+                    "api_key": "anthropic-key",
+                    "model": "claude-sonnet-4",
+                    "supported_models": ["claude-sonnet-4", "claude-opus-4"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    endpoint = load_llm_endpoint(config_dir)
+
+    assert endpoint.provider == "anthropic"
+    assert endpoint.model == "claude-sonnet-4"
+    assert endpoint.supported_models == (
+        "claude-sonnet-4",
+        "claude-opus-4",
+    )
+
+
+def test_load_llm_endpoint_allows_default_ref_alias(tmp_path):
+    """Alias objects should be accepted for more explicit configs."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_endpoints.json").write_text(
+        json.dumps(
+            {
+                "default": {"ref": "backup"},
+                "backup": {
+                    "protocol": "openai",
+                    "base_url": "https://backup.test/v1",
+                    "api_key": "backup-key",
+                    "model": "backup-model",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    endpoint = load_llm_endpoint(config_dir)
+
+    assert endpoint.name == "backup"
+
+
+def test_load_llm_endpoints_accepts_reference_endpoints_list_config(tmp_path):
+    """List configs use explicit endpoint names from each entry."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_endpoints.json").write_text(
+        json.dumps(
+            {
+                "max_outer_retries": 2,
+                "endpoints": [
+                    {
+                        "name": "cpa",
+                        "role": "default",
+                        "priority": 1,
+                        "protocol": "openai",
+                        "base_url": "https://cpa.test/v1",
+                        "api_key": "cpa-key",
+                        "model": "gpt-5.5",
+                        "enabled": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    endpoints = load_llm_endpoints(config_dir)
+
+    assert len(endpoints) == 1
+    assert endpoints[0].name == "cpa"
+    assert endpoints[0].protocol == "openai"
+    assert endpoints[0].base_url == "https://cpa.test/v1"
+    assert endpoints[0].priority == 1
+
+
+def test_load_llm_endpoints_requires_names_in_list_config(tmp_path):
+    """Only keyed configs can infer endpoint names from outer object keys."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_endpoints.json").write_text(
+        json.dumps(
+            {
+                "endpoints": [
+                    {
+                        "protocol": "openai",
+                        "base_url": "https://cpa.test/v1",
+                        "api_key": "cpa-key",
+                        "model": "gpt-5.5",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LLMConfigurationError, match=r"endpoints\[0\]\.name"):
+        load_llm_endpoints(config_dir)
 
 
 def test_load_llm_endpoint_resolves_api_key_placeholder_from_environment(tmp_path, monkeypatch):
@@ -170,7 +361,6 @@ def test_load_llm_endpoint_resolves_api_key_placeholder_from_environment(tmp_pat
         json.dumps(
             {
                 "default": {
-                    "name": "default",
                     "protocol": "openai",
                     "base_url": "https://example.test/v1",
                     "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
@@ -198,7 +388,6 @@ def test_load_llm_endpoint_rejects_missing_api_key_placeholder_environment_varia
         json.dumps(
             {
                 "default": {
-                    "name": "default",
                     "protocol": "openai",
                     "base_url": "https://example.test/v1",
                     "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
@@ -213,8 +402,8 @@ def test_load_llm_endpoint_rejects_missing_api_key_placeholder_environment_varia
         load_llm_endpoint(config_dir)
 
 
-def test_load_llm_endpoint_accepts_future_litellm_protocol(tmp_path):
-    """LiteLLM endpoints are valid config, even though the provider comes later."""
+def test_load_llm_endpoint_accepts_litellm_provider(tmp_path):
+    """LiteLLM endpoints can use the in-process SDK without a base_url."""
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -222,11 +411,10 @@ def test_load_llm_endpoint_accepts_future_litellm_protocol(tmp_path):
         json.dumps(
             {
                 "claude": {
-                    "name": "claude",
                     "protocol": "litellm",
-                    "base_url": "https://api.anthropic.com/v1",
+                    "provider": "anthropic",
                     "api_key": "litellm-local-key",
-                    "model": "anthropic/claude-sonnet-4",
+                    "model": "claude-sonnet-4",
                 }
             }
         ),
@@ -236,7 +424,33 @@ def test_load_llm_endpoint_accepts_future_litellm_protocol(tmp_path):
     endpoint = load_llm_endpoint(config_dir, "claude")
 
     assert endpoint.protocol == "litellm"
+    assert endpoint.provider == "anthropic"
+    assert endpoint.base_url == ""
+    assert endpoint.model == "claude-sonnet-4"
     assert endpoint.api_key == "litellm-local-key"
+
+
+def test_load_llm_endpoint_rejects_prefixed_model_names(tmp_path):
+    """Local config keeps provider and model separate."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_endpoints.json").write_text(
+        json.dumps(
+            {
+                "claude": {
+                    "protocol": "litellm",
+                    "provider": "anthropic",
+                    "api_key": "litellm-local-key",
+                    "model": "anthropic/claude-sonnet-4",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LLMConfigurationError, match="unprefixed model name"):
+        load_llm_endpoint(config_dir, "claude")
 
 
 def test_load_llm_endpoint_rejects_direct_anthropic_protocol(tmp_path):
@@ -248,7 +462,6 @@ def test_load_llm_endpoint_rejects_direct_anthropic_protocol(tmp_path):
         json.dumps(
             {
                 "claude": {
-                    "name": "claude",
                     "protocol": "anthropic",
                     "base_url": "https://api.anthropic.com/v1",
                     "api_key": "anthropic-local-key",
@@ -285,6 +498,7 @@ def test_init_runtime_files_generates_local_env_and_llm_config(tmp_path, monkeyp
     assert env_text == f"ZHICE_AGENT_WORKSPACE={tmp_path.resolve()}\n"
 
     endpoint = load_llm_endpoint(tmp_path / "config", "local")
+    assert endpoint.provider == ""
     assert endpoint.base_url == "https://gateway.test/v1"
     assert endpoint.api_key == "local-json-secret"
     assert endpoint.model == "test-model"

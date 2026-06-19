@@ -58,6 +58,8 @@ class ExecTool(BaseTool):
     }
 
     def _execute(self, args: dict[str, Any]) -> ToolResult:
+        """Validate parameters, enforce policy, run the command, and format output."""
+
         command = require_string(args, "command", required=True).strip()
         if not command:
             raise ToolExecutionError(
@@ -165,6 +167,8 @@ def _timeout_result(
     stderr: str,
     max_output_chars: int,
 ) -> ToolResult:
+    """Build the structured ToolResult returned when subprocess timeout fires."""
+
     stdout = redact_secrets(stdout)
     stderr = redact_secrets(stderr)
     output = _format_exec_output(
@@ -198,6 +202,8 @@ def _format_exec_output(
     stderr: str,
     header: str | None = None,
 ) -> str:
+    """Render command metadata, stdout, and stderr into one text block."""
+
     lines: list[str] = []
     if header:
         lines.append(header)
@@ -214,6 +220,8 @@ def _format_exec_output(
 
 
 def _coerce_output(value: str | bytes | None) -> str:
+    """Normalize subprocess timeout output into UTF-8 text."""
+
     if value is None:
         return ""
     if isinstance(value, bytes):

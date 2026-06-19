@@ -20,6 +20,8 @@ class ContextBuilder:
         max_history_messages: int = 30,
         max_message_chars: int = 8000,
     ):
+        """Configure prompt source and history/message size limits."""
+
         if max_history_messages < 0:
             raise ValueError("max_history_messages must be non-negative")
         if max_message_chars <= 0:
@@ -55,6 +57,8 @@ class ContextBuilder:
         return messages
 
     def _build_system_prompt(self, workspace: Path, session_id: str) -> str:
+        """Combine runtime prompts with workspace/session facts for the LLM."""
+
         prompts = self.prompt_loader.load_many(DEFAULT_CONTEXT_PROMPTS)
         return "\n\n".join(
             [
@@ -72,6 +76,8 @@ class ContextBuilder:
         )
 
     def _message_to_llm_dict(self, message: Message) -> dict[str, Any] | None:
+        """Convert an internal Message to the provider-neutral chat shape."""
+
         if message.role not in {"system", "user", "assistant", "tool"}:
             return None
 
@@ -129,6 +135,8 @@ class ContextBuilder:
         return converted
 
     def _truncate(self, content: str) -> str:
+        """Trim overly long message content before sending it to the LLM."""
+
         if len(content) <= self.max_message_chars:
             return content
         marker = "[truncated]"
@@ -136,6 +144,8 @@ class ContextBuilder:
 
 
 def _tool_call_ids(tool_calls: list[dict[str, Any]]) -> list[str]:
+    """Return valid unique tool call ids, or empty when the block is unsafe."""
+
     ids: list[str] = []
     for tool_call in tool_calls:
         raw_id = tool_call.get("id") if isinstance(tool_call, dict) else None

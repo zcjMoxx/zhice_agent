@@ -40,4 +40,10 @@
 
 - 输入：`protocol="litellm"` 的 endpoint。
 - 预期：`create_llm_provider` 返回 `LiteLLMProvider`。
-- 检查点：请求发往 LiteLLM proxy 的 `/chat/completions`，模型名、tools、tool_calls 与 usage 正常透传。
+- 检查点：调用 `litellm.completion(...)`，模型名、api_key、可选 api_base、tools、tool_calls 与 usage 正常透传。
+
+### Case 7: EndpointFailoverProvider
+
+- 输入：多个 endpoint，包含 preferred endpoint、不同 priority、disabled endpoint。
+- 预期：优先尝试 preferred endpoint；失败后按 priority 尝试其它 enabled endpoint。
+- 检查点：成功响应 metadata 记录 endpoint 和 attempted_endpoints；`endpoint/model` 覆盖只允许默认模型或命中 `supported_models` 的模型，且只作用于首选 endpoint；全部失败时错误信息包含 endpoint 摘要且不泄露 secret。

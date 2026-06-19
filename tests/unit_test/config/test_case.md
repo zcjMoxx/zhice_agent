@@ -34,7 +34,7 @@
 
 - 输入：读取 `config/llm_endpoints.json`。
 - 预期：解析为 `LLMEndpoint`。
-- 检查点：支持 `api_key` 明文和 `${ENV_VAR}` 占位；缺失字段、非法 JSON、未知 endpoint、未定义环境变量都会给出配置错误。
+- 检查点：支持 `api_key` 明文和 `${ENV_VAR}` 占位；支持 keyed object 和顶层 `endpoints` 列表；支持 `default` 别名；支持 `priority`、`enabled`、`role`；缺失字段、非法 JSON、未知 endpoint、未定义环境变量都会给出配置错误。
 
 ### Case 6: dotenv 读取
 

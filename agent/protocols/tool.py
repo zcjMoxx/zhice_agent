@@ -15,6 +15,8 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Normalize missing tool output to an empty string."""
+
         if self.output is None:
             self.output = ""
 

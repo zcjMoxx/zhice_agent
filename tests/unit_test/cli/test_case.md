@@ -38,15 +38,15 @@
 
 ### Case 6: 会话 slash commands
 
-- 输入：`/new`、`/reset`、`/sessions`、`/history`、`/prompts`、`/exit`。
+- 输入：`/new`、`/reset`、`/sessions`、`/history`、`/prompts`、`/model`、`/model list`、`/model list endpoint`、`/model endpoint/model`、`/model reset`、`/exit`。
 - 预期：命令在 CLI 层处理，不进入 AgentLoop 普通对话路径。
-- 检查点：新 session 可写入文件；reset 后 history 为空；sessions 能显示 preview。
+- 检查点：新 session 可写入文件；reset 后 history 为空；sessions 能显示 preview；`/model` 能紧凑显示当前模型，`/model list` 能列出 endpoint/model，`/model list endpoint` 能列出单个 endpoint 的 supported_models，且能切换、临时覆盖模型并重置当前首选 endpoint。
 
 ### Case 7: `/tools`
 
 - 输入：`/tools`。
 - 预期：列出默认只读工具注册表。
-- 检查点：输出包含 `list_dir`、`read_file`、`grep`。
+- 检查点：输出包含 `list_dir`、`read_file`、`grep`、`exec`。
 
 ### Case 8: Fake LLM 对话
 

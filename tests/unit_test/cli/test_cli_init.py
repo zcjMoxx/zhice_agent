@@ -2,7 +2,8 @@
 
 import builtins
 
-from agent.cli import main
+from agent.cli import _resolve_preferred_endpoint, main
+from agent.protocols.llm import LLMEndpoint
 
 
 def test_cli_init_generates_runtime_files(tmp_path, capsys, monkeypatch):
@@ -159,6 +160,34 @@ def test_cli_chat_respects_explicit_session_id(tmp_path, capsys, monkeypatch):
     assert "named-session" in output
 
 
+def test_cli_auto_endpoint_uses_default_alias_when_configured(tmp_path):
+    """Auto startup should honor a lightweight default alias."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_endpoints.json").write_text(
+        '{"default":"backup","backup":{"protocol":"openai","base_url":"https://b.test/v1","api_key":"k","model":"m"}}',
+        encoding="utf-8",
+    )
+    endpoints = [_endpoint("backup", priority=2)]
+
+    assert _resolve_preferred_endpoint(config_dir, "auto", endpoints) == "backup"
+
+
+def test_cli_auto_endpoint_uses_priority_when_no_default_exists(tmp_path):
+    """Auto startup should allow configs without any default entry."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_endpoints.json").write_text(
+        '{"slow":{"protocol":"openai","base_url":"https://s.test/v1","api_key":"k","model":"s"},"fast":{"protocol":"openai","base_url":"https://f.test/v1","api_key":"k","model":"f"}}',
+        encoding="utf-8",
+    )
+    endpoints = [_endpoint("slow", priority=3), _endpoint("fast", priority=1)]
+
+    assert _resolve_preferred_endpoint(config_dir, "auto", endpoints) is None
+
+
 def test_cli_new_switches_to_a_new_session(tmp_path, capsys, monkeypatch):
     """The /new command should create and switch to a fresh session id."""
 
@@ -249,6 +278,189 @@ def test_cli_tools_lists_default_tools(tmp_path, capsys, monkeypatch):
     assert "exec" in output
 
 
+def test_cli_model_shows_compact_current_status(tmp_path, capsys, monkeypatch):
+    """The /model command should show compact local endpoint state."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    switchable = _SwitchableLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: switchable)
+    inputs = iter(["/model", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "current: default/model-a" in output
+    assert "model-a" in output
+    assert "backup" not in output
+    assert "available endpoints:" not in output
+    assert "Tip:" in output
+    assert "'/model <endpoint>'" in output
+    assert "'/model <endpoint>/<model>'" in output
+    assert "/model <model>" not in output
+    assert "'/model list'" in output
+    assert "'/model reset'" in output
+    assert "protocol=" not in output
+    assert "priority=" not in output
+    assert switchable.chat_calls == 0
+
+
+def test_cli_model_list_shows_available_endpoints_one_line(tmp_path, capsys, monkeypatch):
+    """The /model list command should show endpoints and models on one line."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    switchable = _SwitchableLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: switchable)
+    inputs = iter(["/model list", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "available endpoints:" in output
+    assert "* default" in output
+    assert "default model: model-a" in output
+    assert "  backup" in output
+    assert "default model: model-b" in output
+    assert "Tip: use '/model list <endpoint>'" in output
+    assert "protocol=" not in output
+    assert "priority=" not in output
+    assert switchable.chat_calls == 0
+
+
+def test_cli_model_list_endpoint_shows_supported_models(tmp_path, capsys, monkeypatch):
+    """The /model list endpoint command should show supported models for one endpoint."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    switchable = _SwitchableLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: switchable)
+    inputs = iter(["/model list backup", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "endpoint: backup" in output
+    assert "available models:" in output
+    assert "* model-b (default)" in output
+    assert "  model-b-plus" in output
+    assert "available endpoints:" not in output
+    assert switchable.chat_calls == 0
+
+
+def test_cli_model_list_endpoint_reports_unknown_endpoint(tmp_path, capsys, monkeypatch):
+    """The /model list endpoint command should report unknown endpoints clearly."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    switchable = _SwitchableLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: switchable)
+    inputs = iter(["/model list missing", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "Unknown endpoint: missing" in output
+    assert "available endpoints:" in output
+    assert switchable.chat_calls == 0
+
+
+def test_cli_model_switches_preferred_endpoint(tmp_path, capsys, monkeypatch):
+    """The /model command should switch the provider's preferred endpoint."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    switchable = _SwitchableLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: switchable)
+    inputs = iter(["/model backup", "/model", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "model switched:" in output
+    assert "model-b" in output
+    assert "current:" in output
+    assert "backup" in output
+    assert switchable.preferred_endpoint == "backup"
+
+
+def test_cli_model_switches_endpoint_with_model_override(tmp_path, capsys, monkeypatch):
+    """The /model endpoint/model form should override the preferred endpoint model."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    switchable = _SwitchableLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: switchable)
+    inputs = iter(["/model backup/model-b-plus", "/model", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "model switched:" in output
+    assert "model-b-plus" in output
+    assert "current: backup/model-b-plus" in output
+    assert switchable.preferred_endpoint == "backup"
+    assert switchable.preferred_model == "model-b-plus"
+
+
+def test_cli_model_rejects_unsupported_endpoint_model(tmp_path, capsys, monkeypatch):
+    """The /model endpoint/model form should reject models not listed by the endpoint."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    switchable = _SwitchableLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: switchable)
+    inputs = iter(["/model backup/model-c", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "does not list model" in output
+    assert switchable.preferred_endpoint == "default"
+    assert switchable.chat_calls == 0
+
+
+def test_cli_model_reset_returns_to_default_order(tmp_path, capsys, monkeypatch):
+    """The /model reset command should clear an explicit model preference."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    switchable = _SwitchableLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: switchable)
+    inputs = iter(["/model backup", "/model reset", "/model", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "model preference reset" in output
+    assert "current: default/model-a" in output
+    assert switchable.preferred_endpoint == "default"
+
+
 def _write_runtime_prompts(workspace):
     prompts_dir = workspace / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
@@ -261,6 +473,85 @@ class _EchoLLM:
     def chat(self, messages, tools=None):
         from agent.protocols.llm import LLMResponse
 
+        return LLMResponse(content="ok")
+
+
+def _endpoint(name: str, *, priority: int = 1) -> LLMEndpoint:
+    return LLMEndpoint(
+        name=name,
+        protocol="openai",
+        base_url=f"https://{name}.test/v1",
+        api_key="key",
+        model=name,
+        priority=priority,
+    )
+
+
+class _SwitchableLLM:
+    def __init__(self):
+        from agent.protocols.llm import LLMEndpoint
+
+        self._endpoints = [
+            LLMEndpoint(
+                name="default",
+                protocol="openai",
+                base_url="https://a.test/v1",
+                api_key="key",
+                model="model-a",
+                priority=1,
+            ),
+            LLMEndpoint(
+                name="backup",
+                protocol="openai",
+                base_url="https://b.test/v1",
+                api_key="key",
+                model="model-b",
+                priority=2,
+                supported_models=("model-b-plus",),
+            ),
+        ]
+        self.preferred_endpoint = "default"
+        self.preferred_model = ""
+        self.chat_calls = 0
+
+    def endpoints(self):
+        return list(self._endpoints)
+
+    def current_endpoint(self):
+        from dataclasses import replace
+
+        for endpoint in self._endpoints:
+            if endpoint.name == self.preferred_endpoint:
+                if self.preferred_model:
+                    return replace(endpoint, model=self.preferred_model)
+                return endpoint
+        return self._endpoints[0]
+
+    def match_endpoint(self, target):
+        from dataclasses import replace
+
+        endpoint_name, separator, model = target.partition("/")
+        for endpoint in self._endpoints:
+            if endpoint.name == endpoint_name:
+                if separator:
+                    if model != endpoint.model and model not in endpoint.supported_models:
+                        return None, f"Endpoint {endpoint.name!r} does not list model {model!r} as supported."
+                    return replace(endpoint, model=model), ""
+                return endpoint, ""
+        return None, f"Unknown endpoint: {endpoint_name}"
+
+    def set_preferred(self, endpoint_name, model=None):
+        self.preferred_endpoint = endpoint_name
+        self.preferred_model = model or ""
+
+    def reset_preferred(self):
+        self.preferred_endpoint = "default"
+        self.preferred_model = ""
+
+    def chat(self, messages, tools=None):
+        from agent.protocols.llm import LLMResponse
+
+        self.chat_calls += 1
         return LLMResponse(content="ok")
 
 

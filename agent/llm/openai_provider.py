@@ -26,6 +26,8 @@ class OpenAIProvider:
         urlopen: Callable[..., Any] | None = None,
         timeout: float = 60.0,
     ):
+        """Store endpoint config and injectable HTTP transport for tests."""
+
         self.endpoint = endpoint
         self._urlopen = urlopen or _default_urlopen
         self._timeout = timeout
@@ -35,6 +37,8 @@ class OpenAIProvider:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
+        """Send one chat completion request to an OpenAI-compatible endpoint."""
+
         api_key = _read_api_key(self.endpoint)
         payload: dict[str, Any] = {
             "model": self.endpoint.model,
@@ -49,6 +53,8 @@ class OpenAIProvider:
         return _parse_openai_response(raw, self.endpoint.model)
 
     def _post_json(self, path: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+        """POST JSON to the configured base URL and decode the JSON response."""
+
         url = f"{self.endpoint.base_url.rstrip('/')}/{path}"
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
@@ -75,6 +81,8 @@ class OpenAIProvider:
 
 
 def _read_api_key(endpoint: LLMEndpoint) -> str:
+    """Return the configured API key or raise a setup-focused error."""
+
     api_key = endpoint.api_key.strip()
     if api_key:
         return api_key
@@ -82,6 +90,8 @@ def _read_api_key(endpoint: LLMEndpoint) -> str:
 
 
 def _clean_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Keep only OpenAI-supported message fields and normalize empty content."""
+
     cleaned = {key: value for key, value in message.items() if key in _ALLOWED_MESSAGE_KEYS}
     role = cleaned.get("role")
     content = cleaned.get("content")
@@ -94,6 +104,8 @@ def _clean_message(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_openai_response(raw: dict[str, Any], fallback_model: str) -> LLMResponse:
+    """Convert the OpenAI wire response into provider-neutral LLMResponse."""
+
     choices = raw.get("choices") or []
     first_choice = choices[0] if choices else {}
     message = first_choice.get("message") or {}
@@ -111,6 +123,8 @@ def _parse_openai_response(raw: dict[str, Any], fallback_model: str) -> LLMRespo
 
 
 def _provider_http_error(exc: error.HTTPError, api_key: str) -> LLMProviderError:
+    """Build a redacted provider error from an HTTPError body."""
+
     body = ""
     try:
         body = exc.read().decode("utf-8", errors="replace")[:1000]
@@ -122,4 +136,6 @@ def _provider_http_error(exc: error.HTTPError, api_key: str) -> LLMProviderError
 
 
 def _safe_reason(exc: error.URLError) -> str:
+    """Return a bounded network-error reason for user-facing messages."""
+
     return str(getattr(exc, "reason", exc))[:500]

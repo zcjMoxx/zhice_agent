@@ -14,13 +14,15 @@ from agent.config import (
     bootstrap_dotenv,
     init_runtime_files,
     load_config,
-    load_llm_endpoint,
+    load_llm_endpoints,
+    resolve_llm_endpoint_alias,
 )
-from agent.console import console
+from agent.console import Spinner, console
 from agent.context import ContextBuilder
 from agent.gateway import format_gateway_check, run_gateway
-from agent.llm import LLMConfigurationError, create_llm_provider
+from agent.llm import LLMConfigurationError, create_llm_provider_chain
 from agent.loop import AgentLoop
+from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.session import JsonlSessionStore
 from agent.tools import create_default_tool_registry
@@ -56,7 +58,11 @@ def _run_chat(argv: Sequence[str]) -> int:
         help="Session id to resume. Defaults to the stable local session: default.",
     )
     parser.add_argument("--workspace", default=None, help="Workspace root override.")
-    parser.add_argument("--endpoint", default="default", help="LLM endpoint name.")
+    parser.add_argument(
+        "--endpoint",
+        default="auto",
+        help="Preferred LLM endpoint name. Defaults to config default alias or priority order.",
+    )
     args = parser.parse_args(argv)
     session_id = args.session
 
@@ -122,8 +128,20 @@ def _run_chat(argv: Sequence[str]) -> int:
         if user_text == "/tools":
             _print_tools(tool_registry)
             continue
+        if user_text == "/model" or user_text.startswith("/model "):
+            print(_handle_model_command(llm, user_text.removeprefix("/model").strip()))
+            continue
 
-        print(agent_loop.run_turn(session_id, user_text))
+        try:
+            with Spinner("thinking"):
+                result = agent_loop.run_turn(session_id, user_text)
+            print(result)
+        except KeyboardInterrupt:
+            session_store.append(session_id, [
+                Message(role="user", content=user_text),
+                Message(role="assistant", content="[interrupted]",
+                        metadata={"interrupted": True}),
+            ])
 
 
 def _run_gateway(argv: Sequence[str]) -> int:
@@ -225,6 +243,8 @@ def _run_init(argv: Sequence[str]) -> int:
 
 
 def _ensure_runtime_dirs(config) -> bool:
+    """Create runtime directories and print a friendly setup error on failure."""
+
     try:
         config.ensure_dirs()
     except OSError as exc:
@@ -264,6 +284,8 @@ def _new_session_id() -> str:
 
 
 def _print_workspace_error(message: str) -> None:
+    """Print first-run workspace setup guidance after config discovery fails."""
+
     env_example = "ZHICE_AGENT_WORKSPACE=C:\\Users\\you\\ZhiCe-Agent-Workspace"
     powershell_override = '$env:ZHICE_AGENT_WORKSPACE="C:\\Users\\you\\ZhiCe-Agent-Workspace"'
 
@@ -375,6 +397,120 @@ def _print_tools(tool_registry) -> None:
         print(f"{console.command(str(name)):<18}{description}")
 
 
+def _handle_model_command(llm, target: str) -> str:
+    """Handle the local /model command without sending it to the LLM.
+
+    Supported forms:
+    - /model
+    - /model list
+    - /model list <endpoint>
+    - /model <endpoint>
+    - /model <endpoint>/<model>
+    - /model reset
+    """
+
+    required = (
+        "endpoints",
+        "current_endpoint",
+        "match_endpoint",
+        "reset_preferred",
+        "set_preferred",
+    )
+    if not all(hasattr(llm, name) for name in required):
+        return console.warning("Model switching is unavailable for this provider.")
+
+    normalized_target = target.strip()
+    if not normalized_target:
+        return _format_model_status(llm)
+    if normalized_target.lower() == "list" or normalized_target.lower().startswith("list "):
+        # "list" shows all endpoints; "list claude" shows one endpoint's model allowlist.
+        endpoint_name = normalized_target[4:].strip()
+        if endpoint_name:
+            return _format_endpoint_model_list(llm, endpoint_name)
+        return _format_model_list(llm)
+    if normalized_target.lower() == "reset":
+        llm.reset_preferred()
+        current = llm.current_endpoint()
+        return (
+            f"{console.success('model preference reset.')}\n"
+            f"{_format_current_model(current)}"
+        )
+
+    endpoint, error = llm.match_endpoint(normalized_target)
+    if endpoint is None:
+        return f"{console.error(error)}\n{_format_model_status(llm)}"
+
+    # A slash means the user chose endpoint/model, so remember a temporary
+    # model override for that endpoint. Plain endpoint switches keep its default model.
+    model_override = endpoint.model if "/" in normalized_target else None
+    llm.set_preferred(endpoint.name, model_override)
+    return (
+        f"{console.success('model switched:')} {console.command(endpoint.model)}\n"
+        f"endpoint: {console.command(endpoint.name)}"
+    )
+
+
+def _format_model_status(llm) -> str:
+    """Format the compact /model status view for the current endpoint/model."""
+
+    current = llm.current_endpoint()
+    lines = [
+        _format_current_model(current),
+        (
+            "Tip: use '/model <endpoint>' or '/model <endpoint>/<model>' to switch. "
+            "Use '/model list' to see available, '/model reset' to restore default."
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def _format_model_list(llm) -> str:
+    """Format all configured endpoints for /model list."""
+
+    current = llm.current_endpoint()
+    lines = [_format_current_model(current), "available endpoints:"]
+    for endpoint in llm.endpoints():
+        marker = "*" if endpoint.name == current.name else " "
+        lines.append(f"{marker} {endpoint.name:<18} default model: {endpoint.model}")
+    lines.append("")
+    lines.append("Tip: use '/model list <endpoint>' to see available models for an endpoint.")
+    return "\n".join(lines)
+
+
+def _format_endpoint_model_list(llm, endpoint_name: str) -> str:
+    """Format the model allowlist for one endpoint."""
+
+    for endpoint in llm.endpoints():
+        if endpoint.name == endpoint_name:
+            models = _endpoint_model_names(endpoint)
+            lines = [
+                f"endpoint: {console.command(endpoint.name)}",
+                "available models:",
+            ]
+            for model in models:
+                marker = "*" if model == endpoint.model else " "
+                suffix = " (default)" if model == endpoint.model else ""
+                lines.append(f"{marker} {model}{suffix}")
+            return "\n".join(lines)
+    return f"{console.error(f'Unknown endpoint: {endpoint_name}')}\n{_format_model_list(llm)}"
+
+
+def _endpoint_model_names(endpoint) -> list[str]:
+    """Return endpoint default model first, followed by unique supported models."""
+
+    models = [endpoint.model]
+    for model in endpoint.supported_models:
+        if model not in models:
+            models.append(model)
+    return models
+
+
+def _format_current_model(endpoint) -> str:
+    """Render the current endpoint/model pair shown by /model."""
+
+    return f"current: {console.command(f'{endpoint.name}/{endpoint.model}')}"
+
+
 def _print_help() -> None:
     """Print available slash commands for the local CLI."""
 
@@ -386,6 +522,7 @@ def _print_help() -> None:
         ("/history", "print recent messages from the current session"),
         ("/prompts", "list loaded prompt files"),
         ("/tools", "list registered tools"),
+        ("/model", "show or switch the preferred LLM endpoint"),
         ("/exit", "leave the CLI"),
     ]
     for name, description in commands:
@@ -401,21 +538,48 @@ def _format_session_time(timestamp: float) -> str:
 
 
 class _UnavailableLLMProvider:
+    """Provider placeholder that delays configuration errors until first chat."""
+
     def __init__(self, error: LLMConfigurationError):
+        """Store the startup error so normal CLI rendering can continue."""
+
         self.error = error
 
     def chat(self, messages, tools=None):
+        """Raise the stored configuration error through the normal loop path."""
+
         raise self.error
 
 
 def _build_llm_provider(config_dir, endpoint_name):
+    """Build the runtime LLM provider chain from endpoint config."""
+
     try:
-        endpoint = load_llm_endpoint(config_dir, endpoint_name)
-        return create_llm_provider(endpoint)
+        endpoints = load_llm_endpoints(config_dir)
+        preferred_endpoint = _resolve_preferred_endpoint(config_dir, endpoint_name, endpoints)
+        return create_llm_provider_chain(endpoints, preferred_endpoint=preferred_endpoint)
     except LLMConfigurationError as exc:
         return _UnavailableLLMProvider(exc)
 
 
+def _resolve_preferred_endpoint(config_dir, endpoint_name, endpoints):
+    """Resolve CLI --endpoint into the concrete startup preference.
+
+    ``auto`` means: use a configured default alias if present, else a real
+    endpoint named "default", else let the failover provider choose by priority.
+    """
+
+    resolved = resolve_llm_endpoint_alias(config_dir, endpoint_name)
+    if resolved:
+        return resolved
+    default_alias = resolve_llm_endpoint_alias(config_dir, "default")
+    endpoint_names = {endpoint.name for endpoint in endpoints if endpoint.enabled}
+    if default_alias and default_alias in endpoint_names:
+        return default_alias
+    if "default" in endpoint_names:
+        return "default"
+    return None
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
-

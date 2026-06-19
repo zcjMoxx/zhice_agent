@@ -41,6 +41,8 @@ class AgentLoop:
         tools: ToolProvider | None = None,
         max_tool_iterations: int = 4,
     ):
+        """Wire provider dependencies and guard the tool-iteration limit."""
+
         if max_tool_iterations < 0:
             raise ValueError("max_tool_iterations must be non-negative")
 
@@ -141,6 +143,8 @@ class AgentLoop:
 
 
 def _execute_tool(tools: ToolProvider | None, call: ParsedToolCall) -> ToolResult:
+    """Dispatch one parsed tool call through the configured tool provider."""
+
     if tools is None:
         return ToolResult(
             output="Tool provider is not configured.",
@@ -151,6 +155,8 @@ def _execute_tool(tools: ToolProvider | None, call: ParsedToolCall) -> ToolResul
 
 
 def _parse_tool_call(raw_call: object, index: int) -> ParsedToolCall:
+    """Decode one provider tool-call object and validate its JSON arguments."""
+
     generated_id = False
     if isinstance(raw_call, dict):
         raw_id = raw_call.get("id")
@@ -229,6 +235,8 @@ def _parse_tool_call(raw_call: object, index: int) -> ParsedToolCall:
 
 
 def _tool_result_to_message(call: ParsedToolCall, result: ToolResult) -> Message:
+    """Wrap a ToolResult as an OpenAI-compatible tool message for the next LLM call."""
+
     metadata = {
         "tool_name": call.name,
         "is_error": result.is_error,
@@ -254,6 +262,8 @@ def _tool_result_to_message(call: ParsedToolCall, result: ToolResult) -> Message
 
 
 def _message_to_llm_dict(message: Message) -> dict[str, Any]:
+    """Convert one internal Message to the chat message dict shape."""
+
     converted: dict[str, Any] = {"role": message.role, "content": message.content}
     if message.name:
         converted["name"] = message.name
@@ -265,6 +275,8 @@ def _message_to_llm_dict(message: Message) -> dict[str, Any]:
 
 
 def _format_llm_error(exc: Exception, workspace: Path) -> str:
+    """Turn provider/config failures into actionable CLI text."""
+
     config_path = workspace / "config" / "llm_endpoints.json"
     message = str(exc)
     if isinstance(exc, LLMConfigurationError):
@@ -302,10 +314,14 @@ def _format_llm_error(exc: Exception, workspace: Path) -> str:
 
 
 def _safe_error_message(message: str) -> str:
+    """Bound provider error text before displaying it to the user."""
+
     return message[:500] if message else "unknown provider error"
 
 
 def _extract_missing_env_name(message: str) -> str | None:
+    """Pull the missing environment variable name out of config error text."""
+
     marker = "references missing environment variable "
     if marker not in message:
         return None
@@ -321,6 +337,8 @@ def _append_session_messages(
     messages: list[Message],
     workspace: Path,
 ) -> str | None:
+    """Persist pending messages and return a user-facing save error if needed."""
+
     try:
         sessions.append(session_id, messages)
     except OSError as exc:
@@ -333,6 +351,8 @@ def _append_session_messages(
 
 
 def _with_save_error(text: str, save_error: str | None) -> str:
+    """Append a session-save warning to an otherwise valid assistant response."""
+
     if not save_error:
         return text
     return f"{text}\n\n{save_error}"

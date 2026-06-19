@@ -51,19 +51,27 @@ def gateway_status(config: AppConfig) -> dict[str, str]:
 
 
 def _build_handler(config: AppConfig):
+    """Create a request handler class bound to one resolved AppConfig."""
+
     status_payload = gateway_status(config)
 
     class ZhiCeGatewayHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
+            """Serve health/status JSON for the scaffold gateway."""
+
             if self.path in {"/", "/health"}:
                 self._send_json(status_payload)
                 return
             self._send_json({"status": "not_found"}, status=404)
 
         def log_message(self, format: str, *args) -> None:  # noqa: A002
+            """Suppress default HTTP request logs for quiet CLI output."""
+
             return
 
         def _send_json(self, payload: dict[str, str], *, status: int = 200) -> None:
+            """Write one UTF-8 JSON response."""
+
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")

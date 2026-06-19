@@ -15,6 +15,8 @@ class ToolRegistry:
     """Register tools, expose schemas, and execute tools by name."""
 
     def __init__(self, tools: list[Tool]):
+        """Register the provided tools and reject duplicate names early."""
+
         self._tools: dict[str, Tool] = {}
         for tool in tools:
             self._register(tool)
@@ -66,6 +68,8 @@ class ToolRegistry:
             )
 
     def _register(self, tool: Tool) -> None:
+        """Validate and store one tool by its public name."""
+
         if not _TOOL_NAME_RE.fullmatch(tool.name):
             raise ValueError(f"invalid tool name: {tool.name}")
         if tool.name in self._tools:

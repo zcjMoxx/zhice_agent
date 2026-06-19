@@ -15,8 +15,13 @@ class LLMEndpoint:
     base_url: str
     model: str
     api_key: str
+    provider: str = ""
     max_tokens: int = 4096
     temperature: float = 0.7
+    priority: int = 1
+    enabled: bool = True
+    role: str = "default"
+    supported_models: tuple[str, ...] = ()
 
 
 @dataclass
@@ -28,6 +33,8 @@ class LLMResponse:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Normalize missing provider content to an empty string."""
+
         if self.content is None:
             self.content = ""
 

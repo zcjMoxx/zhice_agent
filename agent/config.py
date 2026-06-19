@@ -28,6 +28,14 @@ class MissingWorkspaceError(RuntimeError):
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_ENDPOINT_ROUTE_KEYS = {
+    "protocol",
+    "provider",
+    "base_url",
+    "model",
+    "supported_models",
+    "api_key",
+}
 
 
 @dataclass(frozen=True)
@@ -99,7 +107,54 @@ def _resolve_path(value: str | Path | None, default: Path | None = None) -> Path
 
 
 def load_llm_endpoint(config_dir: Path, name: str = "default") -> LLMEndpoint:
-    """Load one LLM endpoint from config/llm_endpoints.json."""
+    """Load one endpoint by name, resolving aliases such as ``default`` first."""
+
+    name = resolve_llm_endpoint_alias(config_dir, name)
+    endpoints = load_llm_endpoints(config_dir)
+    for endpoint in endpoints:
+        if endpoint.name == name:
+            return endpoint
+    raise LLMConfigurationError(f"LLM endpoint is not configured: {name}")
+
+
+def resolve_llm_endpoint_alias(config_dir: Path, name: str | None) -> str:
+    """Resolve a user-facing endpoint name to the real endpoint key.
+
+    ``auto`` means the caller did not choose a concrete endpoint yet. A top-level
+    alias such as ``"default": "openai_gpt5"`` resolves to ``openai_gpt5``.
+    """
+
+    endpoint_name = (name or "").strip()
+    if not endpoint_name or endpoint_name == "auto":
+        return ""
+
+    raw = _load_llm_endpoint_config(config_dir)
+    aliases = _endpoint_aliases(raw)
+    seen: set[str] = set()
+    while endpoint_name in aliases:
+        # Follow alias chains like default -> primary -> openai_gpt5.
+        if endpoint_name in seen:
+            raise LLMConfigurationError(f"LLM endpoint alias cycle detected: {endpoint_name}")
+        seen.add(endpoint_name)
+        endpoint_name = aliases[endpoint_name]
+    return endpoint_name
+
+
+def load_llm_endpoints(config_dir: Path) -> list[LLMEndpoint]:
+    """Load all endpoint objects from config/llm_endpoints.json."""
+
+    raw = _load_llm_endpoint_config(config_dir)
+    endpoints = [
+        _endpoint_from_mapping(name, data)
+        for name, data in _iter_endpoint_mappings(raw)
+    ]
+    if not endpoints:
+        raise LLMConfigurationError("LLM endpoint config does not contain any endpoints")
+    return endpoints
+
+
+def _load_llm_endpoint_config(config_dir: Path) -> dict[str, object]:
+    """Read the raw endpoint JSON before interpreting endpoint fields."""
 
     path = config_dir / "llm_endpoints.json"
     if not path.exists():
@@ -115,13 +170,7 @@ def load_llm_endpoint(config_dir: Path, name: str = "default") -> LLMEndpoint:
 
     if not isinstance(raw, dict):
         raise LLMConfigurationError("LLM endpoint config must be a JSON object")
-    if name not in raw:
-        raise LLMConfigurationError(f"LLM endpoint is not configured: {name}")
-
-    endpoint_data = raw[name]
-    if not isinstance(endpoint_data, dict):
-        raise LLMConfigurationError(f"LLM endpoint must be an object: {name}")
-    return _endpoint_from_mapping(name, endpoint_data)
+    return raw
 
 
 def init_runtime_files(
@@ -169,13 +218,16 @@ def init_runtime_files(
         llm_path = config.config_dir / "llm_endpoints.json"
         payload = {
             endpoint_name: {
-                "name": endpoint_name,
                 "protocol": protocol,
+                "provider": "",
                 "base_url": base_url,
                 "api_key": api_key,
                 "model": model,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
+                "priority": 1,
+                "enabled": True,
+                "role": "default",
             }
         }
         _write_text_once(
@@ -242,6 +294,8 @@ def _read_dotenv_text(path: Path) -> str:
 
 
 def _strip_dotenv_quotes(value: str) -> str:
+    """Remove matching single or double quotes around one dotenv value."""
+
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
         return value[1:-1]
     return value
@@ -273,39 +327,51 @@ def _build_env_template(config: AppConfig) -> str:
 
 
 def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
-    protocol = _resolve_endpoint_text(
-        name,
-        data.get("protocol") or data.get("provider") or data.get("openai_protocol"),
-        "protocol",
-    )
+    """Convert one JSON endpoint object into the shared LLMEndpoint shape.
+
+    For keyed configs, ``name`` is the outer JSON key. The endpoint body should
+    not repeat it. LiteLLM keeps ``provider`` and plain ``model`` separate here;
+    the provider adapter joins them only when it calls the LiteLLM SDK.
+    """
+
+    protocol = _resolve_endpoint_protocol(name, data)
     base_url = _resolve_endpoint_text(name, data.get("base_url"), "base_url", required=False)
-    if not base_url and protocol == "openai":
-        base_url = _resolve_endpoint_text(name, data.get("openai_base_url"), "openai_base_url")
-    if not base_url and protocol == "litellm":
-        base_url = _resolve_endpoint_text(
-            name,
-            data.get("litellm_base_url") or data.get("llmlite_base_url"),
-            "litellm_base_url",
-            required=False,
-        )
+    provider = _resolve_endpoint_text(name, data.get("provider"), "provider", required=False)
+    model = _resolve_endpoint_text(name, data.get("model"), "model")
+    supported_models = _resolve_supported_models(name, data.get("supported_models"))
+    protocol_text = str(protocol)
 
     endpoint = {
-        "name": _resolve_endpoint_text(name, data.get("name") or name, "name"),
+        "name": _resolve_endpoint_text(name, name, "name"),
         "protocol": protocol,
         "base_url": base_url,
-        "model": _resolve_endpoint_text(name, data.get("model"), "model"),
+        "provider": provider,
+        "model": model,
     }
-    missing = [key for key, value in endpoint.items() if not value]
+    required_endpoint_keys = ["name", "protocol", "model"]
+    # OpenAI-compatible endpoints need a concrete API base URL. LiteLLM direct
+    # SDK endpoints need a provider prefix such as "anthropic".
+    if protocol_text == "openai":
+        required_endpoint_keys.append("base_url")
+    if protocol_text == "litellm":
+        required_endpoint_keys.append("provider")
+    missing = [key for key in required_endpoint_keys if not endpoint[key]]
     if missing:
         raise LLMConfigurationError(
             f"LLM endpoint {name!r} is missing required fields: {', '.join(missing)}"
         )
 
-    protocol_text = str(endpoint["protocol"])
     if protocol_text not in {"openai", "litellm"}:
         raise LLMConfigurationError(
             f"LLM endpoint {name!r} has unsupported protocol: {protocol_text}"
         )
+    if "/" in model:
+        raise LLMConfigurationError(
+            f"LLM endpoint {name!r} model should be an unprefixed model name"
+        )
+    priority = _coerce_int(data.get("priority"), 1, "priority")
+    if priority < 1:
+        raise LLMConfigurationError("LLM endpoint field must be >= 1: priority")
 
     return LLMEndpoint(
         name=str(endpoint["name"]),
@@ -313,9 +379,102 @@ def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
         base_url=str(endpoint["base_url"]),
         model=str(endpoint["model"]),
         api_key=_resolve_endpoint_text(name, data.get("api_key"), "api_key"),
+        provider=str(endpoint["provider"]),
         max_tokens=_coerce_int(data.get("max_tokens"), 4096, "max_tokens"),
         temperature=_coerce_float(data.get("temperature"), 0.7, "temperature"),
+        priority=priority,
+        enabled=_coerce_bool(data.get("enabled"), True, "enabled"),
+        role=_resolve_endpoint_text(name, data.get("role") or "default", "role"),
+        supported_models=supported_models,
     )
+
+
+def _resolve_supported_models(endpoint_name: str, value: object) -> tuple[str, ...]:
+    """Parse optional model-switch allowlist for one endpoint.
+
+    These names stay local and unprefixed. For LiteLLM, ``provider/model`` is
+    built later by LiteLLMProvider when a request is made.
+    """
+
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise LLMConfigurationError(
+            f"LLM endpoint {endpoint_name!r} field must be a list: supported_models"
+        )
+    models: list[str] = []
+    for index, item in enumerate(value):
+        model = _resolve_endpoint_text(endpoint_name, item, f"supported_models[{index}]")
+        if model:
+            if "/" in model:
+                raise LLMConfigurationError(
+                    f"LLM endpoint {endpoint_name!r} supported model should be unprefixed: "
+                    f"supported_models[{index}]"
+                )
+            models.append(model)
+    return tuple(models)
+
+
+def _iter_endpoint_mappings(raw: dict[str, object]) -> list[tuple[str, dict[str, object]]]:
+    """Normalize the two supported JSON layouts into ``(name, data)`` pairs.
+
+    Keyed object layout infers the endpoint name from the outer key. List layout
+    has no outer key, so each item must carry its own ``name``.
+    """
+
+    if "endpoints" in raw:
+        entries = raw["endpoints"]
+        if not isinstance(entries, list):
+            raise LLMConfigurationError("LLM endpoint config field must be a list: endpoints")
+        mappings: list[tuple[str, dict[str, object]]] = []
+        for index, item in enumerate(entries):
+            if not isinstance(item, dict):
+                raise LLMConfigurationError(f"LLM endpoint must be an object: endpoints[{index}]")
+            name = _required_text(item.get("name"), f"endpoints[{index}].name")
+            mappings.append((name, item))
+        return mappings
+
+    mappings = []
+    for key, value in raw.items():
+        # Skip comments, aliases such as "default": "openai_gpt5", and any
+        # metadata objects that do not look like endpoint definitions.
+        if key.startswith("_") or not isinstance(value, dict):
+            continue
+        if not _looks_like_endpoint(value):
+            continue
+        mappings.append((key, value))
+    return mappings
+
+
+def _endpoint_aliases(raw: dict[str, object]) -> dict[str, str]:
+    """Collect top-level aliases, for example ``default -> openai_gpt5``."""
+
+    aliases: dict[str, str] = {}
+    for key, value in raw.items():
+        if key.startswith("_"):
+            continue
+        if isinstance(value, str):
+            target = value.strip()
+            if target:
+                aliases[key] = target
+            continue
+        if isinstance(value, dict) and not _looks_like_endpoint(value):
+            target = _optional_text(value.get("ref") or value.get("alias") or value.get("endpoint"))
+            if target:
+                aliases[key] = target
+    return aliases
+
+
+def _looks_like_endpoint(data: dict[str, object]) -> bool:
+    """Return True when a dict has fields that identify an endpoint body."""
+
+    return any(key in data for key in _ENDPOINT_ROUTE_KEYS)
+
+
+def _resolve_endpoint_protocol(name: str, data: dict[str, object]) -> str:
+    """Read the required local adapter name: ``openai`` or ``litellm``."""
+
+    return _resolve_endpoint_text(name, data.get("protocol"), "protocol")
 
 
 def _resolve_endpoint_text(
@@ -325,6 +484,8 @@ def _resolve_endpoint_text(
     *,
     required: bool = True,
 ) -> str:
+    """Read a text field, enforce required values, and expand ${ENV_VAR}."""
+
     text = _required_text(value, field_name) if required else _optional_text(value)
     if not text:
         return text
@@ -341,7 +502,13 @@ def _expand_env_placeholders(
     endpoint_name: str,
     field_name: str,
 ) -> str:
+    """Replace ${ENV_VAR} placeholders inside one endpoint text value."""
+
     def replace(match: re.Match[str]) -> str:
+        """Return the environment value for one regex placeholder match."""
+
+        # re.sub calls this function for each ${ENV_VAR} match and passes the
+        # match object; group(1) is the variable name inside the braces.
         env_name = match.group(1)
         env_value = os.getenv(env_name, "").strip()
         if env_value:
@@ -355,12 +522,16 @@ def _expand_env_placeholders(
 
 
 def _optional_text(value: object) -> str:
+    """Convert an optional config value to stripped text, or empty string."""
+
     if value is None:
         return ""
     return str(value).strip()
 
 
 def _required_text(value: object, field_name: str) -> str:
+    """Convert a required config value to text, raising when it is empty."""
+
     text = _optional_text(value)
     if not text:
         raise LLMConfigurationError(f"LLM endpoint is missing required field: {field_name}")
@@ -368,6 +539,8 @@ def _required_text(value: object, field_name: str) -> str:
 
 
 def _coerce_int(value: object, default: int, field_name: str) -> int:
+    """Convert an optional endpoint field to int with a default."""
+
     if value is None:
         return default
     try:
@@ -377,10 +550,28 @@ def _coerce_int(value: object, default: int, field_name: str) -> int:
 
 
 def _coerce_float(value: object, default: float, field_name: str) -> float:
+    """Convert an optional endpoint field to float with a default."""
+
     if value is None:
         return default
     try:
         return float(value)
     except (TypeError, ValueError) as exc:
         raise LLMConfigurationError(f"LLM endpoint field must be a number: {field_name}") from exc
+
+
+def _coerce_bool(value: object, default: bool, field_name: str) -> bool:
+    """Convert an optional endpoint field to bool with common string aliases."""
+
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise LLMConfigurationError(f"LLM endpoint field must be a boolean: {field_name}")
 

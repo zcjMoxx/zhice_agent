@@ -21,6 +21,8 @@ class PromptLoader:
     """Load prompt templates from a single prompts directory."""
 
     def __init__(self, prompts_dir: Path | str):
+        """Resolve the prompt directory once so later path checks are stable."""
+
         self.prompts_dir = Path(prompts_dir).expanduser().resolve()
 
     def load(self, name: str) -> str:

@@ -148,14 +148,16 @@ class LLMProvider(Protocol):
 
 ### 4.2.1 `agent/llm/litellm_provider.py`
 
-负责通过 LiteLLM Proxy 接入 Anthropic、Gemini、DeepSeek 等非 OpenAI 模型商。
+负责通过进程内 LiteLLM SDK 接入 Anthropic、Gemini、DeepSeek 等非 OpenAI 模型商。
 
 当前实现方式：
 
-- 不直接引入 `litellm` Python 包。
-- 不在 ZhiCe-Agent 进程里聚合各家模型 SDK。
-- 通过 LiteLLM Proxy 暴露的 OpenAI-compatible `/chat/completions` 接口调用模型。
-- 复用 OpenAI-compatible 的消息清洗、tools 传递、响应解析和错误脱敏逻辑。
+- 引入 `litellm` Python 包。
+- 不在 ZhiCe-Agent 进程里直接引入各家模型 SDK。
+- 通过 `litellm.completion(...)` 调用模型。
+- 复用 OpenAI-compatible 的消息清洗和 tools schema，响应解析和错误脱敏在 `LiteLLMProvider` 内完成。
+
+因此 `protocol="litellm"` 不要求用户额外启动 LiteLLM Proxy。`base_url` 是可选字段：不填时由 LiteLLM SDK 根据模型前缀选择默认模型商接口；填写时作为 `api_base` 传给 LiteLLM SDK，用于公司内部网关或自定义 OpenAI-compatible 服务。
 
 配置示例：
 
@@ -163,16 +165,16 @@ class LLMProvider(Protocol):
 {
   "claude": {
     "protocol": "litellm",
-    "base_url": "http://127.0.0.1:4000/v1",
-    "api_key": "${ZHICE_LLM_LITELLM_API_KEY}",
-    "model": "anthropic/claude-sonnet-4",
+    "provider": "anthropic",
+    "api_key": "${ANTHROPIC_API_KEY}",
+    "model": "claude-sonnet-4",
     "max_tokens": 4096,
     "temperature": 0.7
   }
 }
 ```
 
-启动时通过 `zcagent --endpoint claude` 选择该 endpoint。LiteLLM Proxy 本身由用户单独启动和配置真实模型商密钥，ZhiCe-Agent 只负责调用 proxy。
+启动时通过 `zcagent --endpoint claude` 选择该 endpoint。配置层保留 `provider` 和未加前缀的 `model`，由 `LiteLLMProvider` 调用 SDK 时拼接为 LiteLLM 可识别的 `anthropic/claude-sonnet-4`。
 
 ### 4.3 `agent/context.py`
 
@@ -466,7 +468,7 @@ sequenceDiagram
 - HTTP 错误不会泄漏 secret
 - `protocol="openai"` 创建 `OpenAIProvider`
 - `protocol="litellm"` 创建 `LiteLLMProvider`
-- `LiteLLMProvider` 会向 LiteLLM Proxy 的 `/chat/completions` 发送请求
+- `LiteLLMProvider` 会调用 `litellm.completion(...)`
 
 ### 8.4 CLI
 

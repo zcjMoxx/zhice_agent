@@ -102,10 +102,14 @@ def redact_secrets(text: str) -> str:
 
 
 def _blocked(code: str, message: str, category: str = "local") -> CommandPolicyResult:
+    """Create a consistent denied policy result."""
+
     return CommandPolicyResult(allowed=False, code=code, message=message, category=category)
 
 
 def _command_tokens(command: str) -> list[str]:
+    """Split a simple command into tokens for policy checks."""
+
     try:
         return shlex.split(command, posix=True)
     except ValueError:
@@ -113,6 +117,8 @@ def _command_tokens(command: str) -> list[str]:
 
 
 def _normalize_token(token: str) -> str:
+    """Lowercase a command token and remove common executable suffixes."""
+
     normalized = token.strip().strip("\"'").lower()
     if normalized.endswith(".exe") or normalized.endswith(".cmd") or normalized.endswith(".bat"):
         normalized = normalized.rsplit(".", 1)[0]
@@ -120,10 +126,14 @@ def _normalize_token(token: str) -> str:
 
 
 def _contains_any(tokens: list[str], blocked: set[str]) -> bool:
+    """Return True when any normalized token is in a blocked token set."""
+
     return any(token in blocked for token in tokens)
 
 
 def _matches_destructive_git(tokens: list[str]) -> bool:
+    """Detect git commands that can discard local work."""
+
     if not tokens or tokens[0] != "git":
         return False
     if len(tokens) >= 3 and tokens[1] == "reset" and "--hard" in tokens[2:]:
@@ -136,6 +146,8 @@ def _matches_destructive_git(tokens: list[str]) -> bool:
 
 
 def _matches_install_or_network_command(tokens: list[str]) -> bool:
+    """Detect dependency install, clone, pull, fetch, and network commands."""
+
     if not tokens:
         return False
     first = tokens[0]
@@ -154,6 +166,8 @@ def _matches_install_or_network_command(tokens: list[str]) -> bool:
 
 
 def _contains_unquoted_shell_syntax(command: str) -> bool:
+    """Detect unsupported shell operators outside quoted strings."""
+
     in_single = False
     in_double = False
     index = 0

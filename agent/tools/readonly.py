@@ -48,6 +48,8 @@ class ListDirTool(BaseTool):
     }
 
     def _execute(self, args: dict[str, Any]) -> ToolResult:
+        """List one workspace directory with hidden-file and count controls."""
+
         path_value = require_string(args, "path", default=".")
         max_entries = require_int(args, "max_entries", default=200, minimum=1, maximum=500)
         include_hidden = require_bool(args, "include_hidden", default=False)
@@ -110,6 +112,8 @@ class ReadFileTool(BaseTool):
     }
 
     def _execute(self, args: dict[str, Any]) -> ToolResult:
+        """Read a bounded UTF-8 slice from one workspace file."""
+
         path_value = require_string(args, "path", required=True)
         start_line = require_int(args, "start_line", default=1, minimum=1, maximum=1_000_000)
         max_lines = require_int(args, "max_lines", default=300, minimum=1, maximum=1000)
@@ -191,6 +195,8 @@ class GrepTool(BaseTool):
     }
 
     def _execute(self, args: dict[str, Any]) -> ToolResult:
+        """Search workspace text files with a bounded regular-expression scan."""
+
         pattern = require_string(args, "pattern", required=True)
         path_value = require_string(args, "path", default=".")
         case_sensitive = require_bool(args, "case_sensitive", default=False)
@@ -245,6 +251,8 @@ class GrepTool(BaseTool):
 
 
 def _format_dir_entry(entry: Path) -> str:
+    """Render one directory listing row with type and file size."""
+
     if entry.is_dir():
         return f"DIR  {entry.name}"
     try:
@@ -255,6 +263,8 @@ def _format_dir_entry(entry: Path) -> str:
 
 
 def _is_hidden(path: Path, workspace: Path) -> bool:
+    """Return whether any relative path part starts with a dot."""
+
     try:
         relative_parts = path.relative_to(workspace).parts
     except ValueError:
@@ -263,6 +273,8 @@ def _is_hidden(path: Path, workspace: Path) -> bool:
 
 
 def _iter_search_files(target: Path, workspace: Path, include_hidden: bool) -> Iterable[Path]:
+    """Yield searchable files under a file or directory target."""
+
     if target.is_file():
         if _is_safe_file(target, workspace) and (include_hidden or not _is_hidden(target, workspace)):
             yield target
@@ -288,6 +300,8 @@ def _iter_search_files(target: Path, workspace: Path, include_hidden: bool) -> I
 
 
 def _should_visit_dir(path: Path, workspace: Path, include_hidden: bool) -> bool:
+    """Decide whether grep should descend into one directory."""
+
     if path.name in _SKIPPED_DIRS:
         return False
     if not include_hidden and _is_hidden(path, workspace):
@@ -296,10 +310,14 @@ def _should_visit_dir(path: Path, workspace: Path, include_hidden: bool) -> bool
 
 
 def _is_safe_file(path: Path, workspace: Path) -> bool:
+    """Return whether path is a regular file inside the workspace."""
+
     return path.is_file() and _is_safe_path(path, workspace)
 
 
 def _is_safe_path(path: Path, workspace: Path) -> bool:
+    """Return whether a path resolves inside the workspace root."""
+
     try:
         path.resolve(strict=False).relative_to(workspace)
     except ValueError:
@@ -308,6 +326,8 @@ def _is_safe_path(path: Path, workspace: Path) -> bool:
 
 
 def _iter_text_lines(path: Path) -> Iterable[tuple[int, str]]:
+    """Yield UTF-8 text lines and reject binary-looking NUL content."""
+
     with path.open("r", encoding="utf-8") as file:
         for line_number, line in enumerate(file, start=1):
             if "\x00" in line:

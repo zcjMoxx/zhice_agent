@@ -14,6 +14,8 @@ class ToolExecutionError(RuntimeError):
     """Structured tool failure that can be returned to the model."""
 
     def __init__(self, output: str, code: str, metadata: dict[str, Any] | None = None):
+        """Store the model-facing error text, code, and extra metadata."""
+
         super().__init__(output)
         self.output = output
         self.code = code
@@ -28,6 +30,8 @@ class BaseTool:
     parameters: dict[str, Any]
 
     def __init__(self, workspace: Path | str):
+        """Resolve the workspace root that all tool paths must stay within."""
+
         self.workspace = Path(workspace).expanduser().resolve()
 
     def execute(self, args: dict[str, Any]) -> ToolResult:
@@ -46,6 +50,8 @@ class BaseTool:
             )
 
     def _execute(self, args: dict[str, Any]) -> ToolResult:
+        """Implement concrete tool behavior in subclasses."""
+
         raise NotImplementedError
 
 
@@ -161,6 +167,8 @@ def require_string(
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
+    """Return whether path is inside parent without requiring Python 3.9 helpers."""
+
     try:
         path.relative_to(parent)
     except ValueError:

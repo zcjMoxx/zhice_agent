@@ -28,6 +28,8 @@ class JsonlSessionStore:
     """Persist and load Agent sessions from a local JSONL directory."""
 
     def __init__(self, sessions_dir: Path | str):
+        """Resolve the session directory used by all JSONL reads and writes."""
+
         self.sessions_dir = Path(sessions_dir).expanduser().resolve()
 
     def load(self, session_id: str) -> SessionState:
