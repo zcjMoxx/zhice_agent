@@ -31,13 +31,16 @@ def test_cli_init_generates_runtime_files(tmp_path, capsys, monkeypatch):
     output = capsys.readouterr().out
     assert result == 0
     assert "created:" in output
+    assert "Runtime templates created" in output
+    assert "actual endpoint, model, api_key, and Skill sources" in output
     assert not (tmp_path / ".env").exists()
     assert (tmp_path / "config" / "llm_endpoints.json").is_file()
+    assert (tmp_path / "config" / "skill_sources.yml").is_file()
     assert (tmp_path / "prompts" / "identity.md").is_file()
 
 
-def test_cli_init_refuses_to_overwrite_existing_env(tmp_path, capsys, monkeypatch):
-    """Existing user config should be preserved unless --force is explicit."""
+def test_cli_init_preserves_existing_files_and_fills_missing(tmp_path, capsys, monkeypatch):
+    """Existing user config should be preserved while missing runtime files are added."""
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -46,9 +49,28 @@ def test_cli_init_refuses_to_overwrite_existing_env(tmp_path, capsys, monkeypatc
     result = main(["init", "--workspace", str(tmp_path), "--write-env"])
 
     output = capsys.readouterr().out
-    assert result == 1
-    assert "Refusing to overwrite existing file" in output
+    assert result == 0
+    assert "created:" in output
     assert (tmp_path / ".env").read_text(encoding="utf-8") == "EXISTING=1\n"
+    assert (tmp_path / "config" / "llm_endpoints.json").is_file()
+    assert (tmp_path / "config" / "skill_sources.yml").is_file()
+    assert (tmp_path / "prompts" / "identity.md").is_file()
+
+
+def test_cli_init_reports_when_everything_already_exists(tmp_path, capsys, monkeypatch):
+    """Rerunning init should be a harmless no-op when all requested files exist."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    first = main(["init", "--workspace", str(tmp_path)])
+    capsys.readouterr()
+    second = main(["init", "--workspace", str(tmp_path)])
+
+    output = capsys.readouterr().out
+    assert first == 0
+    assert second == 0
+    assert "already exist" in output
 
 
 def test_cli_init_uses_explicit_env_file_workspace(tmp_path, capsys, monkeypatch):
@@ -128,8 +150,46 @@ def test_cli_chat_reports_missing_runtime_prompts(tmp_path, capsys, monkeypatch)
     assert "zcagent init" in output
 
 
-def test_cli_chat_defaults_to_stable_default_session(tmp_path, capsys, monkeypatch):
-    """zcagent should keep using the stable default session unless changed."""
+def test_cli_chat_errors_when_llm_config_is_missing(tmp_path, capsys, monkeypatch):
+    """Missing required LLM config should block chat startup with setup guidance."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "LLM configuration is invalid" in output
+    assert "llm_endpoints.json" in output
+    assert "zcagent init" in output
+
+
+def test_cli_chat_errors_when_enabled_llm_has_no_api_key(tmp_path, capsys, monkeypatch):
+    """A generated but unconfigured endpoint should be treated as not runnable."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.joinpath("llm_endpoints.json").write_text(
+        '{"default":{"protocol":"openai","base_url":"https://api.test/v1","api_key":"","model":"m"}}',
+        encoding="utf-8",
+    )
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "LLM endpoint is missing required field: api_key" in output
+    assert "Chat cannot start" in output
+    assert "llm_endpoints.json" in output
+
+
+def test_cli_chat_warns_when_skill_sources_config_is_missing(tmp_path, capsys, monkeypatch):
+    """Chat startup should not silently ignore a missing Skill source config."""
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
@@ -141,7 +201,31 @@ def test_cli_chat_defaults_to_stable_default_session(tmp_path, capsys, monkeypat
 
     output = capsys.readouterr().out
     assert result == 0
-    assert "default" in output
+    assert "skills sync skipped: missing" in output
+    assert "skill_sources.yml" in output
+    assert "zcagent init" in output
+
+
+def test_cli_chat_defaults_to_daily_session_without_banner_noise(tmp_path, capsys, monkeypatch):
+    """zcagent should use today's session without printing runtime path details."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    monkeypatch.setattr("agent.cli._default_session_id", lambda: "chat-20260621")
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    inputs = iter(["hello", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "zcagent - Personal AI Assistant" in output
+    assert "workspace:" not in output
+    assert "session:" not in output
+    assert (tmp_path / "contexts" / "sessions" / "chat-20260621.jsonl").exists()
+    assert not (tmp_path / "contexts" / "sessions" / "default.jsonl").exists()
 
 
 def test_cli_chat_respects_explicit_session_id(tmp_path, capsys, monkeypatch):
@@ -151,13 +235,14 @@ def test_cli_chat_respects_explicit_session_id(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
     _write_runtime_prompts(tmp_path)
     monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
-    monkeypatch.setattr(builtins, "input", lambda _prompt="": "/exit")
+    inputs = iter(["hello", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
 
     result = main(["--session", "named-session"])
 
-    output = capsys.readouterr().out
+    capsys.readouterr()
     assert result == 0
-    assert "named-session" in output
+    assert (tmp_path / "contexts" / "sessions" / "named-session.jsonl").exists()
 
 
 def test_cli_auto_endpoint_uses_default_alias_when_configured(tmp_path):
@@ -214,6 +299,7 @@ def test_cli_reset_clears_current_session(tmp_path, capsys, monkeypatch):
     _clear_zhice_env(monkeypatch)
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
     _write_runtime_prompts(tmp_path)
+    monkeypatch.setattr("agent.cli._default_session_id", lambda: "chat-reset-day")
     monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
     inputs = iter(["hello", "/reset", "/history", "/exit"])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
@@ -224,7 +310,7 @@ def test_cli_reset_clears_current_session(tmp_path, capsys, monkeypatch):
     assert result == 0
     assert "session cleared:" in output
     assert "(empty history)" in output
-    assert not (tmp_path / "contexts" / "sessions" / "default.jsonl").exists()
+    assert not (tmp_path / "contexts" / "sessions" / "chat-reset-day.jsonl").exists()
 
 
 def test_cli_sessions_lists_previews(tmp_path, capsys, monkeypatch):
@@ -276,6 +362,114 @@ def test_cli_tools_lists_default_tools(tmp_path, capsys, monkeypatch):
     assert "read_file" in output
     assert "grep" in output
     assert "exec" in output
+    assert "load_skills" in output
+    assert "run_skill_script" not in output
+    assert "sync_skills" in output
+
+
+def test_cli_help_keeps_skill_sync_as_skills_tip(tmp_path, capsys, monkeypatch):
+    """Global help should keep /skills sync under the /skills command surface."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    inputs = iter(["/help", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "/skills" in output
+    assert "/skills sync" not in output
+
+
+def test_cli_skills_lists_empty_directory(tmp_path, capsys, monkeypatch):
+    """The /skills command should be friendly when no local Skills exist."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    inputs = iter(["/skills", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "(no skills)" in output
+    assert "Tip: use '/skills sync [--verbose] [source_name]'" in output
+    assert "Optional args: --verbose prints details" in output
+
+
+def test_cli_skills_lists_discovered_skill(tmp_path, capsys, monkeypatch):
+    """The /skills command should print compact local Skill summaries."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    source = tmp_path / "official-source"
+    _write_demo_skill(source)
+    _write_skill_sources_config(tmp_path, source, on_startup="always")
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    inputs = iter(["/skills", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "official/demo" in output
+    assert "category" not in output
+    assert "readonly" not in output
+    assert "Demo skill." in output
+    assert "Tip: use '/skills sync [--verbose] [source_name]'" in output
+    assert "Optional args: --verbose prints details" in output
+
+
+def test_cli_skills_sync_updates_runtime_skills(tmp_path, capsys, monkeypatch):
+    """The /skills sync command should sync configured sources into extends."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    source = tmp_path / "official-source"
+    _write_demo_skill(source)
+    _write_runtime_prompts(tmp_path)
+    _write_skill_sources_config(tmp_path, source, on_startup="never")
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    inputs = iter(["/skills sync", "/skills", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "skills synced: official" in output
+    assert "1 new" in output
+    assert "official/demo" in output
+    assert (tmp_path / "extends" / "official" / "skills" / "demo" / "SKILL.md").is_file()
+
+
+def test_cli_startup_skill_sync_is_silent_in_chat(tmp_path, capsys, monkeypatch):
+    """Automatic startup Skill sync should not add noise to normal zcagent chat."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    source = tmp_path / "official-source"
+    _write_demo_skill(source)
+    _write_runtime_prompts(tmp_path)
+    _write_skill_sources_config(tmp_path, source, on_startup="always")
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "/exit")
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "skills sync:" not in output
+    assert (tmp_path / "extends" / "official" / "skills" / "demo" / "SKILL.md").is_file()
 
 
 def test_cli_model_shows_compact_current_status(tmp_path, capsys, monkeypatch):
@@ -469,6 +663,41 @@ def _write_runtime_prompts(workspace):
     (prompts_dir / "skills_intro.md").write_text("skills intro prompt", encoding="utf-8")
 
 
+def _write_demo_skill(workspace):
+    skill_dir = workspace / "skills" / "demo"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_dir.joinpath("SKILL.md").write_text(
+        """---
+name: demo
+description: Demo skill.
+---
+
+Demo body.
+""",
+        encoding="utf-8",
+    )
+
+
+def _write_skill_sources_config(workspace, source, *, on_startup):
+    config_dir = workspace / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.joinpath("skill_sources.yml").write_text(
+        f"""
+sync:
+  on_startup: {on_startup}
+  background:
+    enabled: false
+    interval_seconds: 0
+  log: changes_only
+sources:
+  - name: official
+    sync: true
+    local_dir: "{source.resolve().as_posix()}"
+""",
+        encoding="utf-8",
+    )
+
+
 class _EchoLLM:
     def chat(self, messages, tools=None):
         from agent.protocols.llm import LLMResponse
@@ -561,6 +790,7 @@ def _clear_zhice_env(monkeypatch) -> None:
         "ZHICE_AGENT_CONFIG_DIR",
         "ZHICE_AGENT_PROMPTS_DIR",
         "ZHICE_AGENT_CONTEXTS_DIR",
+        "ZHICE_AGENT_EXTENDS_DIR",
         "ZHICE_AGENT_SKILLS_DIR",
         "ZHICE_AGENT_LOGS_DIR",
     ]:

@@ -11,6 +11,7 @@ authors = [
 dependencies = [
     "colorama>=0.4.6",
     "litellm>=1.0.0",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

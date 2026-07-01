@@ -47,7 +47,7 @@ class AppConfig:
     prompts_dir: Path
     contexts_dir: Path
     sessions_dir: Path
-    skills_dir: Path
+    extends_dir: Path
     logs_dir: Path
 
     def ensure_dirs(self) -> None:
@@ -57,7 +57,7 @@ class AppConfig:
         self.prompts_dir.mkdir(parents=True, exist_ok=True)
         self.contexts_dir.mkdir(parents=True, exist_ok=True)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        self.skills_dir.mkdir(parents=True, exist_ok=True)
+        self.extends_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -77,7 +77,7 @@ def load_config(workspace: str | Path | None = None) -> AppConfig:
     contexts_dir = _resolve_path(
         os.getenv("ZHICE_AGENT_CONTEXTS_DIR"), workspace_path / "contexts"
     )
-    skills_dir = _resolve_path(os.getenv("ZHICE_AGENT_SKILLS_DIR"), workspace_path / "skills")
+    extends_dir = _resolve_path(os.getenv("ZHICE_AGENT_EXTENDS_DIR"), workspace_path / "extends")
     logs_dir = _resolve_path(os.getenv("ZHICE_AGENT_LOGS_DIR"), workspace_path / "logs")
 
     return AppConfig(
@@ -86,7 +86,7 @@ def load_config(workspace: str | Path | None = None) -> AppConfig:
         prompts_dir=prompts_dir,
         contexts_dir=contexts_dir,
         sessions_dir=contexts_dir / "sessions",
-        skills_dir=skills_dir,
+        extends_dir=extends_dir,
         logs_dir=logs_dir,
     )
 
@@ -178,42 +178,33 @@ def init_runtime_files(
     *,
     create_env: bool = False,
     create_llm_config: bool = True,
+    create_skill_sources_config: bool = True,
     create_prompts: bool = True,
     endpoint_name: str = "default",
     protocol: str = "openai",
     base_url: str = "https://api.openai.com/v1",
     api_key: str = "",
-    model: str = "gpt-5",
-    max_tokens: int = 4096,
+    model: str = "gpt-5.5",
+    max_tokens: int = 16384,
     temperature: float = 0.7,
     force: bool = False,
 ) -> list[Path]:
     """Create local runtime config templates for the second-stage runnable setup.
 
     The generated files are local working copies, not committed secrets. Existing
-    files are preserved unless force=True so a later init cannot silently replace
-    a user's real endpoint configuration. Endpoint values such as protocol,
-    base_url, and model are scaffold defaults only; runtime calls always use the
-    generated workspace config file.
+    files are skipped unless force=True so rerunning init can fill missing files
+    without replacing a user's real endpoint configuration. Endpoint values such
+    as protocol, base_url, and model are scaffold defaults only; runtime calls
+    always use the generated workspace config file.
     """
 
     written: list[Path] = []
     config.ensure_dirs()
-    targets: list[Path] = []
-    if create_env:
-        targets.append(config.workspace / ".env")
-    if create_llm_config:
-        targets.append(config.config_dir / "llm_endpoints.json")
-    if create_prompts:
-        source_prompts = _default_workspace() / "prompts"
-        for source in source_prompts.glob("*.md"):
-            targets.append(config.prompts_dir / source.name)
-    _ensure_can_write(targets, force=force)
 
     if create_env:
         env_path = config.workspace / ".env"
-        _write_text_once(env_path, _build_env_template(config), force=force)
-        written.append(env_path)
+        if _write_text_once(env_path, _build_env_template(config), force=force):
+            written.append(env_path)
     if create_llm_config:
         llm_path = config.config_dir / "llm_endpoints.json"
         payload = {
@@ -230,20 +221,27 @@ def init_runtime_files(
                 "role": "default",
             }
         }
-        _write_text_once(
+        if _write_text_once(
             llm_path,
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
             force=force,
-        )
-        written.append(llm_path)
+        ):
+            written.append(llm_path)
+    if create_skill_sources_config:
+        source = _default_workspace() / "config" / "skill_sources.example.yml"
+        if not source.is_file():
+            raise InitConfigurationError(f"Source Skill config template is missing: {source}")
+        target = config.config_dir / "skill_sources.yml"
+        if _write_text_once(target, source.read_text(encoding="utf-8"), force=force):
+            written.append(target)
     if create_prompts:
         source_prompts = _default_workspace() / "prompts"
         if not source_prompts.is_dir():
             raise InitConfigurationError(f"Source prompts directory is missing: {source_prompts}")
         for source in sorted(source_prompts.glob("*.md")):
             target = config.prompts_dir / source.name
-            _write_text_once(target, source.read_text(encoding="utf-8"), force=force)
-            written.append(target)
+            if _write_text_once(target, source.read_text(encoding="utf-8"), force=force):
+                written.append(target)
     return written
 
 
@@ -301,23 +299,14 @@ def _strip_dotenv_quotes(value: str) -> str:
     return value
 
 
-def _ensure_can_write(paths: list[Path], *, force: bool) -> None:
-    """Preflight local init writes so defaults cannot create partial config."""
-
-    if force:
-        return
-    existing = [path for path in paths if path.exists()]
-    if existing:
-        raise InitConfigurationError(f"Refusing to overwrite existing file: {existing[0]}")
-
-
-def _write_text_once(path: Path, content: str, *, force: bool) -> None:
-    """Write a text file while protecting user-created local config."""
+def _write_text_once(path: Path, content: str, *, force: bool) -> bool:
+    """Write a text file, returning False when an existing file is preserved."""
 
     if path.exists() and not force:
-        raise InitConfigurationError(f"Refusing to overwrite existing file: {path}")
+        return False
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+    return True
 
 
 def _build_env_template(config: AppConfig) -> str:

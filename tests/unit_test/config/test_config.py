@@ -6,7 +6,6 @@ import os
 import pytest
 
 from agent.config import (
-    InitConfigurationError,
     MissingWorkspaceError,
     bootstrap_dotenv,
     init_runtime_files,
@@ -30,7 +29,7 @@ def test_load_config_uses_explicit_workspace(tmp_path, monkeypatch):
     assert config.prompts_dir == tmp_path / "prompts"
     assert config.contexts_dir == tmp_path / "contexts"
     assert config.sessions_dir == tmp_path / "contexts" / "sessions"
-    assert config.skills_dir == tmp_path / "skills"
+    assert config.extends_dir == tmp_path / "extends"
     assert config.logs_dir == tmp_path / "logs"
 
 
@@ -41,14 +40,14 @@ def test_load_config_allows_environment_overrides(tmp_path, monkeypatch):
     custom_config = tmp_path / "custom_config"
     custom_prompts = tmp_path / "custom_prompts"
     custom_contexts = tmp_path / "custom_contexts"
-    custom_skills = tmp_path / "custom_skills"
+    custom_extends = tmp_path / "custom_extends"
     custom_logs = tmp_path / "custom_logs"
 
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(workspace))
     monkeypatch.setenv("ZHICE_AGENT_CONFIG_DIR", str(custom_config))
     monkeypatch.setenv("ZHICE_AGENT_PROMPTS_DIR", str(custom_prompts))
     monkeypatch.setenv("ZHICE_AGENT_CONTEXTS_DIR", str(custom_contexts))
-    monkeypatch.setenv("ZHICE_AGENT_SKILLS_DIR", str(custom_skills))
+    monkeypatch.setenv("ZHICE_AGENT_EXTENDS_DIR", str(custom_extends))
     monkeypatch.setenv("ZHICE_AGENT_LOGS_DIR", str(custom_logs))
 
     config = load_config()
@@ -58,7 +57,7 @@ def test_load_config_allows_environment_overrides(tmp_path, monkeypatch):
     assert config.prompts_dir == custom_prompts.resolve()
     assert config.contexts_dir == custom_contexts.resolve()
     assert config.sessions_dir == custom_contexts.resolve() / "sessions"
-    assert config.skills_dir == custom_skills.resolve()
+    assert config.extends_dir == custom_extends.resolve()
     assert config.logs_dir == custom_logs.resolve()
 
 
@@ -126,7 +125,7 @@ def test_ensure_dirs_creates_runtime_directories(tmp_path, monkeypatch):
     assert config.prompts_dir.is_dir()
     assert config.contexts_dir.is_dir()
     assert config.sessions_dir.is_dir()
-    assert config.skills_dir.is_dir()
+    assert config.extends_dir.is_dir()
     assert config.logs_dir.is_dir()
 
 
@@ -493,7 +492,9 @@ def test_init_runtime_files_generates_local_env_and_llm_config(tmp_path, monkeyp
 
     assert tmp_path / ".env" in written
     assert tmp_path / "config" / "llm_endpoints.json" in written
+    assert tmp_path / "config" / "skill_sources.yml" in written
     assert (tmp_path / "prompts" / "identity.md").is_file()
+    assert (tmp_path / "config" / "skill_sources.yml").is_file()
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert env_text == f"ZHICE_AGENT_WORKSPACE={tmp_path.resolve()}\n"
 
@@ -505,30 +506,46 @@ def test_init_runtime_files_generates_local_env_and_llm_config(tmp_path, monkeyp
 
 
 def test_init_runtime_files_preserves_existing_files_without_force(tmp_path, monkeypatch):
-    """Init must not silently replace user-owned local runtime files."""
+    """Init should skip user-owned local runtime files unless force is enabled."""
 
     _clear_zhice_env(monkeypatch)
     config = load_config(tmp_path)
     (tmp_path / ".env").write_text("EXISTING=1\n", encoding="utf-8")
 
-    with pytest.raises(InitConfigurationError, match="Refusing to overwrite"):
-        init_runtime_files(config, create_env=True)
+    written = init_runtime_files(config, create_env=True)
 
     assert (tmp_path / ".env").read_text(encoding="utf-8") == "EXISTING=1\n"
+    assert tmp_path / ".env" not in written
+    assert tmp_path / "config" / "llm_endpoints.json" in written
 
 
-def test_init_runtime_files_does_not_partially_write_when_config_exists(tmp_path, monkeypatch):
-    """A pre-existing config file should prevent init before .env is created."""
+def test_init_runtime_files_fills_missing_files_when_config_exists(tmp_path, monkeypatch):
+    """A pre-existing config file should be preserved while missing files are created."""
 
     _clear_zhice_env(monkeypatch)
     config = load_config(tmp_path)
     config.config_dir.mkdir()
     (config.config_dir / "llm_endpoints.json").write_text("{}", encoding="utf-8")
 
-    with pytest.raises(InitConfigurationError, match="Refusing to overwrite"):
-        init_runtime_files(config, create_env=True)
+    written = init_runtime_files(config, create_env=True)
 
-    assert not (tmp_path / ".env").exists()
+    assert (config.config_dir / "llm_endpoints.json").read_text(encoding="utf-8") == "{}"
+    assert tmp_path / ".env" in written
+    assert (tmp_path / ".env").exists()
+    assert config.config_dir / "skill_sources.yml" in written
+
+
+def test_init_runtime_files_can_skip_skill_source_config(tmp_path, monkeypatch):
+    """Init should allow minimal configs without a Skill source template."""
+
+    _clear_zhice_env(monkeypatch)
+    config = load_config(tmp_path)
+
+    written = init_runtime_files(config, create_skill_sources_config=False)
+
+    assert tmp_path / "config" / "llm_endpoints.json" in written
+    assert tmp_path / "config" / "skill_sources.yml" not in written
+    assert not (tmp_path / "config" / "skill_sources.yml").exists()
 
 
 def _clear_zhice_env(monkeypatch) -> None:
@@ -539,7 +556,7 @@ def _clear_zhice_env(monkeypatch) -> None:
         "ZHICE_AGENT_CONFIG_DIR",
         "ZHICE_AGENT_PROMPTS_DIR",
         "ZHICE_AGENT_CONTEXTS_DIR",
-        "ZHICE_AGENT_SKILLS_DIR",
+        "ZHICE_AGENT_EXTENDS_DIR",
         "ZHICE_AGENT_LOGS_DIR",
         "LOCAL_ONLY",
     ]:

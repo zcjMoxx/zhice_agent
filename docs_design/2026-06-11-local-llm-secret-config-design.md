@@ -71,7 +71,7 @@ ZHICE_LLM_OPENAI_API_KEY=sk-...
 
 1. `zcagent` 启动时先把项目内 `config/.env` 加载到当前 Python 进程。
 2. 已存在的进程环境变量保留原值，并优先于 `.env`。
-3. `load_llm_endpoint()` 在读取 `config/llm_endpoints.json` 时解析 `${ENV_VAR}`。
+3. `load_llm_endpoint()` 在读取 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 时解析 `${ENV_VAR}`。
 4. 如果引用的环境变量不存在，启动时报明确错误。
 
 因此，占位形式的有效优先级为：
@@ -84,7 +84,7 @@ ZHICE_LLM_OPENAI_API_KEY=sk-...
 ## 边界约束
 
 - `config/.env` 不写入 Windows 系统环境变量，只影响当前 `zcagent` 进程。
-- workspace 中的 `config/llm_endpoints.json` 属于本地运行态文件，不应提交到仓库。
+- `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 属于本地运行态文件，不应提交到仓库。
 - 仓库中的 `config/llm_endpoints.example.json` 可以使用 `${ENV_VAR}`，但不能包含真实密钥。
 - 不再保留 `api_key_env` 独立字段。
 

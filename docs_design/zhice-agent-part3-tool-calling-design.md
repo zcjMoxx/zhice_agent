@@ -2,7 +2,9 @@
 
 > 关联总设：`docs_design/zhice-agent-overall-design.md`
 >
-> 承接文档：`docs_design/2026-06-10-zhice-agent-part2-no-tool-chat-design.md`
+> 文档类型：阶段活文档。本文档始终按当前代码和当前阶段口径维护。
+>
+> 承接文档：`docs_design/zhice-agent-part2-no-tool-chat-design.md`
 >
 > 参考规范：`AGENTS.md`
 >
@@ -452,7 +454,7 @@ FILE pyproject.toml 703 bytes
 
 ```text
 agent/loop.py:25: response = self.llm.chat(messages=messages, tools=None)
-docs_design/2026-06-10-zhice-agent-part2-no-tool-chat-design.md:595: - 新增 agent/protocols/tool.py
+docs_design/zhice-agent-part2-no-tool-chat-design.md:595: - 新增 agent/protocols/tool.py
 ```
 
 设计要求：

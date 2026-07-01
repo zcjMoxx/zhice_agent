@@ -1,22 +1,27 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个按阶段逐步搭建的轻量本地 Agent 项目。
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前已经推进到第五部分，主线能力包括：
 
-当前已经具备的基础能力：
-
-- 项目配置加载
-- Markdown Prompt 加载
-- 通用消息模型
+- workspace 本地运行配置与 `zcagent init`
+- Markdown prompt 加载
 - JSONL 会话持久化
-- 最小可运行 CLI 入口
+- OpenAI-compatible 与 LiteLLM Provider
+- 多 endpoint priority failover
+- `/model` 查看、列表、切换和 reset
+- 多轮 tool calling
+- 受限 `exec`、`read_file`、`list_dir`、`grep`
+- Skill source 同步、SkillLoader、`load_skills` 和 `sync_skills`
+- CLI 与 gateway 基础入口
 
-第二阶段已经补上无工具聊天链路：
+当前仍保持轻量边界：没有 Web UI、MCP、Memory、Subagent、Hook、市集和多用户隔离。
 
-- `ContextBuilder` 会基于 prompts、历史消息和当前输入组装 LLM messages。
-- `AgentLoop.run_turn` 会调用 `LLMProvider`，写入 `user` 与 `assistant` 消息，并返回回复文本。
-- `OpenAIProvider` 是一个 OpenAI 兼容接口的 `LLMProvider` 实现。
-- `LiteLLMProvider` 可以通过进程内 LiteLLM SDK 接入 Anthropic、Gemini、DeepSeek 等模型商。
-- 本地 endpoint 配置放在运行工作目录，不放在源码仓库里。
+## 设计文档
+
+设计文档入口是 `docs_design/README.md`。
+
+- 无日期文档是当前活文档，例如总体设计和 Part 文档，始终按最新代码口径维护。
+- 带日期文档是当次设计记录，用于保留演进痕迹。
+- 新设计落地后，再把已经成为当前准则的内容收敛进总体设计或对应 Part 文档。
 
 ## 快速开始
 
@@ -32,176 +37,132 @@ zcagent
 
 ## 本地命令安装
 
-和参考项目一样，`zcagent` 是在 `pyproject.toml` 里声明的 Python console command。
+`zcagent` 是在 `pyproject.toml` 里声明的 Python console command。
 
-如果你的当前 Python 环境已经在 `PATH` 上，那么在项目根目录安装一次即可：
+如果你的当前 Python 环境已经在 `PATH` 上，在项目根目录安装一次即可：
 
 ```bash
 python -m pip install -e .
 ```
 
-之后新开的终端里，通常就可以直接运行，不需要每次手动激活 `.venv`：
+之后新开的终端里通常可以直接运行：
 
 ```bash
 zcagent
 zcagent gateway
 ```
 
-这是因为命令会被安装到当前 Python 环境对应的 `Scripts` 目录。你这台机器当前就是全局 Anaconda 环境在承接这个命令。`.venv` 仍然适合做隔离，但不是这套参考式工作流的必需条件。
+命令会被安装到当前 Python 环境对应的 `Scripts` 目录。你这台机器当前是全局 Anaconda 环境在承接这个命令。`.venv` 仍然适合做隔离，但不是这套参考式工作流的必需条件。
 
-## LLM 配置
+## 工作区初始化
 
-ZhiCe-Agent 会自动加载源码项目目录下的 `config/.env`。
-
-这个 `.env` 主要用于项目启动配置，例如 `ZHICE_AGENT_WORKSPACE`。
-
-最少需要先配置：
+ZhiCe-Agent 会自动加载源码项目目录下的 `config/.env`。这个 `.env` 主要用于项目启动配置，例如：
 
 ```env
 ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
 ```
 
-然后执行一次 `zcagent init`，它会在 `ZHICE_AGENT_WORKSPACE` 下生成运行时文件，包括：
+执行一次 `zcagent init` 后，会在 `ZHICE_AGENT_WORKSPACE` 下生成运行时文件：
 
-- `config/llm_endpoints.json`
-- prompts 目录下的默认 prompt 文件
+- `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`
+- `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`
+- `${ZHICE_AGENT_WORKSPACE}/prompts/*.md`
 
-如果这些本地文件已经存在，默认不会覆盖；确实要刷新时再加 `--force`。
+`zcagent init` 可以重复执行：已有文件默认保留，缺失文件会自动补齐；确实要刷新覆盖已有模板时再加 `--force`。
 
-可以通过 `--endpoint` 选择启动时首选的 endpoint；不传时会先看 `default` 别名，
-没有 `default` 时按 `priority` 从小到大自动选择。LLM 调用失败时也会按
-`priority` 尝试其它 `enabled=true` 的 endpoint。
+如果启动 `zcagent` 时缺少或未正确填写 `llm_endpoints.json`，CLI 会直接报错并引导你运行 `zcagent init` 或编辑 endpoint 配置。没有可用 LLM 时聊天无法继续。
 
-工作目录下 `config/llm_endpoints.json` 的 `api_key` 目前支持两种写法：
+如果启动 `zcagent` 时缺少 `skill_sources.yml`，CLI 只提示 Skill 同步已跳过，并引导你运行 `zcagent init` 补齐。Skill source 是可选扩展能力，不阻断基础聊天。
 
-1. 直接写本地 key
-2. 写环境变量占位符，例如 `${ZHICE_LLM_OPENAI_API_KEY}`
+## LLM 配置
 
-如果使用占位符，ZhiCe-Agent 会从当前进程环境中解析。由于项目 `config/.env` 的加载不会覆盖已有环境变量，所以实际优先级是：
+仓库只提交模板 `config/llm_endpoints.example.json`。真实运行文件位于：
 
-1. 当前 shell 或系统环境变量
-2. 项目 `config/.env`
+```text
+${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json
+```
 
-工作目录 JSON 示例：
+当前模板口径如下：
 
 ```json
 {
+  "_comment": "把此文件复制到运行工作区的 config/llm_endpoints.json 后再按实际服务修改。",
   "default": "openai_gpt5",
   "openai_gpt5": {
     "protocol": "openai",
     "provider": "",
     "base_url": "https://api.openai.com/v1",
     "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
-    "model": "gpt-5",
-    "supported_models": ["gpt-5", "gpt-5.1", "gpt-*"],
+    "model": "gpt-5.5",
+    "supported_models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+    "max_tokens": 16384,
+    "temperature": 0.7,
     "priority": 1,
-    "enabled": true
+    "enabled": true,
+    "role": "default"
   },
-  "backup": {
-    "protocol": "openai",
-    "provider": "",
-    "base_url": "https://backup.example.com/v1",
-    "api_key": "${ZHICE_LLM_BACKUP_API_KEY}",
-    "model": "backup-model",
-    "supported_models": ["backup-model"],
-    "priority": 2,
-    "enabled": true
-  }
-}
-```
-
-`default` 可以只是别名，也可以完全不写；不写时会按 `priority` 自动选首选 endpoint。
-
-通过 LiteLLM SDK 接其他模型商时，可以新增 endpoint：
-
-```json
-{
-  "claude": {
-    "protocol": "litellm",
-    "provider": "anthropic",
-    "api_key": "${ZHICE_LLM_LITELLM_API_KEY}",
-    "model": "claude-sonnet-4",
-    "supported_models": ["claude-sonnet-4", "claude-*"],
-    "max_tokens": 4096,
-    "temperature": 0.7
-  }
-}
-```
-
-启动时选择：
-
-```bash
-zcagent --endpoint claude
-```
-
-CLI 中可以用 `/model` 查看当前模型，也可以切换当前进程的首选 endpoint：
-
-```text
-/model
-/model list
-/model list cpa_gpt55
-/model cpa_gpt55
-/model cpa_gpt55/gpt-5.5
-/model reset
-```
-
-当前 `/model` 切换只在本次 `zcagent` 进程内生效。退出后重新启动时，会重新使用启动参数
-`--endpoint` 指定的首选 endpoint；如果未指定，则回到 `default`。后续需要补充 session 级模型
-持久化，让同一会话重启后继续使用上次 `/model` 选择的模型。
-
-`/model <endpoint>` 会切到该 endpoint 的默认模型。`/model <endpoint>/<model>`
-会切到指定 endpoint，并在该 endpoint 上临时使用指定 model；该 model 必须等于 endpoint
-的默认 `model`，或命中 endpoint 的 `supported_models`。`supported_models` 支持精确模型名
-和简单 glob，例如 `gpt-*`。没有配置 `supported_models` 时，只允许使用默认 `model`。
-ZhiCe-Agent 不支持裸 `/model <model>` 自动猜测 endpoint。`/model list` 会显示所有可用
-endpoint 及其默认 model；`/model list <endpoint>` 会显示该 endpoint 的默认模型和
-`supported_models`；`/model reset` 会清除本次进程内的手动切换，恢复到配置的 `default`
-别名或 priority 顺序。
-
-### LiteLLM 与 OpenAI-compatible endpoint
-
-ZhiCe-Agent 里的 `protocol` 表示本地选择哪个 Provider：
-
-- `protocol="openai"`：直接调用一个 OpenAI-compatible endpoint，例如 `https://api.openai.com/v1`、OpenRouter、DeepSeek 或公司内部兼容网关。
-- `protocol="litellm"`：在 ZhiCe-Agent 进程内调用 `litellm` Python SDK，由 LiteLLM 适配 Anthropic、Gemini、DeepSeek、DashScope 等模型商。
-
-当前 `LiteLLMProvider` 不要求你本地单独启动 LiteLLM Proxy。它会调用 `litellm.completion(...)`，并把 `api_key`、模型名、tools、max_tokens、temperature 等参数交给 LiteLLM SDK。
-
-因此，`base_url` 的含义是：
-
-```text
-openai  -> 必填，指向真实 OpenAI-compatible 模型网关
-litellm -> 可选，只在你要走自定义 LiteLLM/OpenAI-compatible 网关时作为 api_base 传给 SDK
-```
-
-其它模型可以走 LiteLLM，把模型名写成 LiteLLM 能识别的格式：
-
-```json
-{
-  "claude": {
+  "litellm_claude": {
     "protocol": "litellm",
     "provider": "anthropic",
     "api_key": "${ANTHROPIC_API_KEY}",
-    "model": "claude-sonnet-4",
-    "supported_models": ["claude-sonnet-4", "claude-*"],
-    "priority": 2,
-    "enabled": true
+    "model": "claude-opus-4.8",
+    "supported_models": ["claude-opus-4.8", "claude-opus-4.6"],
+    "max_tokens": 16384,
+    "temperature": 0.7,
+    "priority": 1,
+    "enabled": true,
+    "role": "default"
   }
 }
 ```
 
-加载后，ZhiCe-Agent 会把模型名拼成 `anthropic/claude-sonnet-4` 交给 LiteLLM SDK。通常不需要给 Anthropic/Gemini 这类原生模型商填写 `base_url`；除非你用的是公司内部网关或自建 OpenAI-compatible 转发层。
+字段口径：
 
-项目 `config/.env` 示例：
+- `protocol` 表示本地 Provider：`openai` 或 `litellm`。
+- `provider` 对 OpenAI-compatible endpoint 保持空字符串；对 LiteLLM endpoint 写模型商前缀，例如 `anthropic`。
+- `model` 和 `supported_models` 都写不带 provider 前缀的模型名。
+- `api_key` 可以直接写本地 key，也可以写 `${ENV_VAR}` 占位符。
+- `default` 是 endpoint 别名；不写时会按 `priority` 自动选择首选 endpoint。
 
-```env
-ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
-ZHICE_LLM_OPENAI_API_KEY=your-api-key
+如果使用 `${ENV_VAR}` 占位符，ZhiCe-Agent 会从当前进程环境中解析。项目 `config/.env` 的加载不会覆盖已有环境变量，所以优先级是：
+
+1. 当前 shell 或系统环境变量
+2. 项目 `config/.env`
+
+`protocol="openai"` 会直接调用 `base_url` 指向的 OpenAI-compatible 模型网关。`protocol="litellm"` 会在 ZhiCe-Agent 进程内调用 `litellm.completion(...)`；`base_url` 对 LiteLLM 是可选字段，只在你要走自定义 `api_base` 时填写。
+
+加载 `litellm_claude` 后，ZhiCe-Agent 会把模型名拼成 `anthropic/claude-opus-4.8` 交给 LiteLLM SDK。
+
+启动时可以指定首选 endpoint：
+
+```bash
+zcagent --endpoint litellm_claude
 ```
 
-工作目录里的本地 JSON 不会被 git 提交，适合放本地运行配置。
+## Skill 配置
 
-如果 `ZHICE_AGENT_WORKSPACE` 没设置，`zcagent` 会直接退出，并提示如何创建 `config/.env`，不会把源码目录误当成工作目录。
+仓库只提交模板 `config/skill_sources.example.yml`。真实运行文件位于：
+
+```text
+${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml
+```
+
+默认配置把官方 Skill 仓库根作为本地 source：
+
+```yaml
+name: zhice-official
+local_dir: "${ZHICE_AGENT_SKILL_REPO}"
+git_url: "https://example.com/skills.git"
+target: "master"
+```
+
+内置 `${ZHICE_AGENT_SKILL_REPO}` 默认指向项目根目录下的 `skill_repo/`。仓库结构固定为 `skills/{skill_name}/SKILL.md`。同步后完整仓库会落到：
+
+```text
+${ZHICE_AGENT_WORKSPACE}/extends/zhice-official/
+```
+
+Agent 从 `${ZHICE_AGENT_WORKSPACE}/extends/zhice-official/skills` 发现和执行 Skill，并在模型上下文和 `/skills` 中显示 `zhice-official/{skill_name}`。`sources[].name` 用在日志、命名空间和 `/skills sync <name>`；`sources[].sync` 表示是否同步该 source。`local_dir` 存在时优先使用本地仓库，缺失时可用 `git_url` + `target` 分支兜底。
 
 ## 命令说明
 
@@ -211,9 +172,7 @@ ZHICE_LLM_OPENAI_API_KEY=your-api-key
 zcagent
 ```
 
-默认会进入稳定的本地会话 `default`。
-
-如果你要显式进入某个已有会话，可以传：
+未指定 `--session` 时，默认进入当天本地会话，例如 `chat-20260621`。如果要显式进入某个已有会话：
 
 ```bash
 zcagent --session your-session-id
@@ -227,10 +186,8 @@ CLI 内可用命令：
 - `/history`：打印当前 session 最近消息
 - `/prompts`：列出已加载的 prompt 文件
 - `/tools`：列出已注册的工具
+- `/skills`：列出已同步到 workspace `extends` 下的 Skill
 - `/model`：查看或切换当前首选 LLM endpoint
-- `/model list`：查看可用 endpoint 和默认 model
-- `/model list <endpoint>`：查看某个 endpoint 支持的 model
-- `/model reset`：恢复到配置默认模型或 priority 顺序
 - `/help`：查看可用斜杠命令
 - `/exit`：退出 CLI
 
@@ -240,13 +197,44 @@ CLI 内可用命令：
 zcagent gateway
 ```
 
-现阶段 gateway 还只是入口脚手架和基础状态面，不包含完整 Web UI、WebSocket、渠道接入、鉴权或后台服务编排。
+当前 gateway 只是入口脚手架和基础状态面，不包含完整 Web UI、WebSocket、渠道接入、鉴权或后台服务编排。
 
-如果只想做非阻塞检查：
+非阻塞检查：
 
 ```bash
 zcagent gateway --check
 ```
+
+## 子命令补充
+
+### `/model`
+
+`/model` 用于查看当前模型，或切换当前进程的首选 endpoint：
+
+```text
+/model
+/model list
+/model list openai_gpt5
+/model openai_gpt5
+/model openai_gpt5/gpt-5.5
+/model reset
+```
+
+`/model <endpoint>` 会切到该 endpoint 的默认模型。`/model <endpoint>/<model>` 会在该 endpoint 上临时使用指定 model；该 model 必须等于 endpoint 的默认 `model`，或命中 `supported_models`。`supported_models` 支持精确模型名和简单 glob，例如 `gpt-*`。
+
+ZhiCe-Agent 不支持裸 `/model <model>` 自动猜测 endpoint。`/model` 切换只在本次 `zcagent` 进程内生效；退出后会重新使用启动参数 `--endpoint`、`default` 别名或 priority 顺序。
+
+### `/skills`
+
+`/skills` 用于列出已经同步到 workspace `extends` 下的 Skill。需要刷新配置来源时使用：
+
+```text
+/skills sync
+/skills sync --verbose
+/skills sync zhice-official
+```
+
+`--verbose` 会显示新增、变更、删除和未变更数量等明细。`source_name` 用于只同步某个已配置 source。
 
 ## 测试
 
@@ -255,4 +243,10 @@ python -m ruff check .
 python -m pytest
 ```
 
-第二阶段的 provider 测试使用 mock HTTP，不会真的调用线上 LLM API。
+如果 Windows 临时目录或 `.pytest_cache` 权限导致 warning，可以使用 repo 内 basetemp：
+
+```bash
+python -m pytest --basetemp .tmp/pytest_basetemp
+```
+
+默认单元测试使用 Fake LLM 或 mock HTTP，不会真的调用线上 LLM API。

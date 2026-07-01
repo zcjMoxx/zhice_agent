@@ -2,30 +2,42 @@
 
 from pathlib import Path
 
+from agent.protocols.skill import SkillProvider
+from agent.skills.sync import SkillSourceSync
 from agent.tools.exec import ExecTool
 from agent.tools.readonly import GrepTool, ListDirTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
+from agent.tools.skill import LoadSkillsTool, SyncSkillsTool
 
 
-def create_default_tool_registry(workspace: Path | str) -> ToolRegistry:
+def create_default_tool_registry(
+    workspace: Path | str,
+    skills: SkillProvider | None = None,
+    skill_sync: SkillSourceSync | None = None,
+) -> ToolRegistry:
     """Create the default local workspace tool registry."""
 
     workspace_path = Path(workspace)
-    return ToolRegistry(
-        [
-            ListDirTool(workspace_path),
-            ReadFileTool(workspace_path),
-            GrepTool(workspace_path),
-            ExecTool(workspace_path),
-        ]
-    )
+    tools = [
+        ListDirTool(workspace_path),
+        ReadFileTool(workspace_path),
+        GrepTool(workspace_path),
+        ExecTool(workspace_path),
+    ]
+    if skills is not None:
+        tools.append(LoadSkillsTool(workspace_path, skills))
+    if skill_sync is not None:
+        tools.append(SyncSkillsTool(workspace_path, skill_sync))
+    return ToolRegistry(tools)
 
 
 __all__ = [
     "ExecTool",
     "GrepTool",
     "ListDirTool",
+    "LoadSkillsTool",
     "ReadFileTool",
+    "SyncSkillsTool",
     "ToolRegistry",
     "create_default_tool_registry",
 ]

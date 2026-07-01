@@ -2,7 +2,9 @@
 
 > 关联总设：`docs_design/zhice-agent-overall-design.md`
 >
-> 承接文档：`docs_design/2026-06-09-zhice-agent-part1-foundation-design.md`
+> 文档类型：阶段活文档。本文档始终按当前代码和当前阶段口径维护。
+>
+> 承接文档：`docs_design/zhice-agent-part1-foundation-design.md`
 >
 > 开发范围：Milestone 1 无工具聊天
 
@@ -239,7 +241,7 @@ class LLMProvider(Protocol):
 
 新增职责：
 
-- 从工作目录 `config/llm_endpoints.json` 读取 endpoint
+- 从 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 读取 endpoint
 - 解析 `api_key`
 - 初始化本地运行时文件
 - 加载项目级 `config/.env`
@@ -249,10 +251,11 @@ class LLMProvider(Protocol):
 - 项目目录下的 `config/.env` 用于启动配置，尤其是 `ZHICE_AGENT_WORKSPACE`
 - 真实 endpoint 配置放在工作目录，不放在仓库中
 - `zcagent init` 会在工作目录生成：
-  - `config/llm_endpoints.json`
-  - `prompts/*.md`
-  - 可选 `.env`
-- 已存在的本地文件默认不覆盖，除非显式传 `--force`
+  - `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`
+  - `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`
+  - `${ZHICE_AGENT_WORKSPACE}/prompts/*.md`
+  - 可选 `${ZHICE_AGENT_WORKSPACE}/.env`
+- `zcagent init` 可重复执行：已存在的本地文件默认保留，缺失文件会自动补齐；只有显式传 `--force` 才覆盖已有文件。
 
 ### 4.6 `agent/cli.py`
 
@@ -268,11 +271,8 @@ CLI 是第二部分对话链路的真实入口。
 chat 路径职责：
 
 - 解析 `--session`、`--workspace`、`--endpoint`
-- 默认进入稳定 session：`default`
-- 启动时打印：
-  - 项目名
-  - workspace
-  - session id
+- 未显式传 `--session` 时，默认进入当天本地 session：`chat-YYYYMMDD`
+- 启动时只打印项目名，workspace 和 session id 保持在 gateway/check 等诊断输出中，避免普通对话窗口噪声过多。
 
 第二部分相关命令：
 
@@ -301,7 +301,7 @@ ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
 
 ### 5.2 工作目录配置
 
-工作目录中的 `config/llm_endpoints.json` 描述真实调用的 endpoint。
+`${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 描述真实调用的 endpoint。
 
 示例：
 
@@ -346,16 +346,15 @@ zcagent init
 
 默认行为：
 
-- 在工作目录创建 `config/llm_endpoints.json`
+- 在 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 创建 endpoint 配置
+- 在 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 创建 Skill source 配置
 - 复制默认 prompts
-- 不覆盖已有用户文件
+- 默认保留已有用户文件，只补齐缺失文件
 
 可选行为：
 
 - `--force`：覆盖已存在本地文件
 - `--write-env`：在工作目录额外生成 `.env` 模板
-- `--skip-llm-config`：跳过 endpoint 配置生成
-- `--skip-prompts`：跳过 prompt 复制
 
 ---
 
@@ -478,6 +477,8 @@ sequenceDiagram
 - `zcagent gateway --check` 可用
 - 缺少 workspace 时能打印设置提示
 - 缺少启动 prompts 时能引导用户执行 `zcagent init`
+- 缺少或未正确填写 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 时，`zcagent` 聊天入口直接失败并提示配置；因为 LLM 是聊天运行必需能力
+- 缺少 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 时只打印 warning 并跳过 Skill 同步；因为 Skill source 是可选扩展能力
 
 提交前建议运行：
 

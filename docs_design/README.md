@@ -1,0 +1,88 @@
+# ZhiCe-Agent 设计文档索引
+
+本文档是 `docs_design/` 的阅读入口和维护规则。
+
+## 文档类型
+
+### 当前活文档
+
+无日期文件名表示当前活文档，始终以最新代码和已接受的当前阶段口径为准。新人学习、实现对齐、架构判断优先阅读这些文档。
+
+- `zhice-agent-overall-design.md`：总体设计，当前架构与长期路线图入口。
+- `zhice-agent-part1-foundation-design.md`：Part 1，可运行底座。
+- `zhice-agent-part2-no-tool-chat-design.md`：Part 2，无工具聊天链路。
+- `zhice-agent-part3-tool-calling-design.md`：Part 3，工具调用。
+- `zhice-agent-part4-exec-tool-design.md`：Part 4，安全 `exec` 工具。
+- `zhice-agent-part5-skill-loader-design.md`：Part 5，Skill 同步、加载与执行。
+
+维护规则：
+
+- 当前活文档可以随着代码和阶段边界更新。
+- 当前活文档不保留已经被放弃的旧方案细节，只保留必要的背景和当前准则。
+- 如果专题设计落地后成为当前主线，应同步更新相关活文档。
+
+### 日期设计记录
+
+带 `YYYY-MM-DD-` 前缀的文件表示当次设计记录，用于保留演进痕迹。
+
+维护规则：
+
+- 日期设计记录完成并落地后原则上不再改写方案内容。
+- 后续如果发现旧方案不足，新增日期设计记录，在背景里说明承接了哪个旧方案、旧方案哪里不足、这次如何改进。
+- 如果后续设计已经改变了旧日期设计记录的方案，不回头重写旧正文；只在旧文档标题下方增加 `> 说明：...`，说明当前代码采用什么、旧方案哪里不再适用、应参考哪份新文档或当前活文档。
+- 允许修复链接、错别字、编码、排版等不改变方案含义的维护。
+- 日期设计记录和当前代码冲突时，以当前活文档和当前代码为准。
+
+## 推荐阅读顺序
+
+1. `zhice-agent-overall-design.md`
+2. `zhice-agent-part1-foundation-design.md`
+3. `zhice-agent-part2-no-tool-chat-design.md`
+4. `zhice-agent-part3-tool-calling-design.md`
+5. `zhice-agent-part4-exec-tool-design.md`
+6. `zhice-agent-part5-skill-loader-design.md`
+7. 按需阅读对应日期设计记录，理解某次改动的背景和权衡。
+
+## 日期设计记录清单
+
+- `2026-06-11-cli-gateway-entry-design.md`
+- `2026-06-11-console-color-design.md`
+- `2026-06-11-local-llm-secret-config-design.md`
+- `2026-06-11-packaging-entry-design.md`
+- `2026-06-12-auto-session-default-design.md`
+- `2026-06-12-cli-session-commands-design.md`
+- `2026-06-14-litellm-provider-design.md`
+- `2026-06-15-model-command-and-endpoint-failover-design.md`
+- `2026-06-18-console-spinner-design.md`
+- `2026-06-19-endpoint-config-simplification-design.md`
+- `2026-06-21-readme-endpoint-doc-alignment-design.md`
+- `2026-06-21-runtime-template-chinese-localization-design.md`
+- `2026-06-21-skill-repo-placeholder-design.md`
+- `2026-06-21-skill-sync-default-refresh-design.md`
+- `2026-06-21-test-case-doc-coverage-design.md`
+- `2026-06-30-skill-source-namespace-design.md`
+- `2026-07-01-design-doc-governance-design.md`
+
+## 新设计写法
+
+涉及核心边界、三个及以上文件、运行时配置、Tool、Skill、Session 或 AgentLoop 行为变化时，先新增日期设计记录：
+
+```text
+docs_design/YYYY-MM-DD-{topic}-design.md
+```
+
+新日期设计记录至少说明：
+
+- 背景：承接哪个旧方案或当前活文档中的哪段口径。
+- 问题：旧方案哪里不够。
+- 目标和非目标。
+- 模块设计、数据流、变更文件。
+- 测试方案和验收标准。
+
+代码落地后，再把已经成为当前准则的内容收敛进无日期活文档。
+
+如果新方案覆盖了旧日期设计记录，不要改写旧文档正文。旧文档只在开头补一段说明，例如：
+
+```markdown
+> 说明：这是一份历史实验记录。当前代码并不采用“每次启动都新建唯一会话”的行为，而是默认使用当天会话 `chat-YYYYMMDD`，并通过 `/new` 显式新建临时会话。
+```

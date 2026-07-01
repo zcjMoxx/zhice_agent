@@ -48,10 +48,43 @@
 
 对于 OpenAI-compatible endpoint，`provider` 保持为空字符串，表示不需要 provider 前缀。对于 LiteLLM endpoint，`provider` 是必填字段，配置里的 `model` 仍然保持不带前缀。`LiteLLMProvider` 在真正调用 SDK 时，再把模型名格式化成 `provider/model`。
 
+当前仓库模板 `config/llm_endpoints.example.json` 保持两个示例 endpoint：
+
+```json
+{
+  "default": "openai_gpt5",
+  "openai_gpt5": {
+    "protocol": "openai",
+    "provider": "",
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
+    "model": "gpt-5.5",
+    "supported_models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+    "max_tokens": 16384,
+    "temperature": 0.7,
+    "priority": 1,
+    "enabled": true,
+    "role": "default"
+  },
+  "litellm_claude": {
+    "protocol": "litellm",
+    "provider": "anthropic",
+    "api_key": "${ANTHROPIC_API_KEY}",
+    "model": "claude-opus-4.8",
+    "supported_models": ["claude-opus-4.8", "claude-opus-4.6"],
+    "max_tokens": 16384,
+    "temperature": 0.7,
+    "priority": 1,
+    "enabled": true,
+    "role": "default"
+  }
+}
+```
+
 ## 数据流
 
 ```text
-llm_endpoints.json
+${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json
   -> load_llm_endpoints()
   -> _iter_endpoint_mappings()
   -> _endpoint_from_mapping()

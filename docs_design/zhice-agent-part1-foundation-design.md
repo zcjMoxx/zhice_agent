@@ -2,6 +2,8 @@
 
 > 关联总设：`docs_design/zhice-agent-overall-design.md`
 >
+> 文档类型：阶段活文档。本文档始终按当前代码和当前阶段口径维护。
+>
 > 开发范围：Milestone 0 项目骨架 + Message/Session 基础模型
 
 ---
@@ -190,7 +192,7 @@ class AppConfig:
     prompts_dir: Path
     contexts_dir: Path
     sessions_dir: Path
-    skills_dir: Path
+    extends_dir: Path
     logs_dir: Path
 ```
 
@@ -207,7 +209,7 @@ ZHICE_AGENT_WORKSPACE
 ZHICE_AGENT_CONFIG_DIR
 ZHICE_AGENT_PROMPTS_DIR
 ZHICE_AGENT_CONTEXTS_DIR
-ZHICE_AGENT_SKILLS_DIR
+ZHICE_AGENT_EXTENDS_DIR
 ZHICE_AGENT_LOGS_DIR
 ```
 
@@ -250,10 +252,10 @@ class PromptLoader:
 
 ```text
 $ python -m pip install -e .
-$ zcagent --session default
+$ zcagent
 ZhiCe-Agent
 workspace: ...
-session: default
+session: chat-YYYYMMDD
 > hello
 saved user message.
 > /exit
@@ -263,7 +265,7 @@ bye
 参数：
 
 ```text
---session     session id，默认 default
+--session     session id，默认当天本地会话 chat-YYYYMMDD；显式传入时恢复指定会话
 --workspace   可选，覆盖 ZHICE_AGENT_WORKSPACE
 ```
 
@@ -412,13 +414,13 @@ sequenceDiagram
 
 ```bash
 python -m pytest tests/unit_test
-zcagent --session default
+zcagent
 ```
 
 并且输入一条消息后，能看到：
 
 ```text
-contexts/sessions/default.jsonl
+contexts/sessions/chat-YYYYMMDD.jsonl
 ```
 
 其中追加了对应的 `user` 消息。

@@ -1,3 +1,1 @@
-Skill 能力保留到后续阶段接入。
-
-当前对话中不要假设自己已经拥有 Skill 执行能力，也不要引用不存在的 Skill 工作流。
+Skill 是本地能力包，只在可用 Skill 摘要明显匹配用户目标时使用。可用 Skill 以 `source/name` 限定名展示；调用 `load_skills` 时优先传限定名，也可以在无歧义时传裸 `name`。使用某个 Skill 前，先调用 `load_skills` 读取完整 `SKILL.md`，并严格遵守其中的参数、返回格式和边界说明。不要假设未列出的 Skill 存在，不要编造脚本路径；需要运行脚本时，只能通过 `exec` 执行 `SKILL.md` 明确给出的工作区内命令或脚本示例。如果用户明确要求刷新、更新或同步技能仓库，可以调用 `sync_skills`，但只能同步已配置的 Skill source，不能临时指定任意 URL。如果 Skill 返回 `AMBIGUOUS_SKILL`，应改用候选中的限定名重试；其他错误先根据 `code` 和 `message` 向用户解释，不要盲目重复执行。

@@ -130,6 +130,7 @@ class Spinner:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._start: float = 0.0
+        self._last_width = 0
         self.elapsed: float = 0.0
         self.interrupted: bool = False
 
@@ -137,6 +138,7 @@ class Spinner:
         """Start the spinner thread when stderr is an interactive terminal."""
 
         self._start = time.monotonic()
+        self._last_width = 0
         if not sys.stderr.isatty():
             return self
         self._stop.clear()
@@ -154,14 +156,16 @@ class Spinner:
         self.elapsed = time.monotonic() - self._start if self._start else 0.0
         self.interrupted = exc_type is KeyboardInterrupt
         if sys.stderr.isatty():
+            visible_line = f"⠿ {self._label} {self.elapsed:.1f}s"
             if self.interrupted:
                 tag = " [interrupted]"
+                visible_line += tag
                 if _colors_enabled():
                     tag = " \033[33m[interrupted]\033[0m"
-                line = f"\r⠿ {self._label} {self.elapsed:.1f}s{tag}\n"
+                self._write_status(f"⠿ {self._label} {self.elapsed:.1f}s{tag}", len(visible_line))
             else:
-                line = f"\r⠿ {self._label} {self.elapsed:.1f}s\n"
-            sys.stderr.write(line)
+                self._write_status(visible_line, len(visible_line))
+            sys.stderr.write("\n")
             sys.stderr.flush()
 
     def _spin(self) -> None:
@@ -172,11 +176,19 @@ class Spinner:
         while not self._stop.is_set():
             frame = self._FRAMES[index % len(self._FRAMES)]
             elapsed = time.monotonic() - self._start
+            visible_line = f"{frame} {self._label}... {elapsed:.1f}s"
             if use_color:
-                line = f"\r\033[36m{frame}\033[0m {self._label}... {elapsed:.1f}s"
+                line = f"\033[36m{frame}\033[0m {self._label}... {elapsed:.1f}s"
             else:
-                line = f"\r{frame} {self._label}... {elapsed:.1f}s"
-            sys.stderr.write(line)
-            sys.stderr.flush()
+                line = visible_line
+            self._write_status(line, len(visible_line))
             index += 1
             self._stop.wait(self._INTERVAL)
+
+    def _write_status(self, text: str, visible_width: int) -> None:
+        """Rewrite one terminal status line and erase leftovers from longer frames."""
+
+        padding = " " * max(0, self._last_width - visible_width)
+        sys.stderr.write(f"\r{text}{padding}")
+        sys.stderr.flush()
+        self._last_width = visible_width

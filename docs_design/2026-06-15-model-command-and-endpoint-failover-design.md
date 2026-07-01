@@ -1,12 +1,14 @@
 # ZhiCe-Agent 模型查看切换与 Endpoint Failover 设计
 
+> 说明：这是一份历史设计记录。当前代码不再把 CLI `--endpoint` 默认值当作字面 `default` endpoint，而是默认使用 `auto`：优先解析配置中的 `default` 别名，其次使用名为 `default` 的 endpoint，最后按 enabled endpoint 的 priority 选择。`/model` 仍只影响当前进程，不做 session 级持久化。
+
 - 日期：2026-06-15
 - 状态：第一版已实现；session 级模型持久化待做
 - 范围：第一阶段轻量实现
 
 ## 1. 背景
 
-当前 ZhiCe-Agent 通过 `zcagent --endpoint <name>` 选择一个 LLM endpoint。CLI 默认值是 `default`，因此不传参数时会读取运行工作区 `config/llm_endpoints.json` 中名为 `default` 的 endpoint。
+当前 ZhiCe-Agent 通过 `zcagent --endpoint <name>` 选择一个 LLM endpoint。CLI 默认值是 `default`，因此不传参数时会读取 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 中名为 `default` 的 endpoint。
 
 参考项目 `sthg_nanobot_agent` 已有更完整的 endpoint chain：
 

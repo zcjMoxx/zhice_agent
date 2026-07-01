@@ -42,7 +42,7 @@
 
 - `agent.cli`
   - 顶层分发 `init`、`gateway` 和默认 chat。
-  - 无参数默认进入 chat。
+  - 无参数默认进入 chat，减少日常对话入口的心智负担。
   - `gateway` 子命令支持 `--host`、`--port`、`--workspace`、`--check`。
 - `agent.gateway`
   - 只作为 gateway scaffold，不承载业务 API。

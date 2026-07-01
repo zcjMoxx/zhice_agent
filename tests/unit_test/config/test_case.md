@@ -10,7 +10,7 @@
 
 - 输入：调用 `load_config(tmp_path)`。
 - 预期：所有运行路径都从该 workspace 派生。
-- 检查点：`config_dir`、`prompts_dir`、`contexts_dir`、`sessions_dir`、`skills_dir`、`logs_dir` 路径正确。
+- 检查点：`config_dir`、`prompts_dir`、`contexts_dir`、`sessions_dir`、`extends_dir`、`logs_dir` 路径正确。
 
 ### Case 2: 环境变量覆盖
 
@@ -28,11 +28,11 @@
 
 - 输入：调用 `config.ensure_dirs()`。
 - 预期：第一阶段需要的运行目录全部存在。
-- 检查点：`config`、`prompts`、`contexts/sessions`、`skills`、`logs` 被创建。
+- 检查点：`config`、`prompts`、`contexts/sessions`、`extends`、`logs` 被创建。
 
 ### Case 5: LLM endpoint 解析
 
-- 输入：读取 `config/llm_endpoints.json`。
+- 输入：读取 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`。
 - 预期：解析为 `LLMEndpoint`。
 - 检查点：支持 `api_key` 明文和 `${ENV_VAR}` 占位；支持 keyed object 和顶层 `endpoints` 列表；支持 `default` 别名；支持 `priority`、`enabled`、`role`；缺失字段、非法 JSON、未知 endpoint、未定义环境变量都会给出配置错误。
 
@@ -45,5 +45,5 @@
 ### Case 7: 初始化运行时文件
 
 - 输入：调用 `init_runtime_files()`。
-- 预期：生成本地 `config/llm_endpoints.json` 和 prompts，可选生成 `.env`。
-- 检查点：默认不覆盖已有文件；`--force` 语义由调用方显式开启。
+- 预期：生成本地 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`、`${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 和 prompts，可选生成 `${ZHICE_AGENT_WORKSPACE}/.env`。
+- 检查点：默认不覆盖已有文件但会补齐缺失文件；`--force` 语义由调用方显式开启。

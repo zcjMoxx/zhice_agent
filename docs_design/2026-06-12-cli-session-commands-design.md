@@ -12,7 +12,7 @@
 
 ## 目标
 
-- 将默认聊天会话恢复为 `default`。
+- 将默认聊天会话调整为按天生成的 `chat-YYYYMMDD`，避免长期 `default` 历史污染普通问候和短对话。
 - 新增 `/new`，用于创建并切换到新会话。
 - 新增 `/reset`，用于清空当前会话历史。
 - 新增 `/sessions`，用于列出已保存会话，并显示基于首条 user 消息的简短预览。
@@ -61,7 +61,7 @@
 
 启动逻辑：
 
-- `--session` 默认值恢复为 `default`
+- `--session` 默认值为自动生成的当天 session：`chat-YYYYMMDD`
 
 slash 命令：
 
@@ -76,7 +76,7 @@ slash 命令：
 ## 数据流
 
 1. 用户执行 `zcagent`
-2. CLI 默认进入 `default`，除非显式传入 `--session`
+2. CLI 默认进入 `chat-YYYYMMDD`，除非显式传入 `--session`
 3. `/new` 更新当前活动 `session_id`
 4. 正常聊天轮次写入当前 session JSONL
 5. `/reset` 删除当前 session JSONL 文件
@@ -93,7 +93,7 @@ slash 命令：
 
 ## 测试方案
 
-- 单元测试：默认启动显示 `default`
+- 单元测试：默认启动写入当天 session，且普通聊天不打印 workspace/session 横幅
 - 单元测试：`/new` 能切换到新会话
 - 单元测试：`/reset` 能清空已持久化会话
 - 单元测试：`/sessions` 能打印预览信息

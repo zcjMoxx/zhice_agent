@@ -7,6 +7,7 @@ from typing import Any
 
 from agent.message import Message
 from agent.prompt_loader import PromptLoader
+from agent.protocols.skill import SkillProvider
 
 DEFAULT_CONTEXT_PROMPTS = ["identity", "tool_use_policy", "skills_intro"]
 
@@ -17,8 +18,11 @@ class ContextBuilder:
     def __init__(
         self,
         prompt_loader: PromptLoader,
+        skills: SkillProvider | None = None,
         max_history_messages: int = 30,
         max_message_chars: int = 8000,
+        max_skill_summaries: int = 50,
+        max_skill_summary_chars: int = 5000,
     ):
         """Configure prompt source and history/message size limits."""
 
@@ -26,10 +30,17 @@ class ContextBuilder:
             raise ValueError("max_history_messages must be non-negative")
         if max_message_chars <= 0:
             raise ValueError("max_message_chars must be positive")
+        if max_skill_summaries < 0:
+            raise ValueError("max_skill_summaries must be non-negative")
+        if max_skill_summary_chars <= 0:
+            raise ValueError("max_skill_summary_chars must be positive")
 
         self.prompt_loader = prompt_loader
+        self.skills = skills
         self.max_history_messages = max_history_messages
         self.max_message_chars = max_message_chars
+        self.max_skill_summaries = max_skill_summaries
+        self.max_skill_summary_chars = max_skill_summary_chars
 
     def build(
         self,
@@ -60,20 +71,26 @@ class ContextBuilder:
         """Combine runtime prompts with workspace/session facts for the LLM."""
 
         prompts = self.prompt_loader.load_many(DEFAULT_CONTEXT_PROMPTS)
-        return "\n\n".join(
+        parts = [
+            "# Identity",
+            prompts["identity"].strip(),
+            "# Tool Use Policy",
+            prompts["tool_use_policy"].strip(),
+            "# Skill Use Policy",
+            prompts["skills_intro"].strip(),
+        ]
+        skill_summary = self._build_available_skills_prompt()
+        if skill_summary:
+            parts.extend(["# Available Skills", skill_summary])
+        parts.extend(
             [
-                "# Identity",
-                prompts["identity"].strip(),
-                "# Tool Use Policy",
-                prompts["tool_use_policy"].strip(),
-                "# Skill Use Policy",
-                prompts["skills_intro"].strip(),
                 "# Runtime",
                 "Use tools only through the provided tool schemas.",
                 f"workspace={workspace}",
                 f"session_id={session_id}",
             ]
         )
+        return "\n\n".join(parts)
 
     def _message_to_llm_dict(self, message: Message) -> dict[str, Any] | None:
         """Convert an internal Message to the provider-neutral chat shape."""
@@ -141,6 +158,24 @@ class ContextBuilder:
             return content
         marker = "[truncated]"
         return f"{content[: self.max_message_chars]}{marker}"
+
+    def _build_available_skills_prompt(self) -> str:
+        """Return a compact list of available Skills for the system prompt."""
+
+        if self.skills is None or self.max_skill_summaries == 0:
+            return ""
+        try:
+            skills = self.skills.list_skills()
+        except Exception:  # noqa: BLE001 - bad Skill metadata should not block chat startup.
+            return ""
+        lines = []
+        for skill in skills[: self.max_skill_summaries]:
+            lines.append(f"- `{skill.qualified_name}`: {skill.summary}")
+        text = "\n".join(lines)
+        if len(text) <= self.max_skill_summary_chars:
+            return text
+        marker = "[truncated]"
+        return f"{text[: self.max_skill_summary_chars]}{marker}"
 
 
 def _tool_call_ids(tool_calls: list[dict[str, Any]]) -> list[str]:

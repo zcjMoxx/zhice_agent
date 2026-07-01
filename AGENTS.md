@@ -24,22 +24,22 @@ skills  -> no agent imports
 - `agent/protocols/` 只放接口和数据结构，禁止 import 具体实现。
 - `agent/loop.py` 消费能力时走 `LLMProvider`、`ToolProvider`、`SkillProvider`、`SessionStore`。
 - `agent/tools/` 内的 LLM 可调用工具禁止互相 import；公共逻辑放 `base.py` 或明确的 shared helper。
-- `skills/*/scripts/` 禁止 import `agent.*`，只能通过 `--params`、环境变量、文件或外部 API 通信。
+- `skills/*/scripts/` 禁止 import `agent.*`，建议通过 `--params`、环境变量、文件或外部 API 通信。
 
 ## 3. Prompt 管理
 
 - 所有会进入 LLM messages 的长文本指令必须放在 `prompts/*.md`。
-- Skill 说明必须放在 `skills/{name}/SKILL.md`。
+- Skill 说明必须放在 Skill source 的 `skills/{name}/SKILL.md`；内置官方 source 位于 `skill_repo/skills/{name}/SKILL.md`，运行时同步到 `${ZHICE_AGENT_WORKSPACE}/extends/{source}/skills/{name}/SKILL.md`。
 - Python 代码里只允许保留短 tool name、短 description、极短 fallback 文案。
 - 新增 prompt 不在文件名里写 v1/v2，演进交给 git 记录。
 
 ## 4. 配置与路径
 
 - 所有运行路径从 `ZHICE_AGENT_WORKSPACE` 派生。
-- 配置文件统一放在 `config/`。
+- 运行态配置文件统一放在 `${ZHICE_AGENT_WORKSPACE}/config/`；仓库 `config/` 只放模板或启动用示例。
 - 仓库不提交真实 Secret；仓库只提交 `config/.env.example` 和不含真实 key 的示例配置。
-- 本地开发可在工作目录 `config/llm_endpoints.json` 写入 `api_key`，因为工作目录不属于仓库。
-- Docker、云部署、CI 等环境优先通过 `.env`、env-file 或平台 Secret 注入 Secret；`config/llm_endpoints.json` 里仍统一使用 `api_key`，可写明文，也可写 `${ENV_VAR}` 占位。
+- 本地开发可在 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 写入 `api_key`，因为工作目录不属于仓库。
+- Docker、云部署、CI 等环境优先通过 `.env`、env-file 或平台 Secret 注入 Secret；`${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 里仍统一使用 `api_key`，可写明文，也可写 `${ENV_VAR}` 占位。
 - 文件、工具、exec 默认限制在 workspace 内，禁止默认访问 workspace 外路径。
 
 ## 5. Tool 规范
@@ -51,7 +51,7 @@ skills  -> no agent imports
 
 ## 6. Skill 规范
 
-Skill 最小结构：
+Skill source 内的 Skill 最小结构：
 
 ```text
 skills/{skill_name}/
@@ -61,17 +61,17 @@ skills/{skill_name}/
 
 `SKILL.md` 必须包含：
 
-- frontmatter：`name`、`description`、`category`、`readonly`
+- frontmatter：`name`、`description`
 - 参数表
 - 完整可执行示例
 - 返回格式
 - 错误码和重试策略
 - 边界情况和不适用场景
 
-脚本规范：
+脚本规范（通过 `exec` 按 `SKILL.md` 示例执行）：
 
-- 通过 `--params '{JSON}'` 接收输入。
-- stdout 最后一行输出 JSON。
+- 推荐通过 `--params '{JSON}'` 接收输入。
+- 推荐 stdout 最后一行输出 JSON。
 - 返回字段固定为 `status`、`code`、`data`、`message`、`error_stack`。
 - `except Exception` 时填 `traceback.format_exc()[:1500]`。
 - 禁止 import `agent.*`，禁止 Skill 之间互相 import。
@@ -79,6 +79,7 @@ skills/{skill_name}/
 ## 7. 测试规范
 
 - 新模块必须配单元测试；涉及 AgentLoop、工具、Skill、Session 的改动必须覆盖正常路径、异常路径和边界条件。
+- 新增或扩展 `tests/unit_test/{topic}` 测试主题目录时，同目录必须维护 `test_case.md`，说明测试目标、用例覆盖和关键检查点；不要求每个测试文件单独配说明。
 - AgentLoop 优先用 Fake LLM 做稳定测试，真实 LLM 冒烟测试用环境变量显式开启。
 - E2E 测试必须走真实入口和真实调用链；不要直接 import 内部实现绕过边界。
 - 提交前至少运行：
@@ -92,7 +93,12 @@ python -m pytest
 
 ## 8. 设计先行
 
-以下情况先写 `docs_design/YYYY-MM-DD-*.md`：
+设计文档分两类：
+
+- 当前活文档：无日期文件名，例如 `docs_design/zhice-agent-overall-design.md` 和 `docs_design/zhice-agent-part*.md`，始终以最新代码和当前阶段口径为准。
+- 日期设计记录：`docs_design/YYYY-MM-DD-*.md`，记录当次设计背景、权衡和变更方案；设计完成并落地后原则上不再改写方案内容。
+
+以下情况先写新的日期设计记录：
 
 - 涉及 3 个及以上文件修改。
 - 新增核心模块或协议接口。
@@ -100,6 +106,10 @@ python -m pytest
 - 引入新的运行时依赖或外部服务。
 
 设计文档至少包含：背景、目标、范围边界、模块设计、数据流、变更文件、测试方案、验收标准。
+
+代码落地后，如果该方案成为当前主线，再同步更新总体设计或对应 Part 活文档。后续新变化不要回头重写旧日期设计记录，而是在新日期设计记录的背景里说明旧方案的不足和本次改进。
+
+如果后续设计已经改变了旧日期设计记录的方案，只在旧文档标题下方补一段 `> 说明：...`，说明当前代码采用什么、旧方案哪里不再适用、应参考哪份新文档或当前活文档；旧文档正文保持当时方案原貌。
 
 ## 9. 暂不纳入第一阶段的内容
 

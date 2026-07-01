@@ -2,7 +2,9 @@
 
 > 关联总设：`docs_design/zhice-agent-overall-design.md`
 >
-> 承接文档：`docs_design/2026-06-11-zhice-agent-part3-tool-calling-design.md`
+> 文档类型：阶段活文档。本文档始终按当前代码和当前阶段口径维护。
+>
+> 承接文档：`docs_design/zhice-agent-part3-tool-calling-design.md`
 >
 > 参考规范：`AGENTS.md`
 >

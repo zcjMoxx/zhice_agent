@@ -25,9 +25,13 @@ from agent.loop import AgentLoop
 from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.session import JsonlSessionStore
+from agent.skills import SkillLoader, SkillSourceSync
+from agent.skills.sync import SkillSyncError, SkillSyncResult
 from agent.tools import create_default_tool_registry
 
 DEFAULT_PROMPTS = ["identity", "tool_use_policy", "skills_intro"]
+DEFAULT_CHAT_HISTORY_MESSAGES = 12
+CHAT_BANNER = "🐈 zcagent - Personal AI Assistant"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -54,8 +58,8 @@ def _run_chat(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(prog="zcagent")
     parser.add_argument(
         "--session",
-        default="default",
-        help="Session id to resume. Defaults to the stable local session: default.",
+        default=None,
+        help="Session id to resume. Defaults to today's local chat session.",
     )
     parser.add_argument("--workspace", default=None, help="Workspace root override.")
     parser.add_argument(
@@ -64,7 +68,7 @@ def _run_chat(argv: Sequence[str]) -> int:
         help="Preferred LLM endpoint name. Defaults to config default alias or priority order.",
     )
     args = parser.parse_args(argv)
-    session_id = args.session
+    session_id = args.session or _default_session_id()
 
     try:
         config = load_config(args.workspace)
@@ -74,11 +78,34 @@ def _run_chat(argv: Sequence[str]) -> int:
     if not _ensure_runtime_dirs(config):
         return 1
 
+    skill_sync = SkillSourceSync(
+        workspace=config.workspace,
+        config_dir=config.config_dir,
+        extends_dir=config.extends_dir,
+    )
+    _print_missing_skill_sources_hint(skill_sync)
+    _sync_startup_skills(skill_sync, quiet=True)
+
     prompt_loader = PromptLoader(config.prompts_dir)
     session_store = JsonlSessionStore(config.sessions_dir)
-    context_builder = ContextBuilder(prompt_loader)
-    llm = _build_llm_provider(config.config_dir, args.endpoint)
-    tool_registry = create_default_tool_registry(config.workspace)
+    skill_loader = _create_skill_loader(skill_sync)
+    context_builder = ContextBuilder(
+        prompt_loader,
+        skills=skill_loader,
+        max_history_messages=DEFAULT_CHAT_HISTORY_MESSAGES,
+    )
+    if not _load_startup_prompts(prompt_loader):
+        return 1
+    try:
+        llm = _build_llm_provider(config.config_dir, args.endpoint)
+    except LLMConfigurationError as exc:
+        _print_llm_configuration_error(exc, config)
+        return 1
+    tool_registry = create_default_tool_registry(
+        config.workspace,
+        skills=skill_loader,
+        skill_sync=skill_sync,
+    )
     agent_loop = AgentLoop(
         llm=llm,
         sessions=session_store,
@@ -86,12 +113,7 @@ def _run_chat(argv: Sequence[str]) -> int:
         workspace=config.workspace,
         tools=tool_registry,
     )
-    if not _load_startup_prompts(prompt_loader):
-        return 1
-
-    print(console.bold("ZhiCe-Agent"))
-    print(f"workspace: {console.path(config.workspace)}")
-    print(f"session: {console.command(session_id)}")
+    print(console.bold(CHAT_BANNER))
 
     while True:
         try:
@@ -127,6 +149,13 @@ def _run_chat(argv: Sequence[str]) -> int:
             continue
         if user_text == "/tools":
             _print_tools(tool_registry)
+            continue
+        if user_text == "/skills" or user_text.startswith("/skills "):
+            _handle_skills_command(
+                skill_loader,
+                skill_sync,
+                user_text.removeprefix("/skills").strip(),
+            )
             continue
         if user_text == "/model" or user_text.startswith("/model "):
             print(_handle_model_command(llm, user_text.removeprefix("/model").strip()))
@@ -170,6 +199,13 @@ def _run_gateway(argv: Sequence[str]) -> int:
         return 0
     if not _ensure_runtime_dirs(config):
         return 1
+    skill_sync = SkillSourceSync(
+        workspace=config.workspace,
+        config_dir=config.config_dir,
+        extends_dir=config.extends_dir,
+    )
+    _print_missing_skill_sources_hint(skill_sync)
+    _sync_startup_skills(skill_sync)
     run_gateway(config, host=args.host, port=args.port)
     return 0
 
@@ -185,12 +221,6 @@ def _run_init(argv: Sequence[str]) -> int:
         action="store_true",
         help="Also generate a .env template inside the runtime workspace.",
     )
-    parser.add_argument(
-        "--skip-llm-config",
-        action="store_true",
-        help="Do not generate config/llm_endpoints.json.",
-    )
-    parser.add_argument("--skip-prompts", action="store_true", help="Do not copy prompt files.")
     parser.add_argument("--endpoint", default="default", help="Endpoint name to generate.")
     parser.add_argument("--protocol", default="openai", choices=["openai", "litellm"])
     parser.add_argument("--base-url", default="https://api.openai.com/v1")
@@ -213,8 +243,6 @@ def _run_init(argv: Sequence[str]) -> int:
         written = init_runtime_files(
             config,
             create_env=args.write_env,
-            create_llm_config=not args.skip_llm_config,
-            create_prompts=not args.skip_prompts,
             endpoint_name=args.endpoint,
             protocol=args.protocol,
             base_url=args.base_url,
@@ -230,13 +258,14 @@ def _run_init(argv: Sequence[str]) -> int:
         return 1
 
     if not written:
-        print(console.warning("No runtime files requested."))
+        print(console.warning("All requested runtime files already exist. Nothing changed."))
         return 0
     for path in written:
         print(f"{console.success('created:')} {console.path(path)}")
     print(
         console.warning(
-            "Before calling a real LLM, set workspace api_key to a direct value or ${ENV_VAR}."
+            "Runtime templates created. Before use, review workspace config files "
+            "and set your actual endpoint, model, api_key, and Skill sources."
         )
     )
     return 0
@@ -252,6 +281,50 @@ def _ensure_runtime_dirs(config) -> bool:
         print(console.warning("Check ZHICE_AGENT_WORKSPACE in config/.env, or choose a writable directory."))
         return False
     return True
+
+
+def _sync_startup_skills(skill_sync: SkillSourceSync, *, quiet: bool = False) -> None:
+    """Run configured one-shot startup Skill sync without blocking local commands."""
+
+    try:
+        result = skill_sync.sync_on_startup()
+    except SkillSyncError as exc:
+        if quiet:
+            return
+        print(console.warning(f"skills sync skipped: {exc}"))
+        return
+    if result is None:
+        return
+    if quiet:
+        return
+    try:
+        settings, _sources = skill_sync.load()
+    except SkillSyncError:
+        return
+    if result.has_changes() or settings.log == "always":
+        print(_format_skill_sync_result(result))
+
+
+def _print_missing_skill_sources_hint(skill_sync: SkillSourceSync) -> None:
+    """Print a one-line setup hint when Skill source config has not been initialized."""
+
+    if skill_sync.has_config():
+        return
+    print(
+        console.warning(
+            f"skills sync skipped: missing {skill_sync.config_path}. Run zcagent init to create it."
+        )
+    )
+
+
+def _create_skill_loader(skill_sync: SkillSourceSync) -> SkillLoader:
+    """Create a SkillLoader without letting optional Skill config block chat."""
+
+    try:
+        return SkillLoader(skill_sync.skill_roots())
+    except SkillSyncError as exc:
+        print(console.warning(f"skills disabled: {exc}"))
+        return SkillLoader([])
 
 
 def _extract_env_file(argv: list[str]) -> tuple[str | None, list[str]]:
@@ -281,6 +354,12 @@ def _new_session_id() -> str:
     """Return a new session id for an explicit /new command."""
 
     return "session-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
+def _default_session_id() -> str:
+    """Return the implicit local chat session for today's date."""
+
+    return "chat-" + datetime.now().strftime("%Y%m%d")
 
 
 def _print_workspace_error(message: str) -> None:
@@ -328,6 +407,24 @@ def _load_startup_prompts(prompt_loader: PromptLoader) -> bool:
         print(f"  {console.command('zcagent init')}")
         return False
     return True
+
+
+def _print_llm_configuration_error(exc: LLMConfigurationError, config) -> None:
+    """Print a startup-blocking LLM configuration error with setup guidance."""
+
+    print(console.error(f"LLM configuration is invalid: {exc}"))
+    print(console.warning("Chat cannot start until an enabled LLM endpoint is configured."))
+    print()
+    print("Choose one:")
+    print(
+        f"  {console.success('Recommended:')} run {console.command('zcagent init')} "
+        "to create missing runtime config templates."
+    )
+    print(
+        "  Manual: edit "
+        f"{console.path(config.config_dir / 'llm_endpoints.json')} "
+        "and set endpoint fields such as base_url, model, and api_key."
+    )
 
 
 def _print_history(session_store: JsonlSessionStore, session_id: str) -> None:
@@ -395,6 +492,96 @@ def _print_tools(tool_registry) -> None:
         name = function.get("name", "")
         description = function.get("description", "")
         print(f"{console.command(str(name)):<18}{description}")
+
+
+def _handle_skills_command(
+    skill_loader: SkillLoader,
+    skill_sync: SkillSourceSync,
+    target: str,
+) -> None:
+    """Handle /skills and /skills sync debug commands."""
+
+    if not target:
+        _print_skills(skill_loader)
+        return
+    parts = target.split()
+    if parts[0] != "sync":
+        print(console.warning("Usage: /skills or /skills sync [--verbose] [source_name]"))
+        return
+    verbose = "--verbose" in parts[1:]
+    unknown_options = [part for part in parts[1:] if part.startswith("--") and part != "--verbose"]
+    if unknown_options:
+        print(console.warning("Usage: /skills or /skills sync [--verbose] [source_name]"))
+        return
+    source_names = [part for part in parts[1:] if part != "--verbose"]
+    try:
+        result = skill_sync.sync(source_names=source_names or None)
+    except SkillSyncError as exc:
+        print(console.error(f"skills sync failed: {exc}"))
+        return
+    print(_format_skill_sync_result(result, verbose=verbose))
+
+
+def _format_skill_sync_result(result: SkillSyncResult, *, verbose: bool = False) -> str:
+    """Return a compact human-readable Skill sync summary."""
+
+    if not result.sources:
+        return console.warning("skills sync: no configured sources")
+    lines: list[str] = []
+    for source in result.sources:
+        if source.status == "synced":
+            lines.append(
+                f"{console.success('skills synced:')} {source.name} "
+                f"({_format_skill_sync_counts(source)})"
+            )
+        elif source.status == "up_to_date":
+            lines.append(
+                f"{console.success('skills up to date:')} {source.name} "
+                f"({source.skills} skills)"
+            )
+        elif source.status == "skipped":
+            suffix = f" ({source.message})" if source.message else ""
+            lines.append(console.warning(f"skills skipped: {source.name}{suffix}"))
+        elif source.status == "failed":
+            message = source.error or source.message or "unknown error"
+            lines.append(console.error(f"skills failed: {source.name} ({message})"))
+        else:
+            lines.append(console.warning(f"skills {source.status}: {source.name}"))
+        if verbose:
+            lines.extend(_format_skill_sync_details(source))
+    return "\n".join(lines)
+
+
+def _format_skill_sync_counts(source) -> str:
+    """Return compact source-level change counts."""
+
+    parts = [f"{source.skills} skills"]
+    if source.new:
+        parts.append(f"{len(source.new)} new")
+    if source.changed:
+        parts.append(f"{len(source.changed)} changed")
+    if source.removed:
+        parts.append(f"{len(source.removed)} removed")
+    if len(parts) == 1:
+        parts.append("changed")
+    return ", ".join(parts)
+
+
+def _format_skill_sync_details(source) -> list[str]:
+    """Return optional verbose sync details for one source."""
+
+    lines: list[str] = []
+    details = [
+        ("new", source.new),
+        ("changed", source.changed),
+        ("removed", source.removed),
+    ]
+    for label, names in details:
+        if names:
+            lines.append(f"  {label}: {', '.join(names)}")
+    if source.unchanged:
+        lines.append(f"  unchanged: {len(source.unchanged)}")
+    return lines
 
 
 def _handle_model_command(llm, target: str) -> str:
@@ -522,11 +709,38 @@ def _print_help() -> None:
         ("/history", "print recent messages from the current session"),
         ("/prompts", "list loaded prompt files"),
         ("/tools", "list registered tools"),
+        ("/skills", "list discovered local Skills"),
         ("/model", "show or switch the preferred LLM endpoint"),
         ("/exit", "leave the CLI"),
     ]
     for name, description in commands:
         print(f"{console.command(name):<18}{description}")
+
+
+def _print_skills(skill_loader: SkillLoader) -> None:
+    """Print discovered local Skill summaries for debugging."""
+
+    skills = skill_loader.list_skills()
+    if not skills:
+        print(console.warning("(no skills)"))
+    for skill in skills:
+        print(f"{console.command(skill.qualified_name):<24}{skill.description}")
+    for error in skill_loader.load_errors:
+        path = error.get("path", "")
+        code = error.get("code", "SKILL_ERROR")
+        message = error.get("message", "")
+        print(console.warning(f"skipped skill [{code}] {path}: {message}"))
+    print()
+    print(
+        console.warning(
+            "Tip: use '/skills sync [--verbose] [source_name]' to sync configured sources."
+        )
+    )
+    print(
+        console.warning(
+            "Optional args: --verbose prints details, source_name syncs one source."
+        )
+    )
 
 
 def _format_session_time(timestamp: float) -> str:
@@ -537,29 +751,31 @@ def _format_session_time(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
 
 
-class _UnavailableLLMProvider:
-    """Provider placeholder that delays configuration errors until first chat."""
-
-    def __init__(self, error: LLMConfigurationError):
-        """Store the startup error so normal CLI rendering can continue."""
-
-        self.error = error
-
-    def chat(self, messages, tools=None):
-        """Raise the stored configuration error through the normal loop path."""
-
-        raise self.error
-
-
 def _build_llm_provider(config_dir, endpoint_name):
     """Build the runtime LLM provider chain from endpoint config."""
 
-    try:
-        endpoints = load_llm_endpoints(config_dir)
-        preferred_endpoint = _resolve_preferred_endpoint(config_dir, endpoint_name, endpoints)
-        return create_llm_provider_chain(endpoints, preferred_endpoint=preferred_endpoint)
-    except LLMConfigurationError as exc:
-        return _UnavailableLLMProvider(exc)
+    endpoints = load_llm_endpoints(config_dir)
+    preferred_endpoint = _resolve_preferred_endpoint(config_dir, endpoint_name, endpoints)
+    _validate_startup_llm_endpoints(endpoints, preferred_endpoint)
+    return create_llm_provider_chain(endpoints, preferred_endpoint=preferred_endpoint)
+
+
+def _validate_startup_llm_endpoints(endpoints, preferred_endpoint: str | None) -> None:
+    """Reject endpoint sets that cannot produce any chat response."""
+
+    enabled = [endpoint for endpoint in endpoints if endpoint.enabled]
+    if not enabled:
+        raise LLMConfigurationError("No enabled LLM endpoints are configured.")
+    if preferred_endpoint:
+        for endpoint in enabled:
+            if endpoint.name == preferred_endpoint:
+                if not endpoint.api_key.strip():
+                    raise LLMConfigurationError(
+                        f"LLM endpoint {preferred_endpoint!r} is missing api_key."
+                    )
+                return
+    if not any(endpoint.api_key.strip() for endpoint in enabled):
+        raise LLMConfigurationError("No enabled LLM endpoints have api_key configured.")
 
 
 def _resolve_preferred_endpoint(config_dir, endpoint_name, endpoints):

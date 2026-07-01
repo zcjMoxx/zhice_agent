@@ -1,55 +1,29 @@
 {
-  "_comment": "Copy this file to your runtime workspace as config/llm_endpoints.json. Do not commit real api_key values. /model supports endpoint names and endpoint/model overrides, for example: /model openai_gpt5 or /model openai_gpt5/gpt-5.1.",
+  "_comment": "把此文件复制到运行工作区的 config/llm_endpoints.json 后再按实际服务修改。",
   "default": "openai_gpt5",
   "openai_gpt5": {
     "protocol": "openai",
     "provider": "",
     "base_url": "https://api.openai.com/v1",
     "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
-    "model": "gpt-5",
-    "supported_models": ["gpt-5", "gpt-5.1", "gpt-*"],
-    "max_tokens": 4096,
+    "model": "gpt-5.5",
+    "supported_models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+    "max_tokens": 16384,
     "temperature": 0.7,
     "priority": 1,
     "enabled": true,
     "role": "default"
   },
-  "openai_compatible_backup": {
-    "protocol": "openai",
-    "provider": "",
-    "base_url": "https://gateway.example.com/v1",
-    "api_key": "${ZHICE_LLM_BACKUP_API_KEY}",
-    "model": "backup-model",
-    "supported_models": ["backup-model"],
-    "max_tokens": 4096,
-    "temperature": 0.7,
-    "priority": 2,
-    "enabled": true,
-    "role": "default"
-  },
-  "litellm_anthropic": {
+  "litellm_claude": {
     "protocol": "litellm",
     "provider": "anthropic",
     "api_key": "${ANTHROPIC_API_KEY}",
-    "model": "claude-sonnet-4",
-    "supported_models": ["claude-sonnet-4", "claude-*"],
-    "max_tokens": 4096,
+    "model": "claude-opus-4.8",
+    "supported_models": ["claude-opus-4.8", "claude-opus-4.6"],
+    "max_tokens": 16384,
     "temperature": 0.7,
-    "priority": 3,
+    "priority": 1,
     "enabled": true,
-    "role": "default"
-  },
-  "litellm_custom_gateway": {
-    "protocol": "litellm",
-    "provider": "openai",
-    "base_url": "https://gateway.example.com/v1",
-    "api_key": "${ZHICE_LLM_CUSTOM_GATEWAY_API_KEY}",
-    "model": "custom-model",
-    "supported_models": ["custom-model"],
-    "max_tokens": 4096,
-    "temperature": 0.7,
-    "priority": 4,
-    "enabled": false,
     "role": "default"
   }
 }
