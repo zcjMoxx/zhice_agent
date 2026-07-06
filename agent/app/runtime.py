@@ -89,7 +89,8 @@ class WebRuntime:
         command_text = self.handle_command(session_id, message, command_profile=command_profile)
         if command_text is not None:
             _emit_runtime_event(on_event, {"type": "text_delta", "content": command_text})
-            stopped = message.strip().lower() == "/stop"
+            command_name = message.strip().split(maxsplit=1)[0].lower()
+            stopped = command_profile == EXTERNAL_COMMAND_PROFILE and command_name == "/stop"
             return ChatTurnResult(content=command_text, stopped=stopped)
 
         turn_id = "turn-" + uuid.uuid4().hex
@@ -136,6 +137,8 @@ class WebRuntime:
         if command == "model":
             return _handle_model_command(self.llm, target)
         if command == "stop":
+            if command_profile != EXTERNAL_COMMAND_PROFILE:
+                return _command_not_supported_for_client(stripped)
             result = self.cancel_session(session_id)
             return f"Stopped current turn. Cancelled: `{result['cancelled']}`"
         if command == "reset":
@@ -383,12 +386,12 @@ def _web_help_text(command_profile: str = WEB_COMMAND_PROFILE) -> str:
         "- `/help` - show commands",
         "- `/model` - show or switch the preferred model",
         "- `/reset` - clear this session history",
-        "- `/stop` - stop the active turn",
         "- `/sessions` - list or manage recent sessions",
     ]
     if command_profile == EXTERNAL_COMMAND_PROFILE:
         lines.extend(
             [
+                "- `/stop` - stop the active turn",
                 "- `/history` - show recent messages",
                 "- `/exit` - close this WebSocket connection",
             ]

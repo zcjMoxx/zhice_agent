@@ -88,7 +88,9 @@ async def websocket_chat(websocket: WebSocket) -> None:
                     {"type": "error", "error": {"code": "INVALID_REQUEST", "message": "session_id is required"}},
                 )
                 continue
-            if frame_type == "stop" or content.lower() == "/stop":
+            if frame_type == "stop" or (
+                content.lower() == "/stop" and command_profile == EXTERNAL_COMMAND_PROFILE
+            ):
                 result = runtime.cancel_session(session_id)
                 await send_event("channel_status", {"type": "stopped", **result}, session_id=session_id)
                 continue

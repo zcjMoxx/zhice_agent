@@ -47,11 +47,33 @@ def test_ws_stop_frame_calls_runtime_cancel(tmp_path):
     assert runtime.cancelled_sessions == ["alpha"]
 
 
-def test_ws_stop_text_uses_same_cancel_path(tmp_path):
+def test_ws_web_stop_text_is_a_message_command_not_stop_frame(tmp_path):
     runtime = _WsRuntime()
     client = _client(tmp_path, runtime)
 
     with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "message", "session_id": "alpha", "content": "/stop"})
+        accepted = websocket.receive_json()
+        text = websocket.receive_json()
+        done = websocket.receive_json()
+
+    assert accepted["event"] == "channel_status"
+    assert accepted["data"]["type"] == "accepted"
+    assert text == {"event": "channel_text", "data": "ok", "session_id": "alpha"}
+    assert done["event"] == "channel_status"
+    assert done["data"]["type"] == "done"
+    assert runtime.cancelled_sessions == []
+    assert runtime.chat_calls == [("alpha", "/stop", "web")]
+
+
+def test_ws_external_stop_text_uses_same_cancel_path(tmp_path):
+    runtime = _WsRuntime()
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "hello", "client": "external"})
         websocket.receive_json()
         websocket.send_json({"type": "message", "session_id": "alpha", "content": "/stop"})
         stopped = websocket.receive_json()

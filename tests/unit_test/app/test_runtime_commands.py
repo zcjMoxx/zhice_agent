@@ -24,6 +24,18 @@ def test_web_profile_rejects_history_command(tmp_path):
     assert result == "Command not supported for this client: `/history`.\n\nUse `/help` to see available commands."
 
 
+def test_web_profile_rejects_stop_command(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    result = runtime.handle_command(
+        "alpha",
+        "/stop",
+        command_profile=WEB_COMMAND_PROFILE,
+    )
+
+    assert result == "Command not supported for this client: `/stop`.\n\nUse `/help` to see available commands."
+
+
 def test_external_profile_allows_history_command(tmp_path):
     runtime = _runtime(tmp_path)
 
@@ -47,6 +59,7 @@ def test_web_help_hides_external_only_commands(tmp_path):
     assert result is not None
     assert "/history" not in result
     assert "/exit" not in result
+    assert "/stop" not in result
     assert "- `/model` - show or switch the preferred model" in result
     assert "- `/model list`" not in result
     assert "- `/sessions` - list or manage recent sessions" in result
@@ -60,6 +73,7 @@ def test_external_help_lists_external_commands(tmp_path):
     result = runtime.handle_command("/alpha", "/help", command_profile=EXTERNAL_COMMAND_PROFILE)
 
     assert result is not None
+    assert "- `/stop` - stop the active turn" in result
     assert "- `/history` - show recent messages" in result
     assert "- `/exit` - close this WebSocket connection" in result
     assert "- `/model list`" not in result
