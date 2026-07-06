@@ -31,13 +31,19 @@ class JsonlSessionStore:
         """Resolve the session directory used by all JSONL reads and writes."""
 
         self.sessions_dir = Path(sessions_dir).expanduser().resolve()
+        self.metadata_dir = (
+            self.sessions_dir.parent / "sessions_meta"
+            if self.sessions_dir.name == "sessions"
+            else self.sessions_dir / "sessions_meta"
+        )
 
     def load(self, session_id: str) -> SessionState:
         """Load a session state from disk, or return an empty session."""
 
         path = self._path_for(session_id)
+        metadata = self._read_metadata(session_id)
         if not path.exists():
-            return SessionState(session_id=session_id, messages=[])
+            return SessionState(session_id=session_id, messages=[], metadata=metadata)
 
         messages: list[Message] = []
         with path.open("r", encoding="utf-8") as file:
@@ -47,7 +53,7 @@ class JsonlSessionStore:
                     continue
                 record = json.loads(stripped)
                 messages.append(self._message_from_record(record))
-        return SessionState(session_id=session_id, messages=messages)
+        return SessionState(session_id=session_id, messages=messages, metadata=metadata)
 
     def append(self, session_id: str, messages: list[Message]) -> None:
         """Append messages to a session JSONL file."""
@@ -70,6 +76,27 @@ class JsonlSessionStore:
         path = self._path_for(session_id)
         if path.exists():
             path.unlink()
+
+    def rename(self, session_id: str, title: str) -> None:
+        """Store a display title for a session without changing the JSONL id."""
+
+        self._path_for(session_id)
+        normalized_title = " ".join(title.split())
+        if not normalized_title:
+            raise ValueError("title is required")
+        if len(normalized_title) > 120:
+            normalized_title = normalized_title[:120]
+        metadata = self._read_metadata(session_id)
+        metadata["title"] = normalized_title
+        self._write_metadata(session_id, metadata)
+
+    def delete(self, session_id: str) -> None:
+        """Delete the session messages and sidecar metadata."""
+
+        self.clear(session_id)
+        metadata_path = self._metadata_path_for(session_id)
+        if metadata_path.exists():
+            metadata_path.unlink()
 
     def list_sessions(self) -> list[SessionSummary]:
         """Return stored sessions sorted by recent update time."""
@@ -103,6 +130,7 @@ class JsonlSessionStore:
                     preview=_session_preview(messages),
                     updated_at=updated_at,
                     message_count=len(messages),
+                    title=str(self._read_metadata(session_id).get("title") or ""),
                 )
             )
 
@@ -116,6 +144,34 @@ class JsonlSessionStore:
                 "session_id must contain only letters, numbers, underscores, and hyphens"
             )
         return self.sessions_dir / f"{session_id}.jsonl"
+
+    def _metadata_path_for(self, session_id: str) -> Path:
+        """Resolve and validate the sidecar metadata path for a session id."""
+
+        self._path_for(session_id)
+        return self.metadata_dir / f"{session_id}.json"
+
+    def _read_metadata(self, session_id: str) -> dict[str, Any]:
+        """Read optional sidecar metadata, ignoring malformed non-dict content."""
+
+        path = self._metadata_path_for(session_id)
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_metadata(self, session_id: str, metadata: dict[str, Any]) -> None:
+        """Write sidecar metadata as UTF-8 JSON."""
+
+        path = self._metadata_path_for(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _record_from_message(message: Message) -> dict[str, Any]:

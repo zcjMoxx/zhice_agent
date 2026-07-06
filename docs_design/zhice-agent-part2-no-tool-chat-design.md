@@ -178,7 +178,7 @@ class LLMProvider(Protocol):
 
 启动时通过 `zcagent --endpoint claude` 选择该 endpoint。配置层保留 `provider` 和未加前缀的 `model`，由 `LiteLLMProvider` 调用 SDK 时拼接为 LiteLLM 可识别的 `anthropic/claude-sonnet-4`。
 
-### 4.3 `agent/context.py`
+### 4.3 `agent/core/context.py`
 
 负责将 Prompt、运行时限制说明、Session 历史和当前用户输入组装为发给 LLM 的 `messages`。
 
@@ -206,7 +206,7 @@ class LLMProvider(Protocol):
 - 当前用户消息必须是 `role="user"`，否则抛出明确错误。
 - Prompt 缺失时不吞错，直接向上抛出，交给 CLI 在启动阶段提前失败。
 
-### 4.4 `agent/loop.py`
+### 4.4 `agent/core/loop.py`
 
 负责无工具单轮对话主循环。
 
@@ -416,8 +416,8 @@ sequenceDiagram
 - `agent/protocols/llm.py`
 - `agent/llm/__init__.py`
 - `agent/llm/openai_provider.py`
-- `agent/context.py`
-- `agent/loop.py`
+- `agent/core/context.py`
+- `agent/core/loop.py`
 - `agent/config.py`
 - `agent/cli.py`
 - `tests/unit_test/context_builder/test_context_builder.py`

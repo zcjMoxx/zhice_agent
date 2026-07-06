@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ZhiCe-Agent</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260706-model-refresh" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <header class="sidebar-header">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true">Z</span>
+            <span class="brand-name">ZhiCe-Agent</span>
+          </div>
+          <button class="icon-button" id="collapseButton" type="button" title="Collapse sidebar">
+            <span aria-hidden="true">&#8249;</span>
+          </button>
+        </header>
+
+        <div class="sidebar-actions">
+          <button class="action-button" id="newChatButton" type="button">
+            <span aria-hidden="true">+</span>
+            <span>New chat</span>
+          </button>
+          <label class="search-box" for="searchInput">
+            <span aria-hidden="true">&#8981;</span>
+            <input id="searchInput" type="search" placeholder="Search chats" autocomplete="off" />
+          </label>
+        </div>
+
+        <section class="recent-section" aria-label="Recents">
+          <div class="section-title">Recents</div>
+          <div class="recent-list" id="recentList"></div>
+        </section>
+
+        <button class="user-entry" type="button">
+          <span class="avatar" aria-hidden="true">L</span>
+          <span class="user-copy">
+            <span class="user-name">Local user</span>
+            <span class="user-meta">Workspace</span>
+          </span>
+        </button>
+      </aside>
+
+      <main class="main">
+        <section class="chat-wrap" aria-live="polite">
+          <div class="empty-state" id="emptyState">I'm ZhiCe-Agent. How can I help?</div>
+          <div class="message-list" id="messageList"></div>
+        </section>
+
+        <form class="composer" id="composer">
+          <textarea
+            id="messageInput"
+            rows="1"
+            placeholder="Message ZhiCe-Agent"
+            autocomplete="off"
+          ></textarea>
+          <div class="composer-footer">
+            <select id="modelSelect" aria-label="Model">
+              <option value="auto">auto</option>
+            </select>
+            <button class="stop-button" id="stopButton" type="button" title="Stop" disabled>
+              <span aria-hidden="true">&#9632;</span>
+            </button>
+            <button class="send-button" id="sendButton" type="submit" title="Send" disabled>
+              <span aria-hidden="true">&#8593;</span>
+            </button>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <script src="/static/app.js?v=20260706-model-refresh"></script>
+  </body>
+</html>

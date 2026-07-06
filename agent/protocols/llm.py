@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -39,6 +40,15 @@ class LLMResponse:
             self.content = ""
 
 
+@dataclass
+class LLMStreamChunk:
+    """One provider-neutral streaming update from an LLM provider."""
+
+    content_delta: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 class LLMProviderError(RuntimeError):
     """Base error raised by LLM providers."""
 
@@ -56,3 +66,14 @@ class LLMProvider(Protocol):
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
         """Return one assistant response for the provided messages."""
+
+
+class StreamingLLMProvider(LLMProvider, Protocol):
+    """Optional streaming contract consumed when a provider implements it."""
+
+    def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Iterable[LLMStreamChunk | str]:
+        """Yield incremental assistant content for the provided messages."""

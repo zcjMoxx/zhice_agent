@@ -14,6 +14,8 @@
 - `zhice-agent-part3-tool-calling-design.md`：Part 3，工具调用。
 - `zhice-agent-part4-exec-tool-design.md`：Part 4，安全 `exec` 工具。
 - `zhice-agent-part5-skill-loader-design.md`：Part 5，Skill 同步、加载与执行。
+- `zhice-agent-part6-web-minimum-design.md`：Part 6，Web 最小版、REST/SSE 兼容接口与 WebSocket 主通道。
+- `zhice-agent-part6-web-ui-design.md`：Part 6，前端 UI、流式反馈、Markdown 渲染与会话操作。
 
 维护规则：
 
@@ -41,7 +43,9 @@
 4. `zhice-agent-part3-tool-calling-design.md`
 5. `zhice-agent-part4-exec-tool-design.md`
 6. `zhice-agent-part5-skill-loader-design.md`
-7. 按需阅读对应日期设计记录，理解某次改动的背景和权衡。
+7. `zhice-agent-part6-web-minimum-design.md`
+8. `zhice-agent-part6-web-ui-design.md`
+9. 按需阅读对应日期设计记录，理解某次改动的背景和权衡。
 
 ## 日期设计记录清单
 
@@ -62,6 +66,15 @@
 - `2026-06-21-test-case-doc-coverage-design.md`
 - `2026-06-30-skill-source-namespace-design.md`
 - `2026-07-01-design-doc-governance-design.md`
+- `2026-07-01-web-core-import-and-model-selector-design.md`
+- `2026-07-01-web-minimum-implementation-design.md`
+- `2026-07-01-web-stream-command-markdown-design.md`
+- `2026-07-01-websocket-primary-chat-design.md`
+- `2026-07-02-gateway-import-convergence-design.md`
+- `2026-07-02-gateway-runtime-logging-design.md`
+- `2026-07-02-websocket-command-channel-design.md`
+- `2026-07-04-turn-runtime-and-context-design.md`
+- `2026-07-06-gateway-default-port-design.md`
 
 ## 新设计写法
 

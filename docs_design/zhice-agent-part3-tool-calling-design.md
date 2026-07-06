@@ -453,7 +453,7 @@ FILE pyproject.toml 703 bytes
 返回建议：
 
 ```text
-agent/loop.py:25: response = self.llm.chat(messages=messages, tools=None)
+agent/core/loop.py: response = self.llm.chat(messages=messages, tools=None)
 docs_design/zhice-agent-part2-no-tool-chat-design.md:595: - 新增 agent/protocols/tool.py
 ```
 
@@ -468,7 +468,7 @@ docs_design/zhice-agent-part2-no-tool-chat-design.md:595: - 新增 agent/protoco
 - 命中超过上限时截断，并在 metadata 中记录 `truncated=True`。
 - 第一版用 Python 标准库实现，避免引入外部依赖或 shell 命令。
 
-### 5.5 `agent/loop.py`
+### 5.5 `agent/core/loop.py`
 
 第三部分扩展 `AgentLoop`，新增 `tools` 依赖和工具调用循环。
 
@@ -618,7 +618,7 @@ Message(
 - `metadata` 可包含内部调试信息，但也不要放 secret 或完整异常栈。
 - 工具输出截断后，`content` 中应是截断后的文本，metadata 记录截断状态。
 
-### 5.8 `agent/context.py`
+### 5.8 `agent/core/context.py`
 
 第二部分的 `ContextBuilder` 会跳过 `tool` 角色。第三部分需要允许历史中的 `tool` 消息进入 LLM messages。
 
@@ -974,7 +974,7 @@ session JSONL 中按顺序追加：
 
 同时满足：
 
-- `agent/loop.py` 不 import 具体工具实现，只依赖 `ToolProvider` 协议。
+- `agent/core/loop.py` 不 import 具体工具实现，只依赖 `ToolProvider` 协议。
 - `agent/protocols/tool.py` 不 import 任何具体工具。
 - `agent/tools/readonly.py` 不调用 shell。
 - 所有工具默认限制在 workspace 内。

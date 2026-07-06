@@ -95,9 +95,9 @@ print(result)
 1. 计时在响应返回后消失（`__exit__` 清行），用户看不到总耗时。
 2. 等待期间 Ctrl+C 导致 traceback 崩溃，无法优雅中断。
 
-参考项目（sthg_nanobot_agent）的做法：`/stop` 在 AgentLoop 消息总线层实现（`loop.py:6062`），服务于 Telegram 等多 channel 场景。但 CLI 交互循环在 thinking 期间阻塞（`await turn_done.wait()`），用户无法在 thinking 时打字，CLI 实际中断靠 Ctrl+C。
+参考项目（sthg_nanobot_agent）的停止能力在 AgentLoop 消息总线层实现，服务于 Telegram 等多 channel 场景。但 CLI 交互循环在 thinking 期间阻塞（`await turn_done.wait()`），用户无法在 thinking 时打字，CLI 实际中断靠 Ctrl+C。
 
-本阶段沿用 Ctrl+C 方案，保持 threading 同步架构。`/stop` 留待后续消息总线架构时再加。
+本阶段沿用 Ctrl+C 方案，保持 threading 同步架构。
 
 ### 显示效果
 
@@ -148,7 +148,7 @@ except KeyboardInterrupt:
 
 - 不改 AgentLoop 或 LLMProvider（`KeyboardInterrupt` 自然中断阻塞的 HTTP 调用）。
 - 不引入 asyncio 或 prompt_toolkit。
-- 不做 `/stop` 命令（留待消息总线架构）。
+- 不做运行中输入控制命令（留待消息总线架构）。
 
 ## 验收
 

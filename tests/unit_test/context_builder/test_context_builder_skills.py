@@ -1,4 +1,4 @@
-"""Tests for injecting Skill summaries into chat context."""
+﻿"""Tests for injecting Skill summaries into chat context."""
 
 from pathlib import Path
 
@@ -10,7 +10,7 @@ from agent.protocols.skill import SkillInfo
 def test_context_builder_injects_available_skill_summaries(tmp_path):
     """Only compact summaries should enter the system prompt by default."""
 
-    from agent.context import ContextBuilder
+    from agent.core.context import ContextBuilder
 
     prompts_dir = _write_required_prompts(tmp_path)
     provider = FakeSkillProvider(
@@ -33,7 +33,7 @@ def test_context_builder_injects_available_skill_summaries(tmp_path):
 def test_context_builder_omits_empty_or_broken_skill_provider(tmp_path):
     """Skill discovery failures should not block ordinary chat context."""
 
-    from agent.context import ContextBuilder
+    from agent.core.context import ContextBuilder
 
     prompts_dir = _write_required_prompts(tmp_path)
 
@@ -51,7 +51,7 @@ def test_context_builder_omits_empty_or_broken_skill_provider(tmp_path):
 def test_context_builder_limits_skill_count_and_summary_chars(tmp_path):
     """Available Skills prompt should have count and character bounds."""
 
-    from agent.context import ContextBuilder
+    from agent.core.context import ContextBuilder
 
     prompts_dir = _write_required_prompts(tmp_path)
     provider = FakeSkillProvider(
@@ -79,7 +79,7 @@ def test_context_builder_limits_skill_count_and_summary_chars(tmp_path):
 def test_context_builder_depends_only_on_skill_protocol():
     """ContextBuilder should not import the concrete SkillLoader."""
 
-    source = Path("agent/context.py").read_text(encoding="utf-8")
+    source = Path("agent/core/context.py").read_text(encoding="utf-8")
 
     assert "agent.skills" not in source
     assert "SkillLoader" not in source
@@ -131,3 +131,4 @@ class BrokenSkillProvider:
 
     def get_skill_body(self, name, source=None):
         raise AssertionError(name)
+

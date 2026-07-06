@@ -1,4 +1,4 @@
-"""Command-line entrypoint for the no-tool ZhiCe-Agent runtime."""
+﻿"""Command-line entrypoint for the no-tool ZhiCe-Agent runtime."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import sys
 from collections.abc import Sequence
 from datetime import datetime
 
+from agent.app.gateway import format_gateway_check, run_gateway
 from agent.config import (
     DotenvConfigurationError,
     InitConfigurationError,
@@ -14,14 +15,16 @@ from agent.config import (
     bootstrap_dotenv,
     init_runtime_files,
     load_config,
-    load_llm_endpoints,
-    resolve_llm_endpoint_alias,
 )
 from agent.console import Spinner, console
-from agent.context import ContextBuilder
-from agent.gateway import format_gateway_check, run_gateway
-from agent.llm import LLMConfigurationError, create_llm_provider_chain
-from agent.loop import AgentLoop
+from agent.core.context import ContextBuilder
+from agent.core.loop import AgentLoop
+from agent.llm import LLMConfigurationError
+from agent.llm.runtime import (
+    create_configured_llm_provider,
+    resolve_preferred_endpoint,
+    validate_startup_llm_endpoints,
+)
 from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.session import JsonlSessionStore
@@ -31,7 +34,7 @@ from agent.tools import create_default_tool_registry
 
 DEFAULT_PROMPTS = ["identity", "tool_use_policy", "skills_intro"]
 DEFAULT_CHAT_HISTORY_MESSAGES = 12
-CHAT_BANNER = "🐈 zcagent - Personal AI Assistant"
+CHAT_BANNER = "\U0001F408 zcagent - Personal AI Assistant"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -138,8 +141,12 @@ def _run_chat(argv: Sequence[str]) -> int:
             session_store.clear(session_id)
             print(f"{console.warning('session cleared:')} {console.command(session_id)}")
             continue
-        if user_text == "/sessions":
-            _print_sessions(session_store, session_id)
+        if user_text == "/sessions" or user_text.startswith("/sessions "):
+            _handle_sessions_command(
+                session_store,
+                session_id,
+                user_text.removeprefix("/sessions").strip(),
+            )
             continue
         if user_text == "/history":
             _print_history(session_store, session_id)
@@ -179,7 +186,19 @@ def _run_gateway(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(prog="zcagent gateway")
     parser.add_argument("--workspace", default=None, help="Workspace root override.")
     parser.add_argument("--host", default="127.0.0.1", help="Gateway bind host.")
-    parser.add_argument("--port", type=int, default=18791, help="Gateway bind port.")
+    parser.add_argument("--port", type=int, default=10086, help="Gateway bind port.")
+    parser.add_argument(
+        "--log-level",
+        choices=["info", "warning", "debug"],
+        default="info",
+        help="Gateway terminal log detail. Defaults to info.",
+    )
+    parser.add_argument(
+        "--access-log",
+        choices=["on", "off"],
+        default="on",
+        help="Print HTTP request access logs. Defaults to on.",
+    )
     parser.add_argument(
         "--check",
         action="store_true",
@@ -206,7 +225,21 @@ def _run_gateway(argv: Sequence[str]) -> int:
     )
     _print_missing_skill_sources_hint(skill_sync)
     _sync_startup_skills(skill_sync)
-    run_gateway(config, host=args.host, port=args.port)
+    try:
+        run_gateway(
+            config,
+            host=args.host,
+            port=args.port,
+            log_level=args.log_level,
+            access_log=args.access_log == "on",
+        )
+    except PromptNotFoundError as exc:
+        print(console.error(str(exc)))
+        print(console.warning("Runtime prompt files are missing from the workspace. Run zcagent init."))
+        return 1
+    except LLMConfigurationError as exc:
+        _print_llm_configuration_error(exc, config)
+        return 1
     return 0
 
 
@@ -462,11 +495,64 @@ def _print_sessions(session_store: JsonlSessionStore, current_session_id: str) -
     for summary in summaries:
         marker = "*" if summary.session_id == current_session_id else " "
         updated_at = _format_session_time(summary.updated_at)
+        title = summary.title or summary.preview
         print(
             f"{marker} {console.command(summary.session_id)}"
             f"  [{summary.message_count}]  {updated_at}"
         )
-        print(f"    {summary.preview}")
+        print(f"    {title}")
+    print()
+    print(
+        console.warning(
+            "Tip: use '/sessions rename <id> <title>' to rename, "
+            "'/sessions delete (<id>)' to delete."
+        )
+    )
+
+
+def _handle_sessions_command(
+    session_store: JsonlSessionStore,
+    current_session_id: str,
+    target: str,
+) -> None:
+    """Handle local /sessions management commands."""
+
+    if not target:
+        _print_sessions(session_store, current_session_id)
+        return
+
+    command, _, rest = target.partition(" ")
+    command = command.strip().lower()
+    rest = rest.strip()
+    try:
+        if command == "rename":
+            session_id, _, title = rest.partition(" ")
+            session_id = session_id.strip()
+            title = title.strip()
+            if not session_id or not title:
+                print(console.warning("Usage: /sessions rename <id> <title>"))
+                return
+            session_store.rename(session_id, title)
+            print(f"{console.success('session renamed:')} {console.command(session_id)}")
+            return
+        if command == "delete":
+            session_id = rest or current_session_id
+            if session_id == current_session_id:
+                session_store.clear(current_session_id)
+                print(f"{console.warning('session cleared:')} {console.command(current_session_id)}")
+                return
+            session_store.delete(session_id)
+            print(f"{console.warning('session deleted:')} {console.command(session_id)}")
+            return
+    except ValueError as exc:
+        print(console.error(str(exc)))
+        return
+    print(
+        console.warning(
+            "Tip: use '/sessions rename <id> <title>' to rename, "
+            "'/sessions delete (<id>)' to delete."
+        )
+    )
 
 
 def _print_prompts(prompt_loader: PromptLoader) -> None:
@@ -595,16 +681,6 @@ def _handle_model_command(llm, target: str) -> str:
     - /model <endpoint>/<model>
     - /model reset
     """
-
-    required = (
-        "endpoints",
-        "current_endpoint",
-        "match_endpoint",
-        "reset_preferred",
-        "set_preferred",
-    )
-    if not all(hasattr(llm, name) for name in required):
-        return console.warning("Model switching is unavailable for this provider.")
 
     normalized_target = target.strip()
     if not normalized_target:
@@ -754,28 +830,13 @@ def _format_session_time(timestamp: float) -> str:
 def _build_llm_provider(config_dir, endpoint_name):
     """Build the runtime LLM provider chain from endpoint config."""
 
-    endpoints = load_llm_endpoints(config_dir)
-    preferred_endpoint = _resolve_preferred_endpoint(config_dir, endpoint_name, endpoints)
-    _validate_startup_llm_endpoints(endpoints, preferred_endpoint)
-    return create_llm_provider_chain(endpoints, preferred_endpoint=preferred_endpoint)
+    return create_configured_llm_provider(config_dir, endpoint_name)
 
 
 def _validate_startup_llm_endpoints(endpoints, preferred_endpoint: str | None) -> None:
     """Reject endpoint sets that cannot produce any chat response."""
 
-    enabled = [endpoint for endpoint in endpoints if endpoint.enabled]
-    if not enabled:
-        raise LLMConfigurationError("No enabled LLM endpoints are configured.")
-    if preferred_endpoint:
-        for endpoint in enabled:
-            if endpoint.name == preferred_endpoint:
-                if not endpoint.api_key.strip():
-                    raise LLMConfigurationError(
-                        f"LLM endpoint {preferred_endpoint!r} is missing api_key."
-                    )
-                return
-    if not any(endpoint.api_key.strip() for endpoint in enabled):
-        raise LLMConfigurationError("No enabled LLM endpoints have api_key configured.")
+    validate_startup_llm_endpoints(endpoints, preferred_endpoint)
 
 
 def _resolve_preferred_endpoint(config_dir, endpoint_name, endpoints):
@@ -785,16 +846,7 @@ def _resolve_preferred_endpoint(config_dir, endpoint_name, endpoints):
     endpoint named "default", else let the failover provider choose by priority.
     """
 
-    resolved = resolve_llm_endpoint_alias(config_dir, endpoint_name)
-    if resolved:
-        return resolved
-    default_alias = resolve_llm_endpoint_alias(config_dir, "default")
-    endpoint_names = {endpoint.name for endpoint in endpoints if endpoint.enabled}
-    if default_alias and default_alias in endpoint_names:
-        return default_alias
-    if "default" in endpoint_names:
-        return "default"
-    return None
+    return resolve_preferred_endpoint(config_dir, endpoint_name, endpoints)
 
 
 if __name__ == "__main__":

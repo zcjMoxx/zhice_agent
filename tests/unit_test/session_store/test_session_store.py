@@ -123,3 +123,34 @@ def test_list_sessions_returns_preview_and_recent_order(tmp_path):
     assert [summary.session_id for summary in summaries] == ["newer", "older"]
     assert summaries[0].preview == "first newer question"
     assert summaries[1].preview == "first older question"
+
+
+def test_rename_sets_title_without_changing_session_file(tmp_path):
+    """Renaming a session should update sidecar metadata, not the JSONL id."""
+
+    store = JsonlSessionStore(tmp_path)
+    store.append("alpha", [Message(role="user", content="first question")])
+
+    store.rename("alpha", "New title")
+
+    state = store.load("alpha")
+    summaries = store.list_sessions()
+    assert (tmp_path / "alpha.jsonl").exists()
+    assert state.metadata["title"] == "New title"
+    assert summaries[0].session_id == "alpha"
+    assert summaries[0].title == "New title"
+
+
+def test_delete_removes_session_file_and_metadata(tmp_path):
+    """Deleting a session should remove messages and title metadata."""
+
+    store = JsonlSessionStore(tmp_path)
+    store.append("alpha", [Message(role="user", content="first question")])
+    store.rename("alpha", "New title")
+
+    store.delete("alpha")
+
+    assert not (tmp_path / "alpha.jsonl").exists()
+    assert not (store.metadata_dir / "alpha.json").exists()
+    assert store.load("alpha").messages == []
+    assert store.load("alpha").metadata == {}

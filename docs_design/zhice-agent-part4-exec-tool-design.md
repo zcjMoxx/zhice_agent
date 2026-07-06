@@ -451,7 +451,7 @@ ToolRegistry([
 ])
 ```
 
-保持 `agent/loop.py` 不 import `ExecTool`。CLI 通过 `create_default_tool_registry(config.workspace)` 间接获得工具集。
+保持 `agent/core/loop.py` 不 import `ExecTool`。CLI 通过 `create_default_tool_registry(config.workspace)` 间接获得工具集。
 
 ### 5.4 `prompts/tool_use_policy.md`
 
@@ -738,7 +738,7 @@ assistant(final): 该命令会破坏工作区，已被安全策略拒绝 ...
 
 同时满足：
 
-- `agent/loop.py` 不 import `ExecTool`。
+- `agent/core/loop.py` 不 import `ExecTool`。
 - `agent/protocols/tool.py` 不 import 具体工具。
 - `exec` 默认 cwd 在 workspace 内。
 - 危险命令不会真实执行。

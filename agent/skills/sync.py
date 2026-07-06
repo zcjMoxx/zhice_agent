@@ -129,7 +129,7 @@ class SkillSyncResult:
 
     @property
     def errors(self) -> list[dict[str, str]]:
-        """Return failed source messages for older callers that only need errors."""
+        """Return failed source messages for callers that need compact errors."""
 
         return [
             {"source": source.name, "message": source.error or source.message}

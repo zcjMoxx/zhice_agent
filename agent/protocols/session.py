@@ -29,6 +29,7 @@ class SessionSummary:
     preview: str
     updated_at: float
     message_count: int
+    title: str = ""
 
 
 class SessionStore(Protocol):
@@ -42,6 +43,12 @@ class SessionStore(Protocol):
 
     def clear(self, session_id: str) -> None:
         """Remove all persisted messages for a session."""
+
+    def rename(self, session_id: str, title: str) -> None:
+        """Set a human-readable title for a session without changing its id."""
+
+    def delete(self, session_id: str) -> None:
+        """Remove a session and its metadata."""
 
     def list_sessions(self) -> list[SessionSummary]:
         """Return stored sessions ordered for CLI presentation."""

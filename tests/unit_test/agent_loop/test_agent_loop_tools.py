@@ -1,4 +1,4 @@
-"""Tests for AgentLoop tool-calling behavior."""
+﻿"""Tests for AgentLoop tool-calling behavior."""
 
 import json
 from dataclasses import dataclass, field
@@ -193,7 +193,7 @@ def _make_loop(
     sessions=None,
     max_tool_iterations=4,
 ):
-    from agent.loop import AgentLoop
+    from agent.core.loop import AgentLoop
 
     return AgentLoop(
         llm=llm,
@@ -271,3 +271,4 @@ class FakeTools:
         if self.results:
             return self.results.pop(0)
         return ToolResult(output=f"{name}:{args}")
+

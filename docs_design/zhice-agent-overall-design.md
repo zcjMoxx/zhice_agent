@@ -228,13 +228,7 @@ Session 会影响下一轮对话，因为历史消息会被重新放回 LLM 上�
 contexts/sessions/chat-YYYYMMDD.jsonl
 ```
 
-显式传入 `--session default` 或其它名称时，仍然可以恢复指定会话。
-
-早期示例中的固定 `default.jsonl` 仍可作为手动命名会话存在，但不再作为普通聊天默认值：
-
-```text
-contexts/sessions/default.jsonl
-```
+显式传入 `--session chat-YYYYMMDD` 或其它名称时，仍然可以恢复指定会话。
 
 每一行是一条消息：
 
@@ -262,7 +256,7 @@ contexts/sessions/default.jsonl
 当前代码库已经落地的是一个轻量、可运行、可逐步演进的本地 Agent 内核，核心能力是：
 
 ```text
-一个 CLI 智策 Agent：
+一个本地智策 Agent（CLI + Web）：
 能启动，
 能加载 workspace 配置，
 能读取 Markdown Prompt，
@@ -272,17 +266,20 @@ contexts/sessions/default.jsonl
 能通过 OpenAI-compatible 或 LiteLLM Provider 调用模型，
 能按 endpoint priority 做轻量 failover，
 能用 /model 查看和切换本进程内首选模型，
-能提供本地 gateway scaffold，
+能通过 `zcagent gateway` 启动本地 FastAPI gateway，
+能提供 REST/SSE 兼容 API、WebSocket 主聊天通道和静态 Web UI，
+能在 Web 端查看、重命名、删除会话并进行模型选择，
 能通过 `zcagent init` 生成运行时文件。
 ```
 
-这就是当前代码真正实现出来的第一阶段闭环。它已经不是“只聊天”的版本，而是包含本地工具、命令验证、endpoint 管理和模型切换的轻量 Agent 内核。
+这就是当前代码真正实现出来的阶段闭环。它已经不是“只聊天”的版本，而是包含本地工具、命令验证、endpoint 管理、模型切换和本地 Web 使用面的轻量 Agent 内核。
 
 ### 3.2 未来扩展方向
 
 当前代码还没有实现的能力，后续再按模块增加：
 
-- Web 前端。
+- Web 鉴权、用户系统和远程部署安全边界。
+- 工程化前端、多页面设置页、工具日志面板和 Skill source 状态页。
 - 登录系统。
 - 多用户。
 - 外部 IM / 协作平台接入。
@@ -295,8 +292,9 @@ contexts/sessions/default.jsonl
 - MCP。
 - session 级 `/model` 选择持久化。
 - Provider 错误分类、同 endpoint 重试和 cooldown。
+- turn 运行单元、按 turn 加载上下文，以及基于 turn cancellation 的 CLI `/stop`。
 
-这些能力不是不要，而是现在还没有进入代码主线。已经落地的只读工具、`exec`、LiteLLM、endpoint failover 和 `/model` 命令，应视为当前架构边界的一部分。
+这些能力不是不要，而是现在还没有进入代码主线。已经落地的只读工具、`exec`、LiteLLM、endpoint failover、`/model` 命令、FastAPI gateway、WebSocket 主通道和 Web 会话管理，应视为当前架构边界的一部分。后续事项按领域收敛到第 15 章对应小节。
 
 ### 3.3 推荐目录结构
 
@@ -316,11 +314,19 @@ zhice_agent/
 +-- agent/
 |   +-- __init__.py
 |   +-- cli.py
-|   +-- loop.py
-|   +-- context.py
 |   +-- message.py
 |   +-- config.py
 |   +-- prompt_loader.py
+|   +-- app/
+|   |   +-- gateway.py
+|   |   +-- runtime.py
+|   |   +-- api/
+|   |       +-- routes.py
+|   |       +-- schemas.py
+|   |       +-- ws.py
+|   +-- core/
+|   |   +-- loop.py
+|   |   +-- context.py
 |   +-- protocols/
 |   |   +-- llm.py
 |   |   +-- tool.py
@@ -348,14 +354,16 @@ zhice_agent/
 |       +-- {skill_name}/
 |           +-- SKILL.md
 |           +-- scripts/
++-- web/
+|   +-- static/
+|       +-- index.html
+|       +-- styles.css
+|       +-- app.js
 +-- tests/
-    +-- test_agent_loop_fake_llm.py
-    +-- test_tool_registry.py
-    +-- test_skill_loader.py
-    +-- test_session_store.py
+    +-- unit_test/
 ```
 
-这份目录结构是第一阶段的轻量形态，核心目标是先让 CLI、AgentLoop、工具、Session 和 Prompt 闭环跑起来。当前阶段不急着照搬大型平台里的 `app/api`、`agent_core` 等完整分层，否则会在能力还没展开前引入过多空目录和 import 迁移成本。
+这份目录结构是当前轻量形态。项目已经从 CLI-only 演进到本地 Web gateway，因此 `AgentLoop` 和 `ContextBuilder` 已收敛到 `agent/core/`，HTTP/WS 路由、运行时装配和静态资源服务放在 `agent/app/` 与 `web/static/`。当前不保留 `agent/gateway.py`、`agent/loop.py` 或 `agent/context.py` 兼容导出层。
 
 参考大型 Agent 项目时，更应该吸收它的边界思想，而不是直接复制目录重量：
 
@@ -367,19 +375,20 @@ protocols       -> LLMProvider / ToolProvider / SkillProvider / SessionStore 等
 
 当前代码里：
 
-- `agent/loop.py`、`agent/context.py`、`agent/tools/`、`agent/llm/`、`agent/session/` 属于核心层。
-- `agent/cli.py` 和 `agent/gateway.py` 属于入口层或未来 app shell。
+- `agent/core/loop.py`、`agent/core/context.py`、`agent/tools/`、`agent/llm/`、`agent/session/` 属于核心层。
+- `agent/app/gateway.py`、`agent/app/runtime.py`、`agent/app/api/*` 和 `web/static/*` 属于 app shell / Web 边界。
+- `agent/cli.py` 属于入口层；gateway 实现直接位于 `agent/app/gateway.py`，不再保留顶层 re-export 文件。
 - `agent/protocols/` 已经承担协议层职责，应该保持只放接口和数据结构。
 
-因此，短期先保持现有结构；当 HTTP API、Web UI、鉴权、渠道或更多产品服务真正出现时，再演进为更明确的分层：
+后续如果继续演进登录、远程部署、多渠道或完整前端工程，可以在现有边界上扩展，但仍保持分层方向：
 
 ```text
 agent/
 +-- app/
-|   +-- cli.py
 |   +-- gateway.py
 |   +-- api/
 |       +-- routes.py
+|       +-- ws.py
 +-- core/
 |   +-- loop.py
 |   +-- context.py
@@ -392,8 +401,8 @@ agent/
 
 迁移原则：
 
-- 不为了“看起来像平台”提前拆目录。
-- 一旦拆分，依赖方向固定为 `app -> core -> protocols`，`protocols` 禁止 import 具体实现。
+- 不为了“看起来像平台”继续拆出空目录。
+- 依赖方向固定为 `app -> core -> protocols`，`protocols` 禁止 import 具体实现。
 - `core` 不 import `app`，AgentLoop 不知道 CLI、HTTP、Web、鉴权或渠道。
 - 先在设计文档里写清迁移范围，再做文件移动，避免纯路径重构打断当前里程碑学习。
 
@@ -430,7 +439,7 @@ flowchart TD
     A["zcagent"] --> B["bootstrap config/.env"]
     B --> C{"subcommand"}
     C -->|"init"| D["init runtime files in workspace"]
-    C -->|"gateway"| E["load workspace and start gateway scaffold"]
+    C -->|"gateway"| E["load workspace and start FastAPI gateway"]
     C -->|"none"| F["start chat CLI"]
 
     F --> G["load_config"]
@@ -447,13 +456,13 @@ flowchart TD
     P --> M["print assistant text or error message"]
 ```
 
-当前实现已经包含工具调用、多轮 tool loop、Skill source 同步、SkillLoader、`load_skills` 与 `sync_skills`；MCP、Hook 和 Subagent 仍是后续能力。
+当前实现已经包含工具调用、多轮 tool loop、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、FastAPI gateway、WebSocket 主聊天通道和静态 Web UI；MCP、Hook 和 Subagent 仍是后续能力。
 
 ---
 
 ## 5. 数据结构设计
 
-下面第 5 节开始同时包含当前代码结构和长期路线图。当前已实现 CLI、配置、Prompt、Session、无工具聊天、工具调用、安全 exec、LiteLLM、endpoint failover、`/model`、gateway scaffold、Skill source 同步、SkillLoader、`load_skills` 和 `sync_skills`；Memory、MCP、Hooks、Subagent 仍是后续设计。
+下面第 5 节开始同时包含当前代码结构和长期路线图。当前已实现 CLI、配置、Prompt、Session、无工具聊天、工具调用、安全 exec、LiteLLM、endpoint failover、`/model`、FastAPI gateway、REST/SSE 兼容接口、WebSocket 主聊天通道、静态 Web UI、Skill source 同步、SkillLoader、`load_skills` 和 `sync_skills`；Memory、MCP、Hooks、Subagent 仍是后续设计。
 
 ### 5.1 Message
 
@@ -1336,45 +1345,24 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 ## 15. 后续能力设计
 
+本章就是后续能力的管理入口，不再另设“未来待办池”。已经进入当前实现或当前阶段验收的能力不要放在这里；已实现事实放在前文当前实现、路线图和对应 Part 活文档中维护。
+
+本章只保留未来要做、尚未成为当前主线的方向。某个方向准备进入开发时，先新建日期设计记录，落地后再从本章移除或改写为新的未来增强点。
+
 ### 15.1 Web UI
 
-等 CLI 稳定后再加。
+- 登录、鉴权、多用户和远程部署安全边界。
+- Vue/Vite 或其它工程化前端。
+- 工具调用日志面板、Skill source 状态页、设置页。
+- 会话自动标题、归档、全文搜索和更完整的会话管理。
+- Web `/stop` 与未来持久化 `turn_id` 完全对齐。
 
-Web/API 属于 app shell，不属于 Agent core。它的职责是接收 HTTP 请求、做会话绑定、鉴权、参数校验、流式输出和前端状态组织；真正的推理循环、工具调度、Session 读写仍然通过 core 层的 AgentLoop 和协议接口完成。
+进入开发触发条件：
 
-最小后端：
-
-```text
-POST /api/chat
-GET /api/sessions
-GET /api/sessions/{id}
-```
-
-后面再加：
-
-```text
-GET /api/chat/sse
-WebSocket /ws
-```
-
-最小前端：
-
-- 左侧会话列表。
-- 中间聊天窗口。
-- 底部输入框。
-- 右侧可选工具调用日志。
-
-不要一开始做完整前端。
-
-当最小 Web 版开始落地时，建议先做一次轻量目录演进：
-
-```text
-agent/app/api/      # HTTP routes 和请求/响应适配
-agent/app/cli.py    # CLI 入口
-agent/core/         # AgentLoop 与 ContextBuilder
-```
-
-但这个迁移应放在 Web/API 真实进入开发时做，而不是在 CLI-only 阶段提前搬文件。判断标准很简单：如果还没有真正的 `POST /api/chat`、会话 API、SSE/WebSocket 或鉴权逻辑，就继续保持当前结构。
+- 需要鉴权、用户会话绑定、多渠道接入或远程服务暴露。
+- 需要前端工程化、多页面路由、复杂状态管理或系统化组件。
+- 工具调用事件、Skill 状态、模型/端点配置页开始形成稳定产品界面。
+- `turn` 持久化落地后，需要把 Web stop、历史恢复和上下文加载统一到 turn 语义。
 
 ### 15.2 Memory
 
@@ -1454,17 +1442,13 @@ hooks/safety/pre_tooluse/exec.py
 
 ### 15.5 Skill Source 运维增强
 
-Skill source 的第一阶段目标是“能同步、能发现、能加载、能按说明执行”。后续可以围绕运维可见性、性能、治理和审计继续增强，但不应提前把这些能力塞进 AgentLoop。
-
-建议后续优化方向：
-
 - `/skills status`：查看每个 source 的实际来源、本地路径、远端地址、分支、当前 commit、上次同步时间、同步结果和可用 Skill 数量。
 - Skill 索引缓存：缓存 source 扫描结果、mtime、commit 和 frontmatter 摘要，减少每次启动的全量扫描成本。
 - Skill 健康检查：检查 `skills/`、`SKILL.md`、`hooks/`、`config/`、`shared/` 等仓库结构是否符合规范，并输出提供者可修复的 warning。
 - source 权限过滤：为官方、团队、个人等 source 预留启用策略，后续支持按 workspace、会话或用户上下文过滤可用 Skill。
 - 同步来源审计：记录本次实际使用的是 `local_dir` 还是 `git_url`，包含分支、commit、变更列表和错误信息，方便排查“为什么加载的是这个版本”。
 
-如果这些能力开始稳定共享 source root、来源、commit、同步状态等结构化信息，再把当前内部的 `SkillRoot` 提升为 `agent/protocols/skill.py` 中的协议层数据结构。
+如果这些能力开始稳定共享 source root、来源、commit、同步状态等结构化信息，再把 `SkillRoot` 提升为 `agent/protocols/skill.py` 中的协议层数据结构。
 
 ### 15.6 Subagent
 
@@ -1484,182 +1468,48 @@ Skill source 的第一阶段目标是“能同步、能发现、能加载、能�
 
 ### 15.7 入口、打包与部署
 
-为了让项目既能本地开发，也能容器化运行，入口和部署边界建议固定下来：
-
-- `zcagent` 作为默认聊天入口。
-- `zcagent init` 作为运行时文件初始化入口。
-- `zcagent gateway` 作为本地网关 scaffold 入口。
-- `pyproject.toml` 保持单一 console script 暴露方式，便于 `pip install -e .` 后直接运行。
-- 打包层优先保持轻量，不把 `.venv` 作为用户必须步骤。
-
-如果后续补入 `Dockerfile`，建议只承载“应用打包与运行”这件事，不把业务逻辑塞进镜像：
-
-- 构建阶段只安装 Python 依赖和项目包。
-- 运行阶段只保留应用源码、`prompts/`、`config/` 约定和最小运行时依赖。
-- `ZHICE_AGENT_WORKSPACE` 通过环境变量或挂载卷注入，不写死在镜像里。
-- 项目 `config/.env`、`${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 与 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 保持宿主机侧挂载，不打进镜像。
-- 网关容器应显式暴露端口，并默认监听 `0.0.0.0`。
-
-推荐的容器运行边界是：
-
-```text
-container image
-  -> 只负责启动 zcagent 或 zcagent gateway
-workspace volume
-  -> 放会话、运行时配置、临时输出
-env/config mount
-  -> 放 workspace 路径和本地密钥引用
-```
-
-这意味着：
-
-- 不把真实 LLM secret 烤进镜像。
-- 不把运行时 workspace 烤进镜像。
-- 不把完整 Web 平台、编排系统、Secret Manager 作为第一阶段依赖。
-- 如果后续需要 `docker compose`、Kubernetes、进程守护或云部署清单，再单独拆出部署设计文档。
+- Dockerfile 和本地容器运行方式。
+- `docker compose`、Kubernetes、进程守护或云部署清单。
+- 生产部署下的 workspace volume、env/config mount 和 secret 注入约定。
+- 多环境配置 overlay，例如 local/dev/prod。
+- 发布前健康检查和启动诊断命令。
 
 ### 15.8 CLI 入口与会话命令
 
-当前 CLI 已经形成稳定的本地工作流，建议在总设中明确保留：
-
-- `zcagent` 默认进入对话模式。
-- `zcagent init` 初始化运行时文件。
-- `zcagent gateway` 启动本地 HTTP gateway scaffold。
-- `--env-file` 作为进程级环境文件覆盖入口，优先于默认 `config/.env`。
-- 未显式传 `--session` 时默认进入当天本地会话 `chat-YYYYMMDD`。
-- `--session default` 或其它名称用于显式恢复指定会话。
-
-对话模式内置命令：
-
-- `/help`：打印可用命令。
-- `/new`：生成新的 session id 并切换。
-- `/reset`：清空当前 session。
-- `/sessions`：列出已保存 session 及预览。
-- `/history`：打印当前 session 最近消息。
-- `/prompts`：打印已加载 prompt。
-- `/tools`：打印已注册工具列表。
-- `/exit`：退出 CLI。
-
-这些命令是当前可运行体验的一部分，不是未来设想。
+- CLI `/stop`：等待 turn 持久化、active turn registry、cancellation token 和 CLI 并发输入通道稳定后再做。实现前不加入 CLI help；实现时，`/stop` 只在 CLI 命令层处理，不作为普通 user message 写入 LLM 上下文。有 active turn 时取消当前 turn，无 active turn 时返回简短提示，并在停止后追加带同一 `turn_id` 的 assistant stopped marker。详细底层设计见 `docs_design/2026-07-04-turn-runtime-and-context-design.md`。
+- session 级模型选择持久化，让同一会话重启后继续使用上次选择的模型。
+- 更完整的 `/sessions` 管理扩展，例如归档、搜索、按标题过滤和导出。
+- CLI 与 Web 共用的 turn 状态查询命令，例如查看最近 stopped/error turn。
 
 ### 15.9 运行时初始化
 
-`zcagent init` 的职责是补齐本地运行时模板，而不是搭建生产环境。
-
-推荐行为：
-
-- 初始化时创建或补齐 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`、`${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 和 `${ZHICE_AGENT_WORKSPACE}/prompts/*.md`；项目 `config/.env` 仍是启动入口配置。
-- 默认保留已有文件，只补齐缺失的 endpoint、Skill source 和 prompt 模板。
-- 启动聊天时，workspace、prompts、LLM endpoint 这类必需配置缺失或非法必须直接报错并引导配置；Skill source 缺失只影响可选 Skill 同步，应打印 warning 后继续运行基础聊天。
-- 支持 `--force`，用于显式覆盖已有文件。
-- 支持 `--write-env`，用于额外生成工作目录 `.env` 模板。
-- 支持通过 `--endpoint`、`--protocol`、`--base-url`、`--api-key`、`--model`、`--max-tokens`、`--temperature` 生成默认 LLM 端点模板。
-- 运行时模板属于用户 workspace，不应提交到仓库。
-
-`config/.env` 的最小作用是提供 `ZHICE_AGENT_WORKSPACE`，让 CLI 能定位运行态目录。
+- 配置体检命令，例如检查 endpoint、Skill source、prompt、workspace 权限和会话目录。
+- 安全修复向导，例如检测到缺失模板时给出一键补齐方案。
+- 多 profile 初始化，例如 local/dev/prod 或不同模型供应商模板。
+- 初始化后的摘要报告，说明哪些文件新建、哪些保留、哪些需要用户补 key。
 
 ### 15.10 本地密钥配置
 
-当前实现里，LLM endpoint 的密钥字段采用 `api_key`，并支持两种写法：
-
-- 直接写入本地密钥字面量。
-- 使用 `${ENV_VAR}` 占位，启动时从环境变量展开。
-
-建议优先级如下：
-
-1. 当前进程环境变量。
-2. `config/.env`。
-3. `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 内的占位引用。
-
-典型示例：
-
-```json
-{
-  "default": {
-    "name": "default",
-    "protocol": "openai",
-    "base_url": "https://api.openai.com/v1",
-    "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
-    "model": "gpt-5"
-  }
-}
-```
-
-边界上要坚持两点：
-
-- 仓库里的示例配置不能包含真实密钥。
-- 容器镜像里也不应该烤进真实密钥。
+- 系统 keyring 或平台 Secret Manager 集成。
+- Secret 引用体检，区分“变量不存在”“变量为空”“provider 拒绝认证”。
+- Web 设置页中的密钥状态展示，只显示存在性和来源，不显示明文。
+- 容器和云部署下的 secret mount 约定。
 
 ### 15.11 打包与 Docker
 
-项目打包已经从 `setuptools` 切到 `hatchling`，这让 `pip install -e .` 和 wheel 构建更轻。
-
-建议在总设中保留以下约定：
-
-- `pyproject.toml` 继续通过 `project.scripts` 暴露 `zcagent`。
-- `build-system` 使用 `hatchling.build`。
-- wheel 仅打包 `agent` 包，避免把工作区运行态内容打进去。
-- 打包目标是“安装后可直接运行”，不是把 workspace 一并发布。
-
-如果后续补 `Dockerfile`，建议只做应用运行镜像，不做业务镜像：
-
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY pyproject.toml README.md ./
-COPY agent ./agent
-COPY prompts ./prompts
-COPY config/llm_endpoints.example.json ./config/
-RUN pip install --no-cache-dir .
-CMD ["zcagent"]
-```
-
-实际部署时，workspace 更适合通过卷挂载注入：
-
-```text
-container image
-  -> 只负责启动 zcagent 或 zcagent gateway
-workspace volume
-  -> 放会话、运行时配置、临时输出
-env/config mount
-  -> 放 workspace 路径和本地密钥引用
-```
-
-因此：
-
-- 不把真实 LLM secret 烤进镜像。
-- 不把运行时 workspace 烤进镜像。
-- 如果后续需要 `docker compose`、Kubernetes、进程守护或云部署清单，再单独拆出部署设计文档。
+- 最小运行镜像。
+- 本地一键容器启动脚本。
+- 镜像内健康检查和优雅退出。
+- 发布包校验，确认不会把 workspace、真实密钥或本地会话打进产物。
 
 ### 15.12 网关运行边界
 
-`zcagent gateway` 只是本地 HTTP scaffold，不是完整 Web 平台。
-
-建议在总设里明确：
-
-- `gateway` 默认监听 `127.0.0.1:18791`。
-- `--check` 只做配置检查，不启动服务。
-- 健康检查接口用于确认命令、端口和 workspace 约定可用。
-- gateway 和 chat 共享同一套 `config/.env` 与 workspace 校验逻辑。
-- 不把 Web UI、WebSocket、鉴权、后台任务、聊天 REST API 提前塞进入口层。
-
-如果后续 gateway 开始承载真实聊天 API，应同步做结构调整，而不是继续把所有入口逻辑塞在 `agent/gateway.py`：
-
-```text
-agent/app/gateway.py      # 服务启动和本地检查
-agent/app/api/routes.py   # HTTP route
-agent/app/api/schemas.py  # 请求/响应结构
-agent/core/loop.py        # AgentLoop，仍不 import app
-```
-
-迁移触发条件：
-
-- 新增 `POST /api/chat` 或会话查询 API。
-- 需要 SSE/WebSocket 流式输出。
 - 需要 Web 鉴权、用户会话绑定或多渠道接入。
-- gateway 文件开始出现与 AgentLoop 无关的 HTTP 路由、鉴权、UI 状态编排。
+- 需要生产级 HTTPS、反向代理、访问 token 或公网暴露。
+- 需要多进程任务队列、后台任务或跨会话 active turn 管理。
+- gateway 文件开始出现过多与命令入口无关的 Web 编排。
 
-迁移后仍要保持：`app` 可以依赖 `core` 和 `protocols`，但 `core` 不能依赖 `app`。
+扩展后仍要保持：`app` 可以依赖 `core` 和 `protocols`，但 `core` 不能依赖 `app`。
 
 ---
 
@@ -1752,6 +1602,7 @@ pyproject.toml
 .env.example
 agent/config.py
 agent/cli.py
+agent/prompt_loader.py
 prompts/identity.md
 ```
 
@@ -1802,6 +1653,7 @@ ToolRegistry
 list_dir
 read_file
 grep
+prompts/tool_use_policy.md
 Fake LLM 测试
 ```
 
@@ -1868,48 +1720,45 @@ SkillLoader
 load_skills tool
 sync_skills tool
 config/skill_sources.example.yml
+prompts/skills_intro.md
 ```
 
-### Milestone 6：Prompt 文件化整理（已实现并持续维护）
+Prompt 文件化是贯穿所有阶段的横向规范，不单独占用一个后续里程碑。底座阶段已经建立 `PromptLoader` 和基础 identity prompt；工具与 Skill 阶段继续把工具策略、Skill 引导等长文本收敛到 `prompts/*.md`。后续新增会进入 LLM messages 的长文本，也继续按这一规范维护。
 
-目标：
-
-- LLM 看到的重要 prompt 都在 `prompts/*.md`。
-
-交付：
-
-```text
-prompt_loader.py
-identity.md
-tool_use_policy.md
-skills_intro.md
-```
-
-### Milestone 7：Web 最小版（待实现）
+### Milestone 6：Web 最小版（已实现）
 
 目标：
 
 - 浏览器里能聊天。
-- 在进入真实 Web/API 前，把入口层与 Agent core 做轻量分离。
+- 入口层与 Agent core 做轻量分离，保持 `app -> core -> protocols`。
+- 浏览器主聊天使用 WebSocket，REST/SSE 保留兼容调用。
+- Web 端支持会话查看、重命名、删除、模型选择和停止 active turn。
 
 交付：
 
 ```text
-agent/app/api
-agent/app/cli.py 或兼容入口转发
+agent/app/gateway.py
+agent/app/runtime.py
+agent/app/api/routes.py
+agent/app/api/ws.py
+agent/app/api/schemas.py
 agent/core/loop.py
+agent/core/context.py
 FastAPI backend
-简易前端
+web/static 静态前端
 会话列表
 聊天窗口
+WebSocket 流式输出
+REST/SSE 兼容接口
 ```
 
 说明：
 
-- 这一阶段再引入 `app/api` 分层，不在工具调用或 exec 阶段提前搬目录。
-- 分层后保持 `app -> core -> protocols`，避免 Web/API 逻辑反向进入 AgentLoop。
+- 当前代码已经删除 `agent/gateway.py`、`agent/loop.py` 和 `agent/context.py` 兼容导出层，调用方直接使用 `agent.app.gateway`、`agent.core.loop` 和 `agent.core.context`。
+- Web `/stop` 当前是内存态 active turn cancellation；它可以停止后续事件投递并在 AgentLoop 检查点写入 stopped marker，但还没有持久化 `turn_id`。
+- CLI `/stop` 当前未实现，不在 `/help` 中展示；未来等 turn 模型和并发输入通道稳定后再做。
 
-### Milestone 8：Memory
+### Milestone 7：Memory
 
 目标：
 
@@ -1923,19 +1772,19 @@ memory_read
 memory_write
 ```
 
-### Milestone 9：MCP
+### Milestone 8：MCP
 
 目标：
 
 - 外部 MCP 工具能注册到 ToolRegistry。
 
-### Milestone 10：Hooks
+### Milestone 9：Hooks
 
 目标：
 
 - exec 调用前可以走安全 hook。
 
-### Milestone 11：Subagent
+### Milestone 10：Subagent
 
 目标：
 
@@ -1963,9 +1812,9 @@ memory_write
 不要一开始纳入：
 
 - 完整平台级 AgentLoop 实现。
-- 完整应用 API 层。
+- 平台级应用 API 层、鉴权和多租户。
 - 多渠道接入层。
-- 完整 Web 前端。
+- 工程化多页面 Web 前端。
 - 外部协作平台渠道。
 - 审批和通知。
 - Skill 市场。
@@ -1993,11 +1842,15 @@ memory_write
 9. 明显危险命令会被拒绝。
 10. 工具调用有最大轮数限制。
 11. `zcagent init` 能生成本地运行态文件。
-12. `zcagent gateway --check` 能验证本地 gateway scaffold。
+12. `zcagent gateway --check` 能验证本地 gateway 配置并快速退出。
 13. `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 能配置多个 endpoint，并按 priority failover。
 14. `/model` 能查看、列出、切换和 reset 当前进程内首选 endpoint。
-15. Fake LLM 测试通过。
-16. 默认测试不访问真实 LLM 或网络。
+15. `zcagent gateway` 能启动本地 FastAPI/Web 服务，默认地址为 `http://127.0.0.1:10086/`。
+16. Web 前端能通过 `/ws` 发送消息、展示 pending/streaming 状态和 assistant Markdown。
+17. Web 端能读取、重命名、删除 session；删除当前 session 后进入空界面。
+18. Web 模型选择只显示当前 endpoint 下的模型名，不暴露 endpoint/base_url/api_key。
+19. Fake LLM 测试通过。
+20. 默认测试不访问真实 LLM 或网络。
 
 下一阶段 MVP 扩展项：
 
@@ -2097,13 +1950,15 @@ memory_write
 学习：
 
 - chat API。
-- SSE 或 WebSocket。
+- REST/SSE 兼容接口和 WebSocket 主通道。
 - 会话列表。
 
 实现：
 
 - 最小 FastAPI。
 - 简单前端。
+- WebSocket `/ws`。
+- Web active turn cancellation。
 
 ---
 
@@ -2111,10 +1966,10 @@ memory_write
 
 我们要做的不是“复制一个缩小版大平台”，而是做一个真正能学懂、能掌控、能逐步变强的智策 Agent（ZhiCe-Agent）项目。
 
-第一版完整目标应该非常明确（部分待实现）：
+第一版完整目标应该非常明确（基础能力已实现，平台能力继续演进）：
 
 ```text
-一个 CLI 智策 Agent：
+一个本地智策 Agent：
 能聊天，
 能读文件，
 能搜索，
@@ -2124,7 +1979,10 @@ memory_write
 能用 /model 查看和切换首选模型，
 能加载 Skill，
 能按 `SKILL.md` 通过 `exec` 运行 Skill 脚本，
-能保存会话。
+能保存会话，
+能启动本地 Web UI，
+能通过 WebSocket 流式展示助手输出，
+能在 Web 端管理会话和切换当前模型。
 ```
 
 这个目标完成后，再逐步加：

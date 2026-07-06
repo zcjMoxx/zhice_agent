@@ -1,5 +1,7 @@
 # ZhiCe-Agent CLI 与 Gateway 入口设计
 
+> 说明：这是早期 gateway scaffold 设计记录。当前代码已经删除顶层 `agent/gateway.py` 兼容导出层，`zcagent gateway` 入口仍保留，但 CLI 直接调用 `agent.app.gateway` 的 FastAPI 实现。当前口径以 `docs_design/zhice-agent-part6-web-minimum-design.md` 和 `docs_design/2026-07-02-gateway-import-convergence-design.md` 为准。
+
 ## 归属
 
 本设计归属于“入口与打包基础设施改进”，不归入第二部分“无工具聊天”的功能范围，也不归入后续完整 Web/Gateway 部分。

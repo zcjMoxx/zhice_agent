@@ -11,9 +11,9 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前已经推进到第�
 - 多轮 tool calling
 - 受限 `exec`、`read_file`、`list_dir`、`grep`
 - Skill source 同步、SkillLoader、`load_skills` 和 `sync_skills`
-- CLI 与 gateway 基础入口
+- CLI、本地 Web gateway、会话 API 和最小静态 Web UI
 
-当前仍保持轻量边界：没有 Web UI、MCP、Memory、Subagent、Hook、市集和多用户隔离。
+当前仍保持轻量边界：没有鉴权、远程部署、WebSocket、MCP、Memory、Subagent、Hook、市集和多用户隔离；Web 侧仅提供本地 SSE 聊天输出通道。
 
 ## 设计文档
 
@@ -26,6 +26,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前已经推进到第�
 ## 快速开始
 
 ```bash
+# 进入 zhice_agent 项目所在文件夹
 python -m pip install -e .
 copy config\.env.example config\.env
 # 编辑 config\.env，设置 ZHICE_AGENT_WORKSPACE
@@ -197,7 +198,9 @@ CLI 内可用命令：
 zcagent gateway
 ```
 
-当前 gateway 只是入口脚手架和基础状态面，不包含完整 Web UI、WebSocket、渠道接入、鉴权或后台服务编排。
+当前 gateway 会启动本地 FastAPI 服务，访问 `http://127.0.0.1:10086/` 可打开最小聊天界面；`/api/chat`、`/api/chat/stream`、`/api/sessions`、`/api/sessions/{session_id}`、`/api/models` 和 `/api/model/preference` 提供 Web API。
+
+gateway 仍只面向本地开发，不包含鉴权、远程部署、WebSocket、渠道接入或后台服务编排。
 
 非阻塞检查：
 

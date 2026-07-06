@@ -3,19 +3,29 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from agent.console import console
-from agent.context import ContextBuilder
+from agent.core.context import ContextBuilder
 from agent.message import Message
-from agent.protocols.llm import LLMConfigurationError, LLMProvider, LLMProviderError
+from agent.protocols.llm import (
+    LLMConfigurationError,
+    LLMProvider,
+    LLMProviderError,
+    LLMResponse,
+    LLMStreamChunk,
+)
 from agent.protocols.session import SessionStore
 from agent.protocols.tool import ToolProvider, ToolResult
 
 ASSISTANT_ERROR_TEXT = "LLM call failed. Check the workspace configuration and retry."
 TOOL_ITERATION_LIMIT_TEXT = "Tool call limit reached. Please retry with a narrower request."
+TURN_CANCELLED_TEXT = "[stopped]"
+TurnEventCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass
@@ -27,6 +37,33 @@ class ParsedToolCall:
     arguments: dict[str, Any]
     metadata: dict[str, Any] = field(default_factory=dict)
     error: ToolResult | None = None
+
+
+class TurnCancelledError(RuntimeError):
+    """Raised when a chat turn is cancelled by its caller."""
+
+
+class CancellationToken:
+    """Small thread-safe cancellation token shared by Web runtime and AgentLoop."""
+
+    def __init__(self) -> None:
+        self._event = Event()
+
+    def cancel(self) -> None:
+        """Mark the turn as cancelled."""
+
+        self._event.set()
+
+    def is_cancelled(self) -> bool:
+        """Return whether cancellation was requested."""
+
+        return self._event.is_set()
+
+    def raise_if_cancelled(self) -> None:
+        """Raise TurnCancelledError when cancellation was requested."""
+
+        if self.is_cancelled():
+            raise TurnCancelledError(TURN_CANCELLED_TEXT)
 
 
 class AgentLoop:
@@ -53,7 +90,14 @@ class AgentLoop:
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
 
-    def run_turn(self, session_id: str, user_text: str) -> str:
+    def run_turn(
+        self,
+        session_id: str,
+        user_text: str,
+        *,
+        on_event: TurnEventCallback | None = None,
+        cancellation_token: CancellationToken | None = None,
+    ) -> str:
         """Run one user turn, saving user, assistant, and tool messages."""
 
         session = self.sessions.load(session_id)
@@ -71,7 +115,29 @@ class AgentLoop:
 
         while True:
             try:
-                response = self.llm.chat(messages=list(messages), tools=tool_definitions)
+                _raise_if_cancelled(cancellation_token)
+                response = _call_llm(
+                    self.llm,
+                    messages=list(messages),
+                    tools=tool_definitions,
+                    on_event=on_event,
+                    cancellation_token=cancellation_token,
+                )
+                _raise_if_cancelled(cancellation_token)
+            except TurnCancelledError:
+                assistant_msg = Message(
+                    role="assistant",
+                    content=TURN_CANCELLED_TEXT,
+                    metadata={"stopped": True},
+                )
+                pending_session_messages.append(assistant_msg)
+                save_error = _append_session_messages(
+                    self.sessions,
+                    session_id,
+                    pending_session_messages,
+                    self.workspace,
+                )
+                return _with_save_error(TURN_CANCELLED_TEXT, save_error)
             except Exception as exc:  # noqa: BLE001 - the loop must persist failed turns.
                 error_text = _format_llm_error(exc, self.workspace)
                 assistant_msg = Message(
@@ -94,8 +160,8 @@ class AgentLoop:
             assistant_msg = Message(
                 role="assistant",
                 content=str(response.content),
-                tool_calls=list(getattr(response, "tool_calls", []) or []),
-                metadata=dict(getattr(response, "metadata", {}) or {}),
+                tool_calls=list(response.tool_calls or []),
+                metadata=dict(response.metadata or {}),
             )
             pending_session_messages.append(assistant_msg)
             messages.append(_message_to_llm_dict(assistant_msg))
@@ -135,11 +201,74 @@ class AgentLoop:
 
             tool_iterations += 1
             for index, raw_call in enumerate(assistant_msg.tool_calls):
+                _raise_if_cancelled(cancellation_token)
                 call = _parse_tool_call(raw_call, index)
                 result = call.error or _execute_tool(self.tools, call)
+                _raise_if_cancelled(cancellation_token)
                 tool_msg = _tool_result_to_message(call, result)
                 pending_session_messages.append(tool_msg)
                 messages.append(_message_to_llm_dict(tool_msg))
+
+
+def _call_llm(
+    llm: LLMProvider,
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    on_event: TurnEventCallback | None,
+    cancellation_token: CancellationToken | None,
+) -> LLMResponse:
+    """Call a streaming provider when available, otherwise fall back to chat()."""
+
+    stream_chat = getattr(llm, "stream_chat", None)
+    if callable(stream_chat):
+        content_parts: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        metadata: dict[str, Any] = {}
+        for raw_chunk in stream_chat(messages=messages, tools=tools):
+            _raise_if_cancelled(cancellation_token)
+            chunk = _normalize_stream_chunk(raw_chunk)
+            if chunk.content_delta:
+                content_parts.append(chunk.content_delta)
+                _emit_event(on_event, {"type": "text_delta", "content": chunk.content_delta})
+            if chunk.tool_calls:
+                tool_calls = list(chunk.tool_calls)
+            if chunk.metadata:
+                metadata.update(chunk.metadata)
+        return LLMResponse(
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+            metadata=metadata,
+        )
+
+    response = llm.chat(messages=messages, tools=tools)
+    if response.content:
+        _emit_event(on_event, {"type": "text_delta", "content": response.content})
+    return response
+
+
+def _normalize_stream_chunk(raw_chunk: LLMStreamChunk | str) -> LLMStreamChunk:
+    """Convert protocol-supported stream chunk shapes to LLMStreamChunk."""
+
+    if isinstance(raw_chunk, LLMStreamChunk):
+        return raw_chunk
+    if isinstance(raw_chunk, str):
+        return LLMStreamChunk(content_delta=raw_chunk)
+    raise TypeError(f"Unsupported LLM stream chunk type: {type(raw_chunk).__name__}")
+
+
+def _emit_event(on_event: TurnEventCallback | None, event: dict[str, Any]) -> None:
+    """Emit one turn event without coupling AgentLoop to a transport."""
+
+    if on_event is not None:
+        on_event(event)
+
+
+def _raise_if_cancelled(cancellation_token: CancellationToken | None) -> None:
+    """Raise TurnCancelledError when the optional cancellation token is set."""
+
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
 
 
 def _execute_tool(tools: ToolProvider | None, call: ParsedToolCall) -> ToolResult:

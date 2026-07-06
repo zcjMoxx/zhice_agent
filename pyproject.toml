@@ -10,12 +10,15 @@ authors = [
 ]
 dependencies = [
     "colorama>=0.4.6",
+    "fastapi>=0.110.0",
     "litellm>=1.0.0",
     "PyYAML>=6.0",
+    "uvicorn>=0.29.0",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "httpx>=0.27.0",
     "pytest>=8.0.0",
     "ruff>=0.6.0",
 ]

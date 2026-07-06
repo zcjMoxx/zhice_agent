@@ -1,4 +1,4 @@
-"""AgentLoop coverage for a complete local Skill tool chain."""
+﻿"""AgentLoop coverage for a complete local Skill tool chain."""
 
 import json
 import sys
@@ -63,7 +63,7 @@ def test_agent_loop_can_load_skill_then_exec_script(tmp_path):
 
 
 def _make_loop(workspace, *, llm, tools, sessions):
-    from agent.loop import AgentLoop
+    from agent.core.loop import AgentLoop
 
     return AgentLoop(
         llm=llm,
@@ -150,3 +150,4 @@ class ScriptedLLM:
     def chat(self, messages, tools=None):
         response = self.responses.pop(0)
         return response
+

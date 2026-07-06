@@ -1,4 +1,4 @@
-"""Tests for the minimal no-tool AgentLoop."""
+﻿"""Tests for the minimal no-tool AgentLoop."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,7 +11,7 @@ from agent.protocols.session import SessionState
 def test_run_turn_returns_assistant_text_and_appends_session_messages(tmp_path):
     """A successful turn should save user and assistant messages exactly once."""
 
-    from agent.loop import AgentLoop
+    from agent.core.loop import AgentLoop
     from agent.protocols.llm import LLMResponse
 
     llm = FakeLLM(LLMResponse(content="hi there", metadata={"model": "fake"}))
@@ -33,7 +33,7 @@ def test_run_turn_returns_assistant_text_and_appends_session_messages(tmp_path):
 def test_run_turn_passes_existing_history_to_context_builder(tmp_path):
     """The current user message should be separate from loaded session history."""
 
-    from agent.loop import AgentLoop
+    from agent.core.loop import AgentLoop
     from agent.protocols.llm import LLMResponse
 
     history = [Message(role="user", content="before")]
@@ -61,7 +61,7 @@ def test_run_turn_passes_existing_history_to_context_builder(tmp_path):
 def test_run_turn_records_error_marker_when_llm_raises(tmp_path):
     """LLM failures should leave a complete session turn without leaking details."""
 
-    from agent.loop import AgentLoop
+    from agent.core.loop import AgentLoop
 
     llm = RaisingLLM(RuntimeError("upstream rejected secret sk-test"))
     sessions = InMemorySessionStore()
@@ -87,7 +87,7 @@ def test_run_turn_records_error_marker_when_llm_raises(tmp_path):
 def test_run_turn_explains_missing_api_key(tmp_path):
     """Configuration errors should tell the user exactly what to set."""
 
-    from agent.loop import AgentLoop
+    from agent.core.loop import AgentLoop
     from agent.protocols.llm import LLMConfigurationError
 
     llm = RaisingLLM(LLMConfigurationError("LLM API key is missing. Set api_key in llm_endpoints.json."))
@@ -111,7 +111,7 @@ def test_run_turn_explains_missing_api_key(tmp_path):
 def test_run_turn_explains_missing_placeholder_environment_variable(tmp_path):
     """Missing ${ENV_VAR} references should tell the user what variable to define."""
 
-    from agent.loop import AgentLoop
+    from agent.core.loop import AgentLoop
     from agent.protocols.llm import LLMConfigurationError
 
     llm = RaisingLLM(
@@ -139,7 +139,7 @@ def test_run_turn_explains_missing_placeholder_environment_variable(tmp_path):
 def test_run_turn_explains_provider_request_failure(tmp_path):
     """Provider errors should point to endpoint configuration."""
 
-    from agent.loop import AgentLoop
+    from agent.core.loop import AgentLoop
     from agent.protocols.llm import LLMProviderError
 
     llm = RaisingLLM(LLMProviderError("LLM HTTP request failed with status 401: bad key"))
@@ -161,7 +161,7 @@ def test_run_turn_explains_provider_request_failure(tmp_path):
 def test_run_turn_reports_session_save_failure(tmp_path):
     """Saving history failures should not hide the LLM/configuration message."""
 
-    from agent.loop import AgentLoop
+    from agent.core.loop import AgentLoop
     from agent.protocols.llm import LLMResponse
 
     loop = AgentLoop(
@@ -176,6 +176,63 @@ def test_run_turn_reports_session_save_failure(tmp_path):
     assert "ok" in result
     assert "Cannot save session history" in result
     assert "contexts" in result
+
+
+def test_run_turn_emits_streaming_text_events(tmp_path):
+    """Streaming providers should surface deltas before the final turn returns."""
+
+    from agent.core.loop import AgentLoop
+    from agent.protocols.llm import LLMStreamChunk
+
+    llm = StreamingLLM([LLMStreamChunk(content_delta="hel"), LLMStreamChunk(content_delta="lo")])
+    sessions = InMemorySessionStore()
+    events = []
+    loop = AgentLoop(llm=llm, sessions=sessions, context_builder=FakeContextBuilder(), workspace=tmp_path)
+
+    result = loop.run_turn("default", "hello", on_event=events.append)
+
+    assert result == "hello"
+    assert events == [
+        {"type": "text_delta", "content": "hel"},
+        {"type": "text_delta", "content": "lo"},
+    ]
+    assert sessions.appended["default"][-1].content == "hello"
+
+
+def test_stream_chunk_rejects_shapes_outside_protocol():
+    """Streaming providers should return strings or LLMStreamChunk objects."""
+
+    import pytest
+
+    from agent.core.loop import _normalize_stream_chunk
+
+    with pytest.raises(TypeError, match="Unsupported LLM stream chunk type"):
+        _normalize_stream_chunk({"content_delta": "hello"})
+
+
+def test_run_turn_stops_when_cancellation_token_is_set(tmp_path):
+    """Cancellation should stop later deltas and persist a stopped marker."""
+
+    from agent.core.loop import TURN_CANCELLED_TEXT, AgentLoop, CancellationToken
+    from agent.protocols.llm import LLMStreamChunk
+
+    token = CancellationToken()
+    llm = StreamingLLM([LLMStreamChunk(content_delta="first"), LLMStreamChunk(content_delta="late")])
+    sessions = InMemorySessionStore()
+    events = []
+
+    def on_event(event):
+        events.append(event)
+        token.cancel()
+
+    loop = AgentLoop(llm=llm, sessions=sessions, context_builder=FakeContextBuilder(), workspace=tmp_path)
+
+    result = loop.run_turn("default", "hello", on_event=on_event, cancellation_token=token)
+
+    assert result == TURN_CANCELLED_TEXT
+    assert events == [{"type": "text_delta", "content": "first"}]
+    assert sessions.appended["default"][-1].content == TURN_CANCELLED_TEXT
+    assert sessions.appended["default"][-1].metadata["stopped"] is True
 
 
 @dataclass
@@ -231,9 +288,18 @@ class RaisingLLM:
         raise self.error
 
 
+class StreamingLLM:
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    def stream_chat(self, messages, tools=None):
+        yield from self.chunks
+
+
 class FailingSessionStore:
     def load(self, session_id: str) -> SessionState:
         return SessionState(session_id=session_id, messages=[])
 
     def append(self, session_id: str, messages: list[Message]) -> None:
         raise PermissionError("no write access")
+

@@ -122,6 +122,28 @@ def test_cli_gateway_check_uses_configured_workspace(tmp_path, capsys, monkeypat
     assert str(tmp_path.resolve()) in output
 
 
+def test_cli_gateway_passes_log_options(tmp_path, capsys, monkeypatch):
+    """Gateway log flags should be passed to the FastAPI runner."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    captured = {}
+
+    def capture_gateway(config, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("agent.cli.run_gateway", capture_gateway)
+
+    result = main(["gateway", "--log-level", "warning", "--access-log", "off"])
+
+    capsys.readouterr()
+    assert result == 0
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 10086
+    assert captured["log_level"] == "warning"
+    assert captured["access_log"] is False
+
+
 def test_cli_gateway_reports_missing_workspace(tmp_path, capsys, monkeypatch):
     """Gateway startup should share the same workspace setup guard as chat."""
 
@@ -342,6 +364,78 @@ def test_cli_sessions_lists_previews(tmp_path, capsys, monkeypatch):
     assert "beta" in output
     assert "first alpha message" in output
     assert "first beta message" in output
+    assert "Tip: use '/sessions rename <id> <title>'" in output
+    assert "'/sessions delete (<id>)'" in output
+
+
+def test_cli_sessions_rename_updates_title(tmp_path, capsys, monkeypatch):
+    """The /sessions rename command should set a title without calling the LLM."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    echo = _EchoLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: echo)
+    sessions_dir = tmp_path / "contexts" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    sessions_dir.joinpath("alpha.jsonl").write_text(
+        '{"role":"user","content":"first alpha message","timestamp":1.0,"name":null,"tool_call_id":null,"tool_calls":[],"metadata":{}}\n',
+        encoding="utf-8",
+    )
+    inputs = iter(["/sessions rename alpha 新标题", "/sessions", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "session renamed:" in output
+    assert "新标题" in output
+    assert echo.chat_calls == 0
+
+
+def test_cli_sessions_delete_without_id_clears_current_session(tmp_path, capsys, monkeypatch):
+    """Deleting without an id should behave like /reset for the current session."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    monkeypatch.setattr("agent.cli._default_session_id", lambda: "chat-delete-day")
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    inputs = iter(["hello", "/sessions delete", "/history", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "session cleared:" in output
+    assert "(empty history)" in output
+    assert not (tmp_path / "contexts" / "sessions" / "chat-delete-day.jsonl").exists()
+
+
+def test_cli_sessions_delete_with_id_deletes_other_session(tmp_path, capsys, monkeypatch):
+    """Deleting another id should remove that stored session."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    sessions_dir = tmp_path / "contexts" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    sessions_dir.joinpath("alpha.jsonl").write_text(
+        '{"role":"user","content":"first alpha message","timestamp":1.0,"name":null,"tool_call_id":null,"tool_calls":[],"metadata":{}}\n',
+        encoding="utf-8",
+    )
+    inputs = iter(["/sessions delete alpha", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main(["--session", "beta"])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "session deleted:" in output
+    assert not (sessions_dir / "alpha.jsonl").exists()
 
 
 def test_cli_tools_lists_default_tools(tmp_path, capsys, monkeypatch):
@@ -699,9 +793,13 @@ sources:
 
 
 class _EchoLLM:
+    def __init__(self):
+        self.chat_calls = 0
+
     def chat(self, messages, tools=None):
         from agent.protocols.llm import LLMResponse
 
+        self.chat_calls += 1
         return LLMResponse(content="ok")
 
 
