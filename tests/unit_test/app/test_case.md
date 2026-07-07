@@ -28,3 +28,10 @@
 - API 测试只使用 fake runtime，不访问真实 LLM 或网络。
 - gateway `--check` 仍只做配置检查，不启动 HTTP 服务。
 - Web/API 层不反向进入 AgentLoop 之外的业务分支。
+
+## Part 7 Turn Coverage
+
+- WebRuntime accepts an optional `turn_id` and passes it to AgentLoop.
+- WebSocket accepted, text, done, stopped, and error events carry the aligned turn id.
+- Session history API exposes optional message turn fields.
+- SSE status, delta, done, stopped, and error payloads carry one consistent turn id.

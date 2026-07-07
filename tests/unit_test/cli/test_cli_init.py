@@ -477,6 +477,7 @@ def test_cli_help_keeps_skill_sync_as_skills_tip(tmp_path, capsys, monkeypatch):
     assert result == 0
     assert "/skills" in output
     assert "/skills sync" not in output
+    assert "/stop" not in output
 
 
 def test_cli_skills_lists_empty_directory(tmp_path, capsys, monkeypatch):

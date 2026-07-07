@@ -39,6 +39,89 @@ def test_append_then_load_preserves_message_order(tmp_path):
     assert [message.metadata["timestamp"] for message in state.messages] == [1.0, 2.0]
 
 
+def test_append_writes_turn_fields_at_jsonl_top_level(tmp_path):
+    """New persisted messages should expose turn fields as stable JSONL fields."""
+
+    store = JsonlSessionStore(tmp_path)
+
+    store.append(
+        "default",
+        [
+            Message(
+                role="assistant",
+                content="done",
+                turn_id="turn-abc",
+                turn_index=2,
+                parent_turn_id="turn-parent",
+                metadata={"timestamp": 10.0},
+            )
+        ],
+    )
+
+    record = json.loads((tmp_path / "default.jsonl").read_text(encoding="utf-8"))
+
+    assert record["turn_id"] == "turn-abc"
+    assert record["turn_index"] == 2
+    assert record["parent_turn_id"] == "turn-parent"
+    assert record["metadata"] == {}
+
+
+def test_load_restores_top_level_turn_fields(tmp_path):
+    """Top-level turn fields should be read into Message attributes."""
+
+    session_file = tmp_path / "default.jsonl"
+    session_file.write_text(
+        json.dumps(
+            {
+                "role": "assistant",
+                "content": "done",
+                "timestamp": 3.0,
+                "turn_id": "turn-abc",
+                "turn_index": 4,
+                "parent_turn_id": "turn-parent",
+                "metadata": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    message = JsonlSessionStore(tmp_path).load("default").messages[0]
+
+    assert message.turn_id == "turn-abc"
+    assert message.turn_index == 4
+    assert message.parent_turn_id == "turn-parent"
+
+
+def test_load_does_not_promote_turn_fields_from_metadata(tmp_path):
+    """Only top-level turn fields are treated as persisted turn metadata."""
+
+    session_file = tmp_path / "default.jsonl"
+    session_file.write_text(
+        json.dumps(
+            {
+                "role": "assistant",
+                "content": "done",
+                "timestamp": 3.0,
+                "metadata": {
+                    "turn_id": "turn-meta",
+                    "turn_index": 5,
+                    "parent_turn_id": "turn-parent",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    message = JsonlSessionStore(tmp_path).load("default").messages[0]
+
+    assert message.turn_id is None
+    assert message.turn_index is None
+    assert message.parent_turn_id is None
+    assert message.metadata["turn_id"] == "turn-meta"
+
+
 def test_append_creates_jsonl_file_with_utf8_content(tmp_path):
     """Session files should be UTF-8 JSONL and keep Chinese text readable."""
 

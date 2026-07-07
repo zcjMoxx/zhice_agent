@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from agent.core.context_relevance import select_relevant_turns
+from agent.core.turns import group_messages_by_turn
 from agent.message import Message
 from agent.prompt_loader import PromptLoader
 from agent.protocols.skill import SkillProvider
@@ -19,13 +21,19 @@ class ContextBuilder:
         self,
         prompt_loader: PromptLoader,
         skills: SkillProvider | None = None,
-        max_history_messages: int = 30,
+        max_history_turns: int | None = 8,
+        max_relevant_turns: int = 3,
+        max_history_messages: int = 60,
         max_message_chars: int = 8000,
         max_skill_summaries: int = 50,
         max_skill_summary_chars: int = 5000,
     ):
         """Configure prompt source and history/message size limits."""
 
+        if max_history_turns is not None and max_history_turns < 0:
+            raise ValueError("max_history_turns must be non-negative or None")
+        if max_relevant_turns < 0:
+            raise ValueError("max_relevant_turns must be non-negative")
         if max_history_messages < 0:
             raise ValueError("max_history_messages must be non-negative")
         if max_message_chars <= 0:
@@ -37,6 +45,8 @@ class ContextBuilder:
 
         self.prompt_loader = prompt_loader
         self.skills = skills
+        self.max_history_turns = max_history_turns
+        self.max_relevant_turns = max_relevant_turns
         self.max_history_messages = max_history_messages
         self.max_message_chars = max_message_chars
         self.max_skill_summaries = max_skill_summaries
@@ -58,7 +68,7 @@ class ContextBuilder:
             }
         ]
 
-        recent_history = history[-self.max_history_messages :] if self.max_history_messages else []
+        recent_history = self._select_recent_history(history, query=user_message.content)
         messages.extend(self._history_to_llm_dicts(recent_history))
 
         current_user = self._message_to_llm_dict(user_message)
@@ -66,6 +76,29 @@ class ContextBuilder:
             raise ValueError("user_message must have role 'user'")
         messages.append(current_user)
         return messages
+
+    def _select_recent_history(self, history: list[Message], *, query: str) -> list[Message]:
+        """Return history selected by recent relevant user turns or message fallback."""
+
+        if self.max_history_turns is None:
+            return history[-self.max_history_messages :] if self.max_history_messages else []
+        if self.max_history_turns == 0 or self.max_history_messages == 0:
+            return []
+
+        user_turns = [
+            group
+            for group in group_messages_by_turn(history)
+            if any(message.role == "user" for message in group.messages)
+        ]
+        candidate_turns = user_turns[-self.max_history_turns :]
+        selected_turns = select_relevant_turns(
+            query,
+            candidate_turns,
+            max_selected_turns=self.max_relevant_turns,
+        )
+        while len(selected_turns) > 1 and _message_count(selected_turns) > self.max_history_messages:
+            selected_turns = selected_turns[1:]
+        return [message for group in selected_turns for message in group.messages]
 
     def _build_system_prompt(self, workspace: Path, session_id: str) -> str:
         """Combine runtime prompts with workspace/session facts for the LLM."""
@@ -190,3 +223,9 @@ def _tool_call_ids(tool_calls: list[dict[str, Any]]) -> list[str]:
             return []
         ids.append(raw_id)
     return ids
+
+
+def _message_count(groups) -> int:
+    """Return total messages across a small list of TurnGroup-like objects."""
+
+    return sum(len(group.messages) for group in groups)

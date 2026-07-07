@@ -45,6 +45,9 @@ class ChatMessageResponse(BaseModel):
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    turn_id: str | None = None
+    turn_index: int | None = None
+    parent_turn_id: str | None = None
 
 
 class SessionResponse(BaseModel):

@@ -24,6 +24,7 @@ from agent.app.api.schemas import (
     SessionSummaryResponse,
 )
 from agent.app.runtime import ChatTurnResult, ModelState
+from agent.core.turns import new_turn_id
 from agent.message import Message
 from agent.protocols.llm import LLMConfigurationError, LLMProviderError
 
@@ -130,13 +131,17 @@ def chat(request_body: ChatRequest, request: Request) -> ChatResponse:
         selected_model = (request_body.model or "").strip()
         if _should_apply_model_preference(message, selected_model):
             runtime.set_model_preference(selected_model)
-        assistant_text = _run_chat_events(runtime, session_id, message).content
+        result = _run_chat_events(runtime, session_id, message)
     except Exception as exc:
         raise _api_error_from_exception(exc) from exc
 
     return ChatResponse(
         session_id=session_id,
-        assistant=ChatMessageResponse(role="assistant", content=assistant_text),
+        assistant=ChatMessageResponse(
+            role="assistant",
+            content=result.content,
+            turn_id=result.turn_id or None,
+        ),
     )
 
 
@@ -203,10 +208,17 @@ def _runtime(request: Request):
     return runtime
 
 
-def _run_chat_events(runtime, session_id: str, message: str, on_event=None) -> ChatTurnResult:
+def _run_chat_events(
+    runtime,
+    session_id: str,
+    message: str,
+    on_event=None,
+    *,
+    turn_id: str | None = None,
+) -> ChatTurnResult:
     """Run a chat turn through the required Web runtime event path."""
 
-    return runtime.run_chat_events(session_id, message, on_event=on_event)
+    return runtime.run_chat_events(session_id, message, turn_id=turn_id, on_event=on_event)
 
 
 def _should_apply_model_preference(message: str, model: str) -> bool:
@@ -218,7 +230,8 @@ def _should_apply_model_preference(message: str, model: str) -> bool:
 def _chat_stream_events(runtime, session_id: str, message: str):
     """Yield one chat result as SSE events."""
 
-    yield _sse("status", {"phase": "accepted"})
+    turn_id = new_turn_id()
+    yield _sse("status", {"phase": "accepted", "turn_id": turn_id})
     events: Queue[tuple[str, Any]] = Queue()
 
     def on_event(event: dict[str, Any]) -> None:
@@ -226,7 +239,7 @@ def _chat_stream_events(runtime, session_id: str, message: str):
 
     def worker() -> None:
         try:
-            result = _run_chat_events(runtime, session_id, message, on_event=on_event)
+            result = _run_chat_events(runtime, session_id, message, on_event=on_event, turn_id=turn_id)
         except Exception as exc:  # noqa: BLE001 - streaming responses must encode errors.
             events.put(("error", exc))
             return
@@ -239,19 +252,28 @@ def _chat_stream_events(runtime, session_id: str, message: str):
         kind, payload = events.get()
         if kind == "event":
             if payload.get("type") == "text_delta":
-                yield _sse("delta", {"content": payload.get("content", "")})
+                yield _sse("delta", {"content": payload.get("content", ""), "turn_id": turn_id})
             continue
         if kind == "error":
             error = _api_error_from_exception(payload)
-            yield _sse("error", {"error": {"code": error.code, "message": error.message}})
+            yield _sse(
+                "error",
+                {"turn_id": turn_id, "error": {"code": error.code, "message": error.message}},
+            )
             break
         result = payload
-        assistant = ChatMessageResponse(role="assistant", content=result.content)
+        result_turn_id = result.turn_id or turn_id
+        assistant = ChatMessageResponse(
+            role="assistant",
+            content=result.content,
+            turn_id=result_turn_id,
+        )
         done_event = "stopped" if result.stopped else "done"
         yield _sse(
             done_event,
             {
                 "session_id": session_id,
+                "turn_id": result_turn_id,
                 "assistant": _model_dump(assistant),
             },
         )
@@ -308,6 +330,9 @@ def _message_response(message: Message) -> ChatMessageResponse:
         tool_call_id=message.tool_call_id,
         tool_calls=list(message.tool_calls),
         metadata=dict(message.metadata),
+        turn_id=message.turn_id,
+        turn_index=message.turn_index,
+        parent_turn_id=message.parent_turn_id,
     )
 
 

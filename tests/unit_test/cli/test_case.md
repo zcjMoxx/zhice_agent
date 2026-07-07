@@ -59,3 +59,9 @@
 - 输入：普通用户消息，测试中替换为 Fake LLM。
 - 预期：CLI 调用 AgentLoop 并打印 assistant 文本。
 - 检查点：测试不访问真实网络或真实 LLM。
+
+## Part 7 Turn Coverage
+
+- CLI normal chat relies on AgentLoop-generated turn fields.
+- KeyboardInterrupt fallback writes interrupted messages with one generated turn.
+- CLI help still does not advertise a runtime `/stop` command before the concurrent input path exists.

@@ -28,6 +28,26 @@ def test_run_turn_returns_assistant_text_and_appends_session_messages(tmp_path):
         ("assistant", "hi there"),
     ]
     assert sessions.appended["default"][1].metadata == {"model": "fake"}
+    _assert_single_turn(sessions.appended["default"], expected_index=1)
+
+
+def test_run_turn_uses_external_turn_id_when_provided(tmp_path):
+    """Web callers should be able to align accepted events with persisted messages."""
+
+    from agent.core.loop import AgentLoop
+    from agent.protocols.llm import LLMResponse
+
+    llm = FakeLLM(LLMResponse(content="hi"))
+    sessions = InMemorySessionStore()
+    loop = AgentLoop(llm=llm, sessions=sessions, context_builder=FakeContextBuilder(), workspace=tmp_path)
+
+    loop.run_turn("default", "hello", turn_id="turn-web")
+
+    _assert_single_turn(
+        sessions.appended["default"],
+        expected_turn_id="turn-web",
+        expected_index=1,
+    )
 
 
 def test_run_turn_passes_existing_history_to_context_builder(tmp_path):
@@ -36,7 +56,7 @@ def test_run_turn_passes_existing_history_to_context_builder(tmp_path):
     from agent.core.loop import AgentLoop
     from agent.protocols.llm import LLMResponse
 
-    history = [Message(role="user", content="before")]
+    history = [Message(role="user", content="before", turn_id="turn-before", turn_index=1)]
     sessions = InMemorySessionStore(states={"default": SessionState("default", history)})
     context_builder = FakeContextBuilder(messages=[{"role": "user", "content": "from context"}])
     loop = AgentLoop(
@@ -48,14 +68,14 @@ def test_run_turn_passes_existing_history_to_context_builder(tmp_path):
 
     loop.run_turn("default", "current")
 
-    assert context_builder.calls == [
-        {
-            "history": history,
-            "user_message": Message(role="user", content="current"),
-            "workspace": tmp_path,
-            "session_id": "default",
-        }
-    ]
+    assert context_builder.calls[0]["history"] == history
+    assert context_builder.calls[0]["workspace"] == tmp_path
+    assert context_builder.calls[0]["session_id"] == "default"
+    user_message = context_builder.calls[0]["user_message"]
+    assert user_message.role == "user"
+    assert user_message.content == "current"
+    assert user_message.turn_id is not None
+    assert user_message.turn_index == 2
 
 
 def test_run_turn_records_error_marker_when_llm_raises(tmp_path):
@@ -82,6 +102,7 @@ def test_run_turn_records_error_marker_when_llm_raises(tmp_path):
         ("assistant", result),
     ]
     assert appended[1].metadata["is_error"] is True
+    _assert_single_turn(appended, expected_index=1)
 
 
 def test_run_turn_explains_missing_api_key(tmp_path):
@@ -197,6 +218,7 @@ def test_run_turn_emits_streaming_text_events(tmp_path):
         {"type": "text_delta", "content": "lo"},
     ]
     assert sessions.appended["default"][-1].content == "hello"
+    _assert_single_turn(sessions.appended["default"], expected_index=1)
 
 
 def test_stream_chunk_rejects_shapes_outside_protocol():
@@ -233,6 +255,24 @@ def test_run_turn_stops_when_cancellation_token_is_set(tmp_path):
     assert events == [{"type": "text_delta", "content": "first"}]
     assert sessions.appended["default"][-1].content == TURN_CANCELLED_TEXT
     assert sessions.appended["default"][-1].metadata["stopped"] is True
+    _assert_single_turn(sessions.appended["default"], expected_index=1)
+
+
+def _assert_single_turn(
+    messages: list[Message],
+    *,
+    expected_turn_id: str | None = None,
+    expected_index: int,
+) -> None:
+    turn_ids = {message.turn_id for message in messages}
+    turn_indices = {message.turn_index for message in messages}
+    assert None not in turn_ids
+    if expected_turn_id is not None:
+        assert turn_ids == {expected_turn_id}
+    else:
+        assert len(turn_ids) == 1
+        assert next(iter(turn_ids)).startswith("turn-")  # type: ignore[union-attr]
+    assert turn_indices == {expected_index}
 
 
 @dataclass

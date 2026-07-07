@@ -17,7 +17,17 @@ from agent.message import Message, Role
 from agent.protocols.session import SessionState, SessionSummary
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_MESSAGE_FIELDS = {"role", "content", "name", "tool_call_id", "tool_calls", "metadata"}
+_MESSAGE_FIELDS = {
+    "role",
+    "content",
+    "name",
+    "tool_call_id",
+    "tool_calls",
+    "metadata",
+    "turn_id",
+    "turn_index",
+    "parent_turn_id",
+}
 
 
 class InvalidSessionIdError(ValueError):
@@ -183,6 +193,9 @@ class JsonlSessionStore:
             "role": message.role,
             "content": message.content,
             "timestamp": timestamp,
+            "turn_id": message.turn_id,
+            "turn_index": message.turn_index,
+            "parent_turn_id": message.parent_turn_id,
             "name": message.name,
             "tool_call_id": message.tool_call_id,
             "tool_calls": message.tool_calls,
@@ -197,10 +210,22 @@ class JsonlSessionStore:
         if "timestamp" in record:
             metadata.setdefault("timestamp", record["timestamp"])
 
+        turn_id = record.get("turn_id")
+        if not isinstance(turn_id, str) or not turn_id:
+            turn_id = None
+
+        turn_index = record.get("turn_index")
+        if not isinstance(turn_index, int):
+            turn_index = None
+
+        parent_turn_id = record.get("parent_turn_id")
+        if not isinstance(parent_turn_id, str) or not parent_turn_id:
+            parent_turn_id = None
+
         message_data = {
             key: record.get(key)
             for key in _MESSAGE_FIELDS
-            if key in record and key != "metadata"
+            if key in record and key not in {"metadata", "turn_id", "turn_index", "parent_turn_id"}
         }
         return Message(
             role=message_data.get("role", "user"),  # type: ignore[arg-type]
@@ -209,6 +234,9 @@ class JsonlSessionStore:
             tool_call_id=message_data.get("tool_call_id"),
             tool_calls=list(message_data.get("tool_calls") or []),
             metadata=metadata,
+            turn_id=turn_id,
+            turn_index=turn_index,
+            parent_turn_id=parent_turn_id,
         )
 
 

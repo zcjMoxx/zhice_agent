@@ -355,13 +355,14 @@ setModelPreference(value)
 
 后续可以单独设计：
 
+- 持久化 turn_id，让 accepted/done/stopped 与历史消息完全统一。
+- Gateway / Agent 运行日志优化之后，再设计前端工具调用日志面板。
+- 用户、登录与权限执行边界确定后，再接登录页、账号中心、角色权限配置和审计视图。
 - Vue/Vite 前端工程化。
-- 工具调用日志面板。
 - `/model` Web 控制面。
 - Skill source 状态页。
 - 设置页和用户入口。
 - 会话标题生成、搜索和归档。
-- 持久化 turn_id，让 accepted/done/stopped 与历史消息完全统一。
 - 更完整的 Markdown/代码高亮渲染。
 
 这些能力不并入当前 UI 方案，避免第六部分从“Web 最小版”膨胀成完整产品平台。等后续方案落地后，再把新的当前准则同步回本文。

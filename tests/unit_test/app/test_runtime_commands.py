@@ -140,7 +140,25 @@ def test_sessions_invalid_subcommand_returns_usage(tmp_path):
     assert "/sessions delete [id]" in result
 
 
-def _runtime(tmp_path: Path) -> WebRuntime:
+def test_run_chat_events_passes_external_turn_id_to_agent_loop(tmp_path):
+    agent_loop = _RecordingAgentLoop()
+    runtime = _runtime(tmp_path, agent_loop=agent_loop)
+
+    result = runtime.run_chat_events("alpha", "hello", turn_id="turn-web")
+
+    assert result.turn_id == "turn-web"
+    assert result.content == "ok"
+    assert agent_loop.calls == [
+        {
+            "session_id": "alpha",
+            "message": "hello",
+            "turn_id": "turn-web",
+            "has_token": True,
+        }
+    ]
+
+
+def _runtime(tmp_path: Path, *, agent_loop=None) -> WebRuntime:
     return WebRuntime(
         config=AppConfig(
             workspace=tmp_path,
@@ -152,7 +170,7 @@ def _runtime(tmp_path: Path) -> WebRuntime:
             logs_dir=tmp_path / "logs",
         ),
         sessions=_SessionStore(),
-        agent_loop=_AgentLoop(),
+        agent_loop=agent_loop or _AgentLoop(),
         llm=_Llm(),
     )
 
@@ -198,6 +216,32 @@ class _SessionStore:
 class _AgentLoop:
     def run_turn(self, *_args, **_kwargs) -> str:
         raise AssertionError("commands should not enter AgentLoop")
+
+
+class _RecordingAgentLoop:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def run_turn(
+        self,
+        session_id,
+        message,
+        *,
+        turn_id=None,
+        on_event=None,
+        cancellation_token=None,
+    ) -> str:
+        self.calls.append(
+            {
+                "session_id": session_id,
+                "message": message,
+                "turn_id": turn_id,
+                "has_token": cancellation_token is not None,
+            }
+        )
+        if on_event is not None:
+            on_event({"type": "text_delta", "content": "ok"})
+        return "ok"
 
 
 class _Llm:

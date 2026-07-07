@@ -2,7 +2,7 @@
 
 ## 测试目标
 
-验证 ContextBuilder 能把 prompt、运行环境、历史消息和当前用户消息组装成 OpenAI-compatible messages，并在第三部分保留工具调用历史。
+验证 ContextBuilder 能把 prompt、运行环境、相关历史消息和当前用户消息组装成 OpenAI-compatible messages，并在第三部分保留工具调用历史。
 
 ## 用例覆盖
 
@@ -47,3 +47,15 @@
 - 输入：缺少必需 prompt 文件。
 - 预期：构造上下文时抛出可定位的错误。
 - 检查点：错误信息包含缺失 prompt 名称。
+
+## Part 7 Turn Coverage
+
+- Treat `max_history_turns` as the recent user-turn candidate count.
+- Select only locally relevant candidate turns before injecting history.
+- Omit unrelated prior turns, including greeting-only current inputs.
+- Keep direct follow-ups when the current input references terms from a previous full turn.
+- Keep short confirmations only when the immediately previous assistant message is asking for confirmation.
+- Preserve the old message-count behavior when `max_history_turns=None`.
+- Drop old turns as whole units when the message hard cap is exceeded.
+- Ignore untagged history messages in recent user turn selection.
+- Keep OpenAI-compatible tool-call block filtering after turn selection.

@@ -10,6 +10,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from agent.app.api.routes import _api_error_from_exception
 from agent.app.runtime import EXTERNAL_COMMAND_PROFILE, WEB_COMMAND_PROFILE, ChatTurnResult
+from agent.core.turns import new_turn_id
 
 router = APIRouter()
 
@@ -25,10 +26,18 @@ async def websocket_chat(websocket: WebSocket) -> None:
     send_lock = asyncio.Lock()
     active_tasks: set[asyncio.Task[None]] = set()
 
-    async def send_event(event: str, data: Any, *, session_id: str = "") -> None:
+    async def send_event(
+        event: str,
+        data: Any,
+        *,
+        session_id: str = "",
+        turn_id: str = "",
+    ) -> None:
         payload: dict[str, Any] = {"event": event, "data": data}
         if session_id:
             payload["session_id"] = session_id
+        if turn_id:
+            payload["turn_id"] = turn_id
         async with send_lock:
             await websocket.send_json(payload)
 
@@ -92,7 +101,12 @@ async def websocket_chat(websocket: WebSocket) -> None:
                 content.lower() == "/stop" and command_profile == EXTERNAL_COMMAND_PROFILE
             ):
                 result = runtime.cancel_session(session_id)
-                await send_event("channel_status", {"type": "stopped", **result}, session_id=session_id)
+                await send_event(
+                    "channel_status",
+                    {"type": "stopped", **result},
+                    session_id=session_id,
+                    turn_id=str(result.get("turn_id") or ""),
+                )
                 continue
             if frame_type != "message":
                 await send_event(
@@ -122,16 +136,22 @@ async def _run_message_frame(runtime, frame: dict[str, Any], send_event, command
     session_id = str(frame.get("session_id") or "").strip()
     content = str(frame.get("content") or "").strip()
     model = str(frame.get("model") or "").strip()
-    turn_id = "turn-" + uuid.uuid4().hex
+    turn_id = new_turn_id()
     if not content:
         await send_event(
             "channel_status",
             {"type": "error", "turn_id": turn_id, "error": {"code": "INVALID_REQUEST", "message": "content is required"}},
             session_id=session_id,
+            turn_id=turn_id,
         )
         return
 
-    await send_event("channel_status", {"type": "accepted", "turn_id": turn_id}, session_id=session_id)
+    await send_event(
+        "channel_status",
+        {"type": "accepted", "turn_id": turn_id},
+        session_id=session_id,
+        turn_id=turn_id,
+    )
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
@@ -145,6 +165,7 @@ async def _run_message_frame(runtime, frame: dict[str, Any], send_event, command
             result = runtime.run_chat_events(
                 session_id,
                 content,
+                turn_id=turn_id,
                 on_event=on_event,
                 command_profile=command_profile,
             )
@@ -159,7 +180,12 @@ async def _run_message_frame(runtime, frame: dict[str, Any], send_event, command
             kind, payload = await queue.get()
             if kind == "event":
                 if payload.get("type") == "text_delta":
-                    await send_event("channel_text", payload.get("content", ""), session_id=session_id)
+                    await send_event(
+                        "channel_text",
+                        payload.get("content", ""),
+                        session_id=session_id,
+                        turn_id=turn_id,
+                    )
                 continue
             if kind == "error":
                 error = _api_error_from_exception(payload)
@@ -171,18 +197,21 @@ async def _run_message_frame(runtime, frame: dict[str, Any], send_event, command
                         "error": {"code": error.code, "message": error.message},
                     },
                     session_id=session_id,
+                    turn_id=turn_id,
                 )
                 break
             result: ChatTurnResult = payload
             status_type = "stopped" if result.stopped else "done"
+            result_turn_id = result.turn_id or turn_id
             await send_event(
                 "channel_status",
                 {
                     "type": status_type,
-                    "turn_id": result.turn_id or turn_id,
+                    "turn_id": result_turn_id,
                     "assistant": {"role": "assistant", "content": result.content},
                 },
                 session_id=session_id,
+                turn_id=result_turn_id,
             )
             break
     finally:

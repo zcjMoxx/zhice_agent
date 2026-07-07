@@ -32,6 +32,15 @@ class SessionSummary:
     title: str = ""
 
 
+@dataclass
+class TurnGroup:
+    """Runtime grouping of messages that belong to one user turn."""
+
+    turn_id: str
+    turn_index: int | None
+    messages: list[Message]
+
+
 class SessionStore(Protocol):
     """Minimal persistence contract used by the Agent runtime."""
 

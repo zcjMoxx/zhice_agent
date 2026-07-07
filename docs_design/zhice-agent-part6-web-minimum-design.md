@@ -309,7 +309,7 @@ error   {"error":{"code":"LLM_ERROR","message":"..."}}
 - external command profile 声明 `client="external"` 后支持 `/history` 和 `/exit`；其中 `/exit` 只关闭当前 WS 连接，不退出 gateway。
 - `/sessions` 支持与 CLI 对齐的子命令：`/sessions` 列表，`/sessions rename <id> <title>` 重命名，`/sessions delete (<id>)` 删除指定会话；不带 id 删除时清空当前会话。
 - `content="/stop"` 或 `type="stop"` 都在 WebSocket 路由层拦截，不透传给 LLM。
-- 当前 WebSocket accepted 的 `turn_id` 和 runtime active turn 仍未完全统一，已在 `2026-07-04-turn-runtime-and-context-design.md` 中作为 turn 持久化前置问题记录。
+- 当前 WebSocket accepted 的 `turn_id` 和 runtime active turn 仍未完全统一，第七部分施工图见 `docs_design/zhice-agent-part7-turn-context-design.md`。
 
 ### 5.8 `GET /api/models`
 
@@ -496,7 +496,7 @@ browser stop button or input /stop
   -> WebSocket emits stopped status
 ```
 
-当前 stop 仍是内存态 active turn 能力，不代表 turn 已持久化。未来 turn 设计见 `docs_design/2026-07-04-turn-runtime-and-context-design.md`。
+当前 stop 仍是内存态 active turn 能力，不代表 turn 已持久化。第七部分 turn 施工图见 `docs_design/zhice-agent-part7-turn-context-design.md`，背景记录见 `docs_design/2026-07-04-turn-runtime-and-context-design.md`。
 
 ---
 
@@ -643,12 +643,14 @@ http://127.0.0.1:10086/api/sessions
 第六部分完成后再考虑：
 
 - 持久化 turn_id，让 Web accepted/done/stopped 与 Session 历史完全统一。
+- Gateway / Agent 运行日志优化，复用统一后的 `turn_id` 打印 turn、LLM、tool 和 session 保存轨迹。
+- 用户、登录与权限执行边界设计；这属于后续安全执行主线，不并入第六部分 Web 最小版。
 - CLI `/stop`，等待 turn 持久化、active turn registry 和并发输入通道稳定后再做。
 - 会话自动标题、归档和全文搜索。
 - 工具调用日志面板。
 - `/model` Web 控制面。
 - Skill source 状态页。
-- 简单本地访问 token。
+- 登录页、用户/角色/权限管理页和审计视图；这些等权限设计确定后再做。
 - Dockerfile 和本地容器运行方式。
 
 Memory、MCP、Hooks 和 Subagent 继续按后续里程碑单独设计，不并入 Web 最小版。

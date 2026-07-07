@@ -54,6 +54,10 @@ def test_agent_loop_can_load_skill_then_exec_script(tmp_path):
         "tool",
         "assistant",
     ]
+    assert {message.turn_index for message in sessions.appended["default"]} == {1}
+    turn_ids = {message.turn_id for message in sessions.appended["default"]}
+    assert None not in turn_ids
+    assert len(turn_ids) == 1
     load_payload = json.loads(sessions.appended["default"][2].content)
     run_payload = json.loads(sessions.appended["default"][4].content)
     assert load_payload["status"] == "success"

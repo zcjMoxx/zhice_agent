@@ -47,3 +47,10 @@
 - 输入：多个 session 文件。
 - 预期：返回按更新时间倒序排列的摘要。
 - 检查点：preview 优先来自第一条 user 消息，message_count 正确。
+
+## Part 7 Turn Coverage
+
+- Write top-level `turn_id`, `turn_index`, and `parent_turn_id` for new JSONL records.
+- Restore turn fields only from top-level records.
+- Do not promote `metadata.turn_id` or other metadata turn fields into `Message` turn fields.
+- Ensure session listing remains based on preview, timestamp, and message count for new records.

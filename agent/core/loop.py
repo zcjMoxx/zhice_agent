@@ -11,6 +11,7 @@ from typing import Any
 
 from agent.console import console
 from agent.core.context import ContextBuilder
+from agent.core.turns import assign_turn, new_turn_id, next_turn_index
 from agent.message import Message
 from agent.protocols.llm import (
     LLMConfigurationError,
@@ -95,13 +96,20 @@ class AgentLoop:
         session_id: str,
         user_text: str,
         *,
+        turn_id: str | None = None,
         on_event: TurnEventCallback | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> str:
         """Run one user turn, saving user, assistant, and tool messages."""
 
         session = self.sessions.load(session_id)
-        user_msg = Message(role="user", content=user_text)
+        resolved_turn_id = turn_id or new_turn_id()
+        resolved_turn_index = next_turn_index(session.messages)
+        user_msg = assign_turn(
+            Message(role="user", content=user_text),
+            turn_id=resolved_turn_id,
+            turn_index=resolved_turn_index,
+        )
         messages = self.context_builder.build(
             history=session.messages,
             user_message=user_msg,
@@ -112,6 +120,22 @@ class AgentLoop:
         pending_session_messages = [user_msg]
         tool_definitions = self.tools.definitions() if self.tools else None
         tool_iterations = 0
+
+        def persist_cancelled_turn() -> str:
+            assistant_msg = Message(
+                role="assistant",
+                content=TURN_CANCELLED_TEXT,
+                metadata={"stopped": True},
+            )
+            _assign_turn_fields(assistant_msg, resolved_turn_id, resolved_turn_index)
+            pending_session_messages.append(assistant_msg)
+            save_error = _append_session_messages(
+                self.sessions,
+                session_id,
+                pending_session_messages,
+                self.workspace,
+            )
+            return _with_save_error(TURN_CANCELLED_TEXT, save_error)
 
         while True:
             try:
@@ -125,19 +149,7 @@ class AgentLoop:
                 )
                 _raise_if_cancelled(cancellation_token)
             except TurnCancelledError:
-                assistant_msg = Message(
-                    role="assistant",
-                    content=TURN_CANCELLED_TEXT,
-                    metadata={"stopped": True},
-                )
-                pending_session_messages.append(assistant_msg)
-                save_error = _append_session_messages(
-                    self.sessions,
-                    session_id,
-                    pending_session_messages,
-                    self.workspace,
-                )
-                return _with_save_error(TURN_CANCELLED_TEXT, save_error)
+                return persist_cancelled_turn()
             except Exception as exc:  # noqa: BLE001 - the loop must persist failed turns.
                 error_text = _format_llm_error(exc, self.workspace)
                 assistant_msg = Message(
@@ -148,6 +160,7 @@ class AgentLoop:
                         "error_type": type(exc).__name__,
                     },
                 )
+                _assign_turn_fields(assistant_msg, resolved_turn_id, resolved_turn_index)
                 pending_session_messages.append(assistant_msg)
                 save_error = _append_session_messages(
                     self.sessions,
@@ -163,6 +176,7 @@ class AgentLoop:
                 tool_calls=list(response.tool_calls or []),
                 metadata=dict(response.metadata or {}),
             )
+            _assign_turn_fields(assistant_msg, resolved_turn_id, resolved_turn_index)
             pending_session_messages.append(assistant_msg)
             messages.append(_message_to_llm_dict(assistant_msg))
 
@@ -184,12 +198,14 @@ class AgentLoop:
                         metadata={"code": "TOOL_ITERATION_LIMIT", "tool_name": call.name},
                     )
                     tool_msg = _tool_result_to_message(call, call.error or result)
+                    _assign_turn_fields(tool_msg, resolved_turn_id, resolved_turn_index)
                     pending_session_messages.append(tool_msg)
                 limit_msg = Message(
                     role="assistant",
                     content=TOOL_ITERATION_LIMIT_TEXT,
                     metadata={"is_error": True, "code": "TOOL_ITERATION_LIMIT"},
                 )
+                _assign_turn_fields(limit_msg, resolved_turn_id, resolved_turn_index)
                 pending_session_messages.append(limit_msg)
                 save_error = _append_session_messages(
                     self.sessions,
@@ -201,11 +217,18 @@ class AgentLoop:
 
             tool_iterations += 1
             for index, raw_call in enumerate(assistant_msg.tool_calls):
-                _raise_if_cancelled(cancellation_token)
+                try:
+                    _raise_if_cancelled(cancellation_token)
+                except TurnCancelledError:
+                    return persist_cancelled_turn()
                 call = _parse_tool_call(raw_call, index)
                 result = call.error or _execute_tool(self.tools, call)
-                _raise_if_cancelled(cancellation_token)
+                try:
+                    _raise_if_cancelled(cancellation_token)
+                except TurnCancelledError:
+                    return persist_cancelled_turn()
                 tool_msg = _tool_result_to_message(call, result)
+                _assign_turn_fields(tool_msg, resolved_turn_id, resolved_turn_index)
                 pending_session_messages.append(tool_msg)
                 messages.append(_message_to_llm_dict(tool_msg))
 
@@ -388,6 +411,12 @@ def _tool_result_to_message(call: ParsedToolCall, result: ToolResult) -> Message
         tool_call_id=call.id,
         metadata=metadata,
     )
+
+
+def _assign_turn_fields(message: Message, turn_id: str, turn_index: int) -> Message:
+    """Attach the active turn fields to one pending session message."""
+
+    return assign_turn(message, turn_id=turn_id, turn_index=turn_index)
 
 
 def _message_to_llm_dict(message: Message) -> dict[str, Any]:

@@ -49,8 +49,14 @@ def test_session_api_returns_messages(tmp_path):
             "alpha": SessionState(
                 session_id="alpha",
                 messages=[
-                    Message(role="user", content="hello", metadata={"timestamp": 1.0}),
-                    Message(role="assistant", content="hi"),
+                    Message(
+                        role="user",
+                        content="hello",
+                        metadata={"timestamp": 1.0},
+                        turn_id="turn-1",
+                        turn_index=1,
+                    ),
+                    Message(role="assistant", content="hi", turn_id="turn-1", turn_index=1),
                     Message(role="tool", content='{"status":"success"}', name="list_dir"),
                 ],
             )
@@ -69,6 +75,8 @@ def test_session_api_returns_messages(tmp_path):
         ("assistant", "hi"),
         ("tool", '{"status":"success"}'),
     ]
+    assert payload["messages"][0]["turn_id"] == "turn-1"
+    assert payload["messages"][0]["turn_index"] == 1
     assert payload["messages"][2]["name"] == "list_dir"
 
 
@@ -88,6 +96,9 @@ def test_chat_api_calls_runtime_and_returns_assistant_message(tmp_path):
             "tool_call_id": None,
             "tool_calls": [],
             "metadata": {},
+            "turn_id": "turn-fake",
+            "turn_index": None,
+            "parent_turn_id": None,
         },
     }
     assert runtime.chat_calls == [("alpha", "hello")]
@@ -161,12 +172,15 @@ def test_chat_stream_api_emits_sse_status_delta_and_done(tmp_path):
     assert response.status_code == 200
     assert "text/event-stream" in response.headers["content-type"]
     events = _parse_sse(response.text)
-    assert events[0] == ("status", {"phase": "accepted"})
-    assert ("delta", {"content": "streamed reply"}) in events
+    assert events[0][0] == "status"
+    assert events[0][1]["phase"] == "accepted"
+    turn_id = events[0][1]["turn_id"]
+    assert ("delta", {"content": "streamed reply", "turn_id": turn_id}) in events
     assert events[-1] == (
         "done",
         {
             "session_id": "alpha",
+            "turn_id": turn_id,
             "assistant": {
                 "role": "assistant",
                 "content": "streamed reply",
@@ -174,6 +188,9 @@ def test_chat_stream_api_emits_sse_status_delta_and_done(tmp_path):
                 "tool_call_id": None,
                 "tool_calls": [],
                 "metadata": {},
+                "turn_id": turn_id,
+                "turn_index": None,
+                "parent_turn_id": None,
             },
         },
     )
@@ -191,8 +208,9 @@ def test_chat_stream_api_uses_runtime_streaming_events(tmp_path):
 
     assert response.status_code == 200
     events = _parse_sse(response.text)
-    assert ("delta", {"content": "one "}) in events
-    assert ("delta", {"content": "two"}) in events
+    turn_id = events[0][1]["turn_id"]
+    assert ("delta", {"content": "one ", "turn_id": turn_id}) in events
+    assert ("delta", {"content": "two", "turn_id": turn_id}) in events
     assert events[-1][0] == "done"
 
 
@@ -207,7 +225,8 @@ def test_chat_stream_api_handles_slash_commands_without_calling_llm(tmp_path):
 
     assert response.status_code == 200
     events = _parse_sse(response.text)
-    assert ("delta", {"content": "unknown command"}) in events
+    turn_id = events[0][1]["turn_id"]
+    assert ("delta", {"content": "unknown command", "turn_id": turn_id}) in events
     assert runtime.selected_models == []
     assert runtime.command_calls == [("alpha", "/unknown")]
     assert runtime.chat_calls == []
@@ -224,9 +243,10 @@ def test_chat_stream_api_maps_runtime_errors_to_sse_error(tmp_path):
 
     assert response.status_code == 200
     events = _parse_sse(response.text)
+    turn_id = events[0][1]["turn_id"]
     assert events[-1] == (
         "error",
-        {"error": {"code": "LLM_ERROR", "message": "provider failed"}},
+        {"turn_id": turn_id, "error": {"code": "LLM_ERROR", "message": "provider failed"}},
     )
     assert "Traceback" not in response.text
 
@@ -418,12 +438,19 @@ class _FakeRuntime:
             return self.states[session_id]
         return SessionState(session_id=session_id, messages=[])
 
-    def run_chat_events(self, session_id: str, message: str, on_event=None):
+    def run_chat_events(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        turn_id: str | None = None,
+        on_event=None,
+    ):
         command = self.handle_command(session_id, message)
         if command is not None:
             if on_event is not None:
                 on_event({"type": "text_delta", "content": command})
-            return ChatTurnResult(content=command, turn_id="turn-fake")
+            return ChatTurnResult(content=command, turn_id=turn_id or "")
         self.chat_calls.append((session_id, message))
         if self.chat_error:
             raise self.chat_error
@@ -431,7 +458,7 @@ class _FakeRuntime:
         for chunk in chunks:
             if on_event is not None:
                 on_event({"type": "text_delta", "content": chunk})
-        return ChatTurnResult(content="".join(chunks), turn_id="turn-fake")
+        return ChatTurnResult(content="".join(chunks), turn_id=turn_id or "turn-fake")
 
     def handle_command(self, session_id: str, message: str) -> str | None:
         if not message.startswith("/"):

@@ -52,3 +52,10 @@
 
 - 输入：SessionStore append 抛出写入错误。
 - 预期：保留 LLM 结果文本，同时把保存失败原因追加给用户。
+
+## Part 7 Turn Coverage
+
+- Generate a stable turn id and 1-based turn index for CLI-style calls.
+- Reuse externally provided turn ids for Web/runtime calls.
+- Stamp user, assistant, tool, error, stopped, and tool-iteration-limit messages with the same turn fields.
+- Keep Fake LLM tests deterministic while covering normal, error, streaming, cancellation, and tool paths.

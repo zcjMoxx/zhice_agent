@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Callable
@@ -11,6 +10,7 @@ from typing import Any, Callable
 from agent.config import AppConfig
 from agent.core.context import DEFAULT_CONTEXT_PROMPTS, ContextBuilder
 from agent.core.loop import AgentLoop, CancellationToken
+from agent.core.turns import new_turn_id
 from agent.llm.runtime import create_configured_llm_provider
 from agent.prompt_loader import PromptLoader
 from agent.protocols.llm import LLMEndpoint, LLMProvider
@@ -81,6 +81,7 @@ class WebRuntime:
         session_id: str,
         message: str,
         *,
+        turn_id: str | None = None,
         on_event: RuntimeEventCallback | None = None,
         command_profile: str = WEB_COMMAND_PROFILE,
     ) -> ChatTurnResult:
@@ -91,9 +92,9 @@ class WebRuntime:
             _emit_runtime_event(on_event, {"type": "text_delta", "content": command_text})
             command_name = message.strip().split(maxsplit=1)[0].lower()
             stopped = command_profile == EXTERNAL_COMMAND_PROFILE and command_name == "/stop"
-            return ChatTurnResult(content=command_text, stopped=stopped)
+            return ChatTurnResult(content=command_text, stopped=stopped, turn_id=turn_id or "")
 
-        turn_id = "turn-" + uuid.uuid4().hex
+        turn_id = turn_id or new_turn_id()
         token = CancellationToken()
         self._register_turn(session_id, ActiveTurn(turn_id=turn_id, token=token))
         logger.info("chat accepted session=%s turn=%s", session_id, turn_id)
@@ -101,6 +102,7 @@ class WebRuntime:
             content = self.agent_loop.run_turn(
                 session_id,
                 message,
+                turn_id=turn_id,
                 on_event=on_event,
                 cancellation_token=token,
             )

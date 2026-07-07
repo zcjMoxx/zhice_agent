@@ -276,25 +276,18 @@ contexts/sessions/chat-YYYYMMDD.jsonl
 
 ### 3.2 未来扩展方向
 
-当前代码还没有实现的能力，后续再按模块增加：
+当前代码还没有实现的能力，后续按依赖顺序增加：
 
-- Web 鉴权、用户系统和远程部署安全边界。
-- 工程化前端、多页面设置页、工具日志面板和 Skill source 状态页。
-- 登录系统。
-- 多用户。
-- 外部 IM / 协作平台接入。
-- Skill Market。
-- 审批。
-- 通知。
-- 复杂部署编排。
-- 复杂 Memory。
-- Subagent。
-- MCP。
-- session 级 `/model` 选择持久化。
-- Provider 错误分类、同 endpoint 重试和 cooldown。
-- turn 运行单元、按 turn 加载上下文，以及基于 turn cancellation 的 CLI `/stop`。
+1. turn 运行单元、按 turn 加载上下文，以及 Web accepted/done/stopped 与持久历史对齐。
+2. Gateway / Agent 运行日志优化，复用统一 `turn_id` 串起 turn、LLM、tool 和 session 保存轨迹。
+3. 用户、登录、多用户权限和危险工具执行授权设计。
+4. 用户权限系统第一版实现，包括登录界面、用户/角色/权限管理、session owner、工具权限检查和审计。
+5. 工程化前端、多页面设置页、工具调用日志面板和 Skill source 状态页。
+6. session 级 `/model` 选择持久化。
+7. Provider 错误分类、同 endpoint 重试和 cooldown。
+8. Memory、MCP、Hooks、Subagent、外部 IM / 协作平台接入、Skill Market、审批、通知和复杂部署编排。
 
-这些能力不是不要，而是现在还没有进入代码主线。已经落地的只读工具、`exec`、LiteLLM、endpoint failover、`/model` 命令、FastAPI gateway、WebSocket 主通道和 Web 会话管理，应视为当前架构边界的一部分。后续事项按领域收敛到第 15 章对应小节。
+这些能力不是不要，而是现在还没有进入代码主线。已经落地的只读工具、`exec`、LiteLLM、endpoint failover、`/model` 命令、FastAPI gateway、WebSocket 主通道和 Web 会话管理，应视为当前架构边界的一部分。第六部分之后的主线顺序已经调整为：先 turn，后日志，再用户权限设计，最后实现用户权限 UI 和执行管控。详细排序记录见 `docs_design/2026-07-06-next-stage-sequencing-design.md`。
 
 ### 3.3 推荐目录结构
 
@@ -1349,22 +1342,82 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 本章只保留未来要做、尚未成为当前主线的方向。某个方向准备进入开发时，先新建日期设计记录，落地后再从本章移除或改写为新的未来增强点。
 
-### 15.1 Web UI
+### 15.1 当前后续顺序
 
-- 登录、鉴权、多用户和远程部署安全边界。
+第六部分之后的主线顺序是：
+
+```text
+Milestone 7：Turn 运行单元与上下文治理
+  -> Milestone 8：Gateway / Agent 运行日志优化
+  -> Milestone 9：用户、登录与权限执行边界设计
+  -> Milestone 10：用户权限系统第一版实现
+```
+
+排序原因：
+
+- `turn` 是 Web stop、历史恢复、上下文裁剪、运行日志和权限审计的共同运行单位。
+- Gateway / Agent 运行日志需要复用统一 `turn_id`，否则日志关联后续还要返工。
+- 用户权限系统不是单纯登录壳，而是为 `exec`、Skill、模型切换、session 管理等能力提供身份、授权、确认和审计依据。
+- Memory、MCP、Hooks 和 Subagent 后移，等执行边界、安全日志和权限模型更稳后再进入主线。
+
+### 15.2 Web UI
+
 - Vue/Vite 或其它工程化前端。
 - 工具调用日志面板、Skill source 状态页、设置页。
 - 会话自动标题、归档、全文搜索和更完整的会话管理。
-- Web `/stop` 与未来持久化 `turn_id` 完全对齐。
+- 登录、账号中心、角色权限配置和用户管理页；这些属于 Milestone 10 的用户权限系统实现，不再作为第六部分的普通 UI 后续项。
 
 进入开发触发条件：
 
-- 需要鉴权、用户会话绑定、多渠道接入或远程服务暴露。
 - 需要前端工程化、多页面路由、复杂状态管理或系统化组件。
 - 工具调用事件、Skill 状态、模型/端点配置页开始形成稳定产品界面。
-- `turn` 持久化落地后，需要把 Web stop、历史恢复和上下文加载统一到 turn 语义。
+- 用户权限系统进入实现阶段，需要登录页、用户管理页、角色权限配置页和审计视图。
 
-### 15.2 Memory
+### 15.3 Turn 运行单元与上下文治理
+
+第七部分当前开发依据是 `docs_design/zhice-agent-part7-turn-context-design.md`。`docs_design/2026-07-04-turn-runtime-and-context-design.md` 保留为背景和后续扩展参考，不再作为直接施工清单。
+
+- `Message` 增加可选 `turn_id`、`turn_index` 和预留父 turn 字段。
+- `JsonlSessionStore` 读写 turn 字段，并兼容旧 JSONL。
+- `AgentLoop.run_turn()` 支持外部传入 `turn_id`，同一轮 user / assistant / tool 消息共享同一个 turn。
+- WebSocket accepted / text / done / stopped 使用同一个 `turn_id`。
+- `ContextBuilder` 支持按最近 N 个 user turn 裁剪历史，而不是只按 message 数裁剪。
+
+本阶段不主动引入独立的数据库、多用户、子代理或长期 memory 系统。若 stopped/error marker、兼容字段或 API 返回字段是 turn 闭环必需的一部分，则作为第七部分实现细节处理；turn 本身仍只承担运行边界和上下文治理职责。
+
+### 15.4 Gateway / Agent 运行日志
+
+第八部分进入主线时，落地 `docs_design/2026-07-02-gateway-runtime-logging-design.md`：
+
+- 分离 Agent 日志、HTTP access log 和 HTTP server log。
+- 默认打印简短 Agent 运行痕迹，包括 turn、LLM、tool 和 session 保存关键生命周期。
+- `debug` 只打印截断、脱敏后的 preview。
+- 不输出完整 prompt、完整 session、完整工具结果或 secret。
+
+该阶段应复用第七部分统一后的 `turn_id`，避免日志关联字段后续返工。
+
+### 15.5 用户、登录与权限执行边界
+
+用户系统后续要做，但应排在 turn 和运行日志之后。它的目标不是单纯登录页，而是为危险工具执行提供身份、授权、确认和审计基础。
+
+第一版设计方向：
+
+- SQLite 保存用户、角色、权限、登录态、session owner 和 audit logs。
+- JSONL 继续作为聊天消息真值，暂不强制迁移所有会话到数据库。
+- 权限关系按 `User -> Session -> Turn -> ToolCall / AuditLog` 建模。
+- `exec`、Skill、模型切换、session 管理等能力按用户权限检查。
+- 危险命令不因为“用户权限高”就完全放开；仍需要明确用户确认，并写入审计。
+- Web 提供登录页、用户管理页、角色权限配置页和审计查看入口。
+
+非目标：
+
+- 不在第一版做 OAuth / SSO。
+- 不做复杂组织架构。
+- 不做审批流。
+- 不做多 workspace 租户模型。
+- 不把 AgentLoop 写成用户业务分支；权限判断应进入 app shell、Tool policy 或独立权限服务，core 仍通过协议和上下文接收必要信息。
+
+### 15.6 Memory
 
 第一版不要 memory，只用 session。
 
@@ -1389,7 +1442,7 @@ memory_write
 
 不要一开始上 graph/holographic memory。
 
-### 15.3 MCP
+### 15.7 MCP
 
 MCP 很有价值，但放在工具系统稳定之后。
 
@@ -1400,7 +1453,7 @@ MCP 很有价值，但放在工具系统稳定之后。
 - 把 MCP tool 包装成 `BaseTool`。
 - 注册到 `ToolRegistry`。
 
-### 15.4 Hooks
+### 15.8 Hooks
 
 Hooks 可以用于安全和结果整理。
 
@@ -1440,7 +1493,7 @@ hooks/safety/pre_tooluse/exec.py
 }
 ```
 
-### 15.5 Skill Source 运维增强
+### 15.9 Skill Source 运维增强
 
 - `/skills status`：查看每个 source 的实际来源、本地路径、远端地址、分支、当前 commit、上次同步时间、同步结果和可用 Skill 数量。
 - Skill 索引缓存：缓存 source 扫描结果、mtime、commit 和 frontmatter 摘要，减少每次启动的全量扫描成本。
@@ -1450,7 +1503,7 @@ hooks/safety/pre_tooluse/exec.py
 
 如果这些能力开始稳定共享 source root、来源、commit、同步状态等结构化信息，再把 `SkillRoot` 提升为 `agent/protocols/skill.py` 中的协议层数据结构。
 
-### 15.6 Subagent
+### 15.10 Subagent
 
 子代理晚点做。
 
@@ -1466,7 +1519,7 @@ hooks/safety/pre_tooluse/exec.py
 - 让它跑同一个 AgentLoop。
 - 把结果摘要交回父 Agent。
 
-### 15.7 入口、打包与部署
+### 15.11 入口、打包与部署
 
 - Dockerfile 和本地容器运行方式。
 - `docker compose`、Kubernetes、进程守护或云部署清单。
@@ -1474,35 +1527,35 @@ hooks/safety/pre_tooluse/exec.py
 - 多环境配置 overlay，例如 local/dev/prod。
 - 发布前健康检查和启动诊断命令。
 
-### 15.8 CLI 入口与会话命令
+### 15.12 CLI 入口与会话命令
 
-- CLI `/stop`：等待 turn 持久化、active turn registry、cancellation token 和 CLI 并发输入通道稳定后再做。实现前不加入 CLI help；实现时，`/stop` 只在 CLI 命令层处理，不作为普通 user message 写入 LLM 上下文。有 active turn 时取消当前 turn，无 active turn 时返回简短提示，并在停止后追加带同一 `turn_id` 的 assistant stopped marker。详细底层设计见 `docs_design/2026-07-04-turn-runtime-and-context-design.md`。
+- CLI `/stop`：等待 turn 持久化、active turn registry、cancellation token 和 CLI 并发输入通道稳定后再做。实现前不加入 CLI help；实现时，`/stop` 只在 CLI 命令层处理，不作为普通 user message 写入 LLM 上下文。有 active turn 时取消当前 turn，无 active turn 时返回简短提示，并在停止后追加带同一 `turn_id` 的 assistant stopped marker。第七部分当前施工图见 `docs_design/zhice-agent-part7-turn-context-design.md`，更完整的未来方向见 `docs_design/2026-07-04-turn-runtime-and-context-design.md`。
 - session 级模型选择持久化，让同一会话重启后继续使用上次选择的模型。
 - 更完整的 `/sessions` 管理扩展，例如归档、搜索、按标题过滤和导出。
 - CLI 与 Web 共用的 turn 状态查询命令，例如查看最近 stopped/error turn。
 
-### 15.9 运行时初始化
+### 15.13 运行时初始化
 
 - 配置体检命令，例如检查 endpoint、Skill source、prompt、workspace 权限和会话目录。
 - 安全修复向导，例如检测到缺失模板时给出一键补齐方案。
 - 多 profile 初始化，例如 local/dev/prod 或不同模型供应商模板。
 - 初始化后的摘要报告，说明哪些文件新建、哪些保留、哪些需要用户补 key。
 
-### 15.10 本地密钥配置
+### 15.14 本地密钥配置
 
 - 系统 keyring 或平台 Secret Manager 集成。
 - Secret 引用体检，区分“变量不存在”“变量为空”“provider 拒绝认证”。
 - Web 设置页中的密钥状态展示，只显示存在性和来源，不显示明文。
 - 容器和云部署下的 secret mount 约定。
 
-### 15.11 打包与 Docker
+### 15.15 打包与 Docker
 
 - 最小运行镜像。
 - 本地一键容器启动脚本。
 - 镜像内健康检查和优雅退出。
 - 发布包校验，确认不会把 workspace、真实密钥或本地会话打进产物。
 
-### 15.12 网关运行边界
+### 15.16 网关运行边界
 
 - 需要 Web 鉴权、用户会话绑定或多渠道接入。
 - 需要生产级 HTTPS、反向代理、访问 token 或公网暴露。
@@ -1758,37 +1811,91 @@ REST/SSE 兼容接口
 - Web `/stop` 当前是内存态 active turn cancellation；它可以停止后续事件投递并在 AgentLoop 检查点写入 stopped marker，但还没有持久化 `turn_id`。
 - CLI `/stop` 当前未实现，不在 `/help` 中展示；未来等 turn 模型和并发输入通道稳定后再做。
 
-### Milestone 7：Memory
+### Milestone 7：Turn 运行单元与上下文治理（下一阶段）
 
 目标：
 
-- Agent 能读写简单长期记忆。
+- 把一次用户请求定义为可持久化、可查询、可用于上下文裁剪的 turn。
+- Web accepted / done / stopped、AgentLoop 消息保存和历史恢复使用同一个 `turn_id`。
+- `ContextBuilder` 支持按最近 N 个 user turn 裁剪历史。
 
 交付：
 
 ```text
-MEMORY.md
-memory_read
-memory_write
+Message turn 字段
+JsonlSessionStore turn 读写与 legacy grouping
+AgentLoop.run_turn(turn_id=...)
+WebSocket turn_id 一致性
+ContextBuilder recent turns
 ```
 
-### Milestone 8：MCP
+设计依据：`docs_design/zhice-agent-part7-turn-context-design.md`。背景和后续扩展参考：`docs_design/2026-07-04-turn-runtime-and-context-design.md`。
+
+### Milestone 8：Gateway / Agent 运行日志优化
 
 目标：
 
-- 外部 MCP 工具能注册到 ToolRegistry。
+- 本地 gateway 运行中能看到简短、分层、脱敏的 Agent 运行痕迹。
+- 日志能通过 `session_id` 和 `turn_id` 串起 LLM、tool 和 session 保存轨迹。
 
-### Milestone 9：Hooks
+交付：
+
+```text
+GatewayLogOptions
+agent/app/logging.py
+AgentLoop lifecycle logs
+ToolRegistry execution logs
+WebRuntime turn logs
+secret redaction and preview truncation
+```
+
+设计依据：`docs_design/2026-07-02-gateway-runtime-logging-design.md`。
+
+### Milestone 9：用户、登录与权限执行边界设计
 
 目标：
 
-- exec 调用前可以走安全 hook。
+- 先完成设计文档，明确用户、角色、权限、登录态、session owner、turn、tool call 和 audit log 的关系。
+- 给 `exec` 等危险工具从“一刀切拦截”演进为“权限 + 明确用户确认 + 审计”建立方案。
 
-### Milestone 10：Subagent
+交付：
+
+```text
+日期设计记录
+SQLite schema 草案
+权限 key 设计
+登录与管理界面范围
+工具权限检查数据流
+危险命令确认与审计策略
+```
+
+### Milestone 10：用户权限系统第一版实现
 
 目标：
 
-- 父 Agent 可以创建子任务 Agent。
+- 实现简单本地用户系统和权限管理界面。
+- Web API 有登录态，session 按用户隔离，工具调用按权限和确认策略执行。
+
+交付：
+
+```text
+SQLite auth store
+admin 初始化
+login/logout
+用户/角色/权限管理页
+session owner
+tool permission policy
+audit logs
+```
+
+### 后续能力：Memory / MCP / Hooks / Subagent
+
+这些能力仍然保留，但不再作为第六部分后的默认下一步：
+
+- Memory：长期记忆、会话摘要和检索。
+- MCP：外部 MCP 工具注册到 ToolRegistry。
+- Hooks：工具执行前后的策略扩展点。
+- Subagent：复用同一个 AgentLoop 创建子任务 Agent。
 
 ---
 
@@ -1812,7 +1919,7 @@ memory_write
 不要一开始纳入：
 
 - 完整平台级 AgentLoop 实现。
-- 平台级应用 API 层、鉴权和多租户。
+- 平台级应用 API 层、复杂鉴权和多租户；简单本地用户权限系统已排入 Milestone 9/10，但不等于一开始就做完整平台。
 - 多渠道接入层。
 - 工程化多页面 Web 前端。
 - 外部协作平台渠道。
@@ -1854,9 +1961,12 @@ memory_write
 
 下一阶段 MVP 扩展项：
 
-1. `/model` 选择能写入并恢复 session metadata。
-2. Provider 错误能分类、重试和 cooldown。
-3. 可选真实 LLM 冒烟测试通过。
+1. 新写入的 session 消息具备稳定 `turn_id` 和 `turn_index`。
+2. 旧 JSONL session 没有 `turn_id` 时仍可读取，并能按 user 边界派生 legacy turn。
+3. WebSocket accepted / text / done / stopped 使用同一个 `turn_id`。
+4. `ContextBuilder` 能按最近 N 个 user turn 构建上下文，并保持 tool-call block 合法。
+5. Gateway / Agent 日志能按 `session_id` 和 `turn_id` 打印简短、脱敏、可关闭的运行痕迹。
+6. 用户权限系统进入设计阶段，产出 SQLite schema、权限 key、登录/管理界面和危险工具执行审计方案。
 
 ---
 
@@ -1960,6 +2070,38 @@ memory_write
 - WebSocket `/ws`。
 - Web active turn cancellation。
 
+### 第 8 课：Turn
+
+学习：
+
+- 一次用户请求如何成为可持久化的 turn。
+- Web stop、历史恢复、上下文裁剪和日志如何共享同一个 `turn_id`。
+- 旧 JSONL 如何兼容派生 legacy turn。
+
+开发文档：`docs_design/zhice-agent-part7-turn-context-design.md`。
+
+实现：
+
+- `Message` turn 字段。
+- `JsonlSessionStore` turn 读写。
+- `AgentLoop.run_turn(turn_id=...)`。
+- recent user turns 上下文裁剪。
+
+### 第 9 课：可观测性与权限
+
+学习：
+
+- Gateway / Agent 日志如何分层。
+- 日志如何截断和脱敏。
+- 用户、session、turn、tool call 和 audit log 的关系。
+- 危险工具如何从一刀切拦截演进到权限、确认和审计。
+
+实现：
+
+- 运行日志优化。
+- 用户权限系统设计。
+- 简单登录和权限管理 UI。
+
 ---
 
 ## 22. 最终建议
@@ -1985,14 +2127,14 @@ memory_write
 能在 Web 端管理会话和切换当前模型。
 ```
 
-这个目标完成后，再逐步加：
+这个目标完成后，下一步不要直接跳到大平台能力，而是按依赖顺序逐步加：
 
 ```text
-Web UI
-Memory
-MCP
-Hooks
-Subagent
+Turn 运行单元与上下文治理
+Gateway / Agent 运行日志
+用户、登录与权限执行边界
+权限管理 UI 和工具执行管控
+Memory / MCP / Hooks / Subagent
 更多 Skills
 ```
 

@@ -19,6 +19,7 @@ from agent.config import (
 from agent.console import Spinner, console
 from agent.core.context import ContextBuilder
 from agent.core.loop import AgentLoop
+from agent.core.turns import assign_turn, new_turn_id, next_turn_index
 from agent.llm import LLMConfigurationError
 from agent.llm.runtime import (
     create_configured_llm_provider,
@@ -173,11 +174,27 @@ def _run_chat(argv: Sequence[str]) -> int:
                 result = agent_loop.run_turn(session_id, user_text)
             print(result)
         except KeyboardInterrupt:
-            session_store.append(session_id, [
-                Message(role="user", content=user_text),
-                Message(role="assistant", content="[interrupted]",
-                        metadata={"interrupted": True}),
-            ])
+            turn_id = new_turn_id()
+            turn_index = next_turn_index(session_store.load(session_id).messages)
+            session_store.append(
+                session_id,
+                [
+                    assign_turn(
+                        Message(role="user", content=user_text),
+                        turn_id=turn_id,
+                        turn_index=turn_index,
+                    ),
+                    assign_turn(
+                        Message(
+                            role="assistant",
+                            content="[interrupted]",
+                            metadata={"interrupted": True},
+                        ),
+                        turn_id=turn_id,
+                        turn_index=turn_index,
+                    ),
+                ],
+            )
 
 
 def _run_gateway(argv: Sequence[str]) -> int:

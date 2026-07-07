@@ -24,12 +24,26 @@ def test_ws_message_streams_text_and_done(tmp_path):
 
     assert accepted["event"] == "channel_status"
     assert accepted["data"]["type"] == "accepted"
-    assert first == {"event": "channel_text", "data": "one ", "session_id": "alpha"}
-    assert second == {"event": "channel_text", "data": "two", "session_id": "alpha"}
+    turn_id = accepted["data"]["turn_id"]
+    assert accepted["turn_id"] == turn_id
+    assert first == {
+        "event": "channel_text",
+        "data": "one ",
+        "session_id": "alpha",
+        "turn_id": turn_id,
+    }
+    assert second == {
+        "event": "channel_text",
+        "data": "two",
+        "session_id": "alpha",
+        "turn_id": turn_id,
+    }
     assert done["event"] == "channel_status"
     assert done["data"]["type"] == "done"
+    assert done["data"]["turn_id"] == turn_id
+    assert done["turn_id"] == turn_id
     assert done["data"]["assistant"]["content"] == "one two"
-    assert runtime.chat_calls == [("alpha", "hello", "web")]
+    assert runtime.chat_calls == [("alpha", "hello", "web", turn_id)]
 
 
 def test_ws_stop_frame_calls_runtime_cancel(tmp_path):
@@ -60,11 +74,12 @@ def test_ws_web_stop_text_is_a_message_command_not_stop_frame(tmp_path):
 
     assert accepted["event"] == "channel_status"
     assert accepted["data"]["type"] == "accepted"
-    assert text == {"event": "channel_text", "data": "ok", "session_id": "alpha"}
+    turn_id = accepted["data"]["turn_id"]
+    assert text == {"event": "channel_text", "data": "ok", "session_id": "alpha", "turn_id": turn_id}
     assert done["event"] == "channel_status"
     assert done["data"]["type"] == "done"
     assert runtime.cancelled_sessions == []
-    assert runtime.chat_calls == [("alpha", "/stop", "web")]
+    assert runtime.chat_calls == [("alpha", "/stop", "web", turn_id)]
 
 
 def test_ws_external_stop_text_uses_same_cancel_path(tmp_path):
@@ -119,9 +134,15 @@ def test_ws_external_channel_is_passed_to_runtime(tmp_path):
     assert hello["data"]["command_profile"] == "external"
     assert hello["data"]["capabilities"] == {"history_command": True, "exit_command": True}
     assert accepted["data"]["type"] == "accepted"
-    assert text == {"event": "channel_text", "data": "history", "session_id": "alpha"}
+    turn_id = accepted["data"]["turn_id"]
+    assert text == {
+        "event": "channel_text",
+        "data": "history",
+        "session_id": "alpha",
+        "turn_id": turn_id,
+    }
     assert done["data"]["type"] == "done"
-    assert runtime.chat_calls == [("alpha", "/history", "external")]
+    assert runtime.chat_calls == [("alpha", "/history", "external", turn_id)]
 
 
 def test_ws_hello_unknown_client_is_rejected(tmp_path):
@@ -182,15 +203,23 @@ def _config(tmp_path: Path) -> AppConfig:
 class _WsRuntime:
     def __init__(self, chunks: list[str] | None = None):
         self.chunks = chunks or ["ok"]
-        self.chat_calls: list[tuple[str, str]] = []
+        self.chat_calls: list[tuple[str, str, str, str]] = []
         self.cancelled_sessions: list[str] = []
 
-    def run_chat_events(self, session_id: str, message: str, on_event=None, *, command_profile: str = "web"):
-        self.chat_calls.append((session_id, message, command_profile))
+    def run_chat_events(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        turn_id: str | None = None,
+        on_event=None,
+        command_profile: str = "web",
+    ):
+        self.chat_calls.append((session_id, message, command_profile, turn_id or ""))
         for chunk in self.chunks:
             if on_event is not None:
                 on_event({"type": "text_delta", "content": chunk})
-        return ChatTurnResult(content="".join(self.chunks), turn_id="turn-ws")
+        return ChatTurnResult(content="".join(self.chunks), turn_id=turn_id or "turn-ws")
 
     def cancel_session(self, session_id: str):
         self.cancelled_sessions.append(session_id)

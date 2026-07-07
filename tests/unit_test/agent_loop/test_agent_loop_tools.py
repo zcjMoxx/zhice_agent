@@ -49,6 +49,7 @@ def test_single_tool_call_executes_and_triggers_second_llm_call(tmp_path):
         "tool",
         "assistant",
     ]
+    _assert_single_turn(sessions.appended["default"], expected_index=1)
 
 
 def test_multiple_tool_calls_execute_in_order(tmp_path):
@@ -158,6 +159,7 @@ def test_tool_iteration_limit_saves_error_marker(tmp_path):
     ]
     assert sessions.appended["default"][-1].metadata["code"] == "TOOL_ITERATION_LIMIT"
     assert sessions.appended["default"][-2].metadata["code"] == "TOOL_ITERATION_LIMIT"
+    _assert_single_turn(sessions.appended["default"], expected_index=1)
 
 
 def test_llm_error_after_tool_call_preserves_pending_messages(tmp_path):
@@ -183,6 +185,16 @@ def test_llm_error_after_tool_call_preserves_pending_messages(tmp_path):
         "assistant",
     ]
     assert sessions.appended["default"][-1].metadata["is_error"] is True
+    _assert_single_turn(sessions.appended["default"], expected_index=1)
+
+
+def _assert_single_turn(messages: list[Message], *, expected_index: int) -> None:
+    turn_ids = {message.turn_id for message in messages}
+    turn_indices = {message.turn_index for message in messages}
+    assert None not in turn_ids
+    assert len(turn_ids) == 1
+    assert next(iter(turn_ids)).startswith("turn-")  # type: ignore[union-attr]
+    assert turn_indices == {expected_index}
 
 
 def _make_loop(

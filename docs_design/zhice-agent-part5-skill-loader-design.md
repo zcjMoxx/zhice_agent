@@ -432,8 +432,8 @@ Windows 本机可能因为系统临时目录或 `.pytest_cache` 权限导致普�
 - `/skills status` 查看 source 最近同步时间和 commit。
 - `sync_skills` 支持多个 source 名称。
 - Skill 版本、签名和依赖声明。
-- 用户私有 Skill source 和优先级覆盖。
-- 管理员诊断 Tool：受权限控制地查看项目代码、终端日志、运行状态，再让 Agent 归因分析。
+- 用户私有 Skill source、source 权限过滤和优先级覆盖；这些要等用户权限系统设计清楚后再做。
+- 管理员诊断 Tool：受权限控制地查看项目代码、终端日志、运行状态，再让 Agent 归因分析；它依赖 turn 运行单元、运行日志和用户权限审计，不并入当前 Skill 加载阶段。
 - 自然语言“更新技能仓库”到 `sync_skills` 的意图路由。
 
 当前阶段先保持轻量闭环：配置来源、同步到 `extends`、扫描加载、按需读取说明、通过 `exec` 受控执行脚本。

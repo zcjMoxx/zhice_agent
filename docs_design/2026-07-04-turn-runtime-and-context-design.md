@@ -3,6 +3,8 @@
 > 日期：2026-07-04
 > 状态：未来设计记录，当前不代表已经实现。
 
+> 说明：当前第七部分开发施工图已经收敛到 `docs_design/zhice-agent-part7-turn-context-design.md`，并通过 `docs_design/2026-07-06-context-relevance-selection-design.md` 补充了本地相关性选择。旧 JSONL、metadata fallback 和 legacy grouping 只保留为本历史记录中的旧方案背景，不再是当前实现目标。
+
 ## 1. 背景
 
 当前 ZhiCe-Agent 已经有三个和 `turn` 相关但尚未统一的事实：
