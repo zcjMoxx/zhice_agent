@@ -158,6 +158,19 @@ def test_run_chat_events_passes_external_turn_id_to_agent_loop(tmp_path):
     ]
 
 
+def test_run_chat_events_logs_web_runtime_lifecycle(tmp_path, caplog):
+    agent_loop = _RecordingAgentLoop()
+    runtime = _runtime(tmp_path, agent_loop=agent_loop)
+    caplog.set_level("DEBUG", logger="zcagent.agent")
+
+    runtime.run_chat_events("alpha", "hello", turn_id="turn-web")
+
+    records = [record for record in caplog.records if record.name == "zcagent.agent.web"]
+    assert [record.event for record in records] == ["chat.accepted", "chat.done"]  # type: ignore[attr-defined]
+    assert records[0].fields["session_id"] == "alpha"  # type: ignore[attr-defined]
+    assert records[0].fields["turn_id"] == "turn-web"  # type: ignore[attr-defined]
+
+
 def _runtime(tmp_path: Path, *, agent_loop=None) -> WebRuntime:
     return WebRuntime(
         config=AppConfig(

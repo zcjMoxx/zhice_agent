@@ -12,6 +12,7 @@ from agent.core.context import DEFAULT_CONTEXT_PROMPTS, ContextBuilder
 from agent.core.loop import AgentLoop, CancellationToken
 from agent.core.turns import new_turn_id
 from agent.llm.runtime import create_configured_llm_provider
+from agent.logging_utils import log_event
 from agent.prompt_loader import PromptLoader
 from agent.protocols.llm import LLMEndpoint, LLMProvider
 from agent.protocols.session import SessionState, SessionStore, SessionSummary
@@ -22,7 +23,8 @@ from agent.tools import create_default_tool_registry
 
 DEFAULT_WEB_HISTORY_MESSAGES = 12
 RuntimeEventCallback = Callable[[dict[str, Any]], None]
-logger = logging.getLogger("zcagent.gateway")
+web_logger = logging.getLogger("zcagent.agent.web")
+session_logger = logging.getLogger("zcagent.agent.session")
 WEB_COMMAND_PROFILE = "web"
 EXTERNAL_COMMAND_PROFILE = "external"
 
@@ -97,7 +99,7 @@ class WebRuntime:
         turn_id = turn_id or new_turn_id()
         token = CancellationToken()
         self._register_turn(session_id, ActiveTurn(turn_id=turn_id, token=token))
-        logger.info("chat accepted session=%s turn=%s", session_id, turn_id)
+        log_event(web_logger, logging.DEBUG, "chat.accepted", session_id=session_id, turn_id=turn_id)
         try:
             content = self.agent_loop.run_turn(
                 session_id,
@@ -108,12 +110,19 @@ class WebRuntime:
             )
             stopped = token.is_cancelled()
             if stopped:
-                logger.info("chat stopped session=%s turn=%s", session_id, turn_id)
+                log_event(web_logger, logging.INFO, "chat.stopped", session_id=session_id, turn_id=turn_id)
             else:
-                logger.info("chat done session=%s turn=%s", session_id, turn_id)
+                log_event(web_logger, logging.DEBUG, "chat.done", session_id=session_id, turn_id=turn_id)
             return ChatTurnResult(content=content, stopped=stopped, turn_id=turn_id)
-        except Exception:
-            logger.exception("chat error session=%s turn=%s", session_id, turn_id)
+        except Exception as exc:
+            log_event(
+                web_logger,
+                logging.ERROR,
+                "chat.error",
+                session_id=session_id,
+                turn_id=turn_id,
+                error_type=type(exc).__name__,
+            )
             raise
         finally:
             self._unregister_turn(session_id, turn_id)
@@ -191,7 +200,7 @@ class WebRuntime:
         """Rename a session title and return the updated summary."""
 
         self.sessions.rename(session_id, title)
-        logger.info("session renamed session=%s", session_id)
+        log_event(session_logger, logging.INFO, "session.renamed", session_id=session_id)
         return _find_session_summary(self.sessions.list_sessions(), session_id)
 
     def delete_session(self, session_id: str) -> None:
@@ -199,7 +208,7 @@ class WebRuntime:
 
         self.cancel_session(session_id)
         self.sessions.delete(session_id)
-        logger.info("session deleted session=%s", session_id)
+        log_event(session_logger, logging.INFO, "session.deleted", session_id=session_id)
 
     def cancel_session(self, session_id: str) -> dict[str, Any]:
         """Cancel the active turn for a session when one exists."""
@@ -209,7 +218,13 @@ class WebRuntime:
         if active is None:
             return {"session_id": session_id, "cancelled": 0}
         active.token.cancel()
-        logger.info("chat cancel requested session=%s turn=%s", session_id, active.turn_id)
+        log_event(
+            web_logger,
+            logging.INFO,
+            "chat.cancel_requested",
+            session_id=session_id,
+            turn_id=active.turn_id,
+        )
         return {"session_id": session_id, "turn_id": active.turn_id, "cancelled": 1}
 
     def current_model_label(self) -> str:

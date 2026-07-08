@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from agent.app.gateway import format_gateway_check, run_gateway
+from agent.app.logging import GatewayLogOptions
 from agent.config import (
     DotenvConfigurationError,
     InitConfigurationError,
@@ -205,16 +206,40 @@ def _run_gateway(argv: Sequence[str]) -> int:
     parser.add_argument("--host", default="127.0.0.1", help="Gateway bind host.")
     parser.add_argument("--port", type=int, default=10086, help="Gateway bind port.")
     parser.add_argument(
-        "--log-level",
-        choices=["info", "warning", "debug"],
-        default="info",
-        help="Gateway terminal log detail. Defaults to info.",
-    )
-    parser.add_argument(
-        "--access-log",
+        "--agent-log",
         choices=["on", "off"],
         default="on",
+        help="Print Agent lifecycle logs. Defaults to on.",
+    )
+    parser.add_argument(
+        "--agent-log-level",
+        choices=["debug", "info", "warning", "error", "critical"],
+        default="info",
+        help="Agent lifecycle log level. Defaults to info.",
+    )
+    parser.add_argument(
+        "--trace-log",
+        choices=["on", "off"],
+        default="on",
+        help="Write workspace JSONL trace logs. Defaults to on.",
+    )
+    parser.add_argument(
+        "--http-access-log",
+        choices=["on", "off"],
+        default=None,
         help="Print HTTP request access logs. Defaults to on.",
+    )
+    parser.add_argument(
+        "--http-server-log",
+        choices=["on", "off"],
+        default="on",
+        help="Print HTTP server lifecycle logs. Defaults to on.",
+    )
+    parser.add_argument(
+        "--http-server-log-level",
+        choices=["debug", "info", "warning", "error", "critical"],
+        default=None,
+        help="HTTP server log level. Defaults to info.",
     )
     parser.add_argument(
         "--check",
@@ -247,8 +272,7 @@ def _run_gateway(argv: Sequence[str]) -> int:
             config,
             host=args.host,
             port=args.port,
-            log_level=args.log_level,
-            access_log=args.access_log == "on",
+            log_options=_gateway_log_options(args),
         )
     except PromptNotFoundError as exc:
         print(console.error(str(exc)))
@@ -258,6 +282,19 @@ def _run_gateway(argv: Sequence[str]) -> int:
         _print_llm_configuration_error(exc, config)
         return 1
     return 0
+
+
+def _gateway_log_options(args) -> GatewayLogOptions:
+    """Build split gateway logging options from explicit gateway flags."""
+
+    return GatewayLogOptions(
+        agent_log=args.agent_log == "on",
+        agent_log_level=args.agent_log_level,
+        trace_log=args.trace_log == "on",
+        http_access_log=(args.http_access_log or "on") == "on",
+        http_server_log=args.http_server_log == "on",
+        http_server_log_level=args.http_server_log_level or "info",
+    )
 
 
 def _run_init(argv: Sequence[str]) -> int:

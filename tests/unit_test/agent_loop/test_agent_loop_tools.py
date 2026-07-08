@@ -52,6 +52,28 @@ def test_single_tool_call_executes_and_triggers_second_llm_call(tmp_path):
     _assert_single_turn(sessions.appended["default"], expected_index=1)
 
 
+def test_tool_call_logs_lifecycle_with_safe_output_preview(tmp_path, caplog):
+    """Tool logs should show success/failure and not leak full secret-like output."""
+
+    call = _openai_tool_call("call_1", "read_file", {"path": "README.md"})
+    llm = ScriptedLLM([LLMResponse(content="", tool_calls=[call]), LLMResponse(content="done")])
+    tools = FakeTools(results=[ToolResult(output="OPENAI_API_KEY=sk-testsecret123456\n" + "x" * 200)])
+    loop = _make_loop(tmp_path, llm=llm, tools=tools)
+    caplog.set_level("INFO", logger="zcagent.agent")
+
+    loop.run_turn("default", "read README", turn_id="turn-tool")
+
+    tool_records = [record for record in caplog.records if record.name == "zcagent.agent.tool"]
+    assert [record.event for record in tool_records] == ["tool.start", "tool.done"]  # type: ignore[attr-defined]
+    done_fields = tool_records[-1].fields  # type: ignore[attr-defined]
+    assert done_fields["session_id"] == "default"
+    assert done_fields["turn_id"] == "turn-tool"
+    assert done_fields["tool"] == "read_file"
+    assert done_fields["ok"] is True
+    assert "sk-testsecret123456" not in str(done_fields)
+    assert len(done_fields["output_preview"]) <= 120
+
+
 def test_multiple_tool_calls_execute_in_order(tmp_path):
     """One assistant message may request multiple tools, executed serially."""
 

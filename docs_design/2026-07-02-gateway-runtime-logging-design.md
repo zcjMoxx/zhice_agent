@@ -1,5 +1,7 @@
 # ZhiCe-Agent Gateway 运行日志设计记录
 
+> 说明：这是一份历史设计记录。当前第七部分 turn 运行单元已经落地，第八部分 Gateway / Agent 运行日志也已落地，当前实现口径见 `docs_design/zhice-agent-part8-gateway-agent-logging-design.md`；本文正文保留早期背景和参数分层思路，不再作为直接开发清单。本文早期提出的 `--log-level` / `--access-log` 兼容别名未采用，当前代码只接受语义明确的新参数。
+
 ## 背景
 
 当前 `zcagent gateway` 已经能启动本地 FastAPI gateway，Web 前端也已经有 REST/SSE 兼容接口和 WebSocket 主通道。但终端运行反馈仍然偏静态：启动时打印地址、workspace、routes 和 `logs/access-log` 摘要，运行中主要只能看到 HTTP 请求访问日志。
@@ -350,4 +352,3 @@ tests/unit_test/cli/test_case.md
 5. `--http-server-log-level error` 和 `--http-server-log-level critical` 可用。
 6. 日志不输出完整 prompt、完整 session、完整工具结果或 secret。
 7. 现有 Web、CLI、AgentLoop、ToolRegistry 测试继续通过。
-

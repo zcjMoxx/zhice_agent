@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.app.api.routes import ApiError, router
 from agent.app.api.ws import router as ws_router
+from agent.app.logging import GatewayLogOptions, configure_gateway_logging
 from agent.app.runtime import WebRuntime, build_web_runtime
 from agent.config import AppConfig
 from agent.console import console
@@ -23,11 +24,12 @@ def run_gateway(
     *,
     host: str = "127.0.0.1",
     port: int = 10086,
-    log_level: str = "info",
-    access_log: bool = True,
+    log_options: GatewayLogOptions | None = None,
 ) -> None:
     """Start the local FastAPI gateway and serve until interrupted."""
 
+    resolved_log_options = log_options or GatewayLogOptions()
+    logging_result = configure_gateway_logging(resolved_log_options, logs_dir=config.logs_dir)
     runtime = build_web_runtime(config)
     static_dir = _default_static_dir()
     app = create_app(config=config, runtime=runtime, static_dir=static_dir)
@@ -40,8 +42,27 @@ def run_gateway(
     print(f"workspace: {console.path(config.workspace)}")
     print(f"static: {console.path(static_dir)}")
     print("routes: /, /health, /api/*, /ws")
-    print(f"logs: {log_level}, access-log: {'on' if access_log else 'off'}, lifecycle-log: on")
-    uvicorn.run(app, host=host, port=port, log_level=log_level, access_log=access_log)
+    print(
+        "agent-log: "
+        f"{'on' if resolved_log_options.agent_log else 'off'} "
+        f"level={resolved_log_options.agent_log_level}"
+    )
+    print(
+        "http-access-log: "
+        f"{'on' if resolved_log_options.http_access_log else 'off'}, "
+        "http-server-log: "
+        f"{'on' if resolved_log_options.http_server_log else 'off'} "
+        f"level={resolved_log_options.http_server_log_level}"
+    )
+    trace_path = logging_result.trace_path or config.logs_dir / "YYYY-MM-DD" / "trace.log"
+    print(f"trace-log: {'on' if resolved_log_options.trace_log else 'off'} path={console.path(trace_path)}")
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=_uvicorn_log_level(resolved_log_options),
+        access_log=resolved_log_options.http_access_log,
+    )
 
 
 def create_app(
@@ -113,6 +134,14 @@ def format_gateway_check(config: AppConfig, *, host: str, port: int) -> str:
         f"config: {console.path(Path(payload['config_dir']))}",
     ]
     return "\n".join(lines)
+
+
+def _uvicorn_log_level(options: GatewayLogOptions) -> str:
+    """Return the uvicorn log level for the selected HTTP server log mode."""
+
+    if not options.http_server_log:
+        return "critical"
+    return options.http_server_log_level
 
 
 def _register_error_handlers(app: FastAPI) -> None:

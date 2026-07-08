@@ -4,7 +4,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from agent.app.gateway import create_app, format_gateway_check, gateway_status
+from agent.app.gateway import create_app, format_gateway_check, gateway_status, run_gateway
+from agent.app.logging import GatewayLoggingResult, GatewayLogOptions
 from agent.cli import main
 from agent.config import AppConfig
 
@@ -81,6 +82,27 @@ def test_gateway_check_formats_without_starting_server(tmp_path):
     assert str(tmp_path) in text
 
 
+def test_run_gateway_prints_trace_log_after_http_logs(tmp_path, capsys, monkeypatch):
+    config = _config(tmp_path)
+
+    monkeypatch.setattr("agent.app.gateway.build_web_runtime", lambda _config: _FakeRuntime())
+    monkeypatch.setattr(
+        "agent.app.gateway.configure_gateway_logging",
+        lambda _options, *, logs_dir: GatewayLoggingResult(
+            trace_path=logs_dir / "2026-07-08" / "trace.log"
+        ),
+    )
+    monkeypatch.setattr("agent.app.gateway.uvicorn.run", lambda *_args, **_kwargs: None)
+
+    run_gateway(config, log_options=GatewayLogOptions())
+
+    lines = capsys.readouterr().out.splitlines()
+    agent_index = _line_index(lines, "agent-log:")
+    http_index = _line_index(lines, "http-access-log:")
+    trace_index = _line_index(lines, "trace-log:")
+    assert agent_index < http_index < trace_index
+
+
 def test_cli_gateway_check_does_not_start_gateway(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
 
@@ -96,6 +118,47 @@ def test_cli_gateway_check_does_not_start_gateway(tmp_path, monkeypatch, capsys)
     assert "ZhiCe-Agent gateway check ok" in output
 
 
+def test_cli_gateway_passes_split_log_options(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    captured = {}
+
+    def capture_gateway(config, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("agent.cli.run_gateway", capture_gateway)
+
+    result = main(
+        [
+            "gateway",
+            "--agent-log",
+            "off",
+            "--agent-log-level",
+            "debug",
+            "--trace-log",
+            "off",
+            "--http-access-log",
+            "off",
+            "--http-server-log",
+            "off",
+            "--http-server-log-level",
+            "warning",
+        ]
+    )
+
+    capsys.readouterr()
+    assert result == 0
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 10086
+    assert captured["log_options"] == GatewayLogOptions(
+        agent_log=False,
+        agent_log_level="debug",
+        trace_log=False,
+        http_access_log=False,
+        http_server_log=False,
+        http_server_log_level="warning",
+    )
+
+
 def _config(tmp_path: Path) -> AppConfig:
     return AppConfig(
         workspace=tmp_path,
@@ -106,6 +169,10 @@ def _config(tmp_path: Path) -> AppConfig:
         extends_dir=tmp_path / "extends",
         logs_dir=tmp_path / "logs",
     )
+
+
+def _line_index(lines: list[str], prefix: str) -> int:
+    return next(index for index, line in enumerate(lines) if line.startswith(prefix))
 
 
 class _FakeRuntime:

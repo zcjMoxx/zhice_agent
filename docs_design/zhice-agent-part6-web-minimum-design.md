@@ -69,7 +69,7 @@ browser
 - Memory、MCP、Hooks、Subagent。
 - 数据库会话存储。继续使用现有 JSONL SessionStore。
 - 完整前端工程化。第一版不引入 Vite、React、Vue 或复杂构建链。
-- 持久化 turn 模型。当前 Web stop 只依赖内存态 active turn 与 cancellation token。
+- 独立数据库 turn 状态。第六部分本身不负责 turn 模型；当前持久化 `turn_id`、`turn_index` 和 WebSocket turn 对齐已由第七部分补齐，仍继续使用 JSONL SessionStore。
 
 ---
 
@@ -86,6 +86,8 @@ web/static/*
         v
 agent/core/loop.py
 agent/core/context.py
+agent/core/turns.py
+agent/core/context_relevance.py
         |
         v
 agent/protocols/*
@@ -105,9 +107,11 @@ agent/protocols/*
 ```text
 agent/core/loop.py       # AgentLoop 真实实现
 agent/core/context.py    # ContextBuilder 真实实现
+agent/core/turns.py      # turn id、turn grouping 和 turn index helper
+agent/core/context_relevance.py  # 本地 turn 相关性选择
 ```
 
-仓库内调用方直接导入 `agent.core.loop` 和 `agent.core.context`。不再保留 `agent/loop.py` 或 `agent/context.py` 中间导出层。
+仓库内调用方直接导入 `agent.core.loop`、`agent.core.context` 和相关 core helper。旧的 `agent/loop.py` 或 `agent/context.py` 中间导出层不再保留。
 
 ### 4.3 Gateway 启动职责
 
@@ -309,7 +313,7 @@ error   {"error":{"code":"LLM_ERROR","message":"..."}}
 - external command profile 声明 `client="external"` 后支持 `/history` 和 `/exit`；其中 `/exit` 只关闭当前 WS 连接，不退出 gateway。
 - `/sessions` 支持与 CLI 对齐的子命令：`/sessions` 列表，`/sessions rename <id> <title>` 重命名，`/sessions delete (<id>)` 删除指定会话；不带 id 删除时清空当前会话。
 - `content="/stop"` 或 `type="stop"` 都在 WebSocket 路由层拦截，不透传给 LLM。
-- 当前 WebSocket accepted 的 `turn_id` 和 runtime active turn 仍未完全统一，第七部分施工图见 `docs_design/zhice-agent-part7-turn-context-design.md`。
+- 当前 WebSocket accepted、channel_text、done、stopped、error 已由第七部分统一到同一个 `turn_id`；第七部分当前口径见 `docs_design/zhice-agent-part7-turn-context-design.md`。
 
 ### 5.8 `GET /api/models`
 
@@ -457,8 +461,8 @@ browser submit message
   -> WebSocket /ws message frame
   -> validate frame
   -> optional model preference update
-  -> WebRuntime.run_chat_events(session_id, message)
-  -> AgentLoop.run_turn(session_id, message, on_event, cancellation_token)
+  -> WebRuntime.run_chat_events(session_id, message, turn_id)
+  -> AgentLoop.run_turn(session_id, message, turn_id, on_event, cancellation_token)
   -> ContextBuilder loads prompt/history/skill summaries/current user message
   -> LLMProvider.stream_chat(...) when available, otherwise chat(...)
   -> ToolRegistry executes tool calls when needed
@@ -496,7 +500,7 @@ browser stop button or input /stop
   -> WebSocket emits stopped status
 ```
 
-当前 stop 仍是内存态 active turn 能力，不代表 turn 已持久化。第七部分 turn 施工图见 `docs_design/zhice-agent-part7-turn-context-design.md`，背景记录见 `docs_design/2026-07-04-turn-runtime-and-context-design.md`。
+当前 stop 仍依赖内存态 active turn 与 cancellation token 发起取消；第七部分已经让 stopped marker 和 WebSocket stopped event 复用同一个持久 `turn_id`。第七部分当前口径见 `docs_design/zhice-agent-part7-turn-context-design.md`，背景记录见 `docs_design/2026-07-04-turn-runtime-and-context-design.md`。
 
 ---
 
@@ -548,6 +552,8 @@ agent/app/api/schemas.py
 agent/core/__init__.py
 agent/core/loop.py
 agent/core/context.py
+agent/core/turns.py
+agent/core/context_relevance.py
 web/static/index.html
 web/static/styles.css
 web/static/app.js
@@ -640,12 +646,11 @@ http://127.0.0.1:10086/api/sessions
 
 ## 13. 后续演进
 
-第六部分完成后再考虑：
+第六部分完成后已由第七部分补齐 turn 运行单元；后续再考虑：
 
-- 持久化 turn_id，让 Web accepted/done/stopped 与 Session 历史完全统一。
 - Gateway / Agent 运行日志优化，复用统一后的 `turn_id` 打印 turn、LLM、tool 和 session 保存轨迹。
 - 用户、登录与权限执行边界设计；这属于后续安全执行主线，不并入第六部分 Web 最小版。
-- CLI `/stop`，等待 turn 持久化、active turn registry 和并发输入通道稳定后再做。
+- CLI `/stop`，等待 active turn registry 和并发输入通道稳定后再做。
 - 会话自动标题、归档和全文搜索。
 - 工具调用日志面板。
 - `/model` Web 控制面。

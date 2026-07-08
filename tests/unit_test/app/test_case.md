@@ -35,3 +35,12 @@
 - WebSocket accepted, text, done, stopped, and error events carry the aligned turn id.
 - Session history API exposes optional message turn fields.
 - SSE status, delta, done, stopped, and error payloads carry one consistent turn id.
+
+## Part 8 Logging Coverage
+
+- Gateway logging options split Agent lifecycle log, HTTP access log, HTTP server log, and workspace trace log.
+- Terminal Agent log lines use `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` without milliseconds, and can color the timestamp and component/event segment on TTY.
+- Workspace trace writes JSONL to `logs/YYYY-MM-DD/trace.log` with `component` and no full internal logger name.
+- Logging configuration is idempotent and can disable terminal Agent logs while keeping trace on.
+- Preview helpers redact sensitive fields, collapse multiline text, and truncate long values.
+- WebRuntime keeps correlated `chat.accepted` and `chat.done` events at DEBUG with `session_id` and `turn_id`, while stop/error events remain visible at higher levels.

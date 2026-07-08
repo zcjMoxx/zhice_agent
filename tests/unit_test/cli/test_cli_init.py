@@ -2,6 +2,9 @@
 
 import builtins
 
+import pytest
+
+from agent.app.logging import GatewayLogOptions
 from agent.cli import _resolve_preferred_endpoint, main
 from agent.protocols.llm import LLMEndpoint
 
@@ -123,7 +126,7 @@ def test_cli_gateway_check_uses_configured_workspace(tmp_path, capsys, monkeypat
 
 
 def test_cli_gateway_passes_log_options(tmp_path, capsys, monkeypatch):
-    """Gateway log flags should be passed to the FastAPI runner."""
+    """Gateway log flags should be passed as split gateway log options."""
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
@@ -134,14 +137,37 @@ def test_cli_gateway_passes_log_options(tmp_path, capsys, monkeypatch):
 
     monkeypatch.setattr("agent.cli.run_gateway", capture_gateway)
 
-    result = main(["gateway", "--log-level", "warning", "--access-log", "off"])
+    result = main(
+        [
+            "gateway",
+            "--http-server-log-level",
+            "warning",
+            "--http-access-log",
+            "off",
+        ]
+    )
 
     capsys.readouterr()
     assert result == 0
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 10086
-    assert captured["log_level"] == "warning"
-    assert captured["access_log"] is False
+    assert captured["log_options"] == GatewayLogOptions(
+        http_access_log=False,
+        http_server_log_level="warning",
+    )
+
+
+def test_cli_gateway_rejects_removed_legacy_log_flags(capsys):
+    """Local gateway should not keep old --log-level or --access-log aliases."""
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["gateway", "--log-level", "warning"])
+    assert exc_info.value.code == 2
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["gateway", "--access-log", "off"])
+    assert exc_info.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_cli_gateway_reports_missing_workspace(tmp_path, capsys, monkeypatch):

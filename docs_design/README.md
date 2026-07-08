@@ -17,8 +17,9 @@
 - `zhice-agent-part6-web-minimum-design.md`：Part 6，Web 最小版、REST/SSE 兼容接口与 WebSocket 主通道。
 - `zhice-agent-part6-web-ui-design.md`：Part 6，前端 UI、流式反馈、Markdown 渲染与会话操作。
 - `zhice-agent-part7-turn-context-design.md`：Part 7，Turn 运行单元、持久化字段与上下文治理。
+- `zhice-agent-part8-gateway-agent-logging-design.md`：Part 8，Gateway / Agent 运行日志优化。
 
-当前第六部分之后的主线顺序已调整为：先落地 turn 运行单元与上下文治理，再做 Gateway / Agent 运行日志优化，然后设计并实现用户、登录与权限执行边界。详细排序见 `2026-07-06-next-stage-sequencing-design.md`，第七部分开发依据见 `zhice-agent-part7-turn-context-design.md`。
+当前第八部分 Gateway / Agent 运行日志优化已落地；下一阶段主线是设计并实现用户、登录与权限执行边界。详细排序背景见 `2026-07-06-next-stage-sequencing-design.md`，第八部分当前实现口径见 `zhice-agent-part8-gateway-agent-logging-design.md`。
 
 维护规则：
 
@@ -49,11 +50,12 @@
 7. `zhice-agent-part6-web-minimum-design.md`
 8. `zhice-agent-part6-web-ui-design.md`
 9. `zhice-agent-part7-turn-context-design.md`
-10. `2026-07-06-context-relevance-selection-design.md`
-11. `2026-07-06-next-stage-sequencing-design.md`
-12. `2026-07-04-turn-runtime-and-context-design.md`
-13. `2026-07-02-gateway-runtime-logging-design.md`
-14. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
+10. `zhice-agent-part8-gateway-agent-logging-design.md`
+11. `2026-07-06-context-relevance-selection-design.md`
+12. `2026-07-06-next-stage-sequencing-design.md`
+13. `2026-07-04-turn-runtime-and-context-design.md`
+14. `2026-07-02-gateway-runtime-logging-design.md`
+15. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
 
 ## 日期设计记录清单
 

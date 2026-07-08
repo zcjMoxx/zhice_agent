@@ -59,3 +59,9 @@
 - Reuse externally provided turn ids for Web/runtime calls.
 - Stamp user, assistant, tool, error, stopped, and tool-iteration-limit messages with the same turn fields.
 - Keep Fake LLM tests deterministic while covering normal, error, streaming, cancellation, and tool paths.
+
+## Part 8 Logging Coverage
+
+- AgentLoop emits concise INFO lifecycle logs for `turn.start` and `turn.done`; repetitive `llm.call`, `llm.direct`, and `session.save` remain available at DEBUG with `session_id` and `turn_id`.
+- Tool dispatch emits `tool.start` and `tool.done` with `session_id`, `turn_id`, tool name, success flag, duration, and safe output preview.
+- Lifecycle log fields must not leak secret-like values or full long user/tool content.

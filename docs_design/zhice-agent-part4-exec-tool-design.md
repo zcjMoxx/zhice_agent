@@ -716,7 +716,7 @@ session 保存 user -> assistant(tool_calls) -> tool -> assistant(final)
 
 第四部分留下的能力会成为第五部分的关键底座，但第五部分仍然不应该把 Skill 业务逻辑写进 AgentLoop。Skill 发现、Skill 正文读取、Skill 脚本调用都应通过 Tool/SkillProvider 边界完成。
 
-第六部分之后再考虑 Web、Memory、MCP、Hooks、Subagent 等扩展能力。
+当前 Web 最小版和 turn 运行单元已经落地。第四部分留下的安全底线继续服务后续 Gateway / Agent 运行日志、用户权限、Memory、MCP、Hooks、Subagent 等扩展能力。
 
 ---
 

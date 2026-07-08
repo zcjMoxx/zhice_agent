@@ -31,6 +31,53 @@ def test_run_turn_returns_assistant_text_and_appends_session_messages(tmp_path):
     _assert_single_turn(sessions.appended["default"], expected_index=1)
 
 
+def test_run_turn_logs_lifecycle_without_full_user_text(tmp_path, caplog):
+    """Lifecycle logs should be correlated by session/turn and use short previews."""
+
+    from agent.core.loop import AgentLoop
+    from agent.protocols.llm import LLMResponse
+
+    user_text = "OPENAI_API_KEY=sk-testsecret123456\n" + "x" * 200
+    llm = FakeLLM(LLMResponse(content="hi"))
+    sessions = InMemorySessionStore()
+    loop = AgentLoop(llm=llm, sessions=sessions, context_builder=FakeContextBuilder(), workspace=tmp_path)
+    caplog.set_level("INFO", logger="zcagent.agent")
+
+    loop.run_turn("default", user_text, turn_id="turn-log")
+
+    events = [record for record in caplog.records if record.name.startswith("zcagent.agent")]
+    assert [record.event for record in events] == [  # type: ignore[attr-defined]
+        "turn.start",
+        "turn.done",
+    ]
+    for record in events:
+        fields = record.fields  # type: ignore[attr-defined]
+        assert fields["session_id"] == "default"
+        assert fields["turn_id"] == "turn-log"
+        assert "sk-testsecret123456" not in str(fields)
+    start_fields = events[0].fields  # type: ignore[attr-defined]
+    assert "input_preview" in start_fields
+    assert len(start_fields["input_preview"]) <= 120
+
+
+def test_run_turn_keeps_repetitive_lifecycle_logs_at_debug(tmp_path, caplog):
+    """Default terminal info should stay concise while debug keeps trace detail."""
+
+    from agent.core.loop import AgentLoop
+    from agent.protocols.llm import LLMResponse
+
+    llm = FakeLLM(LLMResponse(content="hi"))
+    sessions = InMemorySessionStore()
+    loop = AgentLoop(llm=llm, sessions=sessions, context_builder=FakeContextBuilder(), workspace=tmp_path)
+    caplog.set_level("DEBUG", logger="zcagent.agent")
+
+    loop.run_turn("default", "hello", turn_id="turn-debug")
+
+    records = [record for record in caplog.records if record.name.startswith("zcagent.agent")]
+    debug_events = [record.event for record in records if record.levelname == "DEBUG"]  # type: ignore[attr-defined]
+    assert debug_events == ["llm.call", "llm.direct", "session.save"]
+
+
 def test_run_turn_uses_external_turn_id_when_provided(tmp_path):
     """Web callers should be able to align accepted events with persisted messages."""
 

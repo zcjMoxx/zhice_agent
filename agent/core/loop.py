@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,6 +14,7 @@ from typing import Any
 from agent.console import console
 from agent.core.context import ContextBuilder
 from agent.core.turns import assign_turn, new_turn_id, next_turn_index
+from agent.logging_utils import log_event, preview_json, preview_text
 from agent.message import Message
 from agent.protocols.llm import (
     LLMConfigurationError,
@@ -27,6 +30,10 @@ ASSISTANT_ERROR_TEXT = "LLM call failed. Check the workspace configuration and r
 TOOL_ITERATION_LIMIT_TEXT = "Tool call limit reached. Please retry with a narrower request."
 TURN_CANCELLED_TEXT = "[stopped]"
 TurnEventCallback = Callable[[dict[str, Any]], None]
+turn_logger = logging.getLogger("zcagent.agent.turn")
+llm_logger = logging.getLogger("zcagent.agent.llm")
+tool_logger = logging.getLogger("zcagent.agent.tool")
+session_logger = logging.getLogger("zcagent.agent.session")
 
 
 @dataclass
@@ -105,6 +112,7 @@ class AgentLoop:
         session = self.sessions.load(session_id)
         resolved_turn_id = turn_id or new_turn_id()
         resolved_turn_index = next_turn_index(session.messages)
+        turn_started = time.perf_counter()
         user_msg = assign_turn(
             Message(role="user", content=user_text),
             turn_id=resolved_turn_id,
@@ -115,6 +123,15 @@ class AgentLoop:
             user_message=user_msg,
             workspace=self.workspace,
             session_id=session_id,
+        )
+        log_event(
+            turn_logger,
+            logging.INFO,
+            "turn.start",
+            session_id=session_id,
+            turn_id=resolved_turn_id,
+            turn_index=resolved_turn_index,
+            input_preview=preview_text(user_text, limit=120),
         )
 
         pending_session_messages = [user_msg]
@@ -135,11 +152,29 @@ class AgentLoop:
                 pending_session_messages,
                 self.workspace,
             )
+            _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
+            log_event(
+                turn_logger,
+                logging.INFO,
+                "turn.stopped",
+                session_id=session_id,
+                turn_id=resolved_turn_id,
+                turn_index=resolved_turn_index,
+            )
             return _with_save_error(TURN_CANCELLED_TEXT, save_error)
 
         while True:
             try:
                 _raise_if_cancelled(cancellation_token)
+                log_event(
+                    llm_logger,
+                    logging.DEBUG,
+                    "llm.call",
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    messages=len(messages),
+                    tools=len(tool_definitions or []),
+                )
                 response = _call_llm(
                     self.llm,
                     messages=list(messages),
@@ -151,6 +186,14 @@ class AgentLoop:
             except TurnCancelledError:
                 return persist_cancelled_turn()
             except Exception as exc:  # noqa: BLE001 - the loop must persist failed turns.
+                log_event(
+                    llm_logger,
+                    logging.ERROR,
+                    "llm.error",
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    error_type=type(exc).__name__,
+                )
                 error_text = _format_llm_error(exc, self.workspace)
                 assistant_msg = Message(
                     role="assistant",
@@ -168,7 +211,37 @@ class AgentLoop:
                     pending_session_messages,
                     self.workspace,
                 )
+                _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
+                log_event(
+                    turn_logger,
+                    logging.ERROR,
+                    "turn.error",
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    turn_index=resolved_turn_index,
+                    error_type=type(exc).__name__,
+                )
                 return _with_save_error(error_text, save_error)
+
+            if response.tool_calls:
+                log_event(
+                    llm_logger,
+                    logging.DEBUG,
+                    "llm.tool_calls",
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    count=len(response.tool_calls),
+                    tools=",".join(_tool_call_names(response.tool_calls)),
+                )
+            else:
+                log_event(
+                    llm_logger,
+                    logging.DEBUG,
+                    "llm.direct",
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    output_preview=preview_text(response.content, limit=120),
+                )
 
             assistant_msg = Message(
                 role="assistant",
@@ -187,9 +260,28 @@ class AgentLoop:
                     pending_session_messages,
                     self.workspace,
                 )
+                _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
+                log_event(
+                    turn_logger,
+                    logging.INFO,
+                    "turn.done",
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    turn_index=resolved_turn_index,
+                    duration_ms=_duration_ms(turn_started),
+                    output_preview=preview_text(assistant_msg.content, limit=120),
+                )
                 return _with_save_error(assistant_msg.content, save_error)
 
             if tool_iterations >= self.max_tool_iterations:
+                log_event(
+                    tool_logger,
+                    logging.WARNING,
+                    "tool.iteration_limit",
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    limit=self.max_tool_iterations,
+                )
                 for index, raw_call in enumerate(assistant_msg.tool_calls):
                     call = _parse_tool_call(raw_call, index)
                     result = ToolResult(
@@ -213,6 +305,17 @@ class AgentLoop:
                     pending_session_messages,
                     self.workspace,
                 )
+                _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
+                log_event(
+                    turn_logger,
+                    logging.WARNING,
+                    "turn.done",
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    turn_index=resolved_turn_index,
+                    duration_ms=_duration_ms(turn_started),
+                    output_preview=TOOL_ITERATION_LIMIT_TEXT,
+                )
                 return _with_save_error(TOOL_ITERATION_LIMIT_TEXT, save_error)
 
             tool_iterations += 1
@@ -222,7 +325,22 @@ class AgentLoop:
                 except TurnCancelledError:
                     return persist_cancelled_turn()
                 call = _parse_tool_call(raw_call, index)
-                result = call.error or _execute_tool(self.tools, call)
+                if call.error is not None:
+                    result = call.error
+                    _log_tool_result(
+                        result,
+                        session_id=session_id,
+                        turn_id=resolved_turn_id,
+                        tool_name=call.name,
+                        duration_ms=0,
+                    )
+                else:
+                    result = _execute_tool(
+                        self.tools,
+                        call,
+                        session_id=session_id,
+                        turn_id=resolved_turn_id,
+                    )
                 try:
                     _raise_if_cancelled(cancellation_token)
                 except TurnCancelledError:
@@ -294,16 +412,129 @@ def _raise_if_cancelled(cancellation_token: CancellationToken | None) -> None:
         cancellation_token.raise_if_cancelled()
 
 
-def _execute_tool(tools: ToolProvider | None, call: ParsedToolCall) -> ToolResult:
+def _execute_tool(
+    tools: ToolProvider | None,
+    call: ParsedToolCall,
+    *,
+    session_id: str,
+    turn_id: str,
+) -> ToolResult:
     """Dispatch one parsed tool call through the configured tool provider."""
 
+    log_event(
+        tool_logger,
+        logging.INFO,
+        "tool.start",
+        session_id=session_id,
+        turn_id=turn_id,
+        tool=call.name,
+    )
+    log_event(
+        tool_logger,
+        logging.DEBUG,
+        "tool.args",
+        session_id=session_id,
+        turn_id=turn_id,
+        tool=call.name,
+        args_preview=preview_json(call.arguments, limit=200),
+    )
+    started = time.perf_counter()
     if tools is None:
-        return ToolResult(
+        result = ToolResult(
             output="Tool provider is not configured.",
             is_error=True,
             metadata={"code": "TOOLS_UNAVAILABLE", "tool_name": call.name},
         )
-    return tools.execute(call.name, call.arguments)
+    else:
+        result = tools.execute(call.name, call.arguments)
+    _log_tool_result(
+        result,
+        session_id=session_id,
+        turn_id=turn_id,
+        tool_name=call.name,
+        duration_ms=_duration_ms(started),
+    )
+    return result
+
+
+def _log_tool_result(
+    result: ToolResult,
+    *,
+    session_id: str,
+    turn_id: str,
+    tool_name: str,
+    duration_ms: int,
+) -> None:
+    """Log a bounded tool result preview."""
+
+    fields: dict[str, Any] = {
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "tool": tool_name,
+        "ok": not result.is_error,
+        "duration_ms": duration_ms,
+        "output_preview": preview_text(result.output, limit=120),
+    }
+    code = result.metadata.get("code")
+    if code:
+        fields["code"] = code
+    log_event(
+        tool_logger,
+        logging.WARNING if result.is_error else logging.INFO,
+        "tool.error" if result.is_error else "tool.done",
+        **fields,
+    )
+
+
+def _log_session_save(
+    save_error: str | None,
+    session_id: str,
+    turn_id: str,
+    messages_count: int,
+) -> None:
+    """Log whether pending turn messages were saved."""
+
+    if save_error:
+        log_event(
+            session_logger,
+            logging.ERROR,
+            "session.save_failed",
+            session_id=session_id,
+            turn_id=turn_id,
+            messages=messages_count,
+            error_preview=preview_text(save_error, limit=160),
+        )
+        return
+    log_event(
+        session_logger,
+        logging.DEBUG,
+        "session.save",
+        session_id=session_id,
+        turn_id=turn_id,
+        messages=messages_count,
+    )
+
+
+def _tool_call_names(tool_calls: list[dict[str, Any]]) -> list[str]:
+    """Return provider tool-call names for compact logging."""
+
+    names: list[str] = []
+    for raw_call in tool_calls:
+        name = ""
+        if isinstance(raw_call, dict):
+            function = raw_call.get("function")
+            if isinstance(function, dict):
+                name = str(function.get("name") or "")
+            if not name:
+                name = str(raw_call.get("name") or "")
+        names.append(name or "unknown_tool")
+    return names
+
+
+def _duration_ms(started: float) -> int:
+    """Return elapsed monotonic time in milliseconds."""
+
+    return max(0, int((time.perf_counter() - started) * 1000))
 
 
 def _parse_tool_call(raw_call: object, index: int) -> ParsedToolCall:

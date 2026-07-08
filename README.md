@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前已经推进到第六部分 Web 最小版，主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前已经完成到第八部分 Gateway / Agent 运行日志优化，主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -12,8 +12,10 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前已经推进到第�
 - 受限 `exec`、`read_file`、`list_dir`、`grep`
 - Skill source 同步、SkillLoader、`load_skills` 和 `sync_skills`
 - CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道和最小静态 Web UI
+- `turn_id` / `turn_index` 持久化、WebSocket turn 对齐和基于 turn 的相关历史选择
+- Gateway / Agent 分层运行日志、终端时间戳格式和 workspace `logs/YYYY-MM-DD/trace.log`
 
-当前仍保持轻量边界：没有鉴权、远程部署、MCP、Memory、Subagent、Hook、市集和多用户隔离；Web 侧已经使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。第六部分之后的主线顺序是：先 turn 运行单元与上下文治理，再做 Gateway / Agent 运行日志优化，然后设计并实现用户、登录与权限执行边界。
+当前仍保持轻量边界：没有鉴权、远程部署、MCP、Memory、Subagent、Hook、市集和多用户隔离；Web 侧已经使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。第七部分 turn 能力和第八部分运行日志能力已经成为当前基线，下一阶段主线是设计并实现用户、登录与权限执行边界。
 
 ## 设计文档
 
@@ -199,6 +201,22 @@ zcagent gateway
 ```
 
 当前 gateway 会启动本地 FastAPI 服务，访问 `http://127.0.0.1:10086/` 可打开最小聊天界面；`/ws` 提供浏览器主聊天通道，`/api/chat`、`/api/chat/stream`、`/api/sessions`、`/api/sessions/{session_id}`、`/api/models` 和 `/api/model/preference` 提供兼容 Web API。
+
+默认启动时会打印简短 Agent lifecycle log，并写入 workspace trace；`llm.call`、`llm.direct`、`session.save` 等细节默认不刷终端，需要时用 `--agent-log-level debug` 或查看 trace：
+
+```text
+${ZHICE_AGENT_WORKSPACE}/logs/YYYY-MM-DD/trace.log
+```
+
+常用日志开关：
+
+```bash
+zcagent gateway --agent-log off
+zcagent gateway --agent-log-level debug
+zcagent gateway --trace-log off
+zcagent gateway --http-access-log off
+zcagent gateway --http-server-log-level warning
+```
 
 gateway 仍只面向本地开发，不包含鉴权、远程部署、渠道接入或后台服务编排。
 

@@ -1,6 +1,6 @@
 # ZhiCe-Agent 后续阶段排序设计记录
 
-> 说明：后续 Part 7 实现已按本地开发口径移除旧 JSONL、metadata fallback 和 legacy grouping 兼容；上下文注入也改为先做本地相关性选择。当前上下文方案参考 `docs_design/2026-07-06-context-relevance-selection-design.md` 和 `docs_design/zhice-agent-part7-turn-context-design.md`。
+> 说明：后续 Part 7 实现已按本地开发口径移除旧 JSONL、metadata fallback 和 legacy grouping 兼容；上下文注入也改为先做本地相关性选择。第八部分 Gateway / Agent 运行日志也已落地。当前上下文方案参考 `docs_design/2026-07-06-context-relevance-selection-design.md` 和 `docs_design/zhice-agent-part7-turn-context-design.md`，第八部分当前实现口径参考 `docs_design/zhice-agent-part8-gateway-agent-logging-design.md`。
 
 > 日期：2026-07-06
 > 状态：路线调整记录；本记录只调整后续阶段顺序和文档口径，不代表代码已经实现。

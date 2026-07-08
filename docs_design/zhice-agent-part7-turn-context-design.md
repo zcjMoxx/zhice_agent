@@ -22,7 +22,7 @@
 - `JsonlSessionStore`：继续以 JSONL 保存会话消息。
 - `ContextBuilder`：按最近 message 数裁剪历史，并尽量保留合法 tool-call block。
 
-当前问题是这些能力还没有共享同一个持久 turn 边界：
+第七部分启动前的问题是这些能力还没有共享同一个持久 turn 边界：
 
 ```text
 Web accepted turn_id
@@ -190,7 +190,7 @@ class Message:
 
 ### 5.3 `TurnGroup`
 
-新增轻量 turn 分组结构。建议放在 `agent/protocols/session.py` 或 `agent/core/turns.py`，以实际实现时的依赖方向为准；不能让 `core` import 具体 JSONL store。
+当前代码在 `agent/protocols/session.py` 放置轻量 `TurnGroup` 数据结构，在 `agent/core/turns.py` 放置分组和索引 helper。`core` 只依赖协议层数据结构，不 import 具体 JSONL store。
 
 ```python
 @dataclass
@@ -217,7 +217,7 @@ class TurnGroup:
 
 ## 6. Turn grouping 规则
 
-实现一个纯函数，把 `list[Message]` 分为 `list[TurnGroup]`。建议命名：
+当前 `agent/core/turns.py` 实现一个纯函数，把 `list[Message]` 分为 `list[TurnGroup]`：
 
 ```python
 group_messages_by_turn(messages: list[Message]) -> list[TurnGroup]
@@ -477,7 +477,7 @@ REST/SSE 兼容接口可以继续调用同一个 `WebRuntime.run_chat_events()`�
 
 ## 11. 变更文件
 
-预计修改：
+当前落地涉及：
 
 ```text
 agent/message.py
@@ -507,14 +507,14 @@ docs_design/zhice-agent-overall-design.md
 docs_design/zhice-agent-part6-web-minimum-design.md
 ```
 
-可选新增：
+当前已新增：
 
 ```text
 agent/core/turns.py
 tests/unit_test/core/test_turns.py
 ```
 
-是否新增 `agent/core/turns.py` 取决于实现时是否需要把 explicit grouping、next turn index、turn flatten 逻辑从 `ContextBuilder` 中拆出。原则是：如果这些 helper 同时被 AgentLoop 和 ContextBuilder 使用，就抽出；如果只在 ContextBuilder 内部使用，就保持局部。
+`agent/core/turns.py` 承载 `new_turn_id()`、`group_messages_by_turn()`、`next_turn_index()` 和 `assign_turn()`；`TurnGroup` 保留在 `agent/protocols/session.py`，方便 core 与 SessionStore 协议共享同一轻量结构。
 
 ---
 
@@ -626,7 +626,7 @@ python -m pytest --basetemp .tmp/pytest_basetemp
 
 ## 15. 和其它文档的关系
 
-- `docs_design/2026-07-04-turn-runtime-and-context-design.md` 是未来设计记录，保留更完整的后续方向；本文是第七部分当前施工图。
+- `docs_design/2026-07-04-turn-runtime-and-context-design.md` 是未来设计记录，保留更完整的后续方向；本文是第七部分当前实现口径。
 - `docs_design/2026-07-06-next-stage-sequencing-design.md` 确定第七部分排在日志和用户权限之前。
-- `docs_design/2026-07-02-gateway-runtime-logging-design.md` 应在第七部分完成后复用统一 `turn_id` 落地。
+- `docs_design/zhice-agent-part8-gateway-agent-logging-design.md` 已承接第八部分运行日志施工图；`docs_design/2026-07-02-gateway-runtime-logging-design.md` 保留为历史背景。
 - 后续用户权限系统应基于本文形成的关系：`User -> Session -> Turn -> ToolCall / AuditLog`。

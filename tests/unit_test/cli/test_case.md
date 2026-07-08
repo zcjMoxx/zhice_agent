@@ -65,3 +65,8 @@
 - CLI normal chat relies on AgentLoop-generated turn fields.
 - KeyboardInterrupt fallback writes interrupted messages with one generated turn.
 - CLI help still does not advertise a runtime `/stop` command before the concurrent input path exists.
+
+## Part 8 Logging Coverage
+
+- `zcagent gateway` parses split log flags for Agent lifecycle log, workspace trace log, HTTP access log, and HTTP server log.
+- Removed legacy flags `--log-level` and `--access-log` are rejected instead of being kept as aliases.

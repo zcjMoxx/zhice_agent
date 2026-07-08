@@ -355,7 +355,6 @@ setModelPreference(value)
 
 后续可以单独设计：
 
-- 持久化 turn_id，让 accepted/done/stopped 与历史消息完全统一。
 - Gateway / Agent 运行日志优化之后，再设计前端工具调用日志面板。
 - 用户、登录与权限执行边界确定后，再接登录页、账号中心、角色权限配置和审计视图。
 - Vue/Vite 前端工程化。

@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+import io
+import json
+import logging
+from datetime import datetime
+
+from agent.app.logging import (
+    GatewayLogOptions,
+    TerminalLogFormatter,
+    configure_gateway_logging,
+    reset_gateway_logging,
+)
+from agent.logging_utils import log_event, preview_json, preview_text, redact_mapping
+
+
+def teardown_function() -> None:
+    reset_gateway_logging()
+
+
+def test_terminal_formatter_uses_bracketed_seconds_and_pipe_separator():
+    formatter = TerminalLogFormatter()
+    record = logging.LogRecord(
+        "zcagent.agent.turn",
+        logging.INFO,
+        __file__,
+        1,
+        "turn.start",
+        (),
+        None,
+    )
+    record.created = datetime(2026, 7, 7, 21, 34, 12).timestamp()
+    record.event = "turn.start"  # type: ignore[attr-defined]
+    record.fields = {"session": "chat-20260707", "turn": "turn-abc"}  # type: ignore[attr-defined]
+
+    rendered = formatter.format(record)
+
+    assert rendered == (
+        "[2026-07-07 21:34:12] | INFO | "
+        "agent.turn.start | session=chat-20260707 turn=turn-abc"
+    )
+    assert ".000" not in rendered
+
+
+def test_terminal_formatter_combines_component_and_event():
+    formatter = TerminalLogFormatter()
+
+    assert _format_action(formatter, "zcagent.agent.llm", "llm.call") == "agent.llm.call"
+    assert _format_action(formatter, "zcagent.agent.tool", "tool.done") == "agent.tool.done"
+    assert _format_action(formatter, "zcagent.agent.session", "session.save") == "agent.session.save"
+    assert _format_action(formatter, "zcagent.agent.web", "chat.done") == "web.chat.done"
+    assert _format_action(formatter, "zcagent.gateway", "startup") == "gateway.startup"
+    assert _format_action(formatter, "zcagent.ws", "connection.open") == "ws.connection.open"
+    assert _format_action(formatter, "zcagent.other", "event") == "zcagent.event"
+
+
+def test_terminal_formatter_can_color_time_and_action_segments():
+    formatter = TerminalLogFormatter(color=True)
+
+    rendered = _format_record(
+        formatter,
+        "zcagent.agent.turn",
+        "turn.start",
+        {"session": "chat-20260707"},
+    )
+
+    assert rendered.startswith("\033[32m[2026-07-07 21:34:12]\033[0m | INFO | ")
+    assert "\033[36magent.turn.start\033[0m" in rendered
+    assert rendered.endswith("| session=chat-20260707")
+
+
+def test_preview_text_redacts_multiline_and_truncates():
+    text = "OPENAI_API_KEY=sk-testsecret123456\n" + "x" * 80
+
+    preview = preview_text(text, limit=48)
+
+    assert "\n" not in preview
+    assert "sk-testsecret123456" not in preview
+    assert "OPENAI_API_KEY=<redacted>" in preview
+    assert preview.endswith("...")
+    assert len(preview) <= 48
+
+
+def test_preview_json_redacts_nested_sensitive_fields():
+    payload = {
+        "api_key": "abc",
+        "nested": {"authorization": "Bearer secret-token"},
+        "items": [{"refresh_token": "r"}],
+    }
+
+    preview = preview_json(payload, limit=200)
+
+    assert "abc" not in preview
+    assert "secret-token" not in preview
+    assert '"api_key":"***"' in preview
+    assert '"authorization":"***"' in preview
+    assert '"refresh_token":"***"' in preview
+
+
+def test_redact_mapping_keeps_original_object_untouched():
+    payload = {"api_key": "abc", "name": "demo"}
+
+    redacted = redact_mapping(payload)
+
+    assert redacted == {"api_key": "***", "name": "demo"}
+    assert payload == {"api_key": "abc", "name": "demo"}
+
+
+def test_configure_gateway_logging_writes_date_partitioned_trace_jsonl(tmp_path):
+    stream = io.StringIO()
+    result = configure_gateway_logging(
+        GatewayLogOptions(trace_log=True),
+        logs_dir=tmp_path / "logs",
+        terminal_stream=stream,
+    )
+
+    log_event(
+        logging.getLogger("zcagent.agent.turn"),
+        logging.INFO,
+        "turn.start",
+        session_id="chat-20260707",
+        turn_id="turn-abc",
+        api_key="secret",
+    )
+
+    assert result.trace_path is not None
+    assert result.trace_path.name == "trace.log"
+    assert result.trace_path.parent.name == datetime.now().strftime("%Y-%m-%d")
+    payload = json.loads(result.trace_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert payload["level"] == "INFO"
+    assert payload["component"] == "agent"
+    assert "logger" not in payload
+    assert payload["event"] == "turn.start"
+    assert payload["session_id"] == "chat-20260707"
+    assert payload["turn_id"] == "turn-abc"
+    assert payload["api_key"] == "***"
+    assert "secret" not in result.trace_path.read_text(encoding="utf-8")
+    assert "[20" in stream.getvalue()
+
+
+def test_configure_gateway_logging_is_idempotent_for_terminal_handlers(tmp_path):
+    stream = io.StringIO()
+    options = GatewayLogOptions(trace_log=False)
+    configure_gateway_logging(options, logs_dir=tmp_path / "logs", terminal_stream=stream)
+    configure_gateway_logging(options, logs_dir=tmp_path / "logs", terminal_stream=stream)
+
+    log_event(logging.getLogger("zcagent.agent.turn"), logging.INFO, "turn.start", session_id="s")
+
+    lines = [line for line in stream.getvalue().splitlines() if "turn.start" in line]
+    assert len(lines) == 1
+
+
+def test_agent_log_can_be_disabled_while_trace_stays_on(tmp_path):
+    stream = io.StringIO()
+    result = configure_gateway_logging(
+        GatewayLogOptions(agent_log=False, trace_log=True),
+        logs_dir=tmp_path / "logs",
+        terminal_stream=stream,
+    )
+
+    log_event(logging.getLogger("zcagent.agent.turn"), logging.INFO, "turn.start", session_id="s")
+
+    assert stream.getvalue() == ""
+    assert result.trace_path is not None
+    assert "turn.start" in result.trace_path.read_text(encoding="utf-8")
+
+
+def _format_action(formatter: TerminalLogFormatter, logger_name: str, event: str) -> str:
+    return _format_record(formatter, logger_name, event).split(" | ")[2]
+
+
+def _format_record(
+    formatter: TerminalLogFormatter,
+    logger_name: str,
+    event: str,
+    fields: dict[str, object] | None = None,
+) -> str:
+    record = logging.LogRecord(logger_name, logging.INFO, __file__, 1, event, (), None)
+    record.created = datetime(2026, 7, 7, 21, 34, 12).timestamp()
+    record.event = event  # type: ignore[attr-defined]
+    if fields is not None:
+        record.fields = fields  # type: ignore[attr-defined]
+    return formatter.format(record)
