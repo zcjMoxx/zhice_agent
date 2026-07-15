@@ -271,23 +271,25 @@ contexts/sessions/chat-YYYYMMDD.jsonl
 能在 Web 端查看、重命名、删除会话并进行模型选择，
 能用稳定 `turn_id` / `turn_index` 串起一轮用户请求、WebSocket 事件和 JSONL 会话消息，
 能按最近 user turn 候选和本地相关性选择历史上下文，
+能通过分层 Gateway / Agent 日志和 workspace `trace.log` 观察 turn、LLM、tool 和 session 保存轨迹，
+能通过本地 SQLite 用户、角色、权限和可撤销 cookie 登录态保护 Web API / WebSocket，
+能按内部 user_id 隔离用户上下文、session index 和 session 模型偏好，
+能在工具执行前进行 RBAC、风险分类、危险确认和安全审计，
 能通过 `zcagent init` 生成运行时文件。
 ```
 
-这就是当前代码真正实现出来的阶段闭环。它已经不是“只聊天”的版本，而是包含本地工具、命令验证、endpoint 管理、模型切换、本地 Web 使用面和 turn 上下文治理的轻量 Agent 内核。
+这就是当前代码真正实现出来的阶段闭环。它已经不是“只聊天”的版本，而是包含本地工具、命令验证、endpoint 管理、模型切换、本地 Web 使用面、turn 上下文治理和运行日志的轻量 Agent 内核。
 
 ### 3.2 未来扩展方向
 
 当前代码还没有实现的能力，后续按依赖顺序增加：
 
-1. 用户、登录、多用户权限和危险工具执行授权设计。
-2. 用户权限系统第一版实现，包括登录界面、用户/角色/权限管理、session owner、工具权限检查和审计。
-3. 工程化前端、多页面设置页、工具调用日志面板和 Skill source 状态页。
-4. session 级 `/model` 选择持久化。
-5. Provider 错误分类、同 endpoint 重试和 cooldown。
-6. Memory、MCP、Hooks、Subagent、外部 IM / 协作平台接入、Skill Market、审批、通知和复杂部署编排。
+1. 工程化前端、多页面设置页、工具调用日志面板和 Skill source 状态页。
+2. Provider 错误分类、同 endpoint 重试和 cooldown。
+3. audit 清理/归档、更多管理命令和生产部署安全增强。
+4. Memory、MCP、Hooks、Subagent、外部 IM / 协作平台接入、Skill Market、审批、通知和复杂部署编排。
 
-这些能力不是不要，而是现在还没有进入代码主线。已经落地的只读工具、`exec`、LiteLLM、endpoint failover、`/model` 命令、FastAPI gateway、WebSocket 主通道、Web 会话管理、turn 上下文治理和 Gateway / Agent 运行日志，应视为当前架构边界的一部分。当前下一阶段是用户、登录与权限执行边界设计和实现。详细排序背景记录见 `docs_design/2026-07-06-next-stage-sequencing-design.md`。
+这些能力不是不要，而是现在还没有进入代码主线。已经落地的只读工具、`exec`、LiteLLM、endpoint failover、session 级 `/model`、FastAPI gateway、WebSocket 主通道、用户/session 隔离、turn 上下文治理、运行日志和 Part 9 权限执行边界，应视为当前架构边界的一部分。第九部分当前实现见 `docs_design/zhice-agent-part9-user-auth-permission-design.md`，排序背景见 `docs_design/2026-07-06-next-stage-sequencing-design.md`。
 
 ### 3.3 推荐目录结构
 
@@ -311,6 +313,7 @@ zhice_agent/
 |   +-- config.py
 |   +-- prompt_loader.py
 |   +-- app/
+|   |   +-- auth.py
 |   |   +-- gateway.py
 |   |   +-- runtime.py
 |   |   +-- api/
@@ -323,6 +326,7 @@ zhice_agent/
 |   |   +-- context_relevance.py
 |   |   +-- turns.py
 |   +-- protocols/
+|   |   +-- auth.py
 |   |   +-- llm.py
 |   |   +-- tool.py
 |   |   +-- skill.py
@@ -331,18 +335,33 @@ zhice_agent/
 |   |   +-- openai_provider.py
 |   |   +-- litellm_provider.py
 |   |   +-- failover_provider.py
+|   |   +-- selection.py
+|   +-- auth/
+|   |   +-- store.py
+|   |   +-- schema.py
+|   |   +-- passwords.py
+|   |   +-- tokens.py
+|   |   +-- audit.py
+|   |   +-- session_access.py
+|   |   +-- user_context.py
+|   |   +-- tool_policy.py
+|   |   +-- confirmation.py
+|   |   +-- diagnostics.py
 |   +-- tools/
 |   |   +-- base.py
 |   |   +-- registry.py
 |   |   +-- readonly.py
 |   |   +-- exec.py
 |   |   +-- shell_policy.py
+|   |   +-- scoped.py
+|   |   +-- diagnostics.py
 |   +-- skills/
 |   |   +-- loader.py
 |   |   +-- markdown.py
 |   |   +-- sync.py
 |   +-- session/
 |       +-- jsonl_store.py
+|       +-- model_preferences.py
 +-- skill_repo/
 |   +-- skills/
 |       +-- README.md
@@ -358,7 +377,7 @@ zhice_agent/
     +-- unit_test/
 ```
 
-这份目录结构是当前轻量形态。项目已经从 CLI-only 演进到本地 Web gateway，因此 `AgentLoop` 和 `ContextBuilder` 已收敛到 `agent/core/`，HTTP/WS 路由、运行时装配和静态资源服务放在 `agent/app/` 与 `web/static/`。当前不保留 `agent/gateway.py`、`agent/loop.py` 或 `agent/context.py` 兼容导出层。
+这份目录结构是当前轻量形态。项目已经从 CLI-only 演进到带本地 auth/RBAC 的 Web gateway：`AgentLoop` 和 `ContextBuilder` 位于 `agent/core/`，身份/权限/用户 session 服务位于 `agent/auth/`，HTTP/WS 壳位于 `agent/app/`，静态 UI 位于 `web/static/`。当前不保留 `agent/gateway.py`、`agent/loop.py` 或 `agent/context.py` 兼容导出层。
 
 参考大型 Agent 项目时，更应该吸收它的边界思想，而不是直接复制目录重量：
 
@@ -370,12 +389,13 @@ protocols       -> LLMProvider / ToolProvider / SkillProvider / SessionStore 等
 
 当前代码里：
 
-- `agent/core/loop.py`、`agent/core/context.py`、`agent/core/turns.py`、`agent/core/context_relevance.py`、`agent/tools/`、`agent/llm/`、`agent/session/` 属于核心层。
+- `agent/core/loop.py`、`agent/core/context.py`、`agent/core/turns.py`、`agent/core/context_relevance.py`、`agent/tools/`、`agent/llm/`、`agent/session/` 属于核心与可替换能力层。
+- `agent/auth/` 是 app/application 侧身份、权限、session access、confirmation 和 audit 实现；AgentLoop 只消费 `agent/protocols/auth.py` / `tool.py` 中的上下文和策略协议。
 - `agent/app/gateway.py`、`agent/app/runtime.py`、`agent/app/api/*` 和 `web/static/*` 属于 app shell / Web 边界。
 - `agent/cli.py` 属于入口层；gateway 实现直接位于 `agent/app/gateway.py`，不再保留顶层 re-export 文件。
 - `agent/protocols/` 已经承担协议层职责，应该保持只放接口和数据结构。
 
-后续如果继续演进登录、远程部署、多渠道或完整前端工程，可以在现有边界上扩展，但仍保持分层方向：
+后续如果继续演进 OAuth/SSO、远程部署、多渠道或完整前端工程，可以在现有边界上扩展，但仍保持分层方向：
 
 ```text
 agent/
@@ -1290,7 +1310,7 @@ contexts/sessions/
 - 后面可以接本地模型。
 - 当前可以做轻量 endpoint failover：启动首选 endpoint 失败后，按 `priority` 尝试其它 enabled endpoint。
 - 当前 `/model` 可以查看和切换本进程内的首选 endpoint。
-- 后面需要把 `/model` 选择写入 session metadata，让同一会话重启后继续使用上次选择的模型。
+- 用户系统实现后，所有入口把 `/model` 选择写入当前 session metadata。`/model reset` 清当前 session 偏好，`/new` 创建使用系统默认的新 session；不增加用户默认模型层。
 
 AgentLoop 只认：
 
@@ -1348,17 +1368,19 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 ### 15.1 当前后续顺序
 
-当前主线从用户权限开始继续推进。第七部分 Turn 运行单元与上下文治理、第八部分 Gateway / Agent 运行日志优化已经落地，已从未来待办池移出；后续顺序是：
+第七部分 Turn、第八部分运行日志和第九部分用户权限第一版均已落地。当前后续主线从 Part 9 的增强项继续推进，不再把用户权限第一版保留在未来待办池。
 
 ```text
-Milestone 9：用户、登录与权限执行边界设计
-  -> Milestone 10：用户权限系统第一版实现
+Part 9 已实现
+  -> 工程化前端 / 工具日志面板 / audit 归档
+  -> Memory / MCP / Hooks / Subagent
 ```
 
 排序原因：
 
 - `turn` 已经成为 Web stop、历史恢复、上下文裁剪、运行日志和权限审计的共同运行单位。
 - Gateway / Agent 运行日志已经复用统一 `turn_id`，后续权限审计可以继续沿用同一关联字段。
+- 第九部分已经把用户、session、turn、tool call 和 audit log 的关系落实到协议、运行时和 SQLite 状态层。
 - 用户权限系统不是单纯登录壳，而是为 `exec`、Skill、模型切换、session 管理等能力提供身份、授权、确认和审计依据。
 - Memory、MCP、Hooks 和 Subagent 后移，等执行边界、安全日志和权限模型更稳后再进入主线。
 
@@ -1367,13 +1389,13 @@ Milestone 9：用户、登录与权限执行边界设计
 - Vue/Vite 或其它工程化前端。
 - 工具调用日志面板、Skill source 状态页、设置页。
 - 会话自动标题、归档、全文搜索和更完整的会话管理。
-- 登录、账号中心、角色权限配置和用户管理页；这些属于 Milestone 10 的用户权限系统实现，不再作为第六部分的普通 UI 后续项。
+- 更完整的账号中心、安全策略、分页审计和权限模板；基础登录、显示名/密码设置、用户/角色权限、审计与诊断页已经在 Part 9 落地。
 
 进入开发触发条件：
 
 - 需要前端工程化、多页面路由、复杂状态管理或系统化组件。
 - 工具调用事件、Skill 状态、模型/端点配置页开始形成稳定产品界面。
-- 用户权限系统进入实现阶段，需要登录页、用户管理页、角色权限配置页和审计视图。
+- 当前原生静态 UI 的状态复杂度开始需要组件化和路由化。
 
 ### 15.3 Gateway / Agent 运行日志
 
@@ -1390,16 +1412,23 @@ Milestone 9：用户、登录与权限执行边界设计
 
 ### 15.4 用户、登录与权限执行边界
 
-用户系统后续要做，但应排在运行日志之后。它的目标不是单纯登录页，而是为危险工具执行提供身份、授权、确认和审计基础。
+第九部分第一版已经落地。当前活文档见 `docs_design/zhice-agent-part9-user-auth-permission-design.md`，日期背景记录见 `docs_design/2026-07-08-user-auth-permission-boundary-design.md`；模型偏好口径见 `docs_design/2026-07-10-session-model-preference-scope-design.md`。
 
-第一版设计方向：
+当前实现：
 
-- SQLite 保存用户、角色、权限、登录态、session owner 和 audit logs。
-- JSONL 继续作为聊天消息真值，暂不强制迁移所有会话到数据库。
+- SQLite 使用 `${ZHICE_AGENT_WORKSPACE}/state/auth.sqlite3`，保存用户、角色、权限、登录态、渠道身份映射、session 索引、tool confirmation 和 audit events。
+- JSONL 继续作为聊天消息真值；Owner Web 与 CLI 复用全局 `contexts/sessions/`，其他 Web / 外部渠道用户落在 `contexts/users/{user_id}/sessions/`。日常会话列表只按当前 owner_user_id 展示，不因全局管理权限混入其他用户记录。
+- `contexts/users/{user_id}/files/` 是用户默认可写工作目录，`contexts/shared/readonly/` 是普通用户可读公共上下文。
+- `owner` 是唯一永久最高用户；`admin` 是日常运营角色。Owner 可向指定 Admin 直接委派 `auth.admin.manage`，该能力不会随管理员任命传播。
+- 当前保留 `viewer` 与 `developer` 两个普通使用角色：`viewer` 是公开注册用户，`developer` 作为后续开发调试和扩展能力角色预留。两者现阶段基础权限基本一致，不为制造差异而临时限制普通用户；后续在开发诊断、Skill 扩展或其它明确能力进入主线时，再通过新的日期设计记录形成差异化权限。
+- 模型偏好按 session 持久化到对应 `sessions_meta/{session_id}.json`，不增加用户默认层。每个 turn 绑定当前 session 的模型选择；`/model reset` 恢复当前 session 系统默认，`/new` 不继承旧 session 偏好。
 - 权限关系按 `User -> Session -> Turn -> ToolCall / AuditLog` 建模。
-- `exec`、Skill、模型切换、session 管理等能力按用户权限检查。
+- `exec`、Skill、模型切换、session 管理等能力按用户权限检查；第一版 exec 权限收敛为 `tool.exec.safe` 和 `tool.exec.dangerous`，具体风险写入 `risk_category`。
 - 危险命令不因为“用户权限高”就完全放开；仍需要明确用户确认，并写入审计。
-- Web 提供登录页、用户管理页、角色权限配置页和审计查看入口。
+- 普通用户可在 Owner 初始化前后自助注册，新账号固定为 `viewer`。Web Owner 初始化仅通过隐藏路径 `/_setup` 提供，并由部署 Secret `ZHICE_AGENT_SETUP_TOKEN` 保护；用户名固定为 `owner`，页面只输入一次密码和一次凭证。普通登录页不展示入口，未配置 Secret 时只允许服务器 CLI 初始化。
+- 用户修改密码成功后撤销全部 auth session、清除 Cookie 并返回登录页，必须使用新密码重新认证。
+- HTTP、SSE 和 WebSocket 错误统一使用领域化业务码。HTTP body 固定包含 `error.status/code/message/request_id/details`：真实 HTTP status 负责协议语义，`code` 负责客户端稳定判断，`message` 只用于展示，`request_id` 关联 access/audit/trace，动态安全上下文放入 `details`。已知业务场景不返回裸 `FORBIDDEN` 或 `INVALID_REQUEST`；具体规范见 `docs_design/2026-07-11-api-error-code-contract-design.md`。
+- AgentLoop 不 import FastAPI、SQLite 或具体用户业务；权限判断通过 ActorContext、ToolExecutionContext、ToolExecutionPolicy 和 confirmation broker 等协议进入 tool dispatch。
 
 非目标：
 
@@ -1409,7 +1438,36 @@ Milestone 9：用户、登录与权限执行边界设计
 - 不做多 workspace 租户模型。
 - 不把 AgentLoop 写成用户业务分支；权限判断应进入 app shell、Tool policy 或独立权限服务，core 仍通过协议和上下文接收必要信息。
 
-### 15.5 Memory
+### 15.5 按意图披露工具与 Skill
+
+当前每轮把当前 actor 有权限使用的工具 schema 一并交给 LLM。这个做法简单，但不应成为长期默认：在连续翻译、改写、解释等纯文本上下文中，全量文件/exec 工具会干扰任务意图判断；反过来，用户也可以用英文自然语言明确下达真实执行任务，不能用“英文即翻译”的关键词规则代替理解。
+
+后续引入独立的 **Capability Selection** 应用层能力，在 `AgentLoop` 调用前基于当前请求、最近相关 turn、当前 actor 权限和风险边界决定本轮披露的最小能力集：
+
+```text
+Actor permissions + current request + relevant recent turns
+  -> CapabilitySelector
+      -> direct_response: 不向 LLM 注入工具或 Skill 摘要
+      -> task_execution: 注入与任务相关的最小 Tool/Skill 集
+      -> ambiguous: 不注入危险/宽泛能力，先澄清或作无工具意图判断
+  -> AgentLoop(LLM, selected ToolProvider, selected SkillProvider)
+```
+
+约束：
+
+- 判断必须是语义和会话连续性驱动：连续翻译中的短英文句通常直接翻译；带明确动作、目标、范围或验收要求的英文可进入执行。不能只按语言、单个关键词或是否出现技术名词判定。
+- 权限筛选先于能力选择；CapabilitySelector 只能从当前 actor 已获授权的能力中做减法，不能借由意图判断提升权限。
+- Skill 也按相关性披露：本轮只展示候选 Skill 摘要，确认需要时再通过 `load_skills` 读取正文；不把全部 Skill 内容或无关 schema 塞进每轮上下文。
+- `AgentLoop` 仍只消费已选的 `ToolProvider` / `SkillProvider`，不承担翻译、开发、诊断等业务意图判断；Selector 应位于 app/context 编排层并通过协议注入。
+- 选择结果需写入安全 trace（模式、候选/已披露能力数、理由码，不记录完整隐式推理），并有 Fake LLM 回归测试覆盖连续翻译、明确英文执行、模糊请求、权限拒绝和 Skill 相关性。
+
+进入开发触发条件：
+
+- 纯文本请求频繁被工具探索打断，或工具 schema/Skill 摘要已显著挤占上下文。
+- 已有足够的真实 turn trace，可为连续翻译、英文任务和诊断请求建立稳定评测集。
+- 先以日期设计记录明确 Selector 输入、输出、审计字段和 fallback，再修改 runtime/context 编排；不得把规则硬编码进 AgentLoop。
+
+### 15.6 Memory
 
 第一版不要 memory，只用 session。
 
@@ -1434,7 +1492,7 @@ memory_write
 
 不要一开始上 graph/holographic memory。
 
-### 15.6 MCP
+### 15.7 MCP
 
 MCP 很有价值，但放在工具系统稳定之后。
 
@@ -1445,7 +1503,7 @@ MCP 很有价值，但放在工具系统稳定之后。
 - 把 MCP tool 包装成 `BaseTool`。
 - 注册到 `ToolRegistry`。
 
-### 15.7 Hooks
+### 15.8 Hooks
 
 Hooks 可以用于安全和结果整理。
 
@@ -1485,7 +1543,7 @@ hooks/safety/pre_tooluse/exec.py
 }
 ```
 
-### 15.8 Skill Source 运维增强
+### 15.9 Skill Source 运维增强
 
 - `/skills status`：查看每个 source 的实际来源、本地路径、远端地址、分支、当前 commit、上次同步时间、同步结果和可用 Skill 数量。
 - Skill 索引缓存：缓存 source 扫描结果、mtime、commit 和 frontmatter 摘要，减少每次启动的全量扫描成本。
@@ -1495,7 +1553,7 @@ hooks/safety/pre_tooluse/exec.py
 
 如果这些能力开始稳定共享 source root、来源、commit、同步状态等结构化信息，再把 `SkillRoot` 提升为 `agent/protocols/skill.py` 中的协议层数据结构。
 
-### 15.9 Subagent
+### 15.10 Subagent
 
 子代理晚点做。
 
@@ -1511,7 +1569,7 @@ hooks/safety/pre_tooluse/exec.py
 - 让它跑同一个 AgentLoop。
 - 把结果摘要交回父 Agent。
 
-### 15.10 入口、打包与部署
+### 15.11 入口、打包与部署
 
 - Dockerfile 和本地容器运行方式。
 - `docker compose`、Kubernetes、进程守护或云部署清单。
@@ -1519,35 +1577,35 @@ hooks/safety/pre_tooluse/exec.py
 - 多环境配置 overlay，例如 local/dev/prod。
 - 发布前健康检查和启动诊断命令。
 
-### 15.11 CLI 入口与会话命令
+### 15.12 CLI 入口与会话命令
 
 - CLI `/stop`：等待 active turn registry、cancellation token 在 CLI 侧复用，以及 CLI 并发输入通道稳定后再做。实现前不加入 CLI help；实现时，`/stop` 只在 CLI 命令层处理，不作为普通 user message 写入 LLM 上下文。有 active turn 时取消当前 turn，无 active turn 时返回简短提示，并在停止后追加带同一 `turn_id` 的 assistant stopped marker。第七部分当前口径见 `docs_design/zhice-agent-part7-turn-context-design.md`，更完整的未来方向见 `docs_design/2026-07-04-turn-runtime-and-context-design.md`。
-- session 级模型选择持久化，让同一会话重启后继续使用上次选择的模型。
+- 第九部分实现阶段把 CLI `/model` 也收敛为当前 session 偏好；`/model reset` 清当前 session metadata，`/new` 创建使用系统默认的新 session。
 - 更完整的 `/sessions` 管理扩展，例如归档、搜索、按标题过滤和导出。
 - CLI 与 Web 共用的 turn 状态查询命令，例如查看最近 stopped/error turn。
 
-### 15.12 运行时初始化
+### 15.13 运行时初始化
 
 - 配置体检命令，例如检查 endpoint、Skill source、prompt、workspace 权限和会话目录。
 - 安全修复向导，例如检测到缺失模板时给出一键补齐方案。
 - 多 profile 初始化，例如 local/dev/prod 或不同模型供应商模板。
 - 初始化后的摘要报告，说明哪些文件新建、哪些保留、哪些需要用户补 key。
 
-### 15.13 本地密钥配置
+### 15.14 本地密钥配置
 
 - 系统 keyring 或平台 Secret Manager 集成。
 - Secret 引用体检，区分“变量不存在”“变量为空”“provider 拒绝认证”。
 - Web 设置页中的密钥状态展示，只显示存在性和来源，不显示明文。
 - 容器和云部署下的 secret mount 约定。
 
-### 15.14 打包与 Docker
+### 15.15 打包与 Docker
 
 - 最小运行镜像。
 - 本地一键容器启动脚本。
 - 镜像内健康检查和优雅退出。
 - 发布包校验，确认不会把 workspace、真实密钥或本地会话打进产物。
 
-### 15.15 网关运行边界
+### 15.16 网关运行边界
 
 - 需要 Web 鉴权、用户会话绑定或多渠道接入。
 - 需要生产级 HTTPS、反向代理、访问 token 或公网暴露。
@@ -1846,40 +1904,35 @@ secret redaction and preview truncation
 
 设计依据：`docs_design/zhice-agent-part8-gateway-agent-logging-design.md`。背景记录：`docs_design/2026-07-02-gateway-runtime-logging-design.md`。
 
-### Milestone 9：用户、登录与权限执行边界设计
+### Milestone 9：用户、登录与权限执行边界设计和实现
+
+状态：已实现第一版并进入当前代码基线。
 
 目标：
 
-- 先完成设计文档，明确用户、角色、权限、登录态、session owner、turn、tool call 和 audit log 的关系。
+- 先完成设计文档并由用户审核，明确用户、角色、权限、登录态、用户上下文目录、session_index、turn、tool call 和 audit log 的关系。
 - 给 `exec` 等危险工具从“一刀切拦截”演进为“权限 + 明确用户确认 + 审计”建立方案。
+- 设计确认后直接实现简单本地用户系统、权限管理界面和工具执行管控。
 
 交付：
 
 ```text
-日期设计记录
+当前活文档：docs_design/zhice-agent-part9-user-auth-permission-design.md
+日期设计记录：docs_design/2026-07-08-user-auth-permission-boundary-design.md
+模型偏好补充记录：docs_design/2026-07-10-session-model-preference-scope-design.md
 SQLite schema 草案
 权限 key 设计
 登录与管理界面范围
 工具权限检查数据流
 危险命令确认与审计策略
-```
-
-### Milestone 10：用户权限系统第一版实现
-
-目标：
-
-- 实现简单本地用户系统和权限管理界面。
-- Web API 有登录态，session 按用户隔离，工具调用按权限和确认策略执行。
-
-交付：
-
-```text
-SQLite auth store
-admin 初始化
+SQLite auth store under state/auth.sqlite3
+唯一 Owner 初始化与管理员管理权委派
 login/logout
-用户/角色/权限管理页
-session owner
+独立 `/admin` 用户/角色/权限管理页
+user context directories and session_index
+session model preferences and turn-local LLM selection
 tool permission policy
+按需 `diagnose_my_recent_activity` 工具诊断
 audit logs
 ```
 
@@ -1914,7 +1967,7 @@ audit logs
 不要一开始纳入：
 
 - 完整平台级 AgentLoop 实现。
-- 平台级应用 API 层、复杂鉴权和多租户；简单本地用户权限系统已排入 Milestone 9/10，但不等于一开始就做完整平台。
+- 平台级应用 API 层、复杂鉴权和多租户；简单本地用户权限系统已排入 Milestone 9，但不等于一开始就做完整平台。
 - 多渠道接入层。
 - 工程化多页面 Web 前端。
 - 外部协作平台渠道。
@@ -1946,7 +1999,7 @@ audit logs
 11. `zcagent init` 能生成本地运行态文件。
 12. `zcagent gateway --check` 能验证本地 gateway 配置并快速退出。
 13. `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 能配置多个 endpoint，并按 priority failover。
-14. `/model` 能查看、列出、切换和 reset 当前进程内首选 endpoint。
+14. `/model` 能按当前 session 查看、列出、切换和 reset endpoint/model 偏好。
 15. `zcagent gateway` 能启动本地 FastAPI/Web 服务，默认地址为 `http://127.0.0.1:10086/`。
 16. Web 前端能通过 `/ws` 发送消息、展示 pending/streaming 状态和 assistant Markdown。
 17. Web 端能读取、重命名、删除 session；删除当前 session 后进入空界面。
@@ -1954,10 +2007,12 @@ audit logs
 19. Fake LLM 测试通过。
 20. 默认测试不访问真实 LLM 或网络。
 
-下一阶段 MVP 扩展项：
+Part 9 已实现扩展项：
 
-1. 用户权限系统进入设计阶段，产出 SQLite schema、权限 key、登录/管理界面和危险工具执行审计方案。
-2. 日志查询面板、audit log、清理归档等能力另行设计，不回塞到第八部分。
+1. `state/auth.sqlite3`、首个 `admin` 初始化、登录/登出、用户上下文、session_index、渠道身份映射和显式 CLI session 导入。
+2. session 级模型偏好、turn-local provider、工具 RBAC、危险确认、用户可见诊断和 audit events。
+
+下一阶段继续处理工程化前端、工具日志面板、audit 清理归档和 Provider 错误治理。
 
 ---
 
@@ -2109,7 +2164,7 @@ audit logs
 
 实现：
 
-- 用户权限系统设计。
+- 用户权限系统设计：`docs_design/zhice-agent-part9-user-auth-permission-design.md`。
 - 简单登录和权限管理 UI。
 
 ---
@@ -2141,8 +2196,8 @@ audit logs
 这个目标完成后，下一步不要直接跳到大平台能力，而是按依赖顺序逐步加：
 
 ```text
-用户、登录与权限执行边界
-权限管理 UI 和工具执行管控
+工程化前端、工具日志面板和 audit 归档
+Provider 错误分类、重试和 cooldown
 Memory / MCP / Hooks / Subagent
 更多 Skills
 ```

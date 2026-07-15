@@ -1,6 +1,6 @@
 # ZhiCe-Agent 后续阶段排序设计记录
 
-> 说明：后续 Part 7 实现已按本地开发口径移除旧 JSONL、metadata fallback 和 legacy grouping 兼容；上下文注入也改为先做本地相关性选择。第八部分 Gateway / Agent 运行日志也已落地。当前上下文方案参考 `docs_design/2026-07-06-context-relevance-selection-design.md` 和 `docs_design/zhice-agent-part7-turn-context-design.md`，第八部分当前实现口径参考 `docs_design/zhice-agent-part8-gateway-agent-logging-design.md`。
+> 说明：后续 Part 7 实现已按本地开发口径移除旧 JSONL、metadata fallback 和 legacy grouping 兼容；上下文注入也改为先做本地相关性选择。第八部分 Gateway / Agent 运行日志也已落地。第九部分用户、登录与权限执行边界设计草案已经形成，审核确认后直接进入第九部分代码实施，当前依据见 `docs_design/zhice-agent-part9-user-auth-permission-design.md`。本历史记录正文里提到的 `session owner` 已在第九部分细化为 `contexts/users/{user_id}` 用户上下文边界和 `session_index`。当前上下文方案参考 `docs_design/2026-07-06-context-relevance-selection-design.md` 和 `docs_design/zhice-agent-part7-turn-context-design.md`，第八部分当前实现口径参考 `docs_design/zhice-agent-part8-gateway-agent-logging-design.md`。
 
 > 日期：2026-07-06
 > 状态：路线调整记录；本记录只调整后续阶段顺序和文档口径，不代表代码已经实现。
@@ -25,15 +25,14 @@
 ```text
 Milestone 7：Turn 运行单元与上下文治理
   -> Milestone 8：Gateway / Agent 运行日志优化
-  -> Milestone 9：用户、登录与权限执行边界设计
-  -> Milestone 10：用户权限系统第一版实现
+  -> Milestone 9：用户、登录与权限执行边界设计和第一版实现
   -> 后续：Memory / MCP / Hooks / Subagent
 ```
 
 一句话原则：
 
 ```text
-先 turn，后日志，再用户权限设计，最后实现用户权限 UI 和执行管控。
+先 turn，后日志，再在第九部分完成用户权限设计审核和代码实施。
 ```
 
 ## 3. 设计理由
@@ -123,7 +122,7 @@ User -> Session -> Turn -> ToolCall / AuditLog
 
 ### 6.3 Milestone 9
 
-用户权限先做设计，不直接开代码：
+用户权限先完成设计并由用户审核：
 
 - 账号和登录态。
 - 角色和权限。
@@ -134,9 +133,7 @@ User -> Session -> Turn -> ToolCall / AuditLog
 - SQLite schema。
 - 登录页和管理界面范围。
 
-### 6.4 Milestone 10
-
-按 Milestone 9 设计实现第一版：
+设计审核确认后，直接在 Milestone 9 实现第一版：
 
 - 初始化管理员。
 - 登录 / 登出。
@@ -150,7 +147,7 @@ User -> Session -> Turn -> ToolCall / AuditLog
 本次文档调整完成后应满足：
 
 1. 总体设计不再把 Memory 作为第六部分后的默认 Milestone 7。
-2. 总体设计明确下一步是 turn，然后是运行日志，再是用户权限设计和实现。
+2. 总体设计明确下一步是 turn，然后是运行日志，再由第九部分完成用户权限设计审核和实现。
 3. Part 6 后续演进与总体设计顺序一致。
 4. README 不再声称当前 Web 只有 SSE 或没有 WebSocket。
 5. 日期设计索引包含本记录，Part 7 活文档成为第七部分开发依据，旧 turn/logging 设计记录保留为背景和后续参考。

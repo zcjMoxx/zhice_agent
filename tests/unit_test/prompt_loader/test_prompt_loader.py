@@ -1,8 +1,14 @@
 """Tests for UTF-8 Markdown prompt loading."""
 
+from __future__ import annotations
+
+from pathlib import Path
+
 import pytest
 
 from agent.prompt_loader import PromptLoader, PromptNotFoundError, PromptPathError
+
+REPOSITORY_PROMPTS_DIR = Path(__file__).resolve().parents[3] / "prompts"
 
 
 def test_load_reads_utf8_prompt_without_suffix(tmp_path):
@@ -63,3 +69,21 @@ def test_load_many_returns_requested_names(tmp_path):
         "identity": "identity",
         "tool_use_policy": "policy",
     }
+
+
+def test_runtime_identity_prompt_matches_current_tool_capable_agent():
+    identity = PromptLoader(REPOSITORY_PROMPTS_DIR).load("identity")
+
+    assert "第二阶段" not in identity
+    assert "纯对话模式" not in identity
+    assert "运行时提供的工具" in identity
+    assert "tool schemas" in identity
+
+
+def test_runtime_tool_policy_requires_verified_real_state_and_explicit_tool_use():
+    policy = PromptLoader(REPOSITORY_PROMPTS_DIR).load("tool_use_policy")
+
+    assert "用户明确要求调用" in policy
+    assert "真实系统状态" in policy
+    assert "不能根据 `session_id`" in policy
+    assert "未经实际调用" in policy

@@ -7,6 +7,7 @@ from agent.skills.sync import SkillSourceSync
 from agent.tools.exec import ExecTool
 from agent.tools.readonly import GrepTool, ListDirTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
+from agent.tools.scoped import UserScopedToolProvider
 from agent.tools.skill import LoadSkillsTool, SyncSkillsTool
 
 
@@ -14,6 +15,8 @@ def create_default_tool_registry(
     workspace: Path | str,
     skills: SkillProvider | None = None,
     skill_sync: SkillSourceSync | None = None,
+    *,
+    allow_confirmable_exec: bool = False,
 ) -> ToolRegistry:
     """Create the default local workspace tool registry."""
 
@@ -22,7 +25,7 @@ def create_default_tool_registry(
         ListDirTool(workspace_path),
         ReadFileTool(workspace_path),
         GrepTool(workspace_path),
-        ExecTool(workspace_path),
+        ExecTool(workspace_path, allow_confirmable=allow_confirmable_exec),
     ]
     if skills is not None:
         tools.append(LoadSkillsTool(workspace_path, skills))
@@ -39,5 +42,6 @@ __all__ = [
     "ReadFileTool",
     "SyncSkillsTool",
     "ToolRegistry",
+    "UserScopedToolProvider",
     "create_default_tool_registry",
 ]

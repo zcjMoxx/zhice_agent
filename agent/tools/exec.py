@@ -57,6 +57,12 @@ class ExecTool(BaseTool):
         "additionalProperties": False,
     }
 
+    def __init__(self, workspace: Path | str, *, allow_confirmable: bool = False):
+        """Keep risky categories blocked unless an outer policy/confirmation layer exists."""
+
+        super().__init__(workspace)
+        self.allow_confirmable = allow_confirmable
+
     def _execute(self, args: dict[str, Any]) -> ToolResult:
         """Validate parameters, enforce policy, run the command, and format output."""
 
@@ -95,6 +101,21 @@ class ExecTool(BaseTool):
                 policy.message,
                 policy.code,
                 {"command_category": policy.category},
+            )
+        if policy.requires_confirmation and not self.allow_confirmable:
+            code = (
+                "NETWORK_COMMAND_BLOCKED"
+                if policy.risk_category == "network"
+                else "DESTRUCTIVE_COMMAND_BLOCKED"
+            )
+            raise ToolExecutionError(
+                "High-risk command requires an execution policy and explicit confirmation.",
+                code,
+                {
+                    "command_category": policy.category,
+                    "risk_category": policy.risk_category,
+                    "requires_confirmation": True,
+                },
             )
 
         started = time.monotonic()
@@ -144,7 +165,10 @@ class ExecTool(BaseTool):
             "timed_out": False,
             "stdout_chars": len(stdout),
             "stderr_chars": len(stderr),
+            "stdout_tail": stdout[-500:],
+            "stderr_tail": stderr[-500:],
             "truncated": truncation["truncated"],
+            "risk_category": policy.risk_category,
         }
         if truncation["truncated"]:
             metadata.update(truncation)
@@ -187,6 +211,8 @@ def _timeout_result(
         "timed_out": True,
         "stdout_chars": len(stdout),
         "stderr_chars": len(stderr),
+        "stdout_tail": stdout[-500:],
+        "stderr_tail": stderr[-500:],
         "truncated": truncation["truncated"],
     }
     if truncation["truncated"]:

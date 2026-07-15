@@ -50,6 +50,30 @@ class AppConfig:
     extends_dir: Path
     logs_dir: Path
 
+    @property
+    def state_dir(self) -> Path:
+        """Runtime state directory for auth and other local databases."""
+
+        return self.workspace / "state"
+
+    @property
+    def auth_db_path(self) -> Path:
+        """SQLite path for the Part 9 local auth and audit store."""
+
+        return self.state_dir / "auth.sqlite3"
+
+    @property
+    def users_contexts_dir(self) -> Path:
+        """Root of per-user Web/external-channel contexts."""
+
+        return self.contexts_dir / "users"
+
+    @property
+    def shared_readonly_dir(self) -> Path:
+        """Shared context directory exposed read-only to ordinary users."""
+
+        return self.contexts_dir / "shared" / "readonly"
+
     def ensure_dirs(self) -> None:
         """Create runtime directories that must exist before the CLI runs."""
 
@@ -563,4 +587,3 @@ def _coerce_bool(value: object, default: bool, field_name: str) -> bool:
         if normalized in {"false", "0", "no", "off"}:
             return False
     raise LLMConfigurationError(f"LLM endpoint field must be a boolean: {field_name}")
-

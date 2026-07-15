@@ -244,10 +244,14 @@ def test_chat_stream_api_maps_runtime_errors_to_sse_error(tmp_path):
     assert response.status_code == 200
     events = _parse_sse(response.text)
     turn_id = events[0][1]["turn_id"]
-    assert events[-1] == (
-        "error",
-        {"turn_id": turn_id, "error": {"code": "LLM_ERROR", "message": "provider failed"}},
-    )
+    error_event = events[-1]
+    assert error_event[0] == "error"
+    assert error_event[1]["turn_id"] == turn_id
+    assert error_event[1]["error"]["status"] == 502
+    assert error_event[1]["error"]["code"] == "LLM_ERROR"
+    assert error_event[1]["error"]["message"] == "provider failed"
+    assert error_event[1]["error"]["request_id"].startswith("req-")
+    assert error_event[1]["error"]["details"] == {}
     assert "Traceback" not in response.text
 
 
@@ -287,9 +291,7 @@ def test_model_preference_api_rejects_invalid_model(tmp_path):
     response = client.post("/api/model/preference", json={"model": "missing"})
 
     assert response.status_code == 400
-    assert response.json() == {
-        "error": {"code": "INVALID_REQUEST", "message": "unsupported model"}
-    }
+    _assert_error(response, 400, "REQUEST_VALIDATION_FAILED", "unsupported model")
 
 
 def test_session_rename_api_updates_runtime(tmp_path):
@@ -328,9 +330,13 @@ def test_chat_api_rejects_empty_message(tmp_path):
     response = client.post("/api/chat", json={"session_id": "alpha", "message": "   "})
 
     assert response.status_code == 400
-    assert response.json() == {
-        "error": {"code": "INVALID_REQUEST", "message": "message is required"}
-    }
+    _assert_error(
+        response,
+        400,
+        "REQUEST_VALIDATION_FAILED",
+        "message is required",
+        details={"field": "message"},
+    )
 
 
 def test_chat_api_maps_validation_errors_to_invalid_request(tmp_path):
@@ -339,7 +345,20 @@ def test_chat_api_maps_validation_errors_to_invalid_request(tmp_path):
     response = client.post("/api/chat", json={"message": "hello"})
 
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    _assert_error(
+        response,
+        400,
+        "REQUEST_VALIDATION_FAILED",
+        "invalid request",
+        details={
+            "issues": [
+                {
+                    "field": "body.session_id",
+                    "reason": "missing",
+                }
+            ]
+        },
+    )
 
 
 def test_session_api_maps_invalid_session_id(tmp_path):
@@ -349,12 +368,12 @@ def test_session_api_maps_invalid_session_id(tmp_path):
     response = client.get("/api/sessions/bad.session")
 
     assert response.status_code == 400
-    assert response.json() == {"error": {"code": "INVALID_REQUEST", "message": "bad session"}}
+    _assert_error(response, 400, "REQUEST_VALIDATION_FAILED", "bad session")
 
 
 def test_chat_api_maps_runtime_errors(tmp_path):
     cases = [
-        (LLMConfigurationError("missing config"), 500, "CONFIG_ERROR"),
+        (LLMConfigurationError("missing config"), 500, "CONFIG_INVALID"),
         (LLMProviderError("provider failed"), 502, "LLM_ERROR"),
         (RuntimeError("boom with stack detail"), 500, "INTERNAL_ERROR"),
     ]
@@ -367,6 +386,8 @@ def test_chat_api_maps_runtime_errors(tmp_path):
 
         assert response.status_code == expected_status
         assert response.json()["error"]["code"] == expected_code
+        assert response.json()["error"]["status"] == expected_status
+        assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
         assert "Traceback" not in response.text
 
 
@@ -495,3 +516,13 @@ class _FakeRuntime:
 
     def delete_session(self, session_id: str) -> None:
         self.deleted_sessions.append(session_id)
+
+
+def _assert_error(response, status: int, code: str, message: str, *, details=None) -> None:
+    payload = response.json()["error"]
+    assert response.status_code == status
+    assert payload["status"] == status
+    assert payload["code"] == code
+    assert payload["message"] == message
+    assert payload["request_id"] == response.headers["X-Request-ID"]
+    assert payload["details"] == (details or {})

@@ -18,8 +18,9 @@
 - `zhice-agent-part6-web-ui-design.md`：Part 6，前端 UI、流式反馈、Markdown 渲染与会话操作。
 - `zhice-agent-part7-turn-context-design.md`：Part 7，Turn 运行单元、持久化字段与上下文治理。
 - `zhice-agent-part8-gateway-agent-logging-design.md`：Part 8，Gateway / Agent 运行日志优化。
+- `zhice-agent-part9-user-auth-permission-design.md`：Part 9，用户、登录与权限执行边界设计。
 
-当前第八部分 Gateway / Agent 运行日志优化已落地；下一阶段主线是设计并实现用户、登录与权限执行边界。详细排序背景见 `2026-07-06-next-stage-sequencing-design.md`，第八部分当前实现口径见 `zhice-agent-part8-gateway-agent-logging-design.md`。
+第九部分用户、登录与权限执行边界已经落地：本地 SQLite auth/RBAC、唯一永久 Owner、部署 Secret 保护的 Web Owner 初始化、普通注册、Owner 对管理员管理权的直接委派、改密后强制重新认证、用户上下文与 session index、session 模型偏好、工具权限/确认、audit/诊断和静态管理 UI 已进入当前代码基线。当前口径以 `zhice-agent-part9-user-auth-permission-design.md` 为准；最新日期记录见 `2026-07-11-password-change-reauthentication-design.md`。
 
 维护规则：
 
@@ -34,7 +35,8 @@
 维护规则：
 
 - 日期设计记录完成并落地后原则上不再改写方案内容。
-- 后续如果发现旧方案不足，新增日期设计记录，在背景里说明承接了哪个旧方案、旧方案哪里不足、这次如何改进。
+- 同一日期、同一功能且代码尚未落地时，直接更新当天同一份日期设计记录，不为讨论中的每次口径变化重复建文件。
+- 跨日期继续迭代时，按新日期新增设计记录，在背景里说明承接了哪个旧方案、旧方案哪里不足、这次如何改进。
 - 如果后续设计已经改变了旧日期设计记录的方案，不回头重写旧正文；只在旧文档标题下方增加 `> 说明：...`，说明当前代码采用什么、旧方案哪里不再适用、应参考哪份新文档或当前活文档。
 - 允许修复链接、错别字、编码、排版等不改变方案含义的维护。
 - 日期设计记录和当前代码冲突时，以当前活文档和当前代码为准。
@@ -51,13 +53,21 @@
 8. `zhice-agent-part6-web-ui-design.md`
 9. `zhice-agent-part7-turn-context-design.md`
 10. `zhice-agent-part8-gateway-agent-logging-design.md`
-11. `2026-07-06-context-relevance-selection-design.md`
-12. `2026-07-06-next-stage-sequencing-design.md`
-13. `2026-07-04-turn-runtime-and-context-design.md`
-14. `2026-07-02-gateway-runtime-logging-design.md`
-15. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
+11. `zhice-agent-part9-user-auth-permission-design.md`
+12. `2026-07-10-session-model-preference-scope-design.md`
+13. `2026-07-08-user-auth-permission-boundary-design.md`
+14. `2026-07-06-context-relevance-selection-design.md`
+15. `2026-07-06-next-stage-sequencing-design.md`
+16. `2026-07-04-turn-runtime-and-context-design.md`
+17. `2026-07-02-gateway-runtime-logging-design.md`
+18. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
 
 ## 日期设计记录清单
+
+- `2026-07-11-api-error-code-contract-design.md`
+- `2026-07-11-owner-session-admin-route-diagnostics-tool-design.md`
+- `2026-07-11-password-change-reauthentication-design.md`
+- `2026-07-10-owner-admin-delegation-design.md`
 
 - `2026-06-11-cli-gateway-entry-design.md`
 - `2026-06-11-console-color-design.md`
@@ -88,6 +98,8 @@
 - `2026-07-06-gateway-default-port-design.md`
 - `2026-07-06-next-stage-sequencing-design.md`
 - `2026-07-06-ws-client-profile-naming-design.md`
+- `2026-07-08-user-auth-permission-boundary-design.md`
+- `2026-07-10-session-model-preference-scope-design.md`
 
 ## 新设计写法
 

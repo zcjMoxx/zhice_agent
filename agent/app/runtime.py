@@ -2,24 +2,41 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
+import os
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Callable
 
+from agent.app.auth import AuthService, local_operator_actor
+from agent.auth.audit import SqliteAuditSink
+from agent.auth.confirmation import SQLiteToolConfirmationBroker
+from agent.auth.diagnostics import RecentActivityDiagnostics
+from agent.auth.session_access import SessionAccessService
+from agent.auth.store import SQLiteAuthStore
+from agent.auth.tool_policy import RbacToolExecutionPolicy
+from agent.auth.user_context import FilesystemUserContextResolver
 from agent.config import AppConfig
 from agent.core.context import DEFAULT_CONTEXT_PROMPTS, ContextBuilder
 from agent.core.loop import AgentLoop, CancellationToken
 from agent.core.turns import new_turn_id
 from agent.llm.runtime import create_configured_llm_provider
+from agent.llm.selection import ConfiguredLLMProviderResolver
 from agent.logging_utils import log_event
 from agent.prompt_loader import PromptLoader
+from agent.protocols.auth import ActorContext, AuditEvent
 from agent.protocols.llm import LLMEndpoint, LLMProvider
-from agent.protocols.session import SessionState, SessionStore, SessionSummary
-from agent.session import JsonlSessionStore
+from agent.protocols.session import (
+    SessionModelPreference,
+    SessionState,
+    SessionStore,
+    SessionSummary,
+)
+from agent.session import JsonlSessionStore, JsonSessionModelPreferenceStore
 from agent.skills import SkillLoader, SkillSourceSync
 from agent.skills.sync import SkillSyncError
-from agent.tools import create_default_tool_registry
+from agent.tools import UserScopedToolProvider, create_default_tool_registry
 
 DEFAULT_WEB_HISTORY_MESSAGES = 12
 RuntimeEventCallback = Callable[[dict[str, Any]], None]
@@ -63,33 +80,103 @@ class WebRuntime:
     sessions: SessionStore
     agent_loop: AgentLoop
     llm: LLMProvider
+    auth: AuthService | None = None
+    session_access: SessionAccessService | None = None
+    model_preferences: JsonSessionModelPreferenceStore | None = None
+    llm_resolver: ConfiguredLLMProviderResolver | None = None
+    tool_policy: RbacToolExecutionPolicy | None = None
+    confirmation_broker: SQLiteToolConfirmationBroker | None = None
+    audit_sink: SqliteAuditSink | None = None
+    diagnostics: RecentActivityDiagnostics | None = None
+    skill_loader: SkillLoader | None = None
+    skill_sync: SkillSourceSync | None = None
 
     def __post_init__(self) -> None:
-        self._active_turns: dict[str, ActiveTurn] = {}
+        self._active_turns: dict[tuple[str, str], ActiveTurn] = {}
         self._turns_lock = Lock()
 
-    def list_sessions(self) -> list[SessionSummary]:
+    def list_sessions(
+        self,
+        actor: ActorContext | None = None,
+        *,
+        request_id: str = "",
+    ) -> list[SessionSummary]:
         """Return known sessions for the Web sidebar."""
 
+        if self.session_access is not None and actor is not None and actor.user_id is not None:
+            summaries = self.session_access.list_sessions(actor)
+            self._audit(
+                actor,
+                "session.read",
+                "session_list",
+                request_id=request_id,
+                decision="allow",
+                metadata={"count": len(summaries)},
+            )
+            return summaries
         return self.sessions.list_sessions()
 
-    def load_session(self, session_id: str) -> SessionState:
+    def load_session(
+        self,
+        actor: ActorContext | str,
+        session_id: str | None = None,
+        *,
+        request_id: str = "",
+    ) -> SessionState:
         """Load one session for Web history rendering."""
 
+        actor, session_id = _normalize_actor_session(actor, session_id)
+        if self.session_access is not None and actor.user_id is not None:
+            state = self.session_access.load_session(actor, session_id)
+            self._audit(
+                actor,
+                "session.read",
+                "session",
+                session_id=session_id,
+                request_id=request_id,
+                decision="allow",
+            )
+            return state
         return self.sessions.load(session_id)
+
+    def create_session(self, actor: ActorContext, session_id: str, channel: str = "web") -> None:
+        """Claim a new globally unique session id for one authenticated actor."""
+
+        if self.session_access is not None and actor.user_id is not None:
+            resolved = self.session_access.ensure_session(
+                actor, session_id, channel=channel, write=True
+            )
+            if resolved.created:
+                self._audit(
+                    actor,
+                    "session.created",
+                    "session",
+                    session_id=session_id,
+                    decision="allow",
+                )
 
     def run_chat_events(
         self,
-        session_id: str,
-        message: str,
+        actor: ActorContext | str,
+        session_id: str | None = None,
+        message: str | None = None,
         *,
         turn_id: str | None = None,
         on_event: RuntimeEventCallback | None = None,
         command_profile: str = WEB_COMMAND_PROFILE,
+        request_id: str = "",
     ) -> ChatTurnResult:
         """Run one command-aware turn and emit text_delta events as they arrive."""
 
-        command_text = self.handle_command(session_id, message, command_profile=command_profile)
+        actor, session_id, message = _normalize_actor_session_message(actor, session_id, message)
+        _require_permission(actor, "chat.run")
+        command_text = self.handle_command(
+            actor,
+            session_id,
+            message,
+            command_profile=command_profile,
+            request_id=request_id,
+        )
         if command_text is not None:
             _emit_runtime_event(on_event, {"type": "text_delta", "content": command_text})
             command_name = message.strip().split(maxsplit=1)[0].lower()
@@ -98,16 +185,100 @@ class WebRuntime:
 
         turn_id = turn_id or new_turn_id()
         token = CancellationToken()
-        self._register_turn(session_id, ActiveTurn(turn_id=turn_id, token=token))
-        log_event(web_logger, logging.DEBUG, "chat.accepted", session_id=session_id, turn_id=turn_id)
+        active_key = _active_turn_key(actor, session_id)
+        self._register_turn(active_key, ActiveTurn(turn_id=turn_id, token=token))
+        log_event(
+            web_logger,
+            logging.DEBUG,
+            "chat.accepted",
+            actor_user_id=actor.user_id or "",
+            channel=actor.channel,
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+        sessions = self.sessions
+        workspace = self.config.workspace
+        tools = getattr(self.agent_loop, "tools", None)
+        turn_llm = self.llm
+        if self.session_access is not None and actor.user_id is not None:
+            resolved = self.session_access.ensure_session(
+                actor,
+                session_id,
+                channel=("external_ws" if command_profile == EXTERNAL_COMMAND_PROFILE else "web"),
+                write=True,
+            )
+            if resolved.created:
+                self._audit(
+                    actor,
+                    "session.created",
+                    "session",
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    request_id=request_id,
+                    decision="allow",
+                )
+            sessions = resolved.store
+            owner_has_workspace_scope = "owner" in actor.role_keys
+            workspace = self.config.workspace if owner_has_workspace_scope else resolved.context.files_dir
+            if self.model_preferences is not None and self.llm_resolver is not None:
+                preference = self.model_preferences.get(resolved.model_context(), session_id)
+                selection = self.llm_resolver.resolve(preference)
+                turn_llm = self.llm_resolver.bind(selection)
+                log_event(
+                    web_logger,
+                    logging.INFO,
+                    "model.turn_selected",
+                    actor_user_id=actor.user_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    preferred_endpoint=selection.endpoint_name,
+                    preferred_model=selection.model_name,
+                    preference_source=selection.source,
+                )
+                if selection.source == "fallback":
+                    self._audit(
+                        actor,
+                        "model.preference_fallback",
+                        "model",
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        request_id=request_id,
+                        decision="fallback",
+                        reason_code=selection.reason_code,
+                        metadata={
+                            "effective_endpoint": selection.endpoint_name,
+                            "effective_model": selection.model_name,
+                        },
+                    )
+            tools = UserScopedToolProvider(
+                files_dir=workspace,
+                shared_readonly_dir=resolved.context.shared_readonly_dir,
+                actor=actor,
+                skills=self.skill_loader,
+                skill_sync=self.skill_sync,
+                diagnostics=self.diagnostics,
+            )
         try:
-            content = self.agent_loop.run_turn(
+            content = _run_agent_turn(
+                self.agent_loop,
                 session_id,
                 message,
                 turn_id=turn_id,
                 on_event=on_event,
                 cancellation_token=token,
+                actor=actor,
+                llm_override=turn_llm,
+                sessions_override=sessions,
+                tools_override=tools,
+                workspace_override=workspace,
+                tool_policy=self.tool_policy,
+                confirmation_broker=self.confirmation_broker,
+                audit_sink=self.audit_sink,
+                channel=actor.channel,
+                request_id=request_id,
             )
+            if self.session_access is not None and actor.user_id is not None:
+                self.session_access.refresh_index(actor, session_id)
             stopped = token.is_cancelled()
             if stopped:
                 log_event(web_logger, logging.INFO, "chat.stopped", session_id=session_id, turn_id=turn_id)
@@ -125,17 +296,20 @@ class WebRuntime:
             )
             raise
         finally:
-            self._unregister_turn(session_id, turn_id)
+            self._unregister_turn(active_key, turn_id)
 
     def handle_command(
         self,
-        session_id: str,
-        message: str,
+        actor: ActorContext | str,
+        session_id: str | None = None,
+        message: str | None = None,
         *,
         command_profile: str = WEB_COMMAND_PROFILE,
+        request_id: str = "",
     ) -> str | None:
         """Return a Web command response, or None for ordinary chat text."""
 
+        actor, session_id, message = _normalize_actor_session_message(actor, session_id, message)
         stripped = message.strip()
         if not stripped.startswith("/"):
             return None
@@ -146,23 +320,26 @@ class WebRuntime:
         if command == "help":
             return _web_help_text(command_profile)
         if command == "model":
-            return _handle_model_command(self.llm, target)
+            return self._handle_model_command(actor, session_id, target, request_id=request_id)
         if command == "stop":
             if command_profile != EXTERNAL_COMMAND_PROFILE:
                 return _command_not_supported_for_client(stripped)
-            result = self.cancel_session(session_id)
+            result = self.cancel_session(actor, session_id)
             return f"Stopped current turn. Cancelled: `{result['cancelled']}`"
         if command == "reset":
-            self.sessions.clear(session_id)
+            if self.session_access is not None and actor.user_id is not None:
+                self.session_access.clear_session(actor, session_id)
+            else:
+                self.sessions.clear(session_id)
             return f"Session cleared: `{session_id}`"
         if command == "new":
             return "Use the New chat button to start a fresh Web session."
         if command == "sessions":
-            return self._handle_sessions_command(session_id, target)
+            return self._handle_sessions_command(actor, session_id, target)
         if command == "history":
             if command_profile != EXTERNAL_COMMAND_PROFILE:
                 return _command_not_supported_for_client(stripped)
-            return _format_session_history(self.sessions.load(session_id).messages)
+            return _format_session_history(self.load_session(actor, session_id).messages)
         if command == "exit":
             if command_profile != EXTERNAL_COMMAND_PROFILE:
                 return _command_not_supported_for_client(stripped)
@@ -170,11 +347,16 @@ class WebRuntime:
 
         return _unsupported_command(stripped)
 
-    def _handle_sessions_command(self, session_id: str, target: str) -> str:
+    def _handle_sessions_command(
+        self,
+        actor: ActorContext,
+        session_id: str,
+        target: str,
+    ) -> str:
         """Handle shared /sessions subcommands for Web and WS channels."""
 
         if not target:
-            return _format_session_list(self.sessions.list_sessions(), session_id)
+            return _format_session_list(self.list_sessions(actor), session_id)
 
         subcommand, _, rest = target.partition(" ")
         subcommand = subcommand.strip().lower()
@@ -185,36 +367,96 @@ class WebRuntime:
             title = title.strip()
             if not target_session_id or not title:
                 return _sessions_usage_text()
-            summary = self.rename_session(target_session_id, title)
+            summary = self.rename_session(actor, target_session_id, title)
             return f"Session renamed: `{summary.session_id}`"
         if subcommand == "delete":
             target_session_id = rest or session_id
             if target_session_id == session_id:
-                self.sessions.clear(session_id)
+                if self.session_access is not None and actor.user_id is not None:
+                    self.session_access.clear_session(actor, session_id)
+                else:
+                    self.sessions.clear(session_id)
                 return f"Session cleared: `{session_id}`"
-            self.delete_session(target_session_id)
+            self.delete_session(actor, target_session_id)
             return f"Session deleted: `{target_session_id}`"
         return _sessions_usage_text()
 
-    def rename_session(self, session_id: str, title: str) -> SessionSummary:
+    def rename_session(
+        self,
+        actor: ActorContext | str,
+        session_id: str | None = None,
+        title: str | None = None,
+        *,
+        request_id: str = "",
+    ) -> SessionSummary:
         """Rename a session title and return the updated summary."""
 
-        self.sessions.rename(session_id, title)
+        actor, session_id, title = _normalize_actor_session_message(actor, session_id, title)
+        if self.session_access is not None and actor.user_id is not None:
+            summary = self.session_access.rename_session(actor, session_id, title)
+        else:
+            self.sessions.rename(session_id, title)
+            summary = _find_session_summary(self.sessions.list_sessions(), session_id)
         log_event(session_logger, logging.INFO, "session.renamed", session_id=session_id)
-        return _find_session_summary(self.sessions.list_sessions(), session_id)
+        self._audit(
+            actor,
+            "session.renamed",
+            "session",
+            session_id=session_id,
+            request_id=request_id,
+        )
+        return summary
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_session(
+        self,
+        actor: ActorContext | str,
+        session_id: str | None = None,
+        *,
+        request_id: str = "",
+    ) -> None:
         """Cancel then delete one Web session."""
 
-        self.cancel_session(session_id)
-        self.sessions.delete(session_id)
+        actor, session_id = _normalize_actor_session(actor, session_id)
+        self.cancel_session(actor, session_id)
+        if self.session_access is not None and actor.user_id is not None:
+            self.session_access.delete_session(actor, session_id)
+        else:
+            self.sessions.delete(session_id)
         log_event(session_logger, logging.INFO, "session.deleted", session_id=session_id)
+        self._audit(
+            actor,
+            "session.deleted",
+            "session",
+            session_id=session_id,
+            request_id=request_id,
+        )
 
-    def cancel_session(self, session_id: str) -> dict[str, Any]:
+    def cancel_session(
+        self,
+        actor: ActorContext | str,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
         """Cancel the active turn for a session when one exists."""
 
+        actor, session_id = _normalize_actor_session(actor, session_id)
+        if not (
+            actor.has_permission("chat.stop.own") or actor.has_permission("chat.stop.any")
+        ):
+            raise PermissionError("Permission denied: chat.stop.own")
+        key = _active_turn_key(actor, session_id)
         with self._turns_lock:
-            active = self._active_turns.get(session_id)
+            active = self._active_turns.get(key)
+            if active is None and actor.has_permission("chat.stop.any"):
+                match = next(
+                    (
+                        (candidate_key, candidate)
+                        for candidate_key, candidate in self._active_turns.items()
+                        if candidate_key[1] == session_id
+                    ),
+                    None,
+                )
+                if match is not None:
+                    key, active = match
         if active is None:
             return {"session_id": session_id, "cancelled": 0}
         active.token.cancel()
@@ -231,14 +473,54 @@ class WebRuntime:
         """Return a compact endpoint/model label when the provider exposes it."""
 
         try:
-            model_state = self.model_state()
+            if self.llm_resolver is not None:
+                selection = self.llm_resolver.resolve(None)
+                return f"{selection.endpoint_name}/{selection.model_name}"
+            model_state = self.model_state(local_operator_actor(channel="web"), "")
         except ValueError:
             return "auto"
         return f"{model_state.endpoint}/{model_state.current_model}"
 
-    def model_state(self) -> ModelState:
+    def model_state(
+        self,
+        actor: ActorContext | None = None,
+        session_id: str = "",
+        *,
+        request_id: str = "",
+    ) -> ModelState:
         """Return the current endpoint and selectable models for the Web UI."""
 
+        actor = actor or local_operator_actor(channel="web")
+        if self.session_access is not None and actor.user_id is not None:
+            _require_permission(actor, "model.view")
+            resolved = self.session_access.ensure_session(actor, session_id, channel="web")
+            if resolved.created:
+                self._audit(
+                    actor,
+                    "session.created",
+                    "session",
+                    session_id=session_id,
+                    decision="allow",
+                )
+            preference = self.model_preferences.get(resolved.model_context(), session_id) if self.model_preferences else None
+            selection = self.llm_resolver.resolve(preference) if self.llm_resolver else None
+            if selection is None:
+                raise ValueError("LLM resolver is not configured")
+            endpoint = _find_endpoint(self.llm_resolver.endpoints(), selection.endpoint_name)
+            self._audit(
+                actor,
+                "model.viewed",
+                "model",
+                session_id=session_id,
+                request_id=request_id,
+                decision="allow",
+                metadata={"endpoint": selection.endpoint_name, "model": selection.model_name},
+            )
+            return ModelState(
+                endpoint=selection.endpoint_name,
+                current_model=selection.model_name,
+                models=_endpoint_model_names(endpoint),
+            )
         current_endpoint = _current_endpoint(self.llm)
         configured_endpoint = _configured_endpoint(self.llm, current_endpoint.name) or current_endpoint
         models = _endpoint_model_names(configured_endpoint)
@@ -250,12 +532,65 @@ class WebRuntime:
             models=models,
         )
 
-    def set_model_preference(self, model: str) -> ModelState:
+    def set_model_preference(
+        self,
+        actor: ActorContext | str,
+        session_id: str | None = None,
+        model: str | None = None,
+        *,
+        request_id: str = "",
+    ) -> ModelState:
         """Set the preferred model for the current endpoint and return new state."""
 
-        selected_model = model.strip()
+        if isinstance(actor, ActorContext):
+            resolved_actor = actor
+            resolved_session_id = str(session_id or "")
+            selected_model = str(model or "").strip()
+        else:
+            resolved_actor = local_operator_actor(channel="web")
+            resolved_session_id = ""
+            selected_model = str(actor).strip()
         if not selected_model:
             raise ValueError("model is required")
+        if self.session_access is not None and resolved_actor.user_id is not None:
+            _require_permission(resolved_actor, "model.switch")
+            resolved = self.session_access.ensure_session(
+                resolved_actor, resolved_session_id, channel="web", write=True
+            )
+            if resolved.created:
+                self._audit(
+                    resolved_actor,
+                    "session.created",
+                    "session",
+                    session_id=resolved_session_id,
+                    request_id=request_id,
+                    decision="allow",
+                )
+            state = self.model_state(
+                resolved_actor,
+                resolved_session_id,
+                request_id=request_id,
+            )
+            selection = self.llm_resolver.select(state.endpoint, selected_model)
+            self.model_preferences.set(
+                resolved.model_context(),
+                resolved_session_id,
+                SessionModelPreference(selection.endpoint_name, selection.model_name),
+            )
+            self._audit(
+                resolved_actor,
+                "model.switched",
+                "model",
+                session_id=resolved_session_id,
+                request_id=request_id,
+                decision="allow",
+                metadata={"endpoint": selection.endpoint_name, "model": selection.model_name},
+            )
+            return self.model_state(
+                resolved_actor,
+                resolved_session_id,
+                request_id=request_id,
+            )
         current_endpoint = _current_endpoint(self.llm)
 
         selected_endpoint, error = self.llm.match_endpoint(f"{current_endpoint.name}/{selected_model}")
@@ -264,22 +599,149 @@ class WebRuntime:
         self.llm.set_preferred(selected_endpoint.name, selected_endpoint.model)
         return self.model_state()
 
-    def _register_turn(self, session_id: str, active: ActiveTurn) -> None:
+    def reset_model_preference(
+        self,
+        actor: ActorContext,
+        session_id: str,
+        *,
+        request_id: str = "",
+    ) -> ModelState:
+        """Clear only one session's model fields and restore the system default."""
+
+        _require_permission(actor, "model.switch")
+        if self.session_access is None or self.model_preferences is None:
+            self.llm.reset_preferred()
+            return self.model_state()
+        resolved = self.session_access.resolve_session(actor, session_id, write=True)
+        self.model_preferences.reset(resolved.model_context(), session_id)
+        self._audit(
+            actor,
+            "model.reset",
+            "model",
+            session_id=session_id,
+            request_id=request_id,
+            decision="allow",
+        )
+        return self.model_state(actor, session_id, request_id=request_id)
+
+    def list_tool_confirmations(self, actor: ActorContext) -> list[dict[str, Any]]:
+        if self.confirmation_broker is None:
+            return []
+        return self.confirmation_broker.list_for_actor(actor)
+
+    def decide_tool_confirmation(
+        self,
+        actor: ActorContext,
+        confirmation_id: str,
+        approved: bool,
+    ) -> str:
+        if self.confirmation_broker is None:
+            raise ValueError("confirmation broker is not configured")
+        return self.confirmation_broker.decide(actor, confirmation_id, approved)
+
+    def _handle_model_command(
+        self,
+        actor: ActorContext,
+        session_id: str,
+        target: str,
+        *,
+        request_id: str = "",
+    ) -> str:
+        """Handle session-scoped Web /model commands."""
+
+        normalized = target.strip()
+        if not normalized:
+            state = self.model_state(actor, session_id, request_id=request_id)
+            return f"Current model: `{state.endpoint}/{state.current_model}`"
+        if normalized.lower() == "reset":
+            state = self.reset_model_preference(actor, session_id, request_id=request_id)
+            return f"Model preference reset.\n\nCurrent model: `{state.endpoint}/{state.current_model}`"
+        if normalized.lower() == "list" or normalized.lower().startswith("list "):
+            endpoint_name = normalized[4:].strip()
+            if endpoint_name:
+                return _format_endpoint_model_list(
+                    self.llm_resolver or self.llm,
+                    endpoint_name,
+                )
+            return _format_model_list(self.llm_resolver or self.llm)
+        _require_permission(actor, "model.switch")
+        if self.session_access is None or self.model_preferences is None or self.llm_resolver is None:
+            return _handle_model_command(self.llm, normalized)
+        endpoint_name, separator, model_name = normalized.partition("/")
+        selection = self.llm_resolver.select(endpoint_name, model_name if separator else None)
+        resolved = self.session_access.ensure_session(
+            actor, session_id, channel="web", write=True
+        )
+        if resolved.created:
+            self._audit(
+                actor,
+                "session.created",
+                "session",
+                session_id=session_id,
+                decision="allow",
+            )
+        self.model_preferences.set(
+            resolved.model_context(),
+            session_id,
+            SessionModelPreference(selection.endpoint_name, selection.model_name),
+        )
+        self._audit(
+            actor,
+            "model.switched",
+            "model",
+            session_id=session_id,
+            request_id=request_id,
+            decision="allow",
+            metadata={"endpoint": selection.endpoint_name, "model": selection.model_name},
+        )
+        return f"Model switched: `{selection.endpoint_name}/{selection.model_name}`"
+
+    def _audit(
+        self,
+        actor: ActorContext,
+        action: str,
+        resource_type: str,
+        *,
+        session_id: str = "",
+        turn_id: str = "",
+        request_id: str = "",
+        decision: str = "",
+        reason_code: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self.audit_sink is None:
+            return
+        self.audit_sink.record(
+            AuditEvent(
+                action=action,
+                resource_type=resource_type,
+                actor=actor,
+                session_id=session_id,
+                turn_id=turn_id,
+                request_id=request_id,
+                channel=actor.channel,
+                decision=decision,
+                reason_code=reason_code,
+                metadata=dict(metadata or {}),
+            )
+        )
+
+    def _register_turn(self, key: tuple[str, str], active: ActiveTurn) -> None:
         """Register the active turn, cancelling any older turn for the session."""
 
         with self._turns_lock:
-            old_turn = self._active_turns.get(session_id)
+            old_turn = self._active_turns.get(key)
             if old_turn is not None:
                 old_turn.token.cancel()
-            self._active_turns[session_id] = active
+            self._active_turns[key] = active
 
-    def _unregister_turn(self, session_id: str, turn_id: str) -> None:
+    def _unregister_turn(self, key: tuple[str, str], turn_id: str) -> None:
         """Remove an active turn only if it is still the current one."""
 
         with self._turns_lock:
-            active = self._active_turns.get(session_id)
+            active = self._active_turns.get(key)
             if active is not None and active.turn_id == turn_id:
-                self._active_turns.pop(session_id, None)
+                self._active_turns.pop(key, None)
 
 
 def build_web_runtime(
@@ -307,6 +769,25 @@ def build_web_runtime(
         max_history_messages=DEFAULT_WEB_HISTORY_MESSAGES,
     )
     llm = create_configured_llm_provider(config.config_dir, endpoint_name)
+    default_endpoint = _current_endpoint(llm).name
+    llm_resolver = ConfiguredLLMProviderResolver(
+        list(llm.endpoints()),
+        default_endpoint=default_endpoint,
+    )
+    auth_store = SQLiteAuthStore(config.auth_db_path)
+    auth_store.initialize_schema()
+    audit_sink = SqliteAuditSink(auth_store)
+    auth = AuthService(
+        auth_store,
+        audit_sink=audit_sink,
+        setup_token=os.getenv("ZHICE_AGENT_SETUP_TOKEN", ""),
+    )
+    user_contexts = FilesystemUserContextResolver(config.contexts_dir)
+    session_access = SessionAccessService(auth_store, user_contexts)
+    model_preferences = JsonSessionModelPreferenceStore()
+    confirmation_broker = SQLiteToolConfirmationBroker(auth_store)
+    diagnostics = RecentActivityDiagnostics(auth_store, config.logs_dir)
+    tool_policy = RbacToolExecutionPolicy()
     tool_registry = create_default_tool_registry(
         config.workspace,
         skills=skill_loader,
@@ -318,12 +799,25 @@ def build_web_runtime(
         context_builder=context_builder,
         workspace=config.workspace,
         tools=tool_registry,
+        tool_policy=tool_policy,
+        confirmation_broker=confirmation_broker,
+        audit_sink=audit_sink,
     )
     return WebRuntime(
         config=config,
         sessions=session_store,
         agent_loop=agent_loop,
         llm=llm,
+        auth=auth,
+        session_access=session_access,
+        model_preferences=model_preferences,
+        llm_resolver=llm_resolver,
+        tool_policy=tool_policy,
+        confirmation_broker=confirmation_broker,
+        audit_sink=audit_sink,
+        diagnostics=diagnostics,
+        skill_loader=skill_loader,
+        skill_sync=skill_sync,
     )
 
 
@@ -334,6 +828,73 @@ def _sync_startup_skills(skill_sync: SkillSourceSync) -> None:
         skill_sync.sync_on_startup()
     except SkillSyncError:
         return
+
+
+def _run_agent_turn(agent_loop, session_id: str, message: str, **kwargs) -> str:
+    """Pass only kwargs supported by the concrete or fake AgentLoop."""
+
+    method = agent_loop.run_turn
+    parameters = inspect.signature(method).parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    filtered = kwargs if accepts_kwargs else {key: value for key, value in kwargs.items() if key in parameters}
+    return method(session_id, message, **filtered)
+
+
+def _normalize_actor_session(
+    actor: ActorContext | str,
+    session_id: str | None,
+) -> tuple[ActorContext, str]:
+    """Normalize new actor-aware and legacy direct runtime call forms."""
+
+    if isinstance(actor, ActorContext):
+        resolved_session_id = str(session_id or "").strip()
+        if not resolved_session_id:
+            raise ValueError("session_id is required")
+        return actor, resolved_session_id
+    resolved_session_id = str(actor).strip()
+    if not resolved_session_id:
+        raise ValueError("session_id is required")
+    return local_operator_actor(channel="web"), resolved_session_id
+
+
+def _normalize_actor_session_message(
+    actor: ActorContext | str,
+    session_id: str | None,
+    message: str | None,
+) -> tuple[ActorContext, str, str]:
+    """Normalize actor-aware calls and the former (session_id, message) form."""
+
+    if isinstance(actor, ActorContext):
+        resolved_actor, resolved_session_id = _normalize_actor_session(actor, session_id)
+        resolved_message = str(message or "")
+    else:
+        resolved_actor = local_operator_actor(channel="web")
+        resolved_session_id = str(actor).strip()
+        resolved_message = str(session_id if message is None else message)
+    if not resolved_session_id:
+        raise ValueError("session_id is required")
+    return resolved_actor, resolved_session_id, resolved_message
+
+
+def _active_turn_key(actor: ActorContext, session_id: str) -> tuple[str, str]:
+    """Keep active turns isolated by stable actor identity and session id."""
+
+    actor_key = actor.user_id or f"{actor.actor_type}:{actor.username}"
+    return actor_key, session_id
+
+
+def _require_permission(actor: ActorContext, permission_key: str) -> None:
+    if not actor.has_permission(permission_key):
+        raise PermissionError(f"Permission denied: {permission_key}")
+
+
+def _find_endpoint(endpoints: list[LLMEndpoint], endpoint_name: str) -> LLMEndpoint:
+    for endpoint in endpoints:
+        if endpoint.name == endpoint_name:
+            return endpoint
+    raise ValueError(f"Unknown endpoint: {endpoint_name}")
 
 
 def _emit_runtime_event(on_event: RuntimeEventCallback | None, event: dict[str, Any]) -> None:
@@ -491,10 +1052,17 @@ def _format_model_status(llm: LLMProvider) -> str:
 def _format_model_list(llm: LLMProvider) -> str:
     """Format all endpoints for Web /model list."""
 
-    current = llm.current_endpoint()
-    lines = [f"Current model: `{current.name}/{current.model}`", "", "Available endpoints:"]
+    if isinstance(llm, ConfiguredLLMProviderResolver):
+        selection = llm.resolve(None)
+        current_name = selection.endpoint_name
+        current_model = selection.model_name
+    else:
+        current = llm.current_endpoint()
+        current_name = current.name
+        current_model = current.model
+    lines = [f"Current model: `{current_name}/{current_model}`", "", "Available endpoints:"]
     for endpoint in llm.endpoints():
-        marker = "*" if endpoint.name == current.name else "-"
+        marker = "*" if endpoint.name == current_name else "-"
         lines.append(f"{marker} `{endpoint.name}` default model: `{endpoint.model}`")
     lines.append("")
     lines.append("Use `/model list <endpoint>` to see available models for one endpoint.")

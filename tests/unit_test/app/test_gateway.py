@@ -4,10 +4,14 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from agent.app.auth import AuthService
 from agent.app.gateway import create_app, format_gateway_check, gateway_status, run_gateway
 from agent.app.logging import GatewayLoggingResult, GatewayLogOptions
+from agent.auth.store import SQLiteAuthStore
 from agent.cli import main
 from agent.config import AppConfig
+
+REPOSITORY_STATIC_DIR = Path(__file__).resolve().parents[3] / "web" / "static"
 
 
 def test_gateway_serves_static_index(tmp_path):
@@ -23,14 +27,136 @@ def test_gateway_serves_static_index(tmp_path):
     assert "Chat UI" in response.text
 
 
+def test_gateway_serves_admin_route_from_static_application(tmp_path):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    static_dir.joinpath("index.html").write_text(
+        "<html><body>Administration UI</body></html>", encoding="utf-8"
+    )
+    client = TestClient(create_app(config=_config(tmp_path), runtime=_FakeRuntime(), static_dir=static_dir))
+
+    response = client.get("/admin")
+
+    assert response.status_code == 200
+    assert "Administration UI" in response.text
+
+
+def test_web_admin_is_a_route_and_diagnostics_is_tool_only():
+    html = REPOSITORY_STATIC_DIR.joinpath("index.html").read_text(encoding="utf-8")
+    javascript = REPOSITORY_STATIC_DIR.joinpath("app.js").read_text(encoding="utf-8")
+
+    assert 'id="adminPage"' in html
+    assert 'id="managementDialog"' not in html
+    assert "window.location.assign(\"/admin\")" in javascript
+    assert "const isAdminRoute" in javascript
+    assert "function resetAccountScopedState" in javascript
+    assert "Recent diagnostics" not in html
+    assert "diagnosticsDialog" not in javascript
+    assert "function refreshAuthorizationAfterFailure" in javascript
+    assert "HTTP ${status} (${code})" in javascript
+
+
+def test_password_inputs_have_persistent_visibility_controls():
+    html = REPOSITORY_STATIC_DIR.joinpath("index.html").read_text(encoding="utf-8")
+    css = REPOSITORY_STATIC_DIR.joinpath("styles.css").read_text(encoding="utf-8")
+    javascript = REPOSITORY_STATIC_DIR.joinpath("app.js").read_text(encoding="utf-8")
+    password_input_ids = [
+        "loginPassword",
+        "currentPassword",
+        "newPassword",
+        "confirmPassword",
+        "bootstrapPassword",
+        "bootstrapSetupToken",
+        "registerPassword",
+        "registerPasswordConfirm",
+    ]
+
+    for input_id in password_input_ids:
+        assert f'id="{input_id}" type="password"' in html
+        assert f'data-password-toggle="{input_id}"' in html
+        assert f'aria-controls="{input_id}"' in html
+    assert html.count('tabindex="-1"') >= len(password_input_ids)
+    assert "function initializePasswordToggles" in javascript
+    assert "function resetPasswordVisibility" in javascript
+    assert 'data-password-toggle="adminCreatePassword"' in javascript
+    assert 'aria-controls="adminCreatePassword"' in javascript
+    assert 'tabindex="-1"' in javascript
+    assert ".password-toggle" in css
+    assert ".password-input-wrap" in css
+    assert "::-ms-reveal" in css
+    assert "::-ms-clear" in css
+    assert "20260711-error-contract" in html
+
+
+def test_web_brand_uses_selected_image_asset_and_a_distinct_user_icon():
+    html = REPOSITORY_STATIC_DIR.joinpath("index.html").read_text(encoding="utf-8")
+    css = REPOSITORY_STATIC_DIR.joinpath("styles.css").read_text(encoding="utf-8")
+    javascript = REPOSITORY_STATIC_DIR.joinpath("app.js").read_text(encoding="utf-8")
+
+    assert html.count('data-brand-logo="selected-a"') == 3
+    assert html.count('src="/static/zhice-logo-a.png?v=20260711-clean"') == 3
+    assert 'class="avatar user-avatar" id="userAvatar"' in html
+    assert 'id="userAvatarPrimary"' in html
+    assert 'id="userAvatarSecondary"' in html
+    assert ".brand-mark img" in css
+    assert ".user-avatar" in css
+    assert "border-radius: 50%;" in css
+    assert ".avatar-letter-primary" in css
+    assert ".avatar-letter-secondary" in css
+    assert "function getAvatarInitials" in javascript
+    assert "Array.from" in javascript
+    assert "state.currentUser?.username" in javascript
+    assert ".logo-avatar" not in css
+    assert "20260711-error-contract" in html
+
+
+def test_owner_setup_page_is_only_served_while_secret_is_configured_and_owner_missing(tmp_path):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    static_dir.joinpath("index.html").write_text(
+        "<html><body>Owner Setup UI</body></html>", encoding="utf-8"
+    )
+    store = SQLiteAuthStore(tmp_path / "state" / "auth.sqlite3")
+    store.initialize_schema()
+
+    unavailable = TestClient(
+        create_app(
+            config=_config(tmp_path),
+            runtime=_FakeRuntime(AuthService(store)),
+            static_dir=static_dir,
+        )
+    )
+    available = TestClient(
+        create_app(
+            config=_config(tmp_path),
+            runtime=_FakeRuntime(AuthService(store, setup_token="setup-secret")),
+            static_dir=static_dir,
+        )
+    )
+
+    assert unavailable.get("/_setup").status_code == 404
+    setup_page = available.get("/_setup")
+    assert setup_page.status_code == 200
+    assert "Owner Setup UI" in setup_page.text
+
+    store.initialize_owner("owner", "Owner", "password-123")
+
+    assert available.get("/_setup").status_code == 404
+
+
 def test_gateway_serves_favicon(tmp_path):
-    client = TestClient(create_app(config=_config(tmp_path), runtime=_FakeRuntime(), static_dir=tmp_path))
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    static_dir.joinpath("zhice-logo-a.png").write_bytes(b"png-logo")
+    client = TestClient(
+        create_app(config=_config(tmp_path), runtime=_FakeRuntime(), static_dir=static_dir)
+    )
 
     response = client.get("/favicon.ico")
 
     assert response.status_code == 200
-    assert "image/svg+xml" in response.headers["content-type"]
-    assert "ZC" in response.text
+    assert "image/png" in response.headers["content-type"]
+    assert response.content == b"png-logo"
 
 
 def test_gateway_absorbs_chrome_devtools_workspace_probe(tmp_path):
@@ -52,10 +178,10 @@ def test_gateway_health_returns_workspace_and_model(tmp_path):
     assert response.json() == {
         "status": "ok",
         "name": "ZhiCe-Agent",
-        "workspace": str(config.workspace),
-        "config_dir": str(config.config_dir),
-        "sessions_dir": str(config.sessions_dir),
         "current_model": "default/model-a",
+        "auth_required": "false",
+        "auth_initialized": "false",
+        "owner_initialized": "false",
     }
 
 
@@ -65,10 +191,10 @@ def test_gateway_status_handles_missing_runtime(tmp_path):
     assert gateway_status(config) == {
         "status": "ok",
         "name": "ZhiCe-Agent",
-        "workspace": str(config.workspace),
-        "config_dir": str(config.config_dir),
-        "sessions_dir": str(config.sessions_dir),
         "current_model": "unavailable",
+        "auth_required": "false",
+        "auth_initialized": "false",
+        "owner_initialized": "false",
     }
 
 
@@ -176,5 +302,8 @@ def _line_index(lines: list[str], prefix: str) -> int:
 
 
 class _FakeRuntime:
+    def __init__(self, auth=None):
+        self.auth = auth
+
     def current_model_label(self) -> str:
         return "default/model-a"

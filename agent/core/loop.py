@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,8 @@ from agent.core.context import ContextBuilder
 from agent.core.turns import assign_turn, new_turn_id, next_turn_index
 from agent.logging_utils import log_event, preview_json, preview_text
 from agent.message import Message
+from agent.protocols.auth import ActorContext, AuditEvent, AuditSink
+from agent.protocols.errors import ErrorCode
 from agent.protocols.llm import (
     LLMConfigurationError,
     LLMProvider,
@@ -24,7 +27,14 @@ from agent.protocols.llm import (
     LLMStreamChunk,
 )
 from agent.protocols.session import SessionStore
-from agent.protocols.tool import ToolProvider, ToolResult
+from agent.protocols.tool import (
+    ToolConfirmationBroker,
+    ToolExecutionContext,
+    ToolExecutionDecision,
+    ToolExecutionPolicy,
+    ToolProvider,
+    ToolResult,
+)
 
 ASSISTANT_ERROR_TEXT = "LLM call failed. Check the workspace configuration and retry."
 TOOL_ITERATION_LIMIT_TEXT = "Tool call limit reached. Please retry with a narrower request."
@@ -84,7 +94,10 @@ class AgentLoop:
         context_builder: ContextBuilder,
         workspace: Path,
         tools: ToolProvider | None = None,
-        max_tool_iterations: int = 4,
+        max_tool_iterations: int = 25,
+        tool_policy: ToolExecutionPolicy | None = None,
+        confirmation_broker: ToolConfirmationBroker | None = None,
+        audit_sink: AuditSink | None = None,
     ):
         """Wire provider dependencies and guard the tool-iteration limit."""
 
@@ -97,6 +110,9 @@ class AgentLoop:
         self.workspace = Path(workspace).expanduser().resolve()
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
+        self.tool_policy = tool_policy
+        self.confirmation_broker = confirmation_broker
+        self.audit_sink = audit_sink
 
     def run_turn(
         self,
@@ -106,10 +122,28 @@ class AgentLoop:
         turn_id: str | None = None,
         on_event: TurnEventCallback | None = None,
         cancellation_token: CancellationToken | None = None,
+        actor: ActorContext | None = None,
+        llm_override: LLMProvider | None = None,
+        sessions_override: SessionStore | None = None,
+        tools_override: ToolProvider | None = None,
+        workspace_override: Path | None = None,
+        tool_policy: ToolExecutionPolicy | None = None,
+        confirmation_broker: ToolConfirmationBroker | None = None,
+        audit_sink: AuditSink | None = None,
+        channel: str = "",
+        request_id: str = "",
     ) -> str:
         """Run one user turn, saving user, assistant, and tool messages."""
 
-        session = self.sessions.load(session_id)
+        sessions = sessions_override or self.sessions
+        tools = tools_override if tools_override is not None else self.tools
+        llm = llm_override or self.llm
+        workspace = Path(workspace_override or self.workspace).expanduser().resolve()
+        execution_policy = tool_policy or self.tool_policy
+        confirmations = confirmation_broker or self.confirmation_broker
+        audit = audit_sink or self.audit_sink
+        resolved_channel = channel or (actor.channel if actor is not None else "")
+        session = sessions.load(session_id)
         resolved_turn_id = turn_id or new_turn_id()
         resolved_turn_index = next_turn_index(session.messages)
         turn_started = time.perf_counter()
@@ -121,7 +155,7 @@ class AgentLoop:
         messages = self.context_builder.build(
             history=session.messages,
             user_message=user_msg,
-            workspace=self.workspace,
+            workspace=workspace,
             session_id=session_id,
         )
         log_event(
@@ -132,10 +166,26 @@ class AgentLoop:
             turn_id=resolved_turn_id,
             turn_index=resolved_turn_index,
             input_preview=preview_text(user_text, limit=120),
+            actor_user_id=actor.user_id if actor else "",
+            channel=resolved_channel,
+        )
+        _record_audit(
+            audit,
+            AuditEvent(
+                action="chat.turn_started",
+                resource_type="turn",
+                actor=actor,
+                request_id=request_id,
+                channel=resolved_channel,
+                session_id=session_id,
+                turn_id=resolved_turn_id,
+                decision="allow",
+                metadata={"turn_index": resolved_turn_index},
+            ),
         )
 
         pending_session_messages = [user_msg]
-        tool_definitions = self.tools.definitions() if self.tools else None
+        tool_definitions = tools.definitions() if tools else None
         tool_iterations = 0
 
         def persist_cancelled_turn() -> str:
@@ -147,10 +197,10 @@ class AgentLoop:
             _assign_turn_fields(assistant_msg, resolved_turn_id, resolved_turn_index)
             pending_session_messages.append(assistant_msg)
             save_error = _append_session_messages(
-                self.sessions,
+                sessions,
                 session_id,
                 pending_session_messages,
-                self.workspace,
+                workspace,
             )
             _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
             log_event(
@@ -160,6 +210,19 @@ class AgentLoop:
                 session_id=session_id,
                 turn_id=resolved_turn_id,
                 turn_index=resolved_turn_index,
+            )
+            _record_audit(
+                audit,
+                AuditEvent(
+                    action="chat.turn_stopped",
+                    resource_type="turn",
+                    actor=actor,
+                    request_id=request_id,
+                    channel=resolved_channel,
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    decision="stopped",
+                ),
             )
             return _with_save_error(TURN_CANCELLED_TEXT, save_error)
 
@@ -176,7 +239,7 @@ class AgentLoop:
                     tools=len(tool_definitions or []),
                 )
                 response = _call_llm(
-                    self.llm,
+                    llm,
                     messages=list(messages),
                     tools=tool_definitions,
                     on_event=on_event,
@@ -194,7 +257,7 @@ class AgentLoop:
                     turn_id=resolved_turn_id,
                     error_type=type(exc).__name__,
                 )
-                error_text = _format_llm_error(exc, self.workspace)
+                error_text = _format_llm_error(exc, workspace)
                 assistant_msg = Message(
                     role="assistant",
                     content=error_text,
@@ -206,10 +269,10 @@ class AgentLoop:
                 _assign_turn_fields(assistant_msg, resolved_turn_id, resolved_turn_index)
                 pending_session_messages.append(assistant_msg)
                 save_error = _append_session_messages(
-                    self.sessions,
+                    sessions,
                     session_id,
                     pending_session_messages,
-                    self.workspace,
+                    workspace,
                 )
                 _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
                 log_event(
@@ -220,6 +283,20 @@ class AgentLoop:
                     turn_id=resolved_turn_id,
                     turn_index=resolved_turn_index,
                     error_type=type(exc).__name__,
+                )
+                _record_audit(
+                    audit,
+                    AuditEvent(
+                        action="chat.turn_error",
+                        resource_type="turn",
+                        actor=actor,
+                        request_id=request_id,
+                        channel=resolved_channel,
+                        session_id=session_id,
+                        turn_id=resolved_turn_id,
+                        decision="error",
+                        reason_code=type(exc).__name__,
+                    ),
                 )
                 return _with_save_error(error_text, save_error)
 
@@ -255,10 +332,10 @@ class AgentLoop:
 
             if not assistant_msg.tool_calls:
                 save_error = _append_session_messages(
-                    self.sessions,
+                    sessions,
                     session_id,
                     pending_session_messages,
-                    self.workspace,
+                    workspace,
                 )
                 _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
                 log_event(
@@ -270,6 +347,27 @@ class AgentLoop:
                     turn_index=resolved_turn_index,
                     duration_ms=_duration_ms(turn_started),
                     output_preview=preview_text(assistant_msg.content, limit=120),
+                )
+                _record_audit(
+                    audit,
+                    AuditEvent(
+                        action="chat.turn_done",
+                        resource_type="turn",
+                        actor=actor,
+                        request_id=request_id,
+                        channel=resolved_channel,
+                        session_id=session_id,
+                        turn_id=resolved_turn_id,
+                        decision="done",
+                        metadata={
+                            "duration_ms": _duration_ms(turn_started),
+                            "actual_endpoint": assistant_msg.metadata.get("endpoint_name", ""),
+                            "actual_model": assistant_msg.metadata.get("model", ""),
+                            "attempted_endpoints": assistant_msg.metadata.get(
+                                "attempted_endpoints", []
+                            ),
+                        },
+                    ),
                 )
                 return _with_save_error(assistant_msg.content, save_error)
 
@@ -294,17 +392,48 @@ class AgentLoop:
                     pending_session_messages.append(tool_msg)
                 limit_msg = Message(
                     role="assistant",
-                    content=TOOL_ITERATION_LIMIT_TEXT,
+                    content=(
+                        f"{TOOL_ITERATION_LIMIT_TEXT} The limit is "
+                        f"{self.max_tool_iterations} tool iteration(s)."
+                    ),
                     metadata={"is_error": True, "code": "TOOL_ITERATION_LIMIT"},
                 )
                 _assign_turn_fields(limit_msg, resolved_turn_id, resolved_turn_index)
                 pending_session_messages.append(limit_msg)
-                save_error = _append_session_messages(
-                    self.sessions,
-                    session_id,
-                    pending_session_messages,
-                    self.workspace,
-                )
+                messages.append(_message_to_llm_dict(limit_msg))
+                final_text = limit_msg.content
+                try:
+                    log_event(
+                        llm_logger,
+                        logging.DEBUG,
+                        "llm.limit_summary",
+                        session_id=session_id,
+                        turn_id=resolved_turn_id,
+                    )
+                    limit_response = llm.chat(messages, tools=None)
+                    if limit_response.tool_calls or not str(limit_response.content).strip():
+                        raise RuntimeError("LLM did not produce a final limit summary")
+                    final_msg = Message(
+                        role="assistant",
+                        content=str(limit_response.content),
+                        metadata={
+                            **dict(limit_response.metadata or {}),
+                            "tool_iteration_limit": self.max_tool_iterations,
+                        },
+                    )
+                    _assign_turn_fields(final_msg, resolved_turn_id, resolved_turn_index)
+                    pending_session_messages.append(final_msg)
+                    final_text = final_msg.content
+                except Exception as exc:  # noqa: BLE001 - retain the deterministic limit result.
+                    log_event(
+                        llm_logger,
+                        logging.WARNING,
+                        "llm.limit_summary_failed",
+                        session_id=session_id,
+                        turn_id=resolved_turn_id,
+                        error_type=type(exc).__name__,
+                    )
+                save_error = _append_session_messages(sessions, session_id, pending_session_messages, workspace)
                 _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
                 log_event(
                     turn_logger,
@@ -314,9 +443,9 @@ class AgentLoop:
                     turn_id=resolved_turn_id,
                     turn_index=resolved_turn_index,
                     duration_ms=_duration_ms(turn_started),
-                    output_preview=TOOL_ITERATION_LIMIT_TEXT,
+                    output_preview=preview_text(final_text, limit=120),
                 )
-                return _with_save_error(TOOL_ITERATION_LIMIT_TEXT, save_error)
+                return _with_save_error(final_text, save_error)
 
             tool_iterations += 1
             for index, raw_call in enumerate(assistant_msg.tool_calls):
@@ -335,11 +464,20 @@ class AgentLoop:
                         duration_ms=0,
                     )
                 else:
-                    result = _execute_tool(
-                        self.tools,
+                    result = _dispatch_tool(
+                        tools,
                         call,
+                        actor=actor,
                         session_id=session_id,
                         turn_id=resolved_turn_id,
+                        turn_index=resolved_turn_index,
+                        channel=resolved_channel,
+                        request_id=request_id,
+                        policy=execution_policy,
+                        confirmation_broker=confirmations,
+                        audit_sink=audit,
+                        on_event=on_event,
+                        cancellation_token=cancellation_token,
                     )
                 try:
                     _raise_if_cancelled(cancellation_token)
@@ -412,12 +550,274 @@ def _raise_if_cancelled(cancellation_token: CancellationToken | None) -> None:
         cancellation_token.raise_if_cancelled()
 
 
+def _dispatch_tool(
+    tools: ToolProvider | None,
+    call: ParsedToolCall,
+    *,
+    actor: ActorContext | None,
+    session_id: str,
+    turn_id: str,
+    turn_index: int,
+    channel: str,
+    request_id: str,
+    policy: ToolExecutionPolicy | None,
+    confirmation_broker: ToolConfirmationBroker | None,
+    audit_sink: AuditSink | None,
+    on_event: TurnEventCallback | None,
+    cancellation_token: CancellationToken | None,
+) -> ToolResult:
+    """Apply actor-aware policy and confirmation before the existing registry dispatch."""
+
+    record_id = "tool-record-" + uuid.uuid4().hex
+    if actor is None and policy is not None:
+        return ToolResult(
+            output="Tool execution actor is required.",
+            is_error=True,
+            metadata={"code": "ACTOR_REQUIRED", "tool_name": call.name},
+        )
+
+    context = None
+    if actor is not None:
+        context = ToolExecutionContext(
+            actor=actor,
+            session_id=session_id,
+            turn_id=turn_id,
+            turn_index=turn_index,
+            channel=channel,
+            request_id=request_id,
+            tool_name=call.name,
+            tool_call_id=call.id,
+            tool_call_record_id=record_id,
+        )
+    metadata = {
+        "tool_name": call.name,
+        "tool_call_id": call.id,
+        "args_preview": preview_json(call.arguments, limit=200),
+    }
+    if call.name == "exec":
+        metadata["command_preview"] = preview_text(str(call.arguments.get("command") or ""), limit=200)
+        metadata["cwd"] = preview_text(str(call.arguments.get("cwd") or "."), limit=120)
+        metadata["timeout_seconds"] = call.arguments.get("timeout_seconds", 30)
+    _record_audit(
+        audit_sink,
+        AuditEvent(
+            action="tool.call_requested",
+            resource_type="tool_call",
+            actor=actor,
+            resource_id=call.id,
+            request_id=request_id,
+            channel=channel,
+            session_id=session_id,
+            turn_id=turn_id,
+            tool_call_record_id=record_id,
+            metadata=metadata,
+        ),
+    )
+
+    decision = ToolExecutionDecision(
+        action="allow",
+        code="ALLOWED",
+        message="Tool execution allowed",
+        permission_key="",
+    )
+    if policy is not None and context is not None:
+        decision = policy.decide(call.name, call.arguments, context)
+    if decision.action == "deny":
+        _record_tool_decision(audit_sink, context, decision, action="tool.call_denied")
+        return ToolResult(
+            output=decision.message or "Tool execution denied.",
+            is_error=True,
+            metadata={
+                "code": decision.code or ErrorCode.AUTH_PERMISSION_DENIED,
+                "tool_name": call.name,
+                "permission_key": decision.permission_key,
+                "risk_category": decision.risk_category,
+                "permission_decision": "deny",
+            },
+        )
+
+    if decision.action == "confirm":
+        if confirmation_broker is None or context is None:
+            unavailable = ToolExecutionDecision(
+                action="deny",
+                code=ErrorCode.TOOL_CONFIRMATION_UNAVAILABLE,
+                message="Explicit confirmation is unavailable for this channel.",
+                permission_key=decision.permission_key,
+                risk_level=decision.risk_level,
+                risk_category=decision.risk_category,
+            )
+            _record_tool_decision(audit_sink, context, unavailable, action="tool.call_denied")
+            return ToolResult(
+                output=unavailable.message,
+                is_error=True,
+                metadata={"code": unavailable.code, "tool_name": call.name},
+            )
+
+        def on_requested(payload: dict[str, Any]) -> None:
+            event = {
+                "type": "tool_confirmation_required",
+                "tool_name": call.name,
+                "risk_level": decision.risk_level,
+                "risk_category": decision.risk_category,
+                "permission_key": decision.permission_key,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                **payload,
+            }
+            _emit_event(on_event, event)
+
+        _record_tool_decision(
+            audit_sink,
+            context,
+            decision,
+            action="tool.confirmation_requested",
+        )
+        confirmation = confirmation_broker.request(
+            decision,
+            context,
+            call.arguments,
+            on_requested=on_requested,
+            is_cancelled=(cancellation_token.is_cancelled if cancellation_token else None),
+        )
+        confirmation_action = f"tool.confirmation_{confirmation.status}"
+        _record_audit(
+            audit_sink,
+            AuditEvent(
+                action=confirmation_action,
+                resource_type="tool_confirmation",
+                actor=actor,
+                resource_id=confirmation.confirmation_id,
+                request_id=request_id,
+                channel=channel,
+                session_id=session_id,
+                turn_id=turn_id,
+                tool_call_record_id=record_id,
+                decision=confirmation.status,
+                risk_category=decision.risk_category,
+                metadata={"tool_name": call.name},
+            ),
+        )
+        if confirmation.status != "approved":
+            return ToolResult(
+                output=confirmation.message or f"Tool confirmation {confirmation.status}.",
+                is_error=True,
+                metadata={
+                    "code": f"CONFIRMATION_{confirmation.status.upper()}",
+                    "tool_name": call.name,
+                    "confirmation_id": confirmation.confirmation_id,
+                    "confirmation_status": confirmation.status,
+                },
+            )
+
+    _record_tool_decision(audit_sink, context, decision, action="tool.call_allowed")
+    result = _execute_tool(
+        tools,
+        call,
+        session_id=session_id,
+        turn_id=turn_id,
+        actor=actor,
+        request_id=request_id,
+        channel=channel,
+    )
+    _record_audit(
+        audit_sink,
+        AuditEvent(
+            action="tool.call_error" if result.is_error else "tool.call_done",
+            resource_type="tool_call",
+            actor=actor,
+            resource_id=call.id,
+            request_id=request_id,
+            channel=channel,
+            session_id=session_id,
+            turn_id=turn_id,
+            tool_call_record_id=record_id,
+            decision="error" if result.is_error else "done",
+            reason_code=str(result.metadata.get("code") or ""),
+            risk_category=decision.risk_category,
+            metadata={
+                "tool_name": call.name,
+                "permission_key": decision.permission_key,
+                "output_preview": preview_text(result.output, limit=160),
+                **{
+                    key: result.metadata[key]
+                    for key in (
+                        "cwd",
+                        "exit_code",
+                        "duration_seconds",
+                        "timeout_seconds",
+                        "timed_out",
+                        "truncated",
+                        "stdout_tail",
+                        "stderr_tail",
+                    )
+                    if key in result.metadata
+                },
+            },
+        ),
+    )
+    return result
+
+
+def _record_tool_decision(
+    audit_sink: AuditSink | None,
+    context: ToolExecutionContext | None,
+    decision: ToolExecutionDecision,
+    *,
+    action: str,
+) -> None:
+    if context is None:
+        return
+    _record_audit(
+        audit_sink,
+        AuditEvent(
+            action=action,
+            resource_type="tool_call",
+            actor=context.actor,
+            resource_id=context.tool_call_id,
+            request_id=context.request_id,
+            channel=context.channel,
+            session_id=context.session_id,
+            turn_id=context.turn_id,
+            tool_call_record_id=context.tool_call_record_id,
+            decision=decision.action,
+            reason_code=decision.code,
+            risk_category=decision.risk_category,
+            metadata={
+                "tool_name": context.tool_name,
+                "permission_key": decision.permission_key,
+                "risk_level": decision.risk_level,
+                **decision.audit_metadata,
+            },
+        ),
+    )
+
+
+def _record_audit(audit_sink: AuditSink | None, event: AuditEvent) -> None:
+    """Best-effort audit emission that never breaks the generic Agent loop."""
+
+    if audit_sink is None:
+        return
+    try:
+        audit_sink.record(event)
+    except Exception as exc:  # noqa: BLE001 - runtime audit failures are logged, not hidden.
+        log_event(
+            tool_logger,
+            logging.ERROR,
+            "audit.write_failed",
+            action=event.action,
+            error_type=type(exc).__name__,
+        )
+
+
 def _execute_tool(
     tools: ToolProvider | None,
     call: ParsedToolCall,
     *,
     session_id: str,
     turn_id: str,
+    actor: ActorContext | None = None,
+    request_id: str = "",
+    channel: str = "",
 ) -> ToolResult:
     """Dispatch one parsed tool call through the configured tool provider."""
 
@@ -428,6 +828,10 @@ def _execute_tool(
         session_id=session_id,
         turn_id=turn_id,
         tool=call.name,
+        tool_call_id=call.id,
+        actor_user_id=actor.user_id if actor else "",
+        request_id=request_id,
+        channel=channel,
     )
     log_event(
         tool_logger,
@@ -436,6 +840,10 @@ def _execute_tool(
         session_id=session_id,
         turn_id=turn_id,
         tool=call.name,
+        tool_call_id=call.id,
+        actor_user_id=actor.user_id if actor else "",
+        request_id=request_id,
+        channel=channel,
         args_preview=preview_json(call.arguments, limit=200),
     )
     started = time.perf_counter()
@@ -453,6 +861,10 @@ def _execute_tool(
         turn_id=turn_id,
         tool_name=call.name,
         duration_ms=_duration_ms(started),
+        actor_user_id=actor.user_id if actor else "",
+        request_id=request_id,
+        channel=channel,
+        tool_call_id=call.id,
     )
     return result
 
@@ -464,6 +876,10 @@ def _log_tool_result(
     turn_id: str,
     tool_name: str,
     duration_ms: int,
+    actor_user_id: str = "",
+    request_id: str = "",
+    channel: str = "",
+    tool_call_id: str = "",
 ) -> None:
     """Log a bounded tool result preview."""
 
@@ -475,6 +891,14 @@ def _log_tool_result(
         "duration_ms": duration_ms,
         "output_preview": preview_text(result.output, limit=120),
     }
+    if actor_user_id:
+        fields["actor_user_id"] = actor_user_id
+    if request_id:
+        fields["request_id"] = request_id
+    if channel:
+        fields["channel"] = channel
+    if tool_call_id:
+        fields["tool_call_id"] = tool_call_id
     code = result.metadata.get("code")
     if code:
         fields["code"] = code

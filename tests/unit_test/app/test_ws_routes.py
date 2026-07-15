@@ -154,13 +154,15 @@ def test_ws_hello_unknown_client_is_rejected(tmp_path):
         websocket.send_json({"type": "hello", "client": "mobile"})
         error = websocket.receive_json()
 
-    assert error == {
-        "event": "channel_status",
-        "data": {
-            "type": "error",
-            "error": {"code": "INVALID_REQUEST", "message": "unknown WS client; supported clients: web, external"},
-        },
-    }
+    assert error["event"] == "channel_status"
+    assert error["data"]["type"] == "error"
+    assert error["data"]["error"]["status"] == 400
+    assert error["data"]["error"]["code"] == "REQUEST_VALIDATION_FAILED"
+    assert error["data"]["error"]["message"] == (
+        "unknown WS client; supported clients: web, external"
+    )
+    assert error["data"]["error"]["request_id"].startswith("ws-")
+    assert error["data"]["error"]["details"] == {}
 
 
 def test_ws_external_exit_closes_current_connection(tmp_path):

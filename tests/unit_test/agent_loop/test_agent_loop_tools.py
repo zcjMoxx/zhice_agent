@@ -24,6 +24,14 @@ def test_agent_loop_passes_tool_definitions_to_llm(tmp_path):
     assert llm.calls[0]["tools"] == tools.definitions()
 
 
+def test_agent_loop_default_tool_iteration_limit_is_25(tmp_path):
+    """The lightweight loop allows a real diagnostic investigation before the hard stop."""
+
+    loop = _make_loop(tmp_path, llm=ScriptedLLM([]), tools=FakeTools())
+
+    assert loop.max_tool_iterations == 25
+
+
 def test_single_tool_call_executes_and_triggers_second_llm_call(tmp_path):
     """A tool request should be executed, returned as a tool message, then summarized."""
 
@@ -157,6 +165,7 @@ def test_tool_iteration_limit_saves_error_marker(tmp_path):
         [
             LLMResponse(content="", tool_calls=[call]),
             LLMResponse(content="", tool_calls=[call]),
+            LLMResponse(content="The tool limit was reached after collecting partial evidence."),
         ]
     )
     sessions = InMemorySessionStore()
@@ -170,7 +179,7 @@ def test_tool_iteration_limit_saves_error_marker(tmp_path):
 
     result = loop.run_turn("default", "loop")
 
-    assert "Tool call limit reached" in result
+    assert result == "The tool limit was reached after collecting partial evidence."
     assert [message.role for message in sessions.appended["default"]] == [
         "user",
         "assistant",
@@ -178,10 +187,33 @@ def test_tool_iteration_limit_saves_error_marker(tmp_path):
         "assistant",
         "tool",
         "assistant",
+        "assistant",
     ]
-    assert sessions.appended["default"][-1].metadata["code"] == "TOOL_ITERATION_LIMIT"
     assert sessions.appended["default"][-2].metadata["code"] == "TOOL_ITERATION_LIMIT"
+    assert sessions.appended["default"][-3].metadata["code"] == "TOOL_ITERATION_LIMIT"
+    assert llm.calls[-1]["tools"] is None
     _assert_single_turn(sessions.appended["default"], expected_index=1)
+
+
+def test_tool_iteration_limit_falls_back_when_final_summary_requests_tools(tmp_path):
+    """No extra tool may run after the limit, even when the model requests one again."""
+
+    call = _openai_tool_call("call_1", "list_dir", {})
+    llm = ScriptedLLM(
+        [
+            LLMResponse(content="", tool_calls=[call]),
+            LLMResponse(content="", tool_calls=[call]),
+            LLMResponse(content="", tool_calls=[call]),
+        ]
+    )
+    tools = FakeTools(results=[ToolResult(output="list")])
+    loop = _make_loop(tmp_path, llm=llm, tools=tools, max_tool_iterations=1)
+
+    result = loop.run_turn("default", "loop")
+
+    assert "The limit is 1 tool iteration(s)." in result
+    assert tools.calls == [("list_dir", {})]
+    assert llm.calls[-1]["tools"] is None
 
 
 def test_llm_error_after_tool_call_preserves_pending_messages(tmp_path):
@@ -225,7 +257,7 @@ def _make_loop(
     llm,
     tools,
     sessions=None,
-    max_tool_iterations=4,
+    max_tool_iterations=25,
 ):
     from agent.core.loop import AgentLoop
 

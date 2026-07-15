@@ -84,6 +84,7 @@ class ModelsResponse(BaseModel):
 class ModelPreferenceRequest(BaseModel):
     """Requested model preference for the current endpoint."""
 
+    session_id: str = ""
     model: str
 
 
@@ -99,3 +100,142 @@ class SessionMutationResponse(BaseModel):
     session_id: str
     status: str
     title: str = ""
+
+
+class LoginRequest(BaseModel):
+    """Local username/password login request."""
+
+    username: str
+    password: str
+
+
+class BootstrapOwnerRequest(BaseModel):
+    """One-time Owner registration request protected by a deployment secret."""
+
+    setup_token: str
+    password: str
+
+
+class RegisterUserRequest(BaseModel):
+    """Public self-service user registration request."""
+
+    username: str
+    password: str
+
+
+class ProfileUpdateRequest(BaseModel):
+    """Current-user profile fields allowed for self-service updates."""
+
+    display_name: str
+
+
+class PasswordChangeRequest(BaseModel):
+    """Authenticated password rotation request."""
+
+    current_password: str
+    new_password: str
+
+
+class PublicUserResponse(BaseModel):
+    """User fields safe for browser and admin responses."""
+
+    id: str
+    username: str
+    display_name: str
+    status: str
+    roles: list[str] = Field(default_factory=list)
+    can_manage_admins: bool = False
+
+
+class AuthMeResponse(BaseModel):
+    """Current actor summary."""
+
+    user: PublicUserResponse
+    permissions: list[str]
+
+
+class AuthMutationResponse(BaseModel):
+    """Simple login/logout mutation status."""
+
+    status: str
+    user: PublicUserResponse | None = None
+
+
+class AdminUsersResponse(BaseModel):
+    """Admin user list response."""
+
+    users: list[PublicUserResponse]
+
+
+class AdminUserCreateRequest(BaseModel):
+    """Create one local DB user."""
+
+    username: str
+    display_name: str = ""
+    password: str
+    roles: list[str] = Field(default_factory=lambda: ["viewer"])
+
+
+class AdminUserUpdateRequest(BaseModel):
+    """Update status, display name, or role assignments."""
+
+    display_name: str | None = None
+    status: str | None = None
+    roles: list[str] | None = None
+    can_manage_admins: bool | None = None
+
+
+class RoleResponse(BaseModel):
+    """Role and permission assignment shown in the admin view."""
+
+    id: str
+    key: str
+    name: str
+    description: str
+    is_builtin: bool
+    permission_keys: list[str]
+
+
+class RolesResponse(BaseModel):
+    """Role list response."""
+
+    roles: list[RoleResponse]
+    permissions: list[str] = Field(default_factory=list)
+
+
+class RoleUpdateRequest(BaseModel):
+    """Replacement permission list for one role."""
+
+    permission_keys: list[str]
+
+
+class AuditEventsResponse(BaseModel):
+    """Bounded safe audit event list."""
+
+    events: list[dict[str, Any]]
+
+
+class ToolConfirmationResponse(BaseModel):
+    """Pending or decided confirmation shown to the requesting actor."""
+
+    id: str
+    session_id: str
+    turn_id: str
+    tool_name: str
+    risk_level: str
+    command_preview: str = ""
+    status: str
+    expires_at: str
+
+
+class ToolConfirmationsResponse(BaseModel):
+    """List of visible confirmations."""
+
+    confirmations: list[ToolConfirmationResponse]
+
+
+class ConfirmationMutationResponse(BaseModel):
+    """Approval or denial result."""
+
+    confirmation_id: str
+    status: str

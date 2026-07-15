@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前已经完成到第八部分 Gateway / Agent 运行日志优化，主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到第九部分用户、登录与权限执行边界第一版。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -14,8 +14,11 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前已经完成到第�
 - CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道和最小静态 Web UI
 - `turn_id` / `turn_index` 持久化、WebSocket turn 对齐和基于 turn 的相关历史选择
 - Gateway / Agent 分层运行日志、终端时间戳格式和 workspace `logs/YYYY-MM-DD/trace.log`
+- SQLite 本地用户、角色、权限、可撤销登录态、唯一永久 Owner、Owner 管理权委派、普通用户自助注册和个人设置
+- 用户上下文目录、session owner/index、session 级模型偏好和 call-scoped provider
+- Tool RBAC、高风险 `exec` 明确确认、audit events 和用户可见诊断
 
-当前仍保持轻量边界：没有鉴权、远程部署、MCP、Memory、Subagent、Hook、市集和多用户隔离；Web 侧已经使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。第七部分 turn 能力和第八部分运行日志能力已经成为当前基线，下一阶段主线是设计并实现用户、登录与权限执行边界。
+当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、MCP、Memory、Subagent、Hook 或市集。Web 侧使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
 
 ## 设计文档
 
@@ -24,6 +27,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前已经完成到第�
 - 无日期文档是当前活文档，例如总体设计和 Part 文档，始终按最新代码口径维护。
 - 带日期文档是当次设计记录，用于保留演进痕迹。
 - 新设计落地后，再把已经成为当前准则的内容收敛进总体设计或对应 Part 文档。
+- 第九部分权限设计入口是 `docs_design/zhice-agent-part9-user-auth-permission-design.md`，日期记录包括 `docs_design/2026-07-08-user-auth-permission-boundary-design.md` 和 `docs_design/2026-07-10-session-model-preference-scope-design.md`。
 
 ## 快速开始
 
@@ -197,10 +201,17 @@ CLI 内可用命令：
 启动本地 gateway：
 
 ```bash
+zcagent auth init-owner
 zcagent gateway
 ```
 
-当前 gateway 会启动本地 FastAPI 服务，访问 `http://127.0.0.1:10086/` 可打开最小聊天界面；`/ws` 提供浏览器主聊天通道，`/api/chat`、`/api/chat/stream`、`/api/sessions`、`/api/sessions/{session_id}`、`/api/models` 和 `/api/model/preference` 提供兼容 Web API。
+普通用户可以在 Owner 初始化前后通过 “Create account” 注册，新账号固定获得 `viewer`，不能通过请求字段自选权限。唯一 Owner 可在服务器运行 `zcagent auth init-owner` 创建；云端如需 Web 初始化，应注入随机 `ZHICE_AGENT_SETUP_TOKEN`，再访问隐藏入口 `http://127.0.0.1:10086/_setup`。Web 用户名固定为 `owner`，页面只填写一次 Owner 密码和一次 setup credential。普通登录页和账号菜单不展示该入口。
+
+用户在 Account settings 修改密码成功后，当前及其它登录态会全部撤销，浏览器立即返回登录页，必须使用新密码重新登录。
+
+当前静态页面、REST API 和 WebSocket 都由同一个 FastAPI Gateway 在 `10086` 同源提供。参考项目的双端口来自 aiohttp Web channel 与 FastAPI 业务 API 并存，ZhiCe-Agent 当前没有这层边界，因此暂不增加 `10186` 前端代理端口。
+
+API 失败响应使用统一错误结构：真实 HTTP 状态码保持数字语义，body 的 `error` 包含 `status`、稳定领域 `code`、可读 `message`、关联日志的 `request_id` 和安全动态上下文 `details`。前端不解析 message，并会在 401/403 后重新获取当前登录态和权限。
 
 默认启动时会打印简短 Agent lifecycle log，并写入 workspace trace；`llm.call`、`llm.direct`、`session.save` 等细节默认不刷终端，需要时用 `--agent-log-level debug` 或查看 trace：
 
@@ -218,7 +229,7 @@ zcagent gateway --http-access-log off
 zcagent gateway --http-server-log-level warning
 ```
 
-gateway 仍只面向本地开发，不包含鉴权、远程部署、渠道接入或后台服务编排。
+gateway 仍只面向本地开发。已有本地用户名密码鉴权和 RBAC，但不包含生产公网安全方案、OAuth/SSO、多租户或后台服务编排。
 
 非阻塞检查：
 
@@ -228,9 +239,20 @@ zcagent gateway --check
 
 ## 子命令补充
 
+### `zcagent auth`
+
+```bash
+zcagent auth init-owner --username owner --display-name Owner
+zcagent auth users
+zcagent auth reset-password admin
+```
+
+- `init-owner` 创建唯一 Owner；默认 `--username owner --display-name Owner`，两者均可覆盖。无 Owner 时先安全读取并校验 `ZHICE_AGENT_SETUP_TOKEN`，再安全读取一次 Owner 密码；两者都不接受明文命令参数。已有 Owner 时直接失败，不读取任何输入。
+- Owner Web 与 CLI 共用全局 `contexts/sessions`；其他 Web / 外部渠道用户位于 `${ZHICE_AGENT_WORKSPACE}/contexts/users/{user_id}`。聊天侧栏始终只展示当前账号自己的已索引会话。
+
 ### `/model`
 
-`/model` 用于查看当前模型，或切换当前进程的首选 endpoint：
+`/model` 用于查看或切换当前 session 的 endpoint/model 偏好；`/model reset` 只清当前 session，`/new` 不继承旧 session 偏好：
 
 ```text
 /model

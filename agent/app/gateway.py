@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +14,13 @@ from fastapi.staticfiles import StaticFiles
 
 from agent.app.api.routes import ApiError, router
 from agent.app.api.ws import router as ws_router
+from agent.app.auth import AuthHttpError
 from agent.app.logging import GatewayLogOptions, configure_gateway_logging
 from agent.app.runtime import WebRuntime, build_web_runtime
 from agent.config import AppConfig
 from agent.console import console
+from agent.protocols.auth import AuditEvent
+from agent.protocols.errors import ErrorCode
 
 
 def run_gateway(
@@ -38,10 +42,10 @@ def run_gateway(
         f"{console.command(f'http://{host}:{port}')}"
     )
     if host in {"0.0.0.0", "::"}:
-        print(console.warning("gateway is a local development service and has no built-in auth."))
+        print(console.warning("gateway auth is enabled, but this remains a local development service."))
     print(f"workspace: {console.path(config.workspace)}")
     print(f"static: {console.path(static_dir)}")
-    print("routes: /, /health, /api/*, /ws")
+    print("routes: /, /_setup, /health, /api/*, /ws")
     print(
         "agent-log: "
         f"{'on' if resolved_log_options.agent_log else 'off'} "
@@ -76,6 +80,65 @@ def create_app(
     app = FastAPI(title="ZhiCe-Agent Gateway", docs_url=None, redoc_url=None)
     app.state.config = config
     app.state.runtime = runtime
+    app.state.auth_service = getattr(runtime, "auth", None)
+
+    @app.middleware("http")
+    async def attach_request_id(request, call_next):
+        request.state.request_id = "req-" + uuid.uuid4().hex
+        auth_service = getattr(request.app.state, "auth_service", None)
+        protected_api = request.url.path.startswith("/api/") and request.url.path not in {
+            "/api/auth/bootstrap",
+            "/api/auth/login",
+            "/api/auth/register",
+            "/api/health",
+        }
+        if protected_api and auth_service is not None:
+            try:
+                request.state.actor = auth_service.resolve_request_actor(request, channel="rest")
+            except AuthHttpError as exc:
+                if auth_service.audit_sink is not None:
+                    auth_service.audit_sink.record(
+                        AuditEvent(
+                            action="auth.request_denied",
+                            resource_type="http_request",
+                            request_id=request.state.request_id,
+                            channel="rest",
+                            route=request.url.path,
+                            status_code=exc.status_code,
+                            decision="deny",
+                            reason_code=exc.code,
+                        )
+                    )
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content=_error_content(
+                        status=exc.status_code,
+                        code=exc.code,
+                        message=exc.message,
+                        request_id=request.state.request_id,
+                        details=exc.details,
+                    ),
+                    headers={"X-Request-ID": request.state.request_id},
+                )
+        response = await call_next(request)
+        if protected_api and auth_service is not None and auth_service.audit_sink is not None:
+            auth_service.audit_sink.record(
+                AuditEvent(
+                    action="http.request",
+                    resource_type="http_request",
+                    actor=getattr(request.state, "actor", None),
+                    resource_id=request.url.path,
+                    request_id=request.state.request_id,
+                    channel="rest",
+                    route=request.url.path,
+                    status_code=response.status_code,
+                    decision="allow" if response.status_code < 400 else "error",
+                    reason_code="" if response.status_code < 400 else f"HTTP_{response.status_code}",
+                )
+            )
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
+
     app.include_router(router)
     app.include_router(ws_router)
     _register_error_handlers(app)
@@ -91,13 +154,41 @@ def create_app(
             return FileResponse(index_path)
         return JSONResponse(gateway_status(config, runtime=runtime))
 
+    @app.get("/admin", include_in_schema=False)
+    def administration():
+        index_path = resolved_static_dir / "index.html"
+        if index_path.is_file():
+            return FileResponse(index_path)
+        return Response(status_code=404)
+
+    @app.get("/_setup", include_in_schema=False)
+    def setup_owner():
+        auth_service = getattr(app.state, "auth_service", None)
+        if (
+            auth_service is None
+            or not auth_service.setup_token
+            or auth_service.store.has_owner()
+        ):
+            return Response(status_code=404)
+        index_path = resolved_static_dir / "index.html"
+        if index_path.is_file():
+            return FileResponse(index_path)
+        return Response(status_code=404)
+
     @app.get("/health")
     def health():
         return gateway_status(config, runtime=runtime)
 
+    @app.get("/api/health")
+    def api_health():
+        return gateway_status(config, runtime=runtime)
+
     @app.get("/favicon.ico")
     def favicon():
-        return Response(content=_FAVICON_SVG, media_type="image/svg+xml")
+        favicon_path = resolved_static_dir / "zhice-logo-a.png"
+        if favicon_path.is_file():
+            return FileResponse(favicon_path, media_type="image/png")
+        return Response(status_code=404)
 
     @app.get("/.well-known/appspecific/com.chrome.devtools.json")
     def chrome_devtools_workspace_probe():
@@ -116,22 +207,31 @@ def gateway_status(
     return {
         "status": "ok",
         "name": "ZhiCe-Agent",
-        "workspace": str(config.workspace),
-        "config_dir": str(config.config_dir),
-        "sessions_dir": str(config.sessions_dir),
         "current_model": _current_model(runtime),
+        "auth_required": "true" if getattr(runtime, "auth", None) is not None else "false",
+        "auth_initialized": (
+            "true"
+            if getattr(getattr(runtime, "auth", None), "store", None)
+            and runtime.auth.store.has_users()
+            else "false"
+        ),
+        "owner_initialized": (
+            "true"
+            if getattr(getattr(runtime, "auth", None), "store", None)
+            and runtime.auth.store.has_owner()
+            else "false"
+        ),
     }
 
 
 def format_gateway_check(config: AppConfig, *, host: str, port: int) -> str:
     """Format a non-blocking gateway readiness check for CLI tests and setup."""
 
-    payload = gateway_status(config)
     lines = [
         console.success("ZhiCe-Agent gateway check ok"),
         f"url: {console.command(f'http://{host}:{port}')}",
-        f"workspace: {console.path(payload['workspace'])}",
-        f"config: {console.path(Path(payload['config_dir']))}",
+        f"workspace: {console.path(config.workspace)}",
+        f"config: {console.path(config.config_dir)}",
     ]
     return "\n".join(lines)
 
@@ -148,18 +248,63 @@ def _register_error_handlers(app: FastAPI) -> None:
     """Register API error handlers with stable JSON shapes."""
 
     @app.exception_handler(ApiError)
-    def handle_api_error(_request, exc: ApiError):
+    def handle_api_error(request, exc: ApiError):
+        request_id = str(getattr(request.state, "request_id", ""))
         return JSONResponse(
             status_code=exc.status_code,
-            content={"error": {"code": exc.code, "message": exc.message}},
+            content=_error_content(
+                status=exc.status_code,
+                code=exc.code,
+                message=exc.message,
+                request_id=request_id,
+                details=exc.details,
+            ),
         )
 
     @app.exception_handler(RequestValidationError)
-    def handle_validation_error(_request, _exc: RequestValidationError):
+    def handle_validation_error(request, exc: RequestValidationError):
+        request_id = str(getattr(request.state, "request_id", ""))
         return JSONResponse(
             status_code=400,
-            content={"error": {"code": "INVALID_REQUEST", "message": "invalid request"}},
+            content=_error_content(
+                status=400,
+                code=ErrorCode.REQUEST_VALIDATION_FAILED,
+                message="invalid request",
+                request_id=request_id,
+                details=_validation_details(exc),
+            ),
         )
+
+
+def _error_content(
+    *,
+    status: int,
+    code: str,
+    message: str,
+    request_id: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the stable HTTP error envelope."""
+
+    return {
+        "error": {
+            "status": int(status),
+            "code": str(code),
+            "message": str(message),
+            "request_id": str(request_id),
+            "details": dict(details or {}),
+        }
+    }
+
+
+def _validation_details(exc: RequestValidationError) -> dict[str, Any]:
+    """Return field-level validation facts without echoing request values."""
+
+    issues = []
+    for item in exc.errors():
+        location = ".".join(str(part) for part in item.get("loc") or ())
+        issues.append({"field": location, "reason": str(item.get("type") or "invalid")})
+    return {"issues": issues}
 
 
 def _current_model(runtime: WebRuntime | Any | None) -> str:
@@ -177,15 +322,3 @@ def _default_static_dir() -> Path:
     """Return the repository static web directory."""
 
     return Path(__file__).resolve().parents[2] / "web" / "static"
-
-
-_FAVICON_SVG = """\
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#111827"/>
-  <path d="M17 20h30L25 44h22" fill="none" stroke="#f9fafb" stroke-width="7"
-        stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="46" cy="18" r="6" fill="#38bdf8"/>
-  <text x="32" y="53" text-anchor="middle" font-family="Arial, sans-serif"
-        font-size="10" font-weight="700" fill="#f9fafb">ZC</text>
-</svg>
-"""

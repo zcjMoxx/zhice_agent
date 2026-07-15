@@ -629,4 +629,4 @@ python -m pytest --basetemp .tmp/pytest_basetemp
 - `docs_design/2026-07-04-turn-runtime-and-context-design.md` 是未来设计记录，保留更完整的后续方向；本文是第七部分当前实现口径。
 - `docs_design/2026-07-06-next-stage-sequencing-design.md` 确定第七部分排在日志和用户权限之前。
 - `docs_design/zhice-agent-part8-gateway-agent-logging-design.md` 已承接第八部分运行日志施工图；`docs_design/2026-07-02-gateway-runtime-logging-design.md` 保留为历史背景。
-- 后续用户权限系统应基于本文形成的关系：`User -> Session -> Turn -> ToolCall / AuditLog`。
+- 第九部分用户、登录与权限执行边界已经基于本文形成的关系完成第一版实现：`User -> Session -> Turn -> ToolCall / AuditLog`，详见 `docs_design/zhice-agent-part9-user-auth-permission-design.md`。

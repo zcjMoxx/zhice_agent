@@ -41,3 +41,9 @@
 - 输入：扫描 prompts 目录。
 - 预期：返回当前可加载的 prompt 名称。
 - 检查点：只列出 Markdown prompt。
+
+### Case 7: 运行时 Prompt 能力契约
+
+- 输入：仓库当前 `identity.md` 和 `tool_use_policy.md`。
+- 预期：identity 不再包含旧阶段或“纯对话模式”，并明确按本轮 tool schemas 使用工具。
+- 检查点：用户明确要求调用已提供工具时应实际调用；系统时间、日志、进程等真实状态必须验证，不能从 `session_id` 或历史回答猜测，也不能未经调用就声称工具不可用。

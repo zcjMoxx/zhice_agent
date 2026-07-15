@@ -48,8 +48,8 @@ def test_validate_command_allows_semicolons_inside_quotes():
     assert result.allowed is True
 
 
-def test_validate_command_blocks_destructive_commands():
-    """Destructive commands require a future explicit confirmation flow."""
+def test_validate_command_classifies_workspace_bounded_destructive_commands_for_confirmation():
+    """Known cwd-bounded destructive commands may enter the explicit confirmation flow."""
 
     for command in [
         "rm -rf .",
@@ -61,12 +61,14 @@ def test_validate_command_blocks_destructive_commands():
     ]:
         result = validate_command(command)
 
-        assert result.allowed is False
-        assert result.code == "DESTRUCTIVE_COMMAND_BLOCKED"
+        assert result.allowed is True
+        assert result.requires_confirmation is True
+        assert result.required_permission == "tool.exec.dangerous"
+        assert result.risk_category == "destructive"
 
 
-def test_validate_command_blocks_network_and_install_commands():
-    """Network and dependency installation are outside first exec scope."""
+def test_validate_command_classifies_network_and_install_commands_for_confirmation():
+    """Known network/install commands require dangerous permission and confirmation."""
 
     for command in [
         "curl https://example.com",
@@ -78,8 +80,30 @@ def test_validate_command_blocks_network_and_install_commands():
     ]:
         result = validate_command(command)
 
+        assert result.allowed is True
+        assert result.requires_confirmation is True
+        assert result.required_permission == "tool.exec.dangerous"
+        assert result.risk_category == "network"
+
+
+def test_validate_command_keeps_absolute_destructive_paths_blocked():
+    result = validate_command(r"Remove-Item -Recurse C:\\Users\\Public")
+
+    assert result.allowed is False
+    assert result.code == "PATH_OUTSIDE_WORKSPACE"
+
+
+def test_validate_command_blocks_absolute_paths_even_for_read_commands():
+    for command in [
+        r"Get-Content C:\\Users\\Public\\notes.txt",
+        "cat /etc/passwd",
+        r'''python -c "print(open('C:\\Users\\Public\\notes.txt').read())"''',
+        r"Get-Content $env:USERPROFILE\\notes.txt",
+    ]:
+        result = validate_command(command)
+
         assert result.allowed is False
-        assert result.code == "NETWORK_COMMAND_BLOCKED"
+        assert result.code == "PATH_OUTSIDE_WORKSPACE"
 
 
 def test_validate_command_blocks_environment_dump_commands():

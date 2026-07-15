@@ -6,7 +6,7 @@
 >
 > 承接文档：`docs_design/zhice-agent-part6-web-minimum-design.md`
 >
-> 当前状态：已实现第一版静态 UI。当前方案使用 `web/static` 原生 HTML/CSS/JS，不引入 Vue、Vite、React 或完整前端工程化；浏览器主聊天通道为 `WebSocket /ws`，REST/SSE 仅保留兼容调用。
+> 当前状态：已实现原生静态 UI，并由第九部分扩展登录视图、用户入口、用户/角色/审计管理、诊断和危险工具确认弹窗。当前仍使用 `web/static` 原生 HTML/CSS/JS，不引入 Vue、Vite、React 或完整前端工程化；浏览器主聊天通道为 `WebSocket /ws`。
 
 ---
 
@@ -223,6 +223,8 @@ I'm ZhiCe-Agent. How can I help?
 - 不在 UI 内暴露 API key、base_url 或完整配置路径。
 - 下拉框只显示模型名，不显示 endpoint 前缀。
 
+> 当前代码中的模型选择已经按 `session_id` 隔离；session A 切换不会影响 session B。新建会话显示系统默认，切回已有会话恢复该 session 偏好。详细口径见 Part 9 活文档和 `docs_design/2026-07-10-session-model-preference-scope-design.md`。
+
 ### 5.5 Assistant 输出
 
 助手消息按 Markdown 正文渲染，但保持最小安全边界：
@@ -356,7 +358,7 @@ setModelPreference(value)
 后续可以单独设计：
 
 - Gateway / Agent 运行日志优化之后，再设计前端工具调用日志面板。
-- 用户、登录与权限执行边界确定后，再接登录页、账号中心、角色权限配置和审计视图。
+- 更完整的账号中心、密码修改、审计分页和工具调用详情。
 - Vue/Vite 前端工程化。
 - `/model` Web 控制面。
 - Skill source 状态页。

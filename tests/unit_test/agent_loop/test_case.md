@@ -45,8 +45,9 @@
 ### Case 7: 工具轮数上限
 
 - 输入：LLM 连续请求工具超过 `max_tool_iterations`。
-- 预期：停止循环，保存上限错误 marker。
-- 检查点：仍为未执行的 tool_call 生成配对 `tool` 错误消息，避免历史不完整。
+- 默认值：25；一轮 assistant 中的多个 tool call 只计为一次工具决策。
+- 预期：停止新工具执行，保存上限错误 marker，并让模型在无工具模式下总结已收集证据。
+- 检查点：仍为未执行的 tool_call 生成配对 `tool` 错误消息；最终模型调用不得携带 tools，失败时返回带实际限制值的 fallback。
 
 ### Case 8: Session 保存失败
 
@@ -65,3 +66,9 @@
 - AgentLoop emits concise INFO lifecycle logs for `turn.start` and `turn.done`; repetitive `llm.call`, `llm.direct`, and `session.save` remain available at DEBUG with `session_id` and `turn_id`.
 - Tool dispatch emits `tool.start` and `tool.done` with `session_id`, `turn_id`, tool name, success flag, duration, and safe output preview.
 - Lifecycle log fields must not leak secret-like values or full long user/tool content.
+
+## Part 9 Tool Policy Coverage
+
+- Tool policy 拒绝时不调用工具，但仍写入结构化 tool result 和 audit。
+- 确认通过后才执行工具，拒绝、超时或取消均不得执行。
+- `llm_override` 只作用于当前 turn，不修改 AgentLoop 默认 provider。

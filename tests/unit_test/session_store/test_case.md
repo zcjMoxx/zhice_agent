@@ -54,3 +54,9 @@
 - Restore turn fields only from top-level records.
 - Do not promote `metadata.turn_id` or other metadata turn fields into `Message` turn fields.
 - Ensure session listing remains based on preview, timestamp, and message count for new records.
+
+## Part 9 Session Model Preference Coverage
+
+- Session 模型偏好保存在 sidecar metadata，并保留已有 title 等字段。
+- reset 只删除模型偏好字段，不删除消息或标题。
+- 不同 session 的 provider 绑定互不修改共享状态；失效偏好回退系统默认。

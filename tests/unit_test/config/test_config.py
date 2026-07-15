@@ -31,6 +31,10 @@ def test_load_config_uses_explicit_workspace(tmp_path, monkeypatch):
     assert config.sessions_dir == tmp_path / "contexts" / "sessions"
     assert config.extends_dir == tmp_path / "extends"
     assert config.logs_dir == tmp_path / "logs"
+    assert config.state_dir == tmp_path / "state"
+    assert config.auth_db_path == tmp_path / "state" / "auth.sqlite3"
+    assert config.users_contexts_dir == tmp_path / "contexts" / "users"
+    assert config.shared_readonly_dir == tmp_path / "contexts" / "shared" / "readonly"
 
 
 def test_load_config_allows_environment_overrides(tmp_path, monkeypatch):

@@ -50,9 +50,9 @@
 
 ### Case 8: shell_policy 命令策略
 
-- 输入：普通单命令、复杂 shell 语法、危险命令、网络/安装命令、环境导出命令。
-- 预期：普通单命令允许，其余命令在进入 subprocess 前返回结构化拦截结果。
-- 检查点：错误码分别为 `UNSUPPORTED_SHELL_SYNTAX`、`DESTRUCTIVE_COMMAND_BLOCKED`、`NETWORK_COMMAND_BLOCKED`、`ENV_DUMP_BLOCKED`。
+- 输入：普通单命令、复杂 shell 语法、workspace-bounded 危险命令、网络/安装命令、环境导出命令。
+- 预期：普通单命令允许；已知 network/install 和 cwd-bounded destructive 命令进入高风险确认分类；其它高风险命令硬拒绝。
+- 检查点：`tool.exec.dangerous` 只允许进入确认；env dump、复杂 shell、绝对路径或无法证明在 workspace 内的破坏命令继续拒绝。
 
 ### Case 9: exec 工具执行
 

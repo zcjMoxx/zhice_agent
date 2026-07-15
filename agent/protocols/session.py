@@ -7,6 +7,7 @@ keeps later storage changes local to the session implementation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from agent.message import Message
@@ -39,6 +40,47 @@ class TurnGroup:
     turn_id: str
     turn_index: int | None
     messages: list[Message]
+
+
+@dataclass(frozen=True)
+class SessionContext:
+    """Already-authorized filesystem context used by session metadata services."""
+
+    owner_user_id: str | None
+    sessions_dir: Path
+    sessions_meta_dir: Path
+    files_dir: Path
+    shared_readonly_dir: Path
+
+
+@dataclass(frozen=True)
+class SessionModelPreference:
+    """Persisted endpoint and model preference for one session."""
+
+    endpoint_name: str
+    model_name: str
+
+
+class SessionModelPreferenceStore(Protocol):
+    """Read and mutate model fields in session sidecar metadata."""
+
+    def get(
+        self,
+        session_context: SessionContext,
+        session_id: str,
+    ) -> SessionModelPreference | None:
+        """Return the saved preference, or None for system default."""
+
+    def set(
+        self,
+        session_context: SessionContext,
+        session_id: str,
+        preference: SessionModelPreference,
+    ) -> None:
+        """Persist one session preference while preserving other metadata."""
+
+    def reset(self, session_context: SessionContext, session_id: str) -> None:
+        """Remove only the model preference fields."""
 
 
 class SessionStore(Protocol):

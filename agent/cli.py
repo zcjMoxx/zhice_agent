@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import hmac
+import os
 import sys
 from collections.abc import Sequence
 from datetime import datetime
 
+from agent.app.auth import local_operator_actor
 from agent.app.gateway import format_gateway_check, run_gateway
 from agent.app.logging import GatewayLogOptions
+from agent.auth.audit import SqliteAuditSink
+from agent.auth.confirmation import ConsoleConfirmationBroker
+from agent.auth.store import AuthSetupError, AuthStoreError, SQLiteAuthStore
+from agent.auth.tool_policy import RbacToolExecutionPolicy
 from agent.config import (
     DotenvConfigurationError,
     InitConfigurationError,
@@ -22,14 +30,18 @@ from agent.core.context import ContextBuilder
 from agent.core.loop import AgentLoop
 from agent.core.turns import assign_turn, new_turn_id, next_turn_index
 from agent.llm import LLMConfigurationError
+from agent.llm.failover_provider import EndpointFailoverProvider
 from agent.llm.runtime import (
     create_configured_llm_provider,
     resolve_preferred_endpoint,
     validate_startup_llm_endpoints,
 )
+from agent.llm.selection import ConfiguredLLMProviderResolver
 from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
-from agent.session import JsonlSessionStore
+from agent.protocols.auth import AuditEvent
+from agent.protocols.session import SessionContext, SessionModelPreference
+from agent.session import JsonlSessionStore, JsonSessionModelPreferenceStore
 from agent.skills import SkillLoader, SkillSourceSync
 from agent.skills.sync import SkillSyncError, SkillSyncResult
 from agent.tools import create_default_tool_registry
@@ -54,7 +66,85 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_init(argv_list[1:])
     if argv_list and argv_list[0] == "gateway":
         return _run_gateway(argv_list[1:])
+    if argv_list and argv_list[0] == "auth":
+        return _run_auth(argv_list[1:])
     return _run_chat(argv_list)
+
+
+def _run_auth(argv: Sequence[str]) -> int:
+    """Run local auth bootstrap and maintenance commands."""
+
+    parser = argparse.ArgumentParser(prog="zcagent auth")
+    parser.add_argument("--workspace", default=None, help="Workspace root override.")
+    subparsers = parser.add_subparsers(dest="auth_command", required=True)
+
+    init_owner = subparsers.add_parser("init-owner", help="Create the unique Owner user.")
+    init_owner.add_argument("--username", default="owner")
+    init_owner.add_argument("--display-name", default="Owner")
+    subparsers.add_parser("users", help="List local DB users.")
+
+    reset_password = subparsers.add_parser("reset-password", help="Reset one user's password.")
+    reset_password.add_argument("username")
+
+    args = parser.parse_args(argv)
+    try:
+        config = load_config(args.workspace)
+    except MissingWorkspaceError as exc:
+        _print_workspace_error(str(exc))
+        return 1
+    if not _ensure_runtime_dirs(config):
+        return 1
+    store = SQLiteAuthStore(config.auth_db_path)
+
+    try:
+        if args.auth_command == "init-owner":
+            if store.has_owner():
+                raise AuthSetupError("owner already exists; owner initialization is closed")
+            expected_setup_token = os.getenv("ZHICE_AGENT_SETUP_TOKEN", "")
+            if not expected_setup_token:
+                raise AuthSetupError(
+                    "Owner setup is disabled; configure ZHICE_AGENT_SETUP_TOKEN before initializing."
+                )
+            setup_token = getpass.getpass("Setup token: ")
+            if not hmac.compare_digest(expected_setup_token, setup_token):
+                raise AuthSetupError("Invalid setup credential")
+            password = getpass.getpass("Owner password: ")
+            user = store.initialize_owner(
+                args.username,
+                args.display_name,
+                password,
+            )
+            print(f"{console.success('owner initialized:')} {console.command(user.username)}")
+            print(f"user_id: {console.command(user.id)}")
+            return 0
+        if not store.is_initialized():
+            raise AuthSetupError(
+                "auth database is not initialized; register a user or run zcagent auth init-owner"
+            )
+        if args.auth_command == "users":
+            for user in store.list_users():
+                roles = ",".join(user.role_keys)
+                print(f"{user.id}  {user.username}  {user.status}  roles={roles}")
+            return 0
+        if args.auth_command == "reset-password":
+            password = _read_confirmed_password("New password: ")
+            store.reset_password(args.username, password)
+            print(f"{console.success('password reset:')} {console.command(args.username)}")
+            return 0
+    except (AuthSetupError, AuthStoreError, ValueError, OSError) as exc:
+        print(console.error(str(exc)))
+        return 1
+    return 1
+
+
+def _read_confirmed_password(prompt: str) -> str:
+    """Read a password twice without accepting it through command-line arguments."""
+
+    password = getpass.getpass(prompt)
+    confirmation = getpass.getpass("Confirm password: ")
+    if password != confirmation:
+        raise ValueError("password confirmation does not match")
+    return password
 
 
 def _run_chat(argv: Sequence[str]) -> int:
@@ -106,10 +196,17 @@ def _run_chat(argv: Sequence[str]) -> int:
     except LLMConfigurationError as exc:
         _print_llm_configuration_error(exc, config)
         return 1
+    model_runtime = _build_cli_model_runtime(llm, config, session_store)
+    cli_actor = local_operator_actor(channel="cli")
+    tool_policy = RbacToolExecutionPolicy()
+    confirmation_broker = ConsoleConfirmationBroker()
+    auth_store = SQLiteAuthStore(config.auth_db_path)
+    audit_sink = SqliteAuditSink(auth_store) if auth_store.is_initialized() else None
     tool_registry = create_default_tool_registry(
         config.workspace,
         skills=skill_loader,
         skill_sync=skill_sync,
+        allow_confirmable_exec=True,
     )
     agent_loop = AgentLoop(
         llm=llm,
@@ -117,6 +214,9 @@ def _run_chat(argv: Sequence[str]) -> int:
         context_builder=context_builder,
         workspace=config.workspace,
         tools=tool_registry,
+        tool_policy=tool_policy,
+        confirmation_broker=confirmation_broker,
+        audit_sink=audit_sink,
     )
     print(console.bold(CHAT_BANNER))
 
@@ -167,12 +267,43 @@ def _run_chat(argv: Sequence[str]) -> int:
             )
             continue
         if user_text == "/model" or user_text.startswith("/model "):
-            print(_handle_model_command(llm, user_text.removeprefix("/model").strip()))
+            target = user_text.removeprefix("/model").strip()
+            if model_runtime is None:
+                print(_handle_model_command(llm, target))
+            else:
+                output = _handle_session_model_command(model_runtime, session_id, target)
+                print(output)
+                if audit_sink is not None:
+                    normalized_target = target.lower()
+                    action = (
+                        "model.reset"
+                        if normalized_target == "reset"
+                        else "model.viewed"
+                        if not normalized_target or normalized_target.startswith("list")
+                        else "model.switched"
+                    )
+                    audit_sink.record(
+                        AuditEvent(
+                            action=action,
+                            resource_type="model",
+                            actor=cli_actor,
+                            channel="cli",
+                            session_id=session_id,
+                            decision="allow",
+                        )
+                    )
             continue
 
         try:
             with Spinner("thinking"):
-                result = agent_loop.run_turn(session_id, user_text)
+                turn_llm = _cli_turn_provider(model_runtime, session_id) if model_runtime else None
+                result = agent_loop.run_turn(
+                    session_id,
+                    user_text,
+                    actor=cli_actor,
+                    llm_override=turn_llm,
+                    channel="cli",
+                )
             print(result)
         except KeyboardInterrupt:
             turn_id = new_turn_id()
@@ -765,6 +896,103 @@ def _handle_model_command(llm, target: str) -> str:
         f"{console.success('model switched:')} {console.command(endpoint.model)}\n"
         f"endpoint: {console.command(endpoint.name)}"
     )
+
+
+class _CliModelRuntime:
+    """Session metadata dependencies used by the production CLI model commands."""
+
+    def __init__(self, resolver, preferences, context):
+        self.resolver = resolver
+        self.preferences = preferences
+        self.context = context
+
+
+def _build_cli_model_runtime(llm, config, session_store) -> _CliModelRuntime | None:
+    """Enable session-scoped model state for the configured production provider."""
+
+    if not isinstance(llm, EndpointFailoverProvider):
+        return None
+    resolver = ConfiguredLLMProviderResolver(
+        llm.endpoints(),
+        default_endpoint=llm.current_endpoint().name,
+    )
+    context = SessionContext(
+        owner_user_id=None,
+        sessions_dir=config.sessions_dir,
+        sessions_meta_dir=session_store.metadata_dir,
+        files_dir=config.workspace,
+        shared_readonly_dir=config.shared_readonly_dir,
+    )
+    return _CliModelRuntime(resolver, JsonSessionModelPreferenceStore(), context)
+
+
+def _handle_session_model_command(
+    runtime: _CliModelRuntime,
+    session_id: str,
+    target: str,
+) -> str:
+    """Handle CLI /model using only the current session sidecar metadata."""
+
+    normalized = target.strip()
+    current = runtime.resolver.resolve(runtime.preferences.get(runtime.context, session_id))
+    if not normalized:
+        return "\n".join(
+            [
+                f"current: {console.command(f'{current.endpoint_name}/{current.model_name}')}",
+                (
+                    "Tip: use '/model <endpoint>' or '/model <endpoint>/<model>' to switch. "
+                    "Use '/model list' to see available, '/model reset' to restore default."
+                ),
+            ]
+        )
+    if normalized.lower() == "reset":
+        runtime.preferences.reset(runtime.context, session_id)
+        default = runtime.resolver.resolve(None)
+        return (
+            f"{console.success('model preference reset.')}\n"
+            f"current: {console.command(f'{default.endpoint_name}/{default.model_name}')}"
+        )
+    if normalized.lower() == "list" or normalized.lower().startswith("list "):
+        endpoint_name = normalized[4:].strip()
+        if endpoint_name:
+            endpoint = next(
+                (item for item in runtime.resolver.endpoints() if item.name == endpoint_name),
+                None,
+            )
+            if endpoint is None:
+                return f"{console.error(f'Unknown endpoint: {endpoint_name}')}"
+            lines = [f"endpoint: {console.command(endpoint.name)}", "available models:"]
+            for model in _endpoint_model_names(endpoint):
+                suffix = " (default)" if model == endpoint.model else ""
+                lines.append(f"  {model}{suffix}")
+            return "\n".join(lines)
+        lines = [
+            f"current: {console.command(f'{current.endpoint_name}/{current.model_name}')}",
+            "available endpoints:",
+        ]
+        for endpoint in runtime.resolver.endpoints():
+            marker = "*" if endpoint.name == current.endpoint_name else " "
+            lines.append(f"{marker} {endpoint.name:<18} default model: {endpoint.model}")
+        return "\n".join(lines)
+
+    endpoint_name, separator, model_name = normalized.partition("/")
+    selection = runtime.resolver.select(endpoint_name, model_name if separator else None)
+    runtime.preferences.set(
+        runtime.context,
+        session_id,
+        SessionModelPreference(selection.endpoint_name, selection.model_name),
+    )
+    return (
+        f"{console.success('model switched:')} {console.command(selection.model_name)}\n"
+        f"endpoint: {console.command(selection.endpoint_name)}"
+    )
+
+
+def _cli_turn_provider(runtime: _CliModelRuntime, session_id: str):
+    """Bind one independent provider from the current CLI session metadata."""
+
+    preference = runtime.preferences.get(runtime.context, session_id)
+    return runtime.resolver.bind(runtime.resolver.resolve(preference))
 
 
 def _format_model_status(llm) -> str:

@@ -57,6 +57,16 @@ class LLMConfigurationError(LLMProviderError):
     """Raised when LLM configuration is missing or invalid."""
 
 
+@dataclass(frozen=True)
+class ModelSelection:
+    """Provider-neutral, call-scoped endpoint and model selection."""
+
+    endpoint_name: str
+    model_name: str
+    source: str = "system"
+    reason_code: str = ""
+
+
 class LLMProvider(Protocol):
     """Minimal synchronous chat contract consumed by AgentLoop."""
 
@@ -77,3 +87,10 @@ class StreamingLLMProvider(LLMProvider, Protocol):
         tools: list[dict[str, Any]] | None = None,
     ) -> Iterable[LLMStreamChunk | str]:
         """Yield incremental assistant content for the provided messages."""
+
+
+class LLMProviderResolver(Protocol):
+    """Bind a call-scoped ModelSelection to an independent provider."""
+
+    def bind(self, selection: ModelSelection) -> LLMProvider:
+        """Return a provider whose mutable preference is not shared across turns."""

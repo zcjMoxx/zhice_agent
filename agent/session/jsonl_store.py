@@ -34,6 +34,16 @@ class InvalidSessionIdError(ValueError):
     """Raised when a session id could escape the sessions directory."""
 
 
+def validate_session_id(session_id: str) -> str:
+    """Validate and return a path-safe session id."""
+
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+        raise InvalidSessionIdError(
+            "session_id must contain only letters, numbers, underscores, and hyphens"
+        )
+    return session_id
+
+
 class JsonlSessionStore:
     """Persist and load Agent sessions from a local JSONL directory."""
 
@@ -149,10 +159,7 @@ class JsonlSessionStore:
     def _path_for(self, session_id: str) -> Path:
         """Resolve and validate the JSONL path for a session id."""
 
-        if not _SESSION_ID_RE.fullmatch(session_id):
-            raise InvalidSessionIdError(
-                "session_id must contain only letters, numbers, underscores, and hyphens"
-            )
+        validate_session_id(session_id)
         return self.sessions_dir / f"{session_id}.jsonl"
 
     def _metadata_path_for(self, session_id: str) -> Path:

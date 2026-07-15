@@ -6,7 +6,7 @@
 >
 > 承接文档：`docs_design/zhice-agent-part5-skill-loader-design.md`
 >
-> 当前状态：已实现 Web 最小版。当前代码提供 FastAPI gateway、REST/SSE 兼容聊天 API、WebSocket 主聊天通道、会话 API、模型选择 API、Web stop 和 `web/static` 静态前端；仍不包含鉴权、多用户或远程部署安全边界。
+> 当前状态：第六部分 Web 最小版已实现；第九部分已在其上增加本地登录、RBAC、用户 session 隔离和权限执行边界。当前仍不包含生产公网部署、多租户或多 workspace 安全方案。
 
 ---
 
@@ -339,6 +339,8 @@ error   {"error":{"code":"LLM_ERROR","message":"..."}}
 
 用途：为当前 Web gateway 进程设置当前 endpoint 的模型偏好。
 
+> 当前代码已经按第九部分改为 session metadata 持久化模型偏好，并为每个 turn 绑定 call-scoped provider；Web / REST / SSE / WebSocket 不再修改共享 gateway provider。`/model reset` 清当前 session 偏好，`/new` 使用系统默认。当前方案见 Part 9 活文档和 `docs_design/2026-07-10-session-model-preference-scope-design.md`。
+
 请求：
 
 ```json
@@ -533,7 +535,7 @@ dependencies = [
 - HTTP 请求不能绕过 AgentLoop 直接执行工具。
 - API 不接收任意文件路径读取请求；读文件仍必须经 LLM tool 调用和已有工具策略。
 - 错误响应不暴露 API key、环境变量、完整堆栈或本地敏感路径。
-- 如果用户显式设置 `--host 0.0.0.0`，CLI 输出应提示这是本地开发服务，不自带鉴权。
+- 如果用户显式设置 `--host 0.0.0.0`，CLI 输出应提示即使已有本地 auth/RBAC，它仍不是生产公网服务。
 
 ---
 
@@ -646,16 +648,14 @@ http://127.0.0.1:10086/api/sessions
 
 ## 13. 后续演进
 
-第六部分完成后已由第七部分补齐 turn 运行单元；后续再考虑：
+第六部分完成后已由第七部分补齐 turn 运行单元，由第八部分补齐 Gateway / Agent 运行日志，并由第九部分落地用户、登录与权限执行边界第一版；后续再考虑：
 
-- Gateway / Agent 运行日志优化，复用统一后的 `turn_id` 打印 turn、LLM、tool 和 session 保存轨迹。
-- 用户、登录与权限执行边界设计；这属于后续安全执行主线，不并入第六部分 Web 最小版。
 - CLI `/stop`，等待 active turn registry 和并发输入通道稳定后再做。
 - 会话自动标题、归档和全文搜索。
 - 工具调用日志面板。
 - `/model` Web 控制面。
 - Skill source 状态页。
-- 登录页、用户/角色/权限管理页和审计视图；这些等权限设计确定后再做。
+- 更完整的账号设置、审计分页、权限模板和工具调用日志视图。
 - Dockerfile 和本地容器运行方式。
 
 Memory、MCP、Hooks 和 Subagent 继续按后续里程碑单独设计，不并入 Web 最小版。

@@ -4,6 +4,8 @@
 
 验证配置加载、运行时目录派生、dotenv 读取、LLM endpoint 解析和 `zcagent init` 文件初始化都遵守 workspace 边界和 secret 管理约定。
 
+Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared/readonly` 都从 workspace 派生。
+
 ## 用例覆盖
 
 ### Case 1: 显式 workspace

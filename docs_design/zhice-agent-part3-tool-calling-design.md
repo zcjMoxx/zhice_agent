@@ -483,7 +483,7 @@ class AgentLoop:
         context_builder: ContextBuilder,
         workspace: Path,
         tools: ToolProvider | None = None,
-        max_tool_iterations: int = 4,
+        max_tool_iterations: int = 25,
     ):
         ...
 ```
@@ -534,7 +534,7 @@ return TOOL_ITERATION_LIMIT_TEXT
 - 有工具时，必须先保存模型请求工具的 assistant 消息，再保存 tool 消息。
 - 一次 assistant 可请求多个 tool call，第三部分按顺序串行执行。
 - `max_tool_iterations` 计算 assistant 请求工具的轮数，不计算最终无工具回答。
-- 默认最大工具轮数为 4，防止模型无限调用工具。
+- 默认最大工具轮数为 25，防止模型无限调用工具，同时允许多步骤诊断完成目录定位、日志读取和证据汇总；达到上限后不再执行工具，并进入无工具总结/fallback。
 - 工具返回错误时仍回填给 LLM，而不是让 AgentLoop 直接抛异常。
 - LLM 调用失败沿用第二部分策略：保存 user 和 assistant error marker，不泄露 secret。
 - 最终返回给 CLI 的文本必须是最终 assistant 文本，而不是工具 JSON。

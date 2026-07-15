@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 from dataclasses import dataclass
+from pathlib import PurePath, PureWindowsPath
 
 MAX_COMMAND_CHARS = 2000
 
@@ -23,6 +24,13 @@ _DESTRUCTIVE_FIRST_TOKENS = {
     "remove-item",
     "ri",
 }
+_NEVER_CONFIRM_DESTRUCTIVE = {
+    "format",
+    "mkfs",
+    "shutdown",
+    "stop-computer",
+    "restart-computer",
+}
 _NETWORK_FIRST_TOKENS = {
     "curl",
     "wget",
@@ -39,6 +47,8 @@ _ASSIGNMENT_SECRET_RE = re.compile(
 )
 _BEARER_RE = re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]+")
 _OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+_WINDOWS_PATH_REFERENCE_RE = re.compile(r"(?i)(?:^|[\s\"'(=])(?:[A-Z]:[\\/]|\\\\)")
+_POSIX_PATH_REFERENCE_RE = re.compile(r"(?:^|[\s\"'(=])/(?!/)")
 
 
 @dataclass(frozen=True)
@@ -49,6 +59,10 @@ class CommandPolicyResult:
     code: str = "OK"
     message: str = ""
     category: str = "local"
+    risk_level: str = "low"
+    risk_category: str = "safe"
+    required_permission: str = "tool.exec.safe"
+    requires_confirmation: bool = False
 
 
 def validate_command(command: str) -> CommandPolicyResult:
@@ -65,11 +79,25 @@ def validate_command(command: str) -> CommandPolicyResult:
         )
 
     tokens = _command_tokens(command)
+    if _has_unscoped_path_reference(command, tokens):
+        return _blocked(
+            "PATH_OUTSIDE_WORKSPACE",
+            "Absolute or environment-expanded paths are not supported by exec.",
+            "path",
+        )
     normalized_tokens = [_normalize_token(token) for token in tokens]
     normalized_text = " ".join(normalized_tokens)
     first = normalized_tokens[0] if normalized_tokens else ""
 
+    if first in _NEVER_CONFIRM_DESTRUCTIVE:
+        return _blocked("DESTRUCTIVE_COMMAND_BLOCKED", "Destructive command blocked.", "destructive")
     if first in _DESTRUCTIVE_FIRST_TOKENS or _matches_destructive_git(normalized_tokens):
+        if _is_confirmable_destructive(tokens, normalized_tokens):
+            return _confirmable(
+                "DESTRUCTIVE_CONFIRMATION_REQUIRED",
+                "Destructive workspace command requires confirmation.",
+                "destructive",
+            )
         return _blocked("DESTRUCTIVE_COMMAND_BLOCKED", "Destructive command blocked.", "destructive")
     if _contains_any(normalized_tokens, _DESTRUCTIVE_FIRST_TOKENS):
         return _blocked("DESTRUCTIVE_COMMAND_BLOCKED", "Destructive command blocked.", "destructive")
@@ -79,7 +107,11 @@ def validate_command(command: str) -> CommandPolicyResult:
         or _matches_install_or_network_command(normalized_tokens)
         or _contains_any(normalized_tokens, _NETWORK_FIRST_TOKENS)
     ):
-        return _blocked("NETWORK_COMMAND_BLOCKED", "Network or install command blocked.", "network")
+        return _confirmable(
+            "NETWORK_CONFIRMATION_REQUIRED",
+            "Network or install command requires confirmation.",
+            "network",
+        )
 
     if (
         first in _ENV_DUMP_FIRST_TOKENS
@@ -104,7 +136,32 @@ def redact_secrets(text: str) -> str:
 def _blocked(code: str, message: str, category: str = "local") -> CommandPolicyResult:
     """Create a consistent denied policy result."""
 
-    return CommandPolicyResult(allowed=False, code=code, message=message, category=category)
+    return CommandPolicyResult(
+        allowed=False,
+        code=code,
+        message=message,
+        category=category,
+        risk_level="critical" if category in {"destructive", "environment"} else "high",
+        risk_category=category,
+        required_permission=(
+            "tool.exec.dangerous" if category in {"destructive", "network"} else ""
+        ),
+    )
+
+
+def _confirmable(code: str, message: str, category: str) -> CommandPolicyResult:
+    """Create a high-risk result that may run only after policy confirmation."""
+
+    return CommandPolicyResult(
+        allowed=True,
+        code=code,
+        message=message,
+        category=category,
+        risk_level="high",
+        risk_category=category,
+        required_permission="tool.exec.dangerous",
+        requires_confirmation=True,
+    )
 
 
 def _command_tokens(command: str) -> list[str]:
@@ -165,6 +222,38 @@ def _matches_install_or_network_command(tokens: list[str]) -> bool:
     return False
 
 
+def _is_confirmable_destructive(raw_tokens: list[str], normalized_tokens: list[str]) -> bool:
+    """Allow confirmation only when destructive effects stay rooted in the command cwd."""
+
+    if _matches_destructive_git(normalized_tokens):
+        return True
+    if not normalized_tokens or normalized_tokens[0] not in _DESTRUCTIVE_FIRST_TOKENS:
+        return False
+    if normalized_tokens[0] in _NEVER_CONFIRM_DESTRUCTIVE:
+        return False
+    operands = [
+        token
+        for token in raw_tokens[1:]
+        if token and not token.lstrip().startswith("-") and not token.lstrip().startswith("/")
+    ]
+    if not operands:
+        return False
+    return all(_is_workspace_relative_operand(token) for token in operands)
+
+
+def _is_workspace_relative_operand(token: str) -> bool:
+    """Reject absolute, parent-traversing, drive-qualified, and home-expanded paths."""
+
+    value = token.strip().strip("\"'")
+    if not value or value.startswith(("~", "\\\\", "//")):
+        return False
+    windows_path = PureWindowsPath(value)
+    posix_path = PurePath(value.replace("\\", "/"))
+    if windows_path.is_absolute() or windows_path.drive or posix_path.is_absolute():
+        return False
+    return ".." not in windows_path.parts and ".." not in posix_path.parts
+
+
 def _contains_unquoted_shell_syntax(command: str) -> bool:
     """Detect unsupported shell operators outside quoted strings."""
 
@@ -191,4 +280,27 @@ def _contains_unquoted_shell_syntax(command: str) -> bool:
             if char == "&":
                 return True
         index += 1
+    return False
+
+
+def _has_unscoped_path_reference(command: str, tokens: list[str]) -> bool:
+    """Reject filesystem paths that cannot be proven relative to the guarded cwd."""
+
+    lowered = command.lower()
+    if "$env:" in lowered or "${env:" in lowered or re.search(r"%[A-Za-z_][A-Za-z0-9_]*%", command):
+        return True
+    for index, token in enumerate(tokens):
+        value = token.strip().strip("\"'")
+        if not value or "://" in value:
+            continue
+        if index == 0:
+            # An absolute executable path is allowed; subprocess still runs with a guarded cwd.
+            continue
+        if value.startswith("~"):
+            return True
+        if _WINDOWS_PATH_REFERENCE_RE.search(value):
+            return True
+        if _POSIX_PATH_REFERENCE_RE.search(value):
+            if value.lower() not in {"/s", "/q", "/f"}:
+                return True
     return False

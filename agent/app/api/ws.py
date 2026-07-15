@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from agent.app.api.routes import _api_error_from_exception
+from agent.app.api.routes import _api_error_from_exception, _runtime_call, _set_model_preference
+from agent.app.auth import AuthHttpError, local_operator_actor
 from agent.app.runtime import EXTERNAL_COMMAND_PROFILE, WEB_COMMAND_PROFILE, ChatTurnResult
 from agent.core.turns import new_turn_id
+from agent.protocols.auth import AuditEvent
+from agent.protocols.errors import ErrorCode
 
 router = APIRouter()
 
@@ -20,6 +24,7 @@ async def websocket_chat(websocket: WebSocket) -> None:
     """Serve the bidirectional WebSocket chat channel."""
 
     runtime = getattr(websocket.app.state, "runtime", None)
+    auth = getattr(websocket.app.state, "auth_service", None)
     await websocket.accept()
     connection_id = "ws-" + uuid.uuid4().hex
     command_profile = WEB_COMMAND_PROFILE
@@ -41,14 +46,55 @@ async def websocket_chat(websocket: WebSocket) -> None:
         async with send_lock:
             await websocket.send_json(payload)
 
-    await send_event("connected", {"connection_id": connection_id})
     if runtime is None:
         await send_event(
             "channel_status",
-            {"type": "error", "error": {"code": "CONFIG_ERROR", "message": "runtime is not configured"}},
+            {
+                "type": "error",
+                "error": {
+                    "status": 500,
+                    "code": ErrorCode.CONFIG_INVALID,
+                    "message": "runtime is not configured",
+                    "request_id": connection_id,
+                    "details": {},
+                },
+            },
         )
         await websocket.close(code=1011)
         return
+    try:
+        actor = auth.resolve_ws_actor(websocket, channel="web") if auth else local_operator_actor(channel="web")
+    except AuthHttpError as exc:
+        if auth and auth.audit_sink is not None:
+            auth.audit_sink.record(
+                AuditEvent(
+                    action="auth.request_denied",
+                    resource_type="websocket",
+                    request_id=connection_id,
+                    channel="web",
+                    route="/ws",
+                    status_code=401,
+                    decision="deny",
+                    reason_code=exc.code,
+                )
+            )
+        await send_event(
+            "channel_status",
+            {
+                "type": "error",
+                "error": {
+                    "status": exc.status_code,
+                    "code": exc.code,
+                    "message": exc.message,
+                    "request_id": connection_id,
+                    "details": exc.details,
+                },
+            },
+        )
+        await websocket.close(code=1008)
+        return
+
+    await send_event("connected", {"connection_id": connection_id})
 
     try:
         while True:
@@ -56,7 +102,7 @@ async def websocket_chat(websocket: WebSocket) -> None:
             if not isinstance(frame, dict):
                 await send_event(
                     "channel_status",
-                    {"type": "error", "error": {"code": "INVALID_REQUEST", "message": "invalid frame"}},
+                    _request_error("invalid frame", connection_id),
                 )
                 continue
 
@@ -69,9 +115,13 @@ async def websocket_chat(websocket: WebSocket) -> None:
                 except ValueError as exc:
                     await send_event(
                         "channel_status",
-                        {"type": "error", "error": {"code": "INVALID_REQUEST", "message": str(exc)}},
+                        _request_error(str(exc), connection_id),
                     )
                     continue
+                actor = replace(
+                    actor,
+                    channel="external_ws" if command_profile == EXTERNAL_COMMAND_PROFILE else "web",
+                )
                 await send_event(
                     "hello",
                     {
@@ -83,6 +133,9 @@ async def websocket_chat(websocket: WebSocket) -> None:
                 continue
             if frame_type == "new_session":
                 new_session_id = _new_session_id()
+                create_session = getattr(runtime, "create_session", None)
+                if callable(create_session):
+                    _runtime_call(runtime, "create_session", actor, new_session_id, command_profile)
                 await send_event("session_created", {"session_id": new_session_id}, session_id=new_session_id)
                 continue
             if frame_type == "heartbeat":
@@ -94,13 +147,13 @@ async def websocket_chat(websocket: WebSocket) -> None:
                     return
                 await send_event(
                     "channel_status",
-                    {"type": "error", "error": {"code": "INVALID_REQUEST", "message": "session_id is required"}},
+                    _request_error("session_id is required", connection_id, field="session_id"),
                 )
                 continue
             if frame_type == "stop" or (
                 content.lower() == "/stop" and command_profile == EXTERNAL_COMMAND_PROFILE
             ):
-                result = runtime.cancel_session(session_id)
+                result = _runtime_call(runtime, "cancel_session", actor, session_id)
                 await send_event(
                     "channel_status",
                     {"type": "stopped", **result},
@@ -111,10 +164,7 @@ async def websocket_chat(websocket: WebSocket) -> None:
             if frame_type != "message":
                 await send_event(
                     "channel_status",
-                    {
-                        "type": "error",
-                        "error": {"code": "INVALID_REQUEST", "message": f"unknown frame type: {frame_type}"},
-                    },
+                    _request_error(f"unknown frame type: {frame_type}", connection_id),
                     session_id=session_id,
                 )
                 continue
@@ -122,7 +172,9 @@ async def websocket_chat(websocket: WebSocket) -> None:
                 await _close_external_connection(websocket, send_event, active_tasks, session_id=session_id)
                 return
 
-            task = asyncio.create_task(_run_message_frame(runtime, frame, send_event, command_profile))
+            task = asyncio.create_task(
+                _run_message_frame(runtime, actor, frame, send_event, command_profile)
+            )
             active_tasks.add(task)
             task.add_done_callback(active_tasks.discard)
     except WebSocketDisconnect:
@@ -130,7 +182,13 @@ async def websocket_chat(websocket: WebSocket) -> None:
             task.cancel()
 
 
-async def _run_message_frame(runtime, frame: dict[str, Any], send_event, command_profile: str) -> None:
+async def _run_message_frame(
+    runtime,
+    actor,
+    frame: dict[str, Any],
+    send_event,
+    command_profile: str,
+) -> None:
     """Run one message frame and forward runtime events to the socket."""
 
     session_id = str(frame.get("session_id") or "").strip()
@@ -140,7 +198,10 @@ async def _run_message_frame(runtime, frame: dict[str, Any], send_event, command
     if not content:
         await send_event(
             "channel_status",
-            {"type": "error", "turn_id": turn_id, "error": {"code": "INVALID_REQUEST", "message": "content is required"}},
+            {
+                **_request_error("content is required", "ws-" + turn_id, field="content"),
+                "turn_id": turn_id,
+            },
             session_id=session_id,
             turn_id=turn_id,
         )
@@ -161,13 +222,23 @@ async def _run_message_frame(runtime, frame: dict[str, Any], send_event, command
     def worker() -> None:
         try:
             if _should_apply_model_preference(content, model):
-                runtime.set_model_preference(model)
-            result = runtime.run_chat_events(
+                _set_model_preference(
+                    runtime,
+                    actor,
+                    session_id,
+                    model,
+                    request_id="ws-" + turn_id,
+                )
+            result = _runtime_call(
+                runtime,
+                "run_chat_events",
+                actor,
                 session_id,
                 content,
                 turn_id=turn_id,
                 on_event=on_event,
                 command_profile=command_profile,
+                request_id="ws-" + turn_id,
             )
         except Exception as exc:  # noqa: BLE001 - errors must be sent over the channel.
             loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
@@ -186,6 +257,13 @@ async def _run_message_frame(runtime, frame: dict[str, Any], send_event, command
                         session_id=session_id,
                         turn_id=turn_id,
                     )
+                elif payload.get("type") == "tool_confirmation_required":
+                    await send_event(
+                        "tool_confirmation_required",
+                        payload,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                    )
                 continue
             if kind == "error":
                 error = _api_error_from_exception(payload)
@@ -194,7 +272,13 @@ async def _run_message_frame(runtime, frame: dict[str, Any], send_event, command
                     {
                         "type": "error",
                         "turn_id": turn_id,
-                        "error": {"code": error.code, "message": error.message},
+                        "error": {
+                            "status": error.status_code,
+                            "code": error.code,
+                            "message": error.message,
+                            "request_id": "ws-" + turn_id,
+                            "details": error.details,
+                        },
                     },
                     session_id=session_id,
                     turn_id=turn_id,
@@ -216,6 +300,20 @@ async def _run_message_frame(runtime, frame: dict[str, Any], send_event, command
             break
     finally:
         await worker_task
+
+
+def _request_error(message: str, request_id: str, *, field: str = "") -> dict[str, Any]:
+    details = {"field": field} if field else {}
+    return {
+        "type": "error",
+        "error": {
+            "status": 400,
+            "code": ErrorCode.REQUEST_VALIDATION_FAILED,
+            "message": message,
+            "request_id": request_id,
+            "details": details,
+        },
+    }
 
 
 def _new_session_id() -> str:

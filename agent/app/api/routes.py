@@ -2,30 +2,55 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import UTC, datetime
 from queue import Queue
 from threading import Thread
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
 from agent.app.api.schemas import (
+    AdminUserCreateRequest,
+    AdminUsersResponse,
+    AdminUserUpdateRequest,
+    AuditEventsResponse,
+    AuthMeResponse,
+    AuthMutationResponse,
+    BootstrapOwnerRequest,
     ChatMessageResponse,
     ChatRequest,
     ChatResponse,
+    ConfirmationMutationResponse,
+    LoginRequest,
     ModelPreferenceRequest,
     ModelsResponse,
+    PasswordChangeRequest,
+    ProfileUpdateRequest,
+    PublicUserResponse,
+    RegisterUserRequest,
+    RoleResponse,
+    RolesResponse,
+    RoleUpdateRequest,
     SessionMutationResponse,
     SessionRenameRequest,
     SessionResponse,
     SessionsResponse,
     SessionSummaryResponse,
+    ToolConfirmationResponse,
+    ToolConfirmationsResponse,
 )
+from agent.app.auth import AuthHttpError, local_operator_actor
 from agent.app.runtime import ChatTurnResult, ModelState
+from agent.auth.schema import PERMISSIONS
+from agent.auth.session_access import SessionAccessError
+from agent.auth.store import AuthStoreError
 from agent.core.turns import new_turn_id
 from agent.message import Message
+from agent.protocols.auth import AuditEvent
+from agent.protocols.errors import ErrorCode
 from agent.protocols.llm import LLMConfigurationError, LLMProviderError
 
 router = APIRouter(prefix="/api")
@@ -34,11 +59,168 @@ router = APIRouter(prefix="/api")
 class ApiError(Exception):
     """Exception carrying a stable API error code."""
 
-    def __init__(self, code: str, message: str, *, status_code: int = 500):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status_code: int = 500,
+        details: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
-        self.code = code
+        self.code = str(code)
         self.message = message
         self.status_code = status_code
+        self.details = dict(details or {})
+
+
+@router.post("/auth/bootstrap", response_model=AuthMutationResponse)
+def bootstrap_owner(
+    request_body: BootstrapOwnerRequest,
+    request: Request,
+    response: Response,
+) -> AuthMutationResponse:
+    """Create the unique Owner account and sign it in."""
+
+    auth = _auth_service(request, required=True)
+    try:
+        login_result = auth.bootstrap_owner(
+            request_body.password,
+            request_body.setup_token,
+            channel="web",
+            user_agent_preview=request.headers.get("user-agent", ""),
+            remote_addr_preview=request.client.host if request.client else "",
+            request_id=_request_id(request),
+            route=request.url.path,
+        )
+        auth.set_auth_cookie(response, login_result, secure=request.url.scheme == "https")
+    except AuthHttpError as exc:
+        raise _api_error_from_auth(exc) from exc
+    return AuthMutationResponse(
+        status="authenticated",
+        user=_public_actor(login_result.actor),
+    )
+
+
+@router.post("/auth/login", response_model=AuthMutationResponse)
+def login(request_body: LoginRequest, request: Request, response: Response) -> AuthMutationResponse:
+    """Authenticate a local DB user and set the opaque HttpOnly cookie."""
+
+    auth = _auth_service(request, required=True)
+    try:
+        login_result = auth.login(
+            request_body.username.strip(),
+            request_body.password,
+            channel="web",
+            user_agent_preview=request.headers.get("user-agent", ""),
+            remote_addr_preview=request.client.host if request.client else "",
+            request_id=_request_id(request),
+            route=request.url.path,
+        )
+        auth.set_auth_cookie(response, login_result, secure=request.url.scheme == "https")
+    except AuthHttpError as exc:
+        raise _api_error_from_auth(exc) from exc
+    return AuthMutationResponse(
+        status="authenticated",
+        user=_public_actor(login_result.actor),
+    )
+
+
+@router.post("/auth/register", response_model=AuthMutationResponse)
+def register_user(
+    request_body: RegisterUserRequest,
+    request: Request,
+    response: Response,
+) -> AuthMutationResponse:
+    """Register one public viewer account and sign it in."""
+
+    auth = _auth_service(request, required=True)
+    try:
+        login_result = auth.register_user(
+            request_body.username.strip(),
+            request_body.password,
+            channel="web",
+            user_agent_preview=request.headers.get("user-agent", ""),
+            remote_addr_preview=request.client.host if request.client else "",
+            request_id=_request_id(request),
+            route=request.url.path,
+        )
+        auth.set_auth_cookie(response, login_result, secure=request.url.scheme == "https")
+    except AuthHttpError as exc:
+        raise _api_error_from_auth(exc) from exc
+    return AuthMutationResponse(
+        status="authenticated",
+        user=_public_actor(login_result.actor),
+    )
+
+
+@router.post("/auth/logout", response_model=AuthMutationResponse)
+def logout(request: Request, response: Response) -> AuthMutationResponse:
+    """Revoke the current auth session and clear its browser cookie."""
+
+    auth = _auth_service(request, required=True)
+    auth.logout(request)
+    auth.clear_auth_cookie(response)
+    return AuthMutationResponse(status="logged_out")
+
+
+@router.get("/auth/me", response_model=AuthMeResponse)
+def read_current_user(request: Request) -> AuthMeResponse:
+    """Return the current user and explicit permission summary."""
+
+    actor = _actor(request, "auth.me.read", channel="rest")
+    return AuthMeResponse(
+        user=_public_actor(actor),
+        permissions=sorted(actor.permission_keys),
+    )
+
+
+@router.patch("/auth/profile", response_model=AuthMeResponse)
+def update_current_user_profile(
+    request_body: ProfileUpdateRequest,
+    request: Request,
+) -> AuthMeResponse:
+    """Update the current user's self-service profile fields."""
+
+    actor = _actor(request, "auth.me.read", channel="rest")
+    auth = _auth_service(request, required=True)
+    try:
+        user = auth.update_profile(
+            actor,
+            request_body.display_name,
+            request_id=_request_id(request),
+            route=request.url.path,
+        )
+    except AuthHttpError as exc:
+        raise _api_error_from_auth(exc) from exc
+    return AuthMeResponse(
+        user=_public_user(user),
+        permissions=sorted(actor.permission_keys),
+    )
+
+
+@router.post("/auth/password", response_model=AuthMutationResponse)
+def change_current_user_password(
+    request_body: PasswordChangeRequest,
+    request: Request,
+    response: Response,
+) -> AuthMutationResponse:
+    """Rotate password, revoke all sessions, and require a new login."""
+
+    actor = _actor(request, "auth.me.read", channel="rest")
+    auth = _auth_service(request, required=True)
+    try:
+        auth.change_password(
+            actor,
+            request_body.current_password,
+            request_body.new_password,
+            request_id=_request_id(request),
+            route=request.url.path,
+        )
+    except AuthHttpError as exc:
+        raise _api_error_from_auth(exc) from exc
+    auth.clear_auth_cookie(response)
+    return AuthMutationResponse(status="reauthentication_required")
 
 
 @router.get("/sessions", response_model=SessionsResponse)
@@ -46,10 +228,16 @@ def list_sessions(request: Request) -> SessionsResponse:
     """Return workspace sessions ordered by recent activity."""
 
     runtime = _runtime(request)
+    actor = _actor(request, "session.read.own", channel="rest")
     try:
-        summaries = runtime.list_sessions()
-    except ValueError as exc:
-        raise ApiError("INVALID_REQUEST", str(exc), status_code=400) from exc
+        summaries = _runtime_call(
+            runtime,
+            "list_sessions",
+            actor,
+            request_id=_request_id(request),
+        )
+    except Exception as exc:
+        raise _api_error_from_exception(exc) from exc
     return SessionsResponse(
         sessions=[
             SessionSummaryResponse(
@@ -69,10 +257,17 @@ def read_session(session_id: str, request: Request) -> SessionResponse:
     """Return persisted messages for one session."""
 
     runtime = _runtime(request)
+    actor = _actor(request, "session.read.own", channel="rest")
     try:
-        state = runtime.load_session(session_id)
-    except ValueError as exc:
-        raise ApiError("INVALID_REQUEST", str(exc), status_code=400) from exc
+        state = _runtime_call(
+            runtime,
+            "load_session",
+            actor,
+            session_id,
+            request_id=_request_id(request),
+        )
+    except Exception as exc:
+        raise _api_error_from_exception(exc) from exc
     return SessionResponse(
         session_id=state.session_id,
         messages=[_message_response(message) for message in state.messages],
@@ -89,13 +284,26 @@ def rename_session(
     """Rename a session display title."""
 
     runtime = _runtime(request)
+    actor = _actor(request, "session.write.own", channel="rest")
     title = request_body.title.strip()
     if not title:
-        raise ApiError("INVALID_REQUEST", "title is required", status_code=400)
+        raise ApiError(
+            ErrorCode.REQUEST_VALIDATION_FAILED,
+            "title is required",
+            status_code=400,
+            details={"field": "title"},
+        )
     try:
-        summary = runtime.rename_session(session_id, title)
-    except ValueError as exc:
-        raise ApiError("INVALID_REQUEST", str(exc), status_code=400) from exc
+        summary = _runtime_call(
+            runtime,
+            "rename_session",
+            actor,
+            session_id,
+            title,
+            request_id=_request_id(request),
+        )
+    except Exception as exc:
+        raise _api_error_from_exception(exc) from exc
     return SessionMutationResponse(
         session_id=session_id,
         status="renamed",
@@ -108,10 +316,17 @@ def delete_session(session_id: str, request: Request) -> SessionMutationResponse
     """Delete a session and its metadata."""
 
     runtime = _runtime(request)
+    actor = _actor(request, "session.delete.own", channel="rest")
     try:
-        runtime.delete_session(session_id)
-    except ValueError as exc:
-        raise ApiError("INVALID_REQUEST", str(exc), status_code=400) from exc
+        _runtime_call(
+            runtime,
+            "delete_session",
+            actor,
+            session_id,
+            request_id=_request_id(request),
+        )
+    except Exception as exc:
+        raise _api_error_from_exception(exc) from exc
     return SessionMutationResponse(session_id=session_id, status="deleted")
 
 
@@ -122,16 +337,33 @@ def chat(request_body: ChatRequest, request: Request) -> ChatResponse:
     session_id = request_body.session_id.strip()
     message = request_body.message.strip()
     if not session_id:
-        raise ApiError("INVALID_REQUEST", "session_id is required", status_code=400)
+        raise ApiError(
+            ErrorCode.REQUEST_VALIDATION_FAILED,
+            "session_id is required",
+            status_code=400,
+            details={"field": "session_id"},
+        )
     if not message:
-        raise ApiError("INVALID_REQUEST", "message is required", status_code=400)
+        raise ApiError(
+            ErrorCode.REQUEST_VALIDATION_FAILED,
+            "message is required",
+            status_code=400,
+            details={"field": "message"},
+        )
 
     runtime = _runtime(request)
+    actor = _actor(request, "chat.run", channel="rest")
     try:
         selected_model = (request_body.model or "").strip()
         if _should_apply_model_preference(message, selected_model):
-            runtime.set_model_preference(selected_model)
-        result = _run_chat_events(runtime, session_id, message)
+            _set_model_preference(
+                runtime,
+                actor,
+                session_id,
+                selected_model,
+                request_id=_request_id(request),
+            )
+        result = _run_chat_events(runtime, actor, session_id, message, request_id=_request_id(request))
     except Exception as exc:
         raise _api_error_from_exception(exc) from exc
 
@@ -152,34 +384,71 @@ def chat_stream(request_body: ChatRequest, request: Request) -> StreamingRespons
     session_id = request_body.session_id.strip()
     message = request_body.message.strip()
     if not session_id:
-        raise ApiError("INVALID_REQUEST", "session_id is required", status_code=400)
+        raise ApiError(
+            ErrorCode.REQUEST_VALIDATION_FAILED,
+            "session_id is required",
+            status_code=400,
+            details={"field": "session_id"},
+        )
     if not message:
-        raise ApiError("INVALID_REQUEST", "message is required", status_code=400)
+        raise ApiError(
+            ErrorCode.REQUEST_VALIDATION_FAILED,
+            "message is required",
+            status_code=400,
+            details={"field": "message"},
+        )
 
     runtime = _runtime(request)
+    actor = _actor(request, "chat.run", channel="sse")
     try:
         selected_model = (request_body.model or "").strip()
         if _should_apply_model_preference(message, selected_model):
-            runtime.set_model_preference(selected_model)
+            _set_model_preference(
+                runtime,
+                actor,
+                session_id,
+                selected_model,
+                request_id=_request_id(request),
+            )
     except Exception as exc:
         raise _api_error_from_exception(exc) from exc
 
     return StreamingResponse(
-        _chat_stream_events(runtime, session_id, message),
+        _chat_stream_events(
+            runtime,
+            actor,
+            session_id,
+            message,
+            request_id=_request_id(request),
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
 
 
 @router.get("/models", response_model=ModelsResponse)
-def read_models(request: Request) -> ModelsResponse:
+def read_models(request: Request, session_id: str = "") -> ModelsResponse:
     """Return the current endpoint and its selectable models."""
 
     runtime = _runtime(request)
+    actor = _actor(request, "model.view", channel="rest")
+    if _auth_service(request) is not None and not session_id.strip():
+        raise ApiError(
+            ErrorCode.REQUEST_VALIDATION_FAILED,
+            "session_id is required",
+            status_code=400,
+            details={"field": "session_id"},
+        )
     try:
-        return _model_response(runtime.model_state())
-    except ValueError as exc:
-        raise ApiError("INVALID_REQUEST", str(exc), status_code=400) from exc
+        state = _runtime_model_state(
+            runtime,
+            actor,
+            session_id.strip(),
+            request_id=_request_id(request),
+        )
+        return _model_response(state)
+    except Exception as exc:
+        raise _api_error_from_exception(exc) from exc
 
 
 @router.post("/model/preference", response_model=ModelsResponse)
@@ -190,13 +459,257 @@ def set_model_preference(
     """Set the preferred model for the current endpoint."""
 
     model = request_body.model.strip()
+    session_id = request_body.session_id.strip()
     if not model:
-        raise ApiError("INVALID_REQUEST", "model is required", status_code=400)
+        raise ApiError(
+            ErrorCode.REQUEST_VALIDATION_FAILED,
+            "model is required",
+            status_code=400,
+            details={"field": "model"},
+        )
+    if _auth_service(request) is not None and not session_id:
+        raise ApiError(
+            ErrorCode.REQUEST_VALIDATION_FAILED,
+            "session_id is required",
+            status_code=400,
+            details={"field": "session_id"},
+        )
     runtime = _runtime(request)
+    actor = _actor(request, "model.switch", channel="rest")
     try:
-        return _model_response(runtime.set_model_preference(model))
+        return _model_response(
+            _set_model_preference(
+                runtime,
+                actor,
+                session_id,
+                model,
+                request_id=_request_id(request),
+            )
+        )
+    except Exception as exc:
+        raise _api_error_from_exception(exc) from exc
+
+
+@router.delete("/model/preference", response_model=ModelsResponse)
+def reset_model_preference(request: Request, session_id: str) -> ModelsResponse:
+    """Clear only the current session model preference."""
+
+    runtime = _runtime(request)
+    actor = _actor(request, "model.switch", channel="rest")
+    try:
+        return _model_response(
+            _runtime_call(
+                runtime,
+                "reset_model_preference",
+                actor,
+                session_id,
+                request_id=_request_id(request),
+            )
+        )
+    except Exception as exc:
+        raise _api_error_from_exception(exc) from exc
+
+
+@router.get("/admin/users", response_model=AdminUsersResponse)
+def list_users(request: Request) -> AdminUsersResponse:
+    """List public user fields for authorized administrators."""
+
+    _actor(request, "auth.users.read", channel="rest")
+    auth = _auth_service(request, required=True)
+    users = auth.store.list_users()
+    return AdminUsersResponse(
+        users=[
+            _public_user(user, auth)
+            for user in users
+        ]
+    )
+
+
+@router.post("/admin/users", response_model=PublicUserResponse)
+def create_user(request_body: AdminUserCreateRequest, request: Request) -> PublicUserResponse:
+    """Create a local DB user with explicit role assignments."""
+
+    actor = _actor(request, "auth.users.manage", channel="rest")
+    auth = _auth_service(request, required=True)
+    try:
+        user = auth.create_managed_user(
+            actor,
+            request_body.username,
+            request_body.display_name,
+            request_body.password,
+            request_body.roles,
+        )
+    except AuthHttpError as exc:
+        raise _api_error_from_auth(exc) from exc
     except ValueError as exc:
-        raise ApiError("INVALID_REQUEST", str(exc), status_code=400) from exc
+        raise ApiError(ErrorCode.REQUEST_VALIDATION_FAILED, str(exc), status_code=400) from exc
+    _ = actor
+    if auth.audit_sink is not None:
+        auth.audit_sink.record(
+            AuditEvent(
+                action="user.created",
+                resource_type="user",
+                actor=actor,
+                resource_id=user.id,
+                channel="rest",
+                decision="allow",
+            )
+        )
+    return _public_user(user, auth)
+
+
+@router.patch("/admin/users/{user_id}", response_model=PublicUserResponse)
+def update_user(
+    user_id: str,
+    request_body: AdminUserUpdateRequest,
+    request: Request,
+) -> PublicUserResponse:
+    """Update user status, display name, or role assignments."""
+
+    actor = _actor(request, "auth.users.manage", channel="rest")
+    auth = _auth_service(request, required=True)
+    try:
+        user = auth.update_managed_user(
+            actor,
+            user_id,
+            display_name=request_body.display_name,
+            status=request_body.status,
+            role_keys=request_body.roles,
+            can_manage_admins=request_body.can_manage_admins,
+        )
+    except AuthHttpError as exc:
+        raise _api_error_from_auth(exc) from exc
+    if auth.audit_sink is not None:
+        if request_body.can_manage_admins is not None:
+            action = (
+                "admin.management_delegated"
+                if request_body.can_manage_admins
+                else "admin.management_revoked"
+            )
+        elif request_body.roles is not None:
+            action = "admin.role_updated" if "admin" in request_body.roles else "user.roles_updated"
+        else:
+            action = "user.disabled" if user.status == "disabled" else "user.updated"
+        auth.audit_sink.record(
+            AuditEvent(
+                action=action,
+                resource_type="user",
+                actor=actor,
+                resource_id=user.id,
+                channel="rest",
+                decision="allow",
+                metadata={
+                    "roles": list(user.role_keys),
+                    "can_manage_admins": auth.can_manage_admins(user),
+                },
+            )
+        )
+    return _public_user(user, auth)
+
+
+@router.get("/admin/roles", response_model=RolesResponse)
+def list_roles(request: Request) -> RolesResponse:
+    """Return roles and current permission assignments."""
+
+    _actor(request, "auth.roles.read", channel="rest")
+    auth = _auth_service(request, required=True)
+    return RolesResponse(
+        roles=[RoleResponse(**role) for role in auth.store.list_roles()],
+        permissions=sorted(PERMISSIONS),
+    )
+
+
+@router.patch("/admin/roles/{role_id}", response_model=RoleResponse)
+def update_role(
+    role_id: str,
+    request_body: RoleUpdateRequest,
+    request: Request,
+) -> RoleResponse:
+    """Replace one role's permission assignment set."""
+
+    actor = _actor(request, "auth.roles.manage", channel="rest")
+    auth = _auth_service(request, required=True)
+    try:
+        role = auth.store.update_role_permissions(role_id, request_body.permission_keys)
+    except AuthStoreError as exc:
+        raise ApiError(ErrorCode.REQUEST_VALIDATION_FAILED, str(exc), status_code=400) from exc
+    if auth.audit_sink is not None:
+        auth.audit_sink.record(
+            AuditEvent(
+                action="role.updated",
+                resource_type="role",
+                actor=actor,
+                resource_id=role_id,
+                channel="rest",
+                decision="allow",
+                metadata={"permission_count": len(request_body.permission_keys)},
+            )
+        )
+    return RoleResponse(**role)
+
+
+@router.get("/audit/events", response_model=AuditEventsResponse)
+def list_audit_events(
+    request: Request,
+    limit: int = 100,
+    session_id: str = "",
+    turn_id: str = "",
+) -> AuditEventsResponse:
+    """Return bounded audit events for actors with audit.read."""
+
+    _actor(request, "audit.read", channel="rest")
+    auth = _auth_service(request, required=True)
+    return AuditEventsResponse(
+        events=auth.store.list_audit_events(
+            limit=limit,
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+    )
+
+
+@router.get("/tool-confirmations", response_model=ToolConfirmationsResponse)
+def list_tool_confirmations(request: Request) -> ToolConfirmationsResponse:
+    """List pending confirmations visible to the current actor."""
+
+    actor = _actor(request, "chat.run", channel="rest")
+    runtime = _runtime(request)
+    items = _runtime_call(runtime, "list_tool_confirmations", actor)
+    return ToolConfirmationsResponse(
+        confirmations=[ToolConfirmationResponse(**item) for item in items]
+    )
+
+
+@router.post(
+    "/tool-confirmations/{confirmation_id}/approve",
+    response_model=ConfirmationMutationResponse,
+)
+def approve_tool_confirmation(
+    confirmation_id: str,
+    request: Request,
+) -> ConfirmationMutationResponse:
+    """Approve the exact pending tool call and argument hash."""
+
+    actor = _actor(request, "chat.run", channel="rest")
+    runtime = _runtime(request)
+    status = _runtime_call(runtime, "decide_tool_confirmation", actor, confirmation_id, True)
+    return ConfirmationMutationResponse(confirmation_id=confirmation_id, status=status)
+
+
+@router.post(
+    "/tool-confirmations/{confirmation_id}/deny",
+    response_model=ConfirmationMutationResponse,
+)
+def deny_tool_confirmation(
+    confirmation_id: str,
+    request: Request,
+) -> ConfirmationMutationResponse:
+    """Deny a pending tool call."""
+
+    actor = _actor(request, "chat.run", channel="rest")
+    runtime = _runtime(request)
+    status = _runtime_call(runtime, "decide_tool_confirmation", actor, confirmation_id, False)
+    return ConfirmationMutationResponse(confirmation_id=confirmation_id, status=status)
 
 
 def _runtime(request: Request):
@@ -204,21 +717,187 @@ def _runtime(request: Request):
 
     runtime = getattr(request.app.state, "runtime", None)
     if runtime is None:
-        raise ApiError("CONFIG_ERROR", "runtime is not configured", status_code=500)
+        raise ApiError(ErrorCode.CONFIG_INVALID, "runtime is not configured", status_code=500)
     return runtime
+
+
+def _auth_service(request: Request, *, required: bool = False):
+    """Return the app auth service, with a stable setup error when required."""
+
+    auth = getattr(request.app.state, "auth_service", None)
+    if auth is None:
+        runtime = getattr(request.app.state, "runtime", None)
+        auth = getattr(runtime, "auth", None)
+    if auth is None and required:
+        raise ApiError(
+            ErrorCode.AUTH_UNAVAILABLE,
+            "Authentication service is not configured",
+            status_code=503,
+        )
+    return auth
+
+
+def _actor(request: Request, permission_key: str, *, channel: str):
+    """Resolve the request actor and check one application permission."""
+
+    auth = _auth_service(request)
+    if auth is None:
+        actor = local_operator_actor(channel=channel)
+    else:
+        actor = None
+        try:
+            actor = getattr(request.state, "actor", None) or auth.resolve_request_actor(
+                request, channel=channel
+            )
+            if actor.channel != channel:
+                actor = actor.__class__(
+                    actor_type=actor.actor_type,
+                    user_id=actor.user_id,
+                    username=actor.username,
+                    display_name=actor.display_name,
+                    role_keys=actor.role_keys,
+                    permission_keys=actor.permission_keys,
+                    channel=channel,
+                    auth_session_id=actor.auth_session_id,
+                )
+            auth.require_permission(actor, permission_key)
+        except AuthHttpError as exc:
+            if auth.audit_sink is not None:
+                auth.audit_sink.record(
+                    AuditEvent(
+                        action="auth.request_denied",
+                        resource_type="http_request",
+                        actor=actor,
+                        request_id=_request_id(request),
+                        channel=channel,
+                        route=request.url.path,
+                        status_code=exc.status_code,
+                        decision="deny",
+                        reason_code=exc.code,
+                        metadata={"permission_key": permission_key},
+                    )
+                )
+            raise _api_error_from_auth(exc) from exc
+    request.state.actor = actor
+    return actor
+
+
+def _runtime_call(runtime, method_name: str, actor, *args, **kwargs):
+    """Call actor-aware runtime methods while preserving old fake-runtime tests."""
+
+    method = getattr(runtime, method_name)
+    signature = inspect.signature(method)
+    parameters = signature.parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    filtered_kwargs = (
+        kwargs
+        if accepts_kwargs
+        else {key: value for key, value in kwargs.items() if key in parameters}
+    )
+    positional = list(parameters.values())
+    if positional and positional[0].name == "actor":
+        return method(actor, *args, **filtered_kwargs)
+    return method(*args, **filtered_kwargs)
+
+
+def _runtime_model_state(
+    runtime,
+    actor,
+    session_id: str,
+    *,
+    request_id: str = "",
+) -> ModelState:
+    """Read actor/session-aware model state with legacy fake compatibility."""
+
+    method = getattr(runtime, "model_state")
+    parameters = list(inspect.signature(method).parameters.values())
+    if parameters and parameters[0].name == "actor":
+        kwargs = {"request_id": request_id} if "request_id" in inspect.signature(method).parameters else {}
+        return method(actor, session_id, **kwargs)
+    if parameters and parameters[0].name == "session_id":
+        return method(session_id)
+    return method()
+
+
+def _set_model_preference(
+    runtime,
+    actor,
+    session_id: str,
+    model: str,
+    *,
+    request_id: str = "",
+) -> ModelState:
+    """Update one session preference without touching a shared provider."""
+
+    method = getattr(runtime, "set_model_preference")
+    parameters = list(inspect.signature(method).parameters.values())
+    if parameters and parameters[0].name == "actor":
+        kwargs = {"request_id": request_id} if "request_id" in inspect.signature(method).parameters else {}
+        return method(actor, session_id, model, **kwargs)
+    return method(model)
+
+
+def _public_actor(actor) -> PublicUserResponse:
+    """Convert ActorContext into the public user response shape."""
+
+    return PublicUserResponse(
+        id=str(actor.user_id or "local-operator"),
+        username=actor.username,
+        display_name=actor.display_name,
+        status="active",
+        roles=sorted(actor.role_keys),
+        can_manage_admins=actor.has_permission("auth.admin.manage"),
+    )
+
+
+def _public_user(user, auth=None) -> PublicUserResponse:
+    return PublicUserResponse(
+        id=user.id,
+        username=user.username,
+        display_name=user.display_name,
+        status=user.status,
+        roles=list(user.role_keys),
+        can_manage_admins=auth.can_manage_admins(user) if auth is not None else False,
+    )
+
+
+def _api_error_from_auth(exc: AuthHttpError) -> ApiError:
+    return ApiError(
+        exc.code,
+        exc.message,
+        status_code=exc.status_code,
+        details=exc.details,
+    )
+
+
+def _request_id(request: Request) -> str:
+    return str(getattr(request.state, "request_id", ""))
 
 
 def _run_chat_events(
     runtime,
+    actor,
     session_id: str,
     message: str,
     on_event=None,
     *,
     turn_id: str | None = None,
+    request_id: str = "",
 ) -> ChatTurnResult:
     """Run a chat turn through the required Web runtime event path."""
 
-    return runtime.run_chat_events(session_id, message, turn_id=turn_id, on_event=on_event)
+    return _runtime_call(
+        runtime,
+        "run_chat_events",
+        actor,
+        session_id,
+        message,
+        turn_id=turn_id,
+        on_event=on_event,
+        request_id=request_id,
+    )
 
 
 def _should_apply_model_preference(message: str, model: str) -> bool:
@@ -227,7 +906,7 @@ def _should_apply_model_preference(message: str, model: str) -> bool:
     return bool(model and model != "auto" and not message.lstrip().startswith("/"))
 
 
-def _chat_stream_events(runtime, session_id: str, message: str):
+def _chat_stream_events(runtime, actor, session_id: str, message: str, *, request_id: str = ""):
     """Yield one chat result as SSE events."""
 
     turn_id = new_turn_id()
@@ -239,7 +918,15 @@ def _chat_stream_events(runtime, session_id: str, message: str):
 
     def worker() -> None:
         try:
-            result = _run_chat_events(runtime, session_id, message, on_event=on_event, turn_id=turn_id)
+            result = _run_chat_events(
+                runtime,
+                actor,
+                session_id,
+                message,
+                on_event=on_event,
+                turn_id=turn_id,
+                request_id=request_id,
+            )
         except Exception as exc:  # noqa: BLE001 - streaming responses must encode errors.
             events.put(("error", exc))
             return
@@ -258,7 +945,16 @@ def _chat_stream_events(runtime, session_id: str, message: str):
             error = _api_error_from_exception(payload)
             yield _sse(
                 "error",
-                {"turn_id": turn_id, "error": {"code": error.code, "message": error.message}},
+                {
+                    "turn_id": turn_id,
+                    "error": {
+                        "status": error.status_code,
+                        "code": error.code,
+                        "message": error.message,
+                        "request_id": request_id,
+                        "details": error.details,
+                    },
+                },
             )
             break
         result = payload
@@ -293,13 +989,32 @@ def _api_error_from_exception(exc: Exception) -> ApiError:
 
     if isinstance(exc, ApiError):
         return exc
+    if isinstance(exc, AuthHttpError):
+        return _api_error_from_auth(exc)
+    if isinstance(exc, SessionAccessError):
+        return ApiError(
+            exc.code,
+            exc.message,
+            status_code=exc.status_code,
+            details=exc.details,
+        )
+    if isinstance(exc, AuthStoreError):
+        return ApiError(ErrorCode.REQUEST_VALIDATION_FAILED, str(exc), status_code=400)
+    if isinstance(exc, PermissionError):
+        permission = str(exc).partition(":")[2].strip()
+        return ApiError(
+            ErrorCode.AUTH_PERMISSION_DENIED,
+            "Permission denied",
+            status_code=403,
+            details={"required_permission": permission} if permission else {},
+        )
     if isinstance(exc, ValueError):
-        return ApiError("INVALID_REQUEST", str(exc), status_code=400)
+        return ApiError(ErrorCode.REQUEST_VALIDATION_FAILED, str(exc), status_code=400)
     if isinstance(exc, LLMConfigurationError):
-        return ApiError("CONFIG_ERROR", _safe_message(str(exc)), status_code=500)
+        return ApiError(ErrorCode.CONFIG_INVALID, _safe_message(str(exc)), status_code=500)
     if isinstance(exc, LLMProviderError):
-        return ApiError("LLM_ERROR", _safe_message(str(exc)), status_code=502)
-    return ApiError("INTERNAL_ERROR", "Unexpected server error", status_code=500)
+        return ApiError(ErrorCode.LLM_ERROR, _safe_message(str(exc)), status_code=502)
+    return ApiError(ErrorCode.INTERNAL_ERROR, "Unexpected server error", status_code=500)
 
 
 def _model_dump(model) -> dict[str, Any]:
@@ -348,3 +1063,7 @@ def _safe_message(message: str) -> str:
     """Bound provider/config error text before returning it over HTTP."""
 
     return message[:500] if message else "request failed"
+    PublicUserResponse,
+    RoleResponse,
+    RoleUpdateRequest,
+    RolesResponse,

@@ -4,6 +4,8 @@
 
 验证 `zcagent` 命令行入口只负责参数解析、运行时依赖初始化、用户输入循环和输出展示，不直接实现 AgentLoop、LLM 或工具业务逻辑。
 
+Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密码、初始化唯一 Owner，并拒绝重复 bootstrap；旧 `init-admin` 和 session 导入命令均不再接受。
+
 ## 用例覆盖
 
 ### Case 1: `zcagent init`

@@ -4,14 +4,49 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ZhiCe-Agent</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260706-model-refresh" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260711-admin-route-session-scope" />
   </head>
   <body>
-    <div class="app-shell">
+    <section class="auth-view" id="loginView">
+      <form class="auth-card" id="loginForm">
+        <div class="brand auth-brand">
+          <span class="brand-mark" data-brand-logo="selected-a" aria-hidden="true">
+            <img src="/static/zhice-logo-a.png?v=20260711-clean" alt="" />
+          </span>
+          <span class="brand-name">ZhiCe-Agent</span>
+        </div>
+        <h1>Sign in</h1>
+        <p class="muted" id="loginHint">Use your local ZhiCe-Agent account.</p>
+        <label class="auth-field">
+          <span class="field-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 20c.8-4 3.3-6 7.5-6s6.7 2 7.5 6"></path></svg>
+          </span>
+          <input id="loginUsername" autocomplete="username" aria-label="Username" placeholder="Enter username" required />
+        </label>
+        <label class="auth-field">
+          <span class="field-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
+          </span>
+          <input id="loginPassword" type="password" autocomplete="current-password" aria-label="Password" placeholder="Enter password" required />
+          <button class="password-toggle" type="button" tabindex="-1" data-password-toggle="loginPassword" aria-controls="loginPassword" aria-label="Show password" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+          </button>
+        </label>
+        <button class="primary-button" id="loginButton" type="submit">Sign in</button>
+        <button class="auth-link-button" id="showRegisterButton" type="button" hidden>
+          <span>No account? </span><strong>Create account</strong>
+        </button>
+        <div class="form-error" id="loginError" role="alert"></div>
+      </form>
+    </section>
+
+    <div class="app-shell" id="appShell" hidden>
       <aside class="sidebar" id="sidebar">
         <header class="sidebar-header">
           <div class="brand">
-            <span class="brand-mark" aria-hidden="true">Z</span>
+            <span class="brand-mark" data-brand-logo="selected-a" aria-hidden="true">
+              <img src="/static/zhice-logo-a.png?v=20260711-clean" alt="" />
+            </span>
             <span class="brand-name">ZhiCe-Agent</span>
           </div>
           <button class="icon-button" id="collapseButton" type="button" title="Collapse sidebar">
@@ -35,13 +70,21 @@
           <div class="recent-list" id="recentList"></div>
         </section>
 
-        <button class="user-entry" type="button">
-          <span class="avatar" aria-hidden="true">L</span>
+        <button class="user-entry" id="userEntry" type="button">
+          <span class="avatar user-avatar" id="userAvatar" aria-hidden="true">
+            <span class="avatar-letter avatar-letter-primary" id="userAvatarPrimary">U</span>
+            <span class="avatar-letter avatar-letter-secondary" id="userAvatarSecondary">S</span>
+          </span>
           <span class="user-copy">
-            <span class="user-name">Local user</span>
-            <span class="user-meta">Workspace</span>
+            <span class="user-name" id="userName">User</span>
+            <span class="user-meta" id="userMeta">Local account</span>
           </span>
         </button>
+        <div class="user-menu" id="userMenu" hidden>
+          <button id="accountSettingsButton" type="button">Account settings</button>
+          <button id="adminButton" type="button" hidden>Administration</button>
+          <button id="logoutButton" type="button">Log out</button>
+        </div>
       </aside>
 
       <main class="main">
@@ -72,6 +115,172 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260706-model-refresh"></script>
+    <section class="admin-page" id="adminPage" hidden>
+      <header class="admin-page-header">
+        <div class="brand">
+          <span class="brand-mark" data-brand-logo="selected-a" aria-hidden="true">
+            <img src="/static/zhice-logo-a.png?v=20260711-clean" alt="" />
+          </span>
+          <div>
+            <h1>Administration</h1>
+            <p>Manage users, roles, and audit events.</p>
+          </div>
+        </div>
+        <div class="admin-page-actions">
+          <button class="secondary-button" id="managementClose" type="button">Back to chat</button>
+          <button class="secondary-button" id="adminLogoutButton" type="button">Log out</button>
+        </div>
+      </header>
+      <nav class="dialog-tabs">
+        <button type="button" data-admin-tab="users">Users</button>
+        <button type="button" data-admin-tab="roles">Roles</button>
+        <button type="button" data-admin-tab="audit">Audit</button>
+      </nav>
+      <section class="dialog-body" id="managementBody"></section>
+    </section>
+
+    <dialog class="management-dialog account-dialog" id="accountDialog">
+      <header>
+        <h2>Account settings</h2>
+        <button class="icon-button" id="accountClose" type="button" aria-label="Close">×</button>
+      </header>
+      <section class="account-settings">
+        <form class="account-form" id="profileForm">
+          <h3>Profile</h3>
+          <label>
+            <span>Username</span>
+            <input id="accountUsername" disabled />
+          </label>
+          <label>
+            <span>Display name</span>
+            <input id="accountDisplayName" maxlength="120" required />
+          </label>
+          <button class="primary-button" type="submit">Save profile</button>
+          <div class="form-status" id="profileStatus" role="status"></div>
+        </form>
+        <form class="account-form" id="passwordForm">
+          <h3>Change password</h3>
+          <label>
+            <span>Current password</span>
+            <span class="password-input-wrap">
+              <input id="currentPassword" type="password" autocomplete="current-password" required />
+              <button class="password-toggle" type="button" tabindex="-1" data-password-toggle="currentPassword" aria-controls="currentPassword" aria-label="Show password" aria-pressed="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+              </button>
+            </span>
+          </label>
+          <label>
+            <span>New password</span>
+            <span class="password-input-wrap">
+              <input id="newPassword" type="password" autocomplete="new-password" minlength="8" required />
+              <button class="password-toggle" type="button" tabindex="-1" data-password-toggle="newPassword" aria-controls="newPassword" aria-label="Show password" aria-pressed="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+              </button>
+            </span>
+          </label>
+          <label>
+            <span>Confirm new password</span>
+            <span class="password-input-wrap">
+              <input id="confirmPassword" type="password" autocomplete="new-password" minlength="8" required />
+              <button class="password-toggle" type="button" tabindex="-1" data-password-toggle="confirmPassword" aria-controls="confirmPassword" aria-label="Show password" aria-pressed="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+              </button>
+            </span>
+          </label>
+          <button class="primary-button" type="submit">Change password</button>
+          <div class="form-status" id="passwordStatus" role="status"></div>
+        </form>
+      </section>
+    </dialog>
+
+    <dialog class="registration-dialog" id="bootstrapDialog">
+      <form id="bootstrapForm">
+        <header>
+          <div>
+            <h2>Initialize Owner</h2>
+            <p>Create the unique permanent Owner using the deployment setup credential.</p>
+          </div>
+          <button class="icon-button" id="bootstrapClose" type="button" aria-label="Close">×</button>
+        </header>
+        <div class="auth-field fixed-auth-field" aria-label="Owner username">
+          <span class="field-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 20c.8-4 3.3-6 7.5-6s6.7 2 7.5 6"></path></svg>
+          </span>
+          <span class="fixed-auth-value">owner</span>
+        </div>
+        <label class="auth-field">
+          <span class="field-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
+          </span>
+          <input id="bootstrapPassword" type="password" autocomplete="new-password" aria-label="Password" placeholder="Enter password, at least 8 characters" minlength="8" required />
+          <button class="password-toggle" type="button" tabindex="-1" data-password-toggle="bootstrapPassword" aria-controls="bootstrapPassword" aria-label="Show password" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+          </button>
+        </label>
+        <label class="auth-field">
+          <span class="field-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="3"></circle><path d="m10 13 8.5-8.5 2 2-8.5 8.5"></path><path d="m15 8 2 2"></path></svg>
+          </span>
+          <input id="bootstrapSetupToken" type="password" autocomplete="off" aria-label="Setup credential" placeholder="Enter setup credential" required />
+          <button class="password-toggle" type="button" tabindex="-1" data-password-toggle="bootstrapSetupToken" aria-controls="bootstrapSetupToken" aria-label="Show setup credential" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+          </button>
+        </label>
+        <div class="form-error" id="bootstrapError" role="alert"></div>
+        <button class="primary-button" id="bootstrapSubmit" type="submit">Create Owner and sign in</button>
+        <button class="auth-link-button" id="bootstrapCancel" type="button"><span>Already initialized? </span><strong>Sign in</strong></button>
+      </form>
+    </dialog>
+
+    <dialog class="registration-dialog" id="registerDialog">
+      <form id="registerForm">
+        <header>
+          <div>
+            <h2>Create account</h2>
+            <p>Choose your username and password. You can change the display name later.</p>
+          </div>
+          <button class="icon-button" id="registerClose" type="button" aria-label="Close">×</button>
+        </header>
+        <label class="auth-field">
+          <span class="field-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 20c.8-4 3.3-6 7.5-6s6.7 2 7.5 6"></path></svg>
+          </span>
+          <input id="registerUsername" autocomplete="username" aria-label="Username" placeholder="Enter username" required />
+        </label>
+        <label class="auth-field">
+          <span class="field-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
+          </span>
+          <input id="registerPassword" type="password" autocomplete="new-password" aria-label="Password" placeholder="Enter password, at least 8 characters" minlength="8" required />
+          <button class="password-toggle" type="button" tabindex="-1" data-password-toggle="registerPassword" aria-controls="registerPassword" aria-label="Show password" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+          </button>
+        </label>
+        <label class="auth-field">
+          <span class="field-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path><path d="m9.5 15 1.7 1.7 3.6-3.7"></path></svg>
+          </span>
+          <input id="registerPasswordConfirm" type="password" autocomplete="new-password" aria-label="Confirm password" placeholder="Enter password again" minlength="8" required />
+          <button class="password-toggle" type="button" tabindex="-1" data-password-toggle="registerPasswordConfirm" aria-controls="registerPasswordConfirm" aria-label="Show confirmed password" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+          </button>
+        </label>
+        <p class="registration-note">Display name defaults to username. New accounts start with the viewer role.</p>
+        <div class="form-error" id="registerError" role="alert"></div>
+        <button class="primary-button" id="registerSubmit" type="submit">Create and sign in</button>
+        <button class="auth-link-button" id="registerCancel" type="button"><span>Already have an account? </span><strong>Sign in</strong></button>
+      </form>
+    </dialog>
+
+    <dialog class="confirmation-dialog" id="confirmationDialog">
+      <h2>Confirm high-risk tool</h2>
+      <dl id="confirmationDetails"></dl>
+      <div class="dialog-actions">
+        <button id="confirmationDeny" type="button">Deny</button>
+        <button class="danger-button" id="confirmationApprove" type="button">Approve once</button>
+      </div>
+    </dialog>
+
+    <script src="/static/app.js?v=20260711-error-contract"></script>
   </body>
 </html>
