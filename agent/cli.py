@@ -37,6 +37,10 @@ from agent.llm.runtime import (
     validate_startup_llm_endpoints,
 )
 from agent.llm.selection import ConfiguredLLMProviderResolver
+from agent.memory.context import build_memory_context
+from agent.memory.markdown_store import MarkdownMemoryStore
+from agent.memory.presentation import format_memory_list
+from agent.memory.safety import MemorySafetyPolicy
 from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.protocols.auth import AuditEvent
@@ -202,11 +206,21 @@ def _run_chat(argv: Sequence[str]) -> int:
     confirmation_broker = ConsoleConfirmationBroker()
     auth_store = SQLiteAuthStore(config.auth_db_path)
     audit_sink = SqliteAuditSink(auth_store) if auth_store.is_initialized() else None
+    memory_store = MarkdownMemoryStore(
+        build_memory_context(
+            config.local_memory_dir,
+            scope="workspace",
+            actor_user_id=None,
+        )
+    )
+    memory_safety = MemorySafetyPolicy()
     tool_registry = create_default_tool_registry(
         config.workspace,
         skills=skill_loader,
         skill_sync=skill_sync,
         allow_confirmable_exec=True,
+        memory_store=memory_store,
+        memory_safety=memory_safety,
     )
     agent_loop = AgentLoop(
         llm=llm,
@@ -266,6 +280,13 @@ def _run_chat(argv: Sequence[str]) -> int:
                 user_text.removeprefix("/skills").strip(),
             )
             continue
+        if user_text == "/memory" or user_text.startswith("/memory "):
+            target = user_text.removeprefix("/memory").strip()
+            if target:
+                print("Usage: /memory")
+                continue
+            print(format_memory_list(memory_store))
+            continue
         if user_text == "/model" or user_text.startswith("/model "):
             target = user_text.removeprefix("/model").strip()
             if model_runtime is None:
@@ -294,20 +315,32 @@ def _run_chat(argv: Sequence[str]) -> int:
                     )
             continue
 
+        turn_id = new_turn_id()
+        turn_index = next_turn_index(session_store.load(session_id).messages)
+        turn_tools = create_default_tool_registry(
+            config.workspace,
+            skills=skill_loader,
+            skill_sync=skill_sync,
+            allow_confirmable_exec=True,
+            memory_store=memory_store,
+            memory_safety=memory_safety,
+        )
         try:
             with Spinner("thinking"):
                 turn_llm = _cli_turn_provider(model_runtime, session_id) if model_runtime else None
                 result = agent_loop.run_turn(
                     session_id,
                     user_text,
+                    turn_id=turn_id,
                     actor=cli_actor,
                     llm_override=turn_llm,
+                    tools_override=turn_tools,
+                    tool_policy=tool_policy,
+                    confirmation_broker=confirmation_broker,
                     channel="cli",
                 )
             print(result)
         except KeyboardInterrupt:
-            turn_id = new_turn_id()
-            turn_index = next_turn_index(session_store.load(session_id).messages)
             session_store.append(
                 session_id,
                 [
@@ -1069,6 +1102,7 @@ def _print_help() -> None:
         ("/tools", "list registered tools"),
         ("/skills", "list discovered local Skills"),
         ("/model", "show or switch the preferred LLM endpoint"),
+        ("/memory", "show current Memory"),
         ("/exit", "leave the CLI"),
     ]
     for name, description in commands:

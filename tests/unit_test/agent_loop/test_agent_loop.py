@@ -38,7 +38,11 @@ def test_run_turn_logs_lifecycle_without_full_user_text(tmp_path, caplog):
     from agent.protocols.llm import LLMResponse
 
     user_text = "OPENAI_API_KEY=sk-testsecret123456\n" + "x" * 200
-    llm = FakeLLM(LLMResponse(content="hi"))
+    llm = FakeLLM(
+        LLMResponse(
+            content="\n\n结论：抽象是提取多个对象的共同特征。   " + "x" * 100 + "\n第二行"
+        )
+    )
     sessions = InMemorySessionStore()
     loop = AgentLoop(llm=llm, sessions=sessions, context_builder=FakeContextBuilder(), workspace=tmp_path)
     caplog.set_level("INFO", logger="zcagent.agent")
@@ -56,8 +60,12 @@ def test_run_turn_logs_lifecycle_without_full_user_text(tmp_path, caplog):
         assert fields["turn_id"] == "turn-log"
         assert "sk-testsecret123456" not in str(fields)
     start_fields = events[0].fields  # type: ignore[attr-defined]
+    done_fields = events[1].fields  # type: ignore[attr-defined]
     assert "input_preview" in start_fields
     assert len(start_fields["input_preview"]) <= 120
+    assert done_fields["output_preview"].startswith("结论：抽象是提取多个对象的共同特征。")
+    assert "第二行" not in done_fields["output_preview"]
+    assert len(done_fields["output_preview"]) <= 80
 
 
 def test_run_turn_keeps_repetitive_lifecycle_logs_at_debug(tmp_path, caplog):
@@ -75,7 +83,7 @@ def test_run_turn_keeps_repetitive_lifecycle_logs_at_debug(tmp_path, caplog):
 
     records = [record for record in caplog.records if record.name.startswith("zcagent.agent")]
     debug_events = [record.event for record in records if record.levelname == "DEBUG"]  # type: ignore[attr-defined]
-    assert debug_events == ["llm.call", "llm.direct", "session.save"]
+    assert debug_events == ["llm.call", "llm.done"]
 
 
 def test_run_turn_uses_external_turn_id_when_provided(tmp_path):

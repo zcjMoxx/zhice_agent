@@ -51,6 +51,7 @@
 ## Part 7 Turn Coverage
 
 - Treat `max_history_turns` as the recent user-turn candidate count.
+- Default to 30 recent user-turn candidates and keep at most 5 relevant turns.
 - Select only locally relevant candidate turns before injecting history.
 - Omit unrelated prior turns, including greeting-only current inputs.
 - Keep direct follow-ups when the current input references terms from a previous full turn.

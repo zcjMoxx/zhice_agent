@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -77,7 +78,19 @@ def create_app(
 ) -> FastAPI:
     """Create the FastAPI app used by tests and the gateway command."""
 
-    app = FastAPI(title="ZhiCe-Agent Gateway", docs_url=None, redoc_url=None)
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        shutdown = getattr(runtime, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+
+    app = FastAPI(
+        title="ZhiCe-Agent Gateway",
+        docs_url=None,
+        redoc_url=None,
+        lifespan=lifespan,
+    )
     app.state.config = config
     app.state.runtime = runtime
     app.state.auth_service = getattr(runtime, "auth", None)
@@ -121,21 +134,6 @@ def create_app(
                     headers={"X-Request-ID": request.state.request_id},
                 )
         response = await call_next(request)
-        if protected_api and auth_service is not None and auth_service.audit_sink is not None:
-            auth_service.audit_sink.record(
-                AuditEvent(
-                    action="http.request",
-                    resource_type="http_request",
-                    actor=getattr(request.state, "actor", None),
-                    resource_id=request.url.path,
-                    request_id=request.state.request_id,
-                    channel="rest",
-                    route=request.url.path,
-                    status_code=response.status_code,
-                    decision="allow" if response.status_code < 400 else "error",
-                    reason_code="" if response.status_code < 400 else f"HTTP_{response.status_code}",
-                )
-            )
         response.headers["X-Request-ID"] = request.state.request_id
         return response
 

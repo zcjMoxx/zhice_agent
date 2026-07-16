@@ -327,7 +327,8 @@ ContextBuilder(max_history_messages=30)
 
 ```python
 ContextBuilder(
-    max_history_turns: int | None = 8,
+    max_history_turns: int | None = 30,
+    max_relevant_turns: int = 5,
     max_history_messages: int = 60,
     max_message_chars: int = 8000,
     ...
@@ -338,7 +339,8 @@ ContextBuilder(
 
 - `max_history_turns=None` 表示沿用 message-based 裁剪，主要用于测试或特殊调用。
 - `max_history_turns=0` 表示不带历史，只带当前 user message。
-- `max_history_turns>0` 表示最近 user turn 候选数量；候选还必须通过本地相关性选择。
+- `max_history_turns>0` 表示最近 user turn 候选数量；当前默认取最近 30 个候选，候选还必须通过本地相关性选择。
+- `max_relevant_turns` 限制最终保留的相关 turn 数量，当前默认最多 5 个。
 - `max_history_messages` 保留为消息数量兜底，防止单次上下文异常膨胀。
 
 ### 8.2 构建流程
@@ -630,3 +632,4 @@ python -m pytest --basetemp .tmp/pytest_basetemp
 - `docs_design/2026-07-06-next-stage-sequencing-design.md` 确定第七部分排在日志和用户权限之前。
 - `docs_design/zhice-agent-part8-gateway-agent-logging-design.md` 已承接第八部分运行日志施工图；`docs_design/2026-07-02-gateway-runtime-logging-design.md` 保留为历史背景。
 - 第九部分用户、登录与权限执行边界已经基于本文形成的关系完成第一版实现：`User -> Session -> Turn -> ToolCall / AuditLog`，详见 `docs_design/zhice-agent-part9-user-auth-permission-design.md`。
+- 第十部分 Memory 已复用本文的 turn 分组和相关性边界形成开发设计，详见 `docs_design/zhice-agent-part10-memory-design.md`；Session JSONL 仍是真值，Memory 与 session summary 使用独立存储。

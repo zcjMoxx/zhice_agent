@@ -70,6 +70,7 @@ class UserContext:
     files_dir: Path
     sessions_dir: Path
     sessions_meta_dir: Path
+    memory_dir: Path
     shared_readonly_dir: Path
 
 
@@ -116,9 +117,9 @@ class AuditSink(Protocol):
 
 
 class UserContextResolver(Protocol):
-    """Resolve and create one user's filesystem context boundary."""
+    """Resolve the workspace operator or one user's filesystem boundary."""
 
-    def resolve(self, user_id: str, *, use_global_sessions: bool = False) -> UserContext:
+    def resolve(self, user_id: str, *, use_workspace_context: bool = False) -> UserContext:
         """Return the resolved user context."""
 
 

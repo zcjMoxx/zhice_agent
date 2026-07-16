@@ -168,7 +168,7 @@ def logout(request: Request, response: Response) -> AuthMutationResponse:
 def read_current_user(request: Request) -> AuthMeResponse:
     """Return the current user and explicit permission summary."""
 
-    actor = _actor(request, "auth.me.read", channel="rest")
+    actor = _actor(request, channel="rest")
     return AuthMeResponse(
         user=_public_actor(actor),
         permissions=sorted(actor.permission_keys),
@@ -182,7 +182,7 @@ def update_current_user_profile(
 ) -> AuthMeResponse:
     """Update the current user's self-service profile fields."""
 
-    actor = _actor(request, "auth.me.read", channel="rest")
+    actor = _actor(request, channel="rest")
     auth = _auth_service(request, required=True)
     try:
         user = auth.update_profile(
@@ -207,7 +207,7 @@ def change_current_user_password(
 ) -> AuthMutationResponse:
     """Rotate password, revoke all sessions, and require a new login."""
 
-    actor = _actor(request, "auth.me.read", channel="rest")
+    actor = _actor(request, channel="rest")
     auth = _auth_service(request, required=True)
     try:
         auth.change_password(
@@ -228,7 +228,7 @@ def list_sessions(request: Request) -> SessionsResponse:
     """Return workspace sessions ordered by recent activity."""
 
     runtime = _runtime(request)
-    actor = _actor(request, "session.read.own", channel="rest")
+    actor = _actor(request, channel="rest")
     try:
         summaries = _runtime_call(
             runtime,
@@ -257,7 +257,7 @@ def read_session(session_id: str, request: Request) -> SessionResponse:
     """Return persisted messages for one session."""
 
     runtime = _runtime(request)
-    actor = _actor(request, "session.read.own", channel="rest")
+    actor = _actor(request, channel="rest")
     try:
         state = _runtime_call(
             runtime,
@@ -284,7 +284,7 @@ def rename_session(
     """Rename a session display title."""
 
     runtime = _runtime(request)
-    actor = _actor(request, "session.write.own", channel="rest")
+    actor = _actor(request, channel="rest")
     title = request_body.title.strip()
     if not title:
         raise ApiError(
@@ -316,7 +316,7 @@ def delete_session(session_id: str, request: Request) -> SessionMutationResponse
     """Delete a session and its metadata."""
 
     runtime = _runtime(request)
-    actor = _actor(request, "session.delete.own", channel="rest")
+    actor = _actor(request, channel="rest")
     try:
         _runtime_call(
             runtime,
@@ -352,7 +352,7 @@ def chat(request_body: ChatRequest, request: Request) -> ChatResponse:
         )
 
     runtime = _runtime(request)
-    actor = _actor(request, "chat.run", channel="rest")
+    actor = _actor(request, channel="rest")
     try:
         selected_model = (request_body.model or "").strip()
         if _should_apply_model_preference(message, selected_model):
@@ -399,7 +399,7 @@ def chat_stream(request_body: ChatRequest, request: Request) -> StreamingRespons
         )
 
     runtime = _runtime(request)
-    actor = _actor(request, "chat.run", channel="sse")
+    actor = _actor(request, channel="sse")
     try:
         selected_model = (request_body.model or "").strip()
         if _should_apply_model_preference(message, selected_model):
@@ -431,7 +431,7 @@ def read_models(request: Request, session_id: str = "") -> ModelsResponse:
     """Return the current endpoint and its selectable models."""
 
     runtime = _runtime(request)
-    actor = _actor(request, "model.view", channel="rest")
+    actor = _actor(request, channel="rest")
     if _auth_service(request) is not None and not session_id.strip():
         raise ApiError(
             ErrorCode.REQUEST_VALIDATION_FAILED,
@@ -475,7 +475,7 @@ def set_model_preference(
             details={"field": "session_id"},
         )
     runtime = _runtime(request)
-    actor = _actor(request, "model.switch", channel="rest")
+    actor = _actor(request, channel="rest")
     try:
         return _model_response(
             _set_model_preference(
@@ -495,7 +495,7 @@ def reset_model_preference(request: Request, session_id: str) -> ModelsResponse:
     """Clear only the current session model preference."""
 
     runtime = _runtime(request)
-    actor = _actor(request, "model.switch", channel="rest")
+    actor = _actor(request, channel="rest")
     try:
         return _model_response(
             _runtime_call(
@@ -657,14 +657,33 @@ def list_audit_events(
 ) -> AuditEventsResponse:
     """Return bounded audit events for actors with audit.read."""
 
-    _actor(request, "audit.read", channel="rest")
+    actor = _actor(request, "audit.read", channel="rest")
     auth = _auth_service(request, required=True)
-    return AuditEventsResponse(
-        events=auth.store.list_audit_events(
-            limit=limit,
-            session_id=session_id,
-            turn_id=turn_id,
+    events = auth.store.list_audit_events(
+        limit=limit,
+        session_id=session_id,
+        turn_id=turn_id,
+    )
+    if auth.audit_sink is not None:
+        auth.audit_sink.record(
+            AuditEvent(
+                action="audit.read",
+                resource_type="audit_events",
+                actor=actor,
+                request_id=_request_id(request),
+                channel="rest",
+                route=request.url.path,
+                decision="allow",
+                metadata={
+                    "limit": limit,
+                    "session_filter": bool(session_id),
+                    "turn_filter": bool(turn_id),
+                    "result_count": len(events),
+                },
+            )
         )
+    return AuditEventsResponse(
+        events=events
     )
 
 
@@ -672,7 +691,7 @@ def list_audit_events(
 def list_tool_confirmations(request: Request) -> ToolConfirmationsResponse:
     """List pending confirmations visible to the current actor."""
 
-    actor = _actor(request, "chat.run", channel="rest")
+    actor = _actor(request, channel="rest")
     runtime = _runtime(request)
     items = _runtime_call(runtime, "list_tool_confirmations", actor)
     return ToolConfirmationsResponse(
@@ -690,7 +709,7 @@ def approve_tool_confirmation(
 ) -> ConfirmationMutationResponse:
     """Approve the exact pending tool call and argument hash."""
 
-    actor = _actor(request, "chat.run", channel="rest")
+    actor = _actor(request, channel="rest")
     runtime = _runtime(request)
     status = _runtime_call(runtime, "decide_tool_confirmation", actor, confirmation_id, True)
     return ConfirmationMutationResponse(confirmation_id=confirmation_id, status=status)
@@ -706,7 +725,7 @@ def deny_tool_confirmation(
 ) -> ConfirmationMutationResponse:
     """Deny a pending tool call."""
 
-    actor = _actor(request, "chat.run", channel="rest")
+    actor = _actor(request, channel="rest")
     runtime = _runtime(request)
     status = _runtime_call(runtime, "decide_tool_confirmation", actor, confirmation_id, False)
     return ConfirmationMutationResponse(confirmation_id=confirmation_id, status=status)
@@ -737,8 +756,8 @@ def _auth_service(request: Request, *, required: bool = False):
     return auth
 
 
-def _actor(request: Request, permission_key: str, *, channel: str):
-    """Resolve the request actor and check one application permission."""
+def _actor(request: Request, permission_key: str | None = None, *, channel: str):
+    """Resolve an authenticated actor and optionally check one privileged action."""
 
     auth = _auth_service(request)
     if auth is None:
@@ -760,7 +779,8 @@ def _actor(request: Request, permission_key: str, *, channel: str):
                     channel=channel,
                     auth_session_id=actor.auth_session_id,
                 )
-            auth.require_permission(actor, permission_key)
+            if permission_key:
+                auth.require_permission(actor, permission_key)
         except AuthHttpError as exc:
             if auth.audit_sink is not None:
                 auth.audit_sink.record(
@@ -774,7 +794,7 @@ def _actor(request: Request, permission_key: str, *, channel: str):
                         status_code=exc.status_code,
                         decision="deny",
                         reason_code=exc.code,
-                        metadata={"permission_key": permission_key},
+                        metadata={"permission_key": permission_key or ""},
                     )
                 )
             raise _api_error_from_auth(exc) from exc

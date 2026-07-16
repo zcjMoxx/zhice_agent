@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -17,6 +18,7 @@ from agent.core.context import ContextBuilder
 from agent.core.turns import assign_turn, new_turn_id, next_turn_index
 from agent.logging_utils import log_event, preview_json, preview_text
 from agent.message import Message
+from agent.protocols.activity import RuntimeActivityEvent, RuntimeActivitySink
 from agent.protocols.auth import ActorContext, AuditEvent, AuditSink
 from agent.protocols.errors import ErrorCode
 from agent.protocols.llm import (
@@ -97,6 +99,7 @@ class AgentLoop:
         max_tool_iterations: int = 25,
         tool_policy: ToolExecutionPolicy | None = None,
         confirmation_broker: ToolConfirmationBroker | None = None,
+        activity_sink: RuntimeActivitySink | None = None,
         audit_sink: AuditSink | None = None,
     ):
         """Wire provider dependencies and guard the tool-iteration limit."""
@@ -112,6 +115,7 @@ class AgentLoop:
         self.max_tool_iterations = max_tool_iterations
         self.tool_policy = tool_policy
         self.confirmation_broker = confirmation_broker
+        self.activity_sink = activity_sink
         self.audit_sink = audit_sink
 
     def run_turn(
@@ -129,6 +133,7 @@ class AgentLoop:
         workspace_override: Path | None = None,
         tool_policy: ToolExecutionPolicy | None = None,
         confirmation_broker: ToolConfirmationBroker | None = None,
+        activity_sink: RuntimeActivitySink | None = None,
         audit_sink: AuditSink | None = None,
         channel: str = "",
         request_id: str = "",
@@ -141,6 +146,7 @@ class AgentLoop:
         workspace = Path(workspace_override or self.workspace).expanduser().resolve()
         execution_policy = tool_policy or self.tool_policy
         confirmations = confirmation_broker or self.confirmation_broker
+        activity = activity_sink or self.activity_sink
         audit = audit_sink or self.audit_sink
         resolved_channel = channel or (actor.channel if actor is not None else "")
         session = sessions.load(session_id)
@@ -167,13 +173,13 @@ class AgentLoop:
             turn_index=resolved_turn_index,
             input_preview=preview_text(user_text, limit=120),
             actor_user_id=actor.user_id if actor else "",
+            actor_username=actor.username if actor else "",
             channel=resolved_channel,
         )
-        _record_audit(
-            audit,
-            AuditEvent(
+        _record_activity(
+            activity,
+            RuntimeActivityEvent(
                 action="chat.turn_started",
-                resource_type="turn",
                 actor=actor,
                 request_id=request_id,
                 channel=resolved_channel,
@@ -211,22 +217,23 @@ class AgentLoop:
                 turn_id=resolved_turn_id,
                 turn_index=resolved_turn_index,
             )
-            _record_audit(
-                audit,
-                AuditEvent(
+            _record_activity(
+                activity,
+                RuntimeActivityEvent(
                     action="chat.turn_stopped",
-                    resource_type="turn",
                     actor=actor,
                     request_id=request_id,
                     channel=resolved_channel,
                     session_id=session_id,
                     turn_id=resolved_turn_id,
                     decision="stopped",
+                    metadata={"duration_ms": _duration_ms(turn_started)},
                 ),
             )
             return _with_save_error(TURN_CANCELLED_TEXT, save_error)
 
         while True:
+            llm_started = time.perf_counter()
             try:
                 _raise_if_cancelled(cancellation_token)
                 log_event(
@@ -237,6 +244,9 @@ class AgentLoop:
                     turn_id=resolved_turn_id,
                     messages=len(messages),
                     tools=len(tool_definitions or []),
+                    actor_user_id=actor.user_id if actor else "",
+                    request_id=request_id,
+                    channel=resolved_channel,
                 )
                 response = _call_llm(
                     llm,
@@ -246,6 +256,19 @@ class AgentLoop:
                     cancellation_token=cancellation_token,
                 )
                 _raise_if_cancelled(cancellation_token)
+                log_event(
+                    llm_logger,
+                    logging.DEBUG,
+                    "llm.done",
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    duration_ms=_duration_ms(llm_started),
+                    actor_user_id=actor.user_id if actor else "",
+                    request_id=request_id,
+                    channel=resolved_channel,
+                    endpoint=(response.metadata or {}).get("endpoint_name", ""),
+                    model=(response.metadata or {}).get("model", ""),
+                )
             except TurnCancelledError:
                 return persist_cancelled_turn()
             except Exception as exc:  # noqa: BLE001 - the loop must persist failed turns.
@@ -256,6 +279,10 @@ class AgentLoop:
                     session_id=session_id,
                     turn_id=resolved_turn_id,
                     error_type=type(exc).__name__,
+                    duration_ms=_duration_ms(llm_started),
+                    actor_user_id=actor.user_id if actor else "",
+                    request_id=request_id,
+                    channel=resolved_channel,
                 )
                 error_text = _format_llm_error(exc, workspace)
                 assistant_msg = Message(
@@ -284,11 +311,10 @@ class AgentLoop:
                     turn_index=resolved_turn_index,
                     error_type=type(exc).__name__,
                 )
-                _record_audit(
-                    audit,
-                    AuditEvent(
+                _record_activity(
+                    activity,
+                    RuntimeActivityEvent(
                         action="chat.turn_error",
-                        resource_type="turn",
                         actor=actor,
                         request_id=request_id,
                         channel=resolved_channel,
@@ -296,6 +322,7 @@ class AgentLoop:
                         turn_id=resolved_turn_id,
                         decision="error",
                         reason_code=type(exc).__name__,
+                        metadata={"duration_ms": _duration_ms(turn_started)},
                     ),
                 )
                 return _with_save_error(error_text, save_error)
@@ -309,15 +336,6 @@ class AgentLoop:
                     turn_id=resolved_turn_id,
                     count=len(response.tool_calls),
                     tools=",".join(_tool_call_names(response.tool_calls)),
-                )
-            else:
-                log_event(
-                    llm_logger,
-                    logging.DEBUG,
-                    "llm.direct",
-                    session_id=session_id,
-                    turn_id=resolved_turn_id,
-                    output_preview=preview_text(response.content, limit=120),
                 )
 
             assistant_msg = Message(
@@ -346,13 +364,12 @@ class AgentLoop:
                     turn_id=resolved_turn_id,
                     turn_index=resolved_turn_index,
                     duration_ms=_duration_ms(turn_started),
-                    output_preview=preview_text(assistant_msg.content, limit=120),
+                    output_preview=_answer_output_preview(assistant_msg.content),
                 )
-                _record_audit(
-                    audit,
-                    AuditEvent(
+                _record_activity(
+                    activity,
+                    RuntimeActivityEvent(
                         action="chat.turn_done",
-                        resource_type="turn",
                         actor=actor,
                         request_id=request_id,
                         channel=resolved_channel,
@@ -443,7 +460,21 @@ class AgentLoop:
                     turn_id=resolved_turn_id,
                     turn_index=resolved_turn_index,
                     duration_ms=_duration_ms(turn_started),
-                    output_preview=preview_text(final_text, limit=120),
+                    output_preview=_answer_output_preview(final_text),
+                )
+                _record_activity(
+                    activity,
+                    RuntimeActivityEvent(
+                        action="chat.turn_done",
+                        actor=actor,
+                        request_id=request_id,
+                        channel=resolved_channel,
+                        session_id=session_id,
+                        turn_id=resolved_turn_id,
+                        decision="done",
+                        reason_code="TOOL_ITERATION_LIMIT",
+                        metadata={"duration_ms": _duration_ms(turn_started)},
+                    ),
                 )
                 return _with_save_error(final_text, save_error)
 
@@ -476,6 +507,7 @@ class AgentLoop:
                         policy=execution_policy,
                         confirmation_broker=confirmations,
                         audit_sink=audit,
+                        activity_sink=activity,
                         on_event=on_event,
                         cancellation_token=cancellation_token,
                     )
@@ -562,6 +594,7 @@ def _dispatch_tool(
     request_id: str,
     policy: ToolExecutionPolicy | None,
     confirmation_broker: ToolConfirmationBroker | None,
+    activity_sink: RuntimeActivitySink | None,
     audit_sink: AuditSink | None,
     on_event: TurnEventCallback | None,
     cancellation_token: CancellationToken | None,
@@ -592,17 +625,16 @@ def _dispatch_tool(
     metadata = {
         "tool_name": call.name,
         "tool_call_id": call.id,
-        "args_preview": preview_json(call.arguments, limit=200),
+        "args_preview": _safe_tool_args_preview(call.name, call.arguments),
     }
     if call.name == "exec":
         metadata["command_preview"] = preview_text(str(call.arguments.get("command") or ""), limit=200)
         metadata["cwd"] = preview_text(str(call.arguments.get("cwd") or "."), limit=120)
         metadata["timeout_seconds"] = call.arguments.get("timeout_seconds", 30)
-    _record_audit(
-        audit_sink,
-        AuditEvent(
+    _record_activity(
+        activity_sink,
+        RuntimeActivityEvent(
             action="tool.call_requested",
-            resource_type="tool_call",
             actor=actor,
             resource_id=call.id,
             request_id=request_id,
@@ -622,9 +654,38 @@ def _dispatch_tool(
     )
     if policy is not None and context is not None:
         decision = policy.decide(call.name, call.arguments, context)
+    if _should_audit_tool(context, decision):
+        _record_audit(
+            audit_sink,
+            AuditEvent(
+                action="tool.call_requested",
+                resource_type="tool_call",
+                actor=actor,
+                resource_id=call.id,
+                request_id=request_id,
+                channel=channel,
+                session_id=session_id,
+                turn_id=turn_id,
+                tool_call_record_id=record_id,
+                decision=decision.action,
+                reason_code=decision.code,
+                risk_category=decision.risk_category,
+                metadata={
+                    **metadata,
+                    "permission_key": decision.permission_key,
+                    "risk_level": decision.risk_level,
+                },
+            ),
+        )
     if decision.action == "deny":
-        _record_tool_decision(audit_sink, context, decision, action="tool.call_denied")
-        return ToolResult(
+        _record_tool_decision(
+            activity_sink,
+            audit_sink,
+            context,
+            decision,
+            action="tool.call_denied",
+        )
+        result = ToolResult(
             output=decision.message or "Tool execution denied.",
             is_error=True,
             metadata={
@@ -635,6 +696,8 @@ def _dispatch_tool(
                 "permission_decision": "deny",
             },
         )
+        _record_tool_result_activity(activity_sink, context, decision, result)
+        return result
 
     if decision.action == "confirm":
         if confirmation_broker is None or context is None:
@@ -646,12 +709,20 @@ def _dispatch_tool(
                 risk_level=decision.risk_level,
                 risk_category=decision.risk_category,
             )
-            _record_tool_decision(audit_sink, context, unavailable, action="tool.call_denied")
-            return ToolResult(
+            _record_tool_decision(
+                activity_sink,
+                audit_sink,
+                context,
+                unavailable,
+                action="tool.call_denied",
+            )
+            result = ToolResult(
                 output=unavailable.message,
                 is_error=True,
                 metadata={"code": unavailable.code, "tool_name": call.name},
             )
+            _record_tool_result_activity(activity_sink, context, unavailable, result)
+            return result
 
         def on_requested(payload: dict[str, Any]) -> None:
             event = {
@@ -667,6 +738,7 @@ def _dispatch_tool(
             _emit_event(on_event, event)
 
         _record_tool_decision(
+            activity_sink,
             audit_sink,
             context,
             decision,
@@ -698,7 +770,7 @@ def _dispatch_tool(
             ),
         )
         if confirmation.status != "approved":
-            return ToolResult(
+            result = ToolResult(
                 output=confirmation.message or f"Tool confirmation {confirmation.status}.",
                 is_error=True,
                 metadata={
@@ -708,57 +780,84 @@ def _dispatch_tool(
                     "confirmation_status": confirmation.status,
                 },
             )
-
-    _record_tool_decision(audit_sink, context, decision, action="tool.call_allowed")
+            _record_tool_result_activity(activity_sink, context, decision, result)
+            return result
+    _record_tool_decision(
+        activity_sink,
+        audit_sink,
+        context,
+        decision,
+        action="tool.call_allowed",
+    )
     result = _execute_tool(
         tools,
         call,
         session_id=session_id,
         turn_id=turn_id,
+        turn_index=turn_index,
         actor=actor,
         request_id=request_id,
         channel=channel,
     )
-    _record_audit(
-        audit_sink,
-        AuditEvent(
-            action="tool.call_error" if result.is_error else "tool.call_done",
-            resource_type="tool_call",
-            actor=actor,
-            resource_id=call.id,
-            request_id=request_id,
-            channel=channel,
-            session_id=session_id,
-            turn_id=turn_id,
-            tool_call_record_id=record_id,
-            decision="error" if result.is_error else "done",
-            reason_code=str(result.metadata.get("code") or ""),
-            risk_category=decision.risk_category,
-            metadata={
-                "tool_name": call.name,
-                "permission_key": decision.permission_key,
-                "output_preview": preview_text(result.output, limit=160),
-                **{
-                    key: result.metadata[key]
-                    for key in (
-                        "cwd",
-                        "exit_code",
-                        "duration_seconds",
-                        "timeout_seconds",
-                        "timed_out",
-                        "truncated",
-                        "stdout_tail",
-                        "stderr_tail",
-                    )
-                    if key in result.metadata
-                },
-            },
-        ),
+    result_metadata = {
+        "tool_name": call.name,
+        "permission_key": decision.permission_key,
+        "output_preview": _safe_tool_output_preview(call.name, result, limit=160),
+        **{
+            key: result.metadata[key]
+            for key in (
+                "cwd",
+                "exit_code",
+                "duration_ms",
+                "duration_seconds",
+                "timeout_seconds",
+                "timed_out",
+                "truncated",
+                "stdout_tail",
+                "stderr_tail",
+            )
+            if key in result.metadata
+        },
+    }
+    result_event = RuntimeActivityEvent(
+        action="tool.call_error" if result.is_error else "tool.call_done",
+        actor=actor,
+        resource_id=call.id,
+        request_id=request_id,
+        channel=channel,
+        session_id=session_id,
+        turn_id=turn_id,
+        tool_call_record_id=record_id,
+        decision="error" if result.is_error else "done",
+        reason_code=str(result.metadata.get("code") or ""),
+        risk_category=decision.risk_category,
+        metadata=result_metadata,
     )
+    _record_activity(activity_sink, result_event)
+    if _should_audit_tool(context, decision):
+        _record_audit(
+            audit_sink,
+            AuditEvent(
+                action=result_event.action,
+                resource_type="tool_call",
+                actor=actor,
+                resource_id=call.id,
+                request_id=request_id,
+                channel=channel,
+                session_id=session_id,
+                turn_id=turn_id,
+                tool_call_record_id=record_id,
+                decision=result_event.decision,
+                reason_code=result_event.reason_code,
+                risk_category=result_event.risk_category,
+                metadata=result_metadata,
+            ),
+        )
     return result
 
 
 def _record_tool_decision(
+    activity_sink: RuntimeActivitySink | None,
     audit_sink: AuditSink | None,
     context: ToolExecutionContext | None,
     decision: ToolExecutionDecision,
@@ -767,11 +866,60 @@ def _record_tool_decision(
 ) -> None:
     if context is None:
         return
-    _record_audit(
-        audit_sink,
-        AuditEvent(
-            action=action,
-            resource_type="tool_call",
+    metadata = {
+        "tool_name": context.tool_name,
+        "permission_key": decision.permission_key,
+        "risk_level": decision.risk_level,
+        **decision.audit_metadata,
+    }
+    event = RuntimeActivityEvent(
+        action=action,
+        actor=context.actor,
+        resource_id=context.tool_call_id,
+        request_id=context.request_id,
+        channel=context.channel,
+        session_id=context.session_id,
+        turn_id=context.turn_id,
+        tool_call_record_id=context.tool_call_record_id,
+        decision=decision.action,
+        reason_code=decision.code,
+        risk_category=decision.risk_category,
+        metadata=metadata,
+    )
+    _record_activity(activity_sink, event)
+    if _should_audit_tool(context, decision) or action == "tool.call_denied":
+        _record_audit(
+            audit_sink,
+            AuditEvent(
+                action=action,
+                resource_type="tool_call",
+                actor=context.actor,
+                resource_id=context.tool_call_id,
+                request_id=context.request_id,
+                channel=context.channel,
+                session_id=context.session_id,
+                turn_id=context.turn_id,
+                tool_call_record_id=context.tool_call_record_id,
+                decision=decision.action,
+                reason_code=decision.code,
+                risk_category=decision.risk_category,
+                metadata=metadata,
+            ),
+        )
+
+
+def _record_tool_result_activity(
+    activity_sink: RuntimeActivitySink | None,
+    context: ToolExecutionContext | None,
+    decision: ToolExecutionDecision,
+    result: ToolResult,
+) -> None:
+    if context is None:
+        return
+    _record_activity(
+        activity_sink,
+        RuntimeActivityEvent(
+            action="tool.call_error" if result.is_error else "tool.call_done",
             actor=context.actor,
             resource_id=context.tool_call_id,
             request_id=context.request_id,
@@ -779,16 +927,33 @@ def _record_tool_decision(
             session_id=context.session_id,
             turn_id=context.turn_id,
             tool_call_record_id=context.tool_call_record_id,
-            decision=decision.action,
-            reason_code=decision.code,
+            decision="error" if result.is_error else "done",
+            reason_code=str(result.metadata.get("code") or ""),
             risk_category=decision.risk_category,
             metadata={
                 "tool_name": context.tool_name,
                 "permission_key": decision.permission_key,
-                "risk_level": decision.risk_level,
-                **decision.audit_metadata,
+                "output_preview": _safe_tool_output_preview(
+                    context.tool_name,
+                    result,
+                    limit=160,
+                ),
             },
         ),
+    )
+
+
+def _should_audit_tool(
+    context: ToolExecutionContext | None,
+    decision: ToolExecutionDecision,
+) -> bool:
+    if context is None:
+        return False
+    return (
+        decision.action in {"deny", "confirm"}
+        or bool(decision.permission_key)
+        or decision.risk_level in {"high", "critical"}
+        or context.tool_name in {"memory_write", "sync_skills"}
     )
 
 
@@ -809,12 +974,33 @@ def _record_audit(audit_sink: AuditSink | None, event: AuditEvent) -> None:
         )
 
 
+def _record_activity(
+    activity_sink: RuntimeActivitySink | None,
+    event: RuntimeActivityEvent,
+) -> None:
+    """Best-effort activity emission that never breaks the generic Agent loop."""
+
+    if activity_sink is None:
+        return
+    try:
+        activity_sink.record(event)
+    except Exception as exc:  # noqa: BLE001 - runtime indexing failures stay observable.
+        log_event(
+            tool_logger,
+            logging.ERROR,
+            "activity.write_failed",
+            action=event.action,
+            error_type=type(exc).__name__,
+        )
+
+
 def _execute_tool(
     tools: ToolProvider | None,
     call: ParsedToolCall,
     *,
     session_id: str,
     turn_id: str,
+    turn_index: int,
     actor: ActorContext | None = None,
     request_id: str = "",
     channel: str = "",
@@ -830,21 +1016,11 @@ def _execute_tool(
         tool=call.name,
         tool_call_id=call.id,
         actor_user_id=actor.user_id if actor else "",
+        actor_username=actor.username if actor else "",
+        turn_index=turn_index,
         request_id=request_id,
         channel=channel,
-    )
-    log_event(
-        tool_logger,
-        logging.DEBUG,
-        "tool.args",
-        session_id=session_id,
-        turn_id=turn_id,
-        tool=call.name,
-        tool_call_id=call.id,
-        actor_user_id=actor.user_id if actor else "",
-        request_id=request_id,
-        channel=channel,
-        args_preview=preview_json(call.arguments, limit=200),
+        args_preview=_safe_tool_args_preview(call.name, call.arguments),
     )
     started = time.perf_counter()
     if tools is None:
@@ -855,13 +1031,17 @@ def _execute_tool(
         )
     else:
         result = tools.execute(call.name, call.arguments)
+    duration_ms = _duration_ms(started)
+    result.metadata.setdefault("duration_ms", duration_ms)
     _log_tool_result(
         result,
         session_id=session_id,
         turn_id=turn_id,
         tool_name=call.name,
-        duration_ms=_duration_ms(started),
+        duration_ms=duration_ms,
         actor_user_id=actor.user_id if actor else "",
+        actor_username=actor.username if actor else "",
+        turn_index=turn_index,
         request_id=request_id,
         channel=channel,
         tool_call_id=call.id,
@@ -877,6 +1057,8 @@ def _log_tool_result(
     tool_name: str,
     duration_ms: int,
     actor_user_id: str = "",
+    actor_username: str = "",
+    turn_index: int | None = None,
     request_id: str = "",
     channel: str = "",
     tool_call_id: str = "",
@@ -889,10 +1071,14 @@ def _log_tool_result(
         "tool": tool_name,
         "ok": not result.is_error,
         "duration_ms": duration_ms,
-        "output_preview": preview_text(result.output, limit=120),
+        "output_preview": _safe_tool_output_preview(tool_name, result, limit=120),
     }
     if actor_user_id:
         fields["actor_user_id"] = actor_user_id
+    if actor_username:
+        fields["actor_username"] = actor_username
+    if turn_index is not None:
+        fields["turn_index"] = turn_index
     if request_id:
         fields["request_id"] = request_id
     if channel:
@@ -902,12 +1088,81 @@ def _log_tool_result(
     code = result.metadata.get("code")
     if code:
         fields["code"] = code
+    for key in ("match_count", "total", "category", "operation"):
+        value = result.metadata.get(key)
+        if value not in (None, ""):
+            fields[key] = value
     log_event(
         tool_logger,
         logging.WARNING if result.is_error else logging.INFO,
         "tool.error" if result.is_error else "tool.done",
         **fields,
     )
+
+
+def _safe_tool_args_preview(tool_name: str, args: dict[str, Any]) -> str:
+    """Return a bounded preview without persisting private Memory text."""
+
+    if tool_name == "memory_read":
+        query = args.get("query", "")
+        return preview_json(
+            {
+                "mode": args.get("mode", ""),
+                "category": args.get("category", ""),
+                "query_length": len(query) if isinstance(query, str) else 0,
+                "session_id": args.get("session_id", ""),
+                "offset": args.get("offset", 0),
+                "limit": args.get("limit", 8),
+            },
+            limit=200,
+        )
+    if tool_name == "memory_write":
+        content = args.get("content", "")
+        normalized = content if isinstance(content, str) else ""
+        return preview_json(
+            {
+                "operation": args.get("operation", ""),
+                "category": args.get("category", ""),
+                "authorization": args.get("authorization", ""),
+                "content_length": len(normalized),
+                "content_hash": hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+                if normalized
+                else "",
+                "old_content_hash": hashlib.sha256(
+                    str(args.get("old_content", "")).encode("utf-8")
+                ).hexdigest()
+                if args.get("old_content")
+                else "",
+            },
+            limit=300,
+        )
+    return preview_json(args, limit=200)
+
+
+def _safe_tool_output_preview(tool_name: str, result: ToolResult, *, limit: int) -> str:
+    """Return operational Memory result metadata instead of private content."""
+
+    if tool_name in {"memory_read", "memory_write"}:
+        return preview_json(
+            {
+                "ok": not result.is_error,
+                "code": result.metadata.get("code", ""),
+                "operation": result.metadata.get("operation", ""),
+                "category": result.metadata.get("category", ""),
+                "mode": result.metadata.get("mode", ""),
+                "match_count": result.metadata.get("match_count", 0),
+                "total": result.metadata.get("total", 0),
+            },
+            limit=limit,
+        )
+    return preview_text(result.output, limit=limit)
+
+
+def _answer_output_preview(content: str, *, limit: int = 80) -> str:
+    """Return the first non-empty answer line for terminal and trace summaries."""
+
+    first_line = next((line.strip() for line in str(content).splitlines() if line.strip()), "")
+    return preview_text(first_line, limit=limit)
 
 
 def _log_session_save(
@@ -928,15 +1183,7 @@ def _log_session_save(
             messages=messages_count,
             error_preview=preview_text(save_error, limit=160),
         )
-        return
-    log_event(
-        session_logger,
-        logging.DEBUG,
-        "session.save",
-        session_id=session_id,
-        turn_id=turn_id,
-        messages=messages_count,
-    )
+    return
 
 
 def _tool_call_names(tool_calls: list[dict[str, Any]]) -> list[str]:

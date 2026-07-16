@@ -29,6 +29,7 @@ def test_load_config_uses_explicit_workspace(tmp_path, monkeypatch):
     assert config.prompts_dir == tmp_path / "prompts"
     assert config.contexts_dir == tmp_path / "contexts"
     assert config.sessions_dir == tmp_path / "contexts" / "sessions"
+    assert config.local_memory_dir == tmp_path / "contexts" / "memory"
     assert config.extends_dir == tmp_path / "extends"
     assert config.logs_dir == tmp_path / "logs"
     assert config.state_dir == tmp_path / "state"
@@ -129,6 +130,7 @@ def test_ensure_dirs_creates_runtime_directories(tmp_path, monkeypatch):
     assert config.prompts_dir.is_dir()
     assert config.contexts_dir.is_dir()
     assert config.sessions_dir.is_dir()
+    assert config.local_memory_dir.is_dir()
     assert config.extends_dir.is_dir()
     assert config.logs_dir.is_dir()
 

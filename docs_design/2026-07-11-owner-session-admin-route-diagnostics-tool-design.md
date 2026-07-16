@@ -1,5 +1,9 @@
 # Owner 日常会话、独立管理路由与按需诊断工具设计
 
+> 说明：本文原有诊断 Tool 仍依赖模型提供时间、Session/Turn 等筛选并从 trace/audit 返回证据集合，该方案已于 2026-07-16 被自动关联当前 Session、上一轮/最近失败的结构化自助诊断替代；`turn_runs` / `tool_call_records` 也已从 Security Audit 拆入独立 Runtime Activity。当前口径见 `docs_design/2026-07-16-self-diagnostics-activity-audit-separation-design.md` 和 Part 9 活文档。
+
+> 说明：本文正文保留 2026-07-11 当时的过渡方案，其中“Owner 普通文件目录独立”和旧 Owner session 目录 fallback 已不再适用。当前 Owner 是 CLI workspace operator 的 Web 登录身份，直接使用 workspace、全局 `contexts/sessions` 与 `contexts/sessions_meta`，不创建或读取 `contexts/users/{owner_id}`；当前口径以 Part 9 活文档和 `docs_design/2026-07-15-memory-boundary-design.md` 为准。
+
 ## 背景
 
 第九部分已实现用户权限、用户会话目录、管理弹窗和近期诊断。实际使用需要收紧三个口径：Owner 虽有全局会话权限，但仍是正常聊天用户，日常列表不应混入他人记录；用户管理应有独立页面和路由；诊断应在出错后由 Agent 按需调用工具，而不是常驻菜单。

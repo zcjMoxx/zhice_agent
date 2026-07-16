@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from agent.auth.tool_policy import RbacToolExecutionPolicy
 from agent.core.context import ContextBuilder
 from agent.core.loop import AgentLoop
+from agent.protocols.activity import RuntimeActivityEvent
 from agent.protocols.auth import ActorContext, AuditEvent
 from agent.protocols.llm import LLMResponse
 from agent.protocols.tool import (
@@ -41,6 +43,7 @@ def test_agent_loop_confirmation_approval_executes_tool_and_llm_override_is_turn
     override_llm = _ToolThenTextLLM()
     tools = _RecordingTools()
     broker = _ApproveBroker()
+    audit = _RecordingAudit()
     loop = AgentLoop(
         llm=default_llm,
         sessions=JsonlSessionStore(tmp_path / "sessions"),
@@ -49,6 +52,7 @@ def test_agent_loop_confirmation_approval_executes_tool_and_llm_override_is_turn
         tools=tools,
         tool_policy=_StaticPolicy("confirm"),
         confirmation_broker=broker,
+        audit_sink=audit,
     )
 
     result = loop.run_turn(
@@ -62,6 +66,57 @@ def test_agent_loop_confirmation_approval_executes_tool_and_llm_override_is_turn
     assert default_llm.called is False
     assert tools.calls == [("read_file", {"path": "notes.txt"})]
     assert broker.requests == ["read_file"]
+    actions = [event.action for event in audit.events]
+    assert "tool.confirmation_requested" in actions
+    assert "tool.confirmation_approved" in actions
+    assert "tool.call_done" in actions
+
+
+def test_safe_tool_activity_is_recorded_without_security_audit(tmp_path):
+    audit = _RecordingAudit()
+    activity = _RecordingActivity()
+    loop = AgentLoop(
+        llm=_ToolThenTextLLM(),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        context_builder=_ContextBuilder(),
+        workspace=tmp_path,
+        tools=_RecordingTools(),
+        tool_policy=RbacToolExecutionPolicy(),
+        activity_sink=activity,
+        audit_sink=audit,
+    )
+
+    loop.run_turn("session-1", "read", actor=_actor())
+
+    actions = [event.action for event in activity.events]
+    assert "chat.turn_started" in actions
+    assert "tool.call_requested" in actions
+    assert "tool.call_done" in actions
+    assert "chat.turn_done" in actions
+    assert audit.events == []
+
+
+def test_user_authorized_memory_write_executes_without_confirmation_and_stays_private(tmp_path):
+    audit = _RecordingAudit()
+    broker = _FailConfirmationBroker()
+    loop = AgentLoop(
+        llm=_MemoryToolThenTextLLM(),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        context_builder=_ContextBuilder(),
+        workspace=tmp_path,
+        tools=_MemoryTools(),
+        tool_policy=RbacToolExecutionPolicy(),
+        confirmation_broker=broker,
+        audit_sink=audit,
+    )
+
+    loop.run_turn("session-1", "remember", actor=_actor())
+
+    serialized = "\n".join(str(event.metadata) for event in audit.events)
+    assert "private preference text" not in serialized
+    assert "private result text" not in serialized
+    assert "content_hash" in serialized
+    assert broker.called is False
 
 
 class _ContextBuilder(ContextBuilder):
@@ -103,6 +158,33 @@ class _NeverCalledLLM:
         raise AssertionError("default provider should not be called")
 
 
+class _MemoryToolThenTextLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-memory",
+                        "type": "function",
+                        "function": {
+                            "name": "memory_write",
+                            "arguments": (
+                                '{"operation":"add","category":"preferences",'
+                                '"content":"private preference text",'
+                                '"authorization":"user_explicit"}'
+                            ),
+                        },
+                    }
+                ],
+            )
+        return LLMResponse(content="finished")
+
+
 class _RecordingTools:
     def __init__(self):
         self.calls = []
@@ -124,6 +206,29 @@ class _RecordingTools:
         return ToolResult(output="ok")
 
 
+class _MemoryTools:
+    def definitions(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "memory_write",
+                    "description": "memory",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+
+    def execute(self, name, args):
+        return ToolResult(
+            output='{"entry":{"content":"private result text"}}',
+            metadata={
+                "operation": "add",
+                "category": "preferences",
+            },
+        )
+
+
 class _StaticPolicy:
     def __init__(self, action):
         self.action = action
@@ -133,7 +238,7 @@ class _StaticPolicy:
             action=self.action,
             code="AUTH_PERMISSION_DENIED" if self.action == "deny" else "CONFIRM_REQUIRED",
             message="not allowed" if self.action == "deny" else "confirm",
-            permission_key="tool.readonly.use",
+            permission_key="tool.exec.dangerous" if self.action == "confirm" else "",
             risk_level="high" if self.action == "confirm" else "low",
         )
 
@@ -149,9 +254,25 @@ class _ApproveBroker:
         return ToolConfirmationResult(status="approved", confirmation_id="conf-1")
 
 
+class _FailConfirmationBroker:
+    called = False
+
+    def request(self, decision, context, args, *, on_requested=None, is_cancelled=None):
+        self.called = True
+        raise AssertionError("Memory writes must not request tool confirmation")
+
+
 class _RecordingAudit:
     def __init__(self):
         self.events: list[AuditEvent] = []
+
+    def record(self, event):
+        self.events.append(event)
+
+
+class _RecordingActivity:
+    def __init__(self):
+        self.events: list[RuntimeActivityEvent] = []
 
     def record(self, event):
         self.events.append(event)
@@ -164,7 +285,7 @@ def _actor() -> ActorContext:
         username="tester",
         display_name="Tester",
         role_keys=frozenset({"developer"}),
-        permission_keys=frozenset({"tool.readonly.use", "chat.run"}),
+        permission_keys=frozenset(),
         channel="web",
         auth_session_id="auth-1",
     )

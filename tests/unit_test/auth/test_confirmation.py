@@ -5,10 +5,10 @@ from threading import Event
 
 import pytest
 
-from agent.auth.audit import SqliteAuditSink
+from agent.auth.activity import SqliteRuntimeActivitySink
 from agent.auth.confirmation import SQLiteToolConfirmationBroker
 from agent.auth.store import AuthStoreError, SQLiteAuthStore
-from agent.protocols.auth import AuditEvent
+from agent.protocols.activity import RuntimeActivityEvent
 from agent.protocols.tool import ToolExecutionContext, ToolExecutionDecision
 
 
@@ -17,10 +17,9 @@ def test_web_confirmation_blocks_until_same_actor_approves(tmp_path):
     admin = store.initialize_owner("admin", "Admin", "password-123")
     actor = store.actor_for_user(admin.id, channel="web")
     context = _context(actor)
-    SqliteAuditSink(store).record(
-        AuditEvent(
+    SqliteRuntimeActivitySink(store).record(
+        RuntimeActivityEvent(
             action="tool.call_requested",
-            resource_type="tool_call",
             actor=actor,
             resource_id=context.tool_call_id,
             session_id=context.session_id,
@@ -69,10 +68,9 @@ def test_other_user_cannot_decide_confirmation(tmp_path):
     first_actor = store.actor_for_user(first.id, channel="web")
     second_actor = store.actor_for_user(second.id, channel="web")
     context = _context(first_actor)
-    SqliteAuditSink(store).record(
-        AuditEvent(
+    SqliteRuntimeActivitySink(store).record(
+        RuntimeActivityEvent(
             action="tool.call_requested",
-            resource_type="tool_call",
             actor=first_actor,
             resource_id=context.tool_call_id,
             session_id=context.session_id,

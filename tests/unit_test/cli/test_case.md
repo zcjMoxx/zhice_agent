@@ -46,15 +46,21 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 ### Case 6: 会话 slash commands
 
-- 输入：`/help`、`/new`、`/reset`、`/sessions`、`/history`、`/prompts`、`/model`、`/model list`、`/model list endpoint`、`/model endpoint/model`、`/model reset`、`/exit`。
+- 输入：`/help`、`/new`、`/reset`、`/sessions`、`/history`、`/prompts`、`/model`、`/memory`、`/exit` 等命令。
 - 预期：命令在 CLI 层处理，不进入 AgentLoop 普通对话路径。
 - 检查点：新 session 可写入文件；reset 后 history 为空；sessions 能显示 preview；`/help` 只列顶层命令，`/skills sync` 放在 `/skills` 的 tip 中；`/model` 能紧凑显示当前模型，`/model list` 能列出 endpoint/model，`/model list endpoint` 能列出单个 endpoint 的 supported_models，且能切换、临时覆盖模型并重置当前首选 endpoint。
 
 ### Case 7: `/tools`
 
 - 输入：`/tools`。
-- 预期：列出默认只读工具注册表。
-- 检查点：输出包含 `list_dir`、`read_file`、`grep`、`exec`。
+- 预期：列出当前默认工具注册表。
+- 检查点：输出包含 `list_dir`、`read_file`、`grep`、`exec`、`memory_read` 和 `memory_write`。
+
+### Case 7.1: `/memory`
+
+- 输入：`/memory`，以及已经删除的 `/memory session`、list、extract、summarize 子命令。
+- 预期：默认提取当前 Session 长期 Memory；list 展示当前 Memory；指定 Session 提取和 Summary 作为 Tip 中的高级入口。
+- 检查点：命令不进入普通聊天；provider 或格式失败时不覆盖旧摘要。
 
 ### Case 8: Fake LLM 对话
 

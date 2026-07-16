@@ -1,5 +1,7 @@
 # Viewer 正常使用权限补齐设计
 
+> 说明：本文通过给 Viewer 补齐多项 permission key 来恢复正常使用的方案已被替代。当前代码将这些日常功能定义为所有登录用户的基础能力，Viewer 无需额外特权；请参考 `docs_design/2026-07-16-authenticated-user-baseline-capabilities-design.md` 和当前 Part 9 活文档。本文其余正文保留当时方案原貌。
+
 ## 背景
 
 Part 9 普通注册固定授予 `viewer` 角色，但当前 `viewer` 缺少 `model.switch`、`session.delete.own` 和 `tool.exec.safe`。其中模型切换会直接影响 Web 聊天：前端发送普通消息时携带当前模型，后端会校验 `model.switch`，导致已经登录的普通用户在进入 AgentLoop 前被拒绝。

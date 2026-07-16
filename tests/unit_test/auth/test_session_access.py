@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 from agent.auth.session_access import SessionAccessError, SessionAccessService
@@ -20,7 +18,10 @@ def test_user_context_and_session_index_isolate_users(tmp_path):
         password="developer-password",
         role_keys=["developer"],
     )
-    resolver = FilesystemUserContextResolver(tmp_path / "contexts")
+    resolver = FilesystemUserContextResolver(
+        tmp_path / "contexts",
+        workspace_dir=tmp_path,
+    )
     service = SessionAccessService(store, resolver)
     admin_actor = store.actor_for_user(admin.id, channel="web")
     developer_actor = store.actor_for_user(developer.id, channel="web")
@@ -35,6 +36,7 @@ def test_user_context_and_session_index_isolate_users(tmp_path):
     assert resolver.shared_readonly_dir.is_dir()
     assert [item.session_id for item in service.list_sessions(developer_actor)] == ["session-dev"]
     assert service.list_sessions(admin_actor) == []
+    assert service.load_session(admin_actor, "session-dev").messages[0].content == "private"
 
     other = store.create_user(
         username="viewer",
@@ -102,10 +104,19 @@ def test_owner_sessions_use_cli_storage_while_other_users_remain_isolated(tmp_pa
 
     assert owner_session.context.sessions_dir == tmp_path / "contexts" / "sessions"
     assert owner_session.context.sessions_meta_dir == tmp_path / "contexts" / "sessions_meta"
+    assert owner_session.context.root_dir == tmp_path
+    assert owner_session.context.files_dir == tmp_path
+    assert owner_session.context.memory_dir == tmp_path / "contexts" / "memory"
+    assert not (tmp_path / "contexts" / "users" / owner.id).exists()
     assert viewer_session.context.sessions_dir == (
         tmp_path / "contexts" / "users" / viewer.id / "sessions"
     )
-    assert owner_session.context.files_dir == tmp_path / "contexts" / "users" / owner.id / "files"
+    assert viewer_session.context.files_dir == (
+        tmp_path / "contexts" / "users" / viewer.id / "files"
+    )
+    assert viewer_session.context.memory_dir == (
+        tmp_path / "contexts" / "users" / viewer.id / "memory"
+    )
 
 
 def test_owner_listing_indexes_unowned_global_cli_sessions_without_copying(tmp_path):
@@ -129,8 +140,8 @@ def test_owner_ignores_existing_user_directory_session(tmp_path):
     owner = store.initialize_owner("owner", "Owner", "password-123")
     resolver = FilesystemUserContextResolver(tmp_path / "contexts")
     service = SessionAccessService(store, resolver)
-    legacy_context = resolver.resolve(owner.id)
-    legacy_store = JsonlSessionStore(legacy_context.sessions_dir)
+    legacy_sessions_dir = tmp_path / "contexts" / "users" / owner.id / "sessions"
+    legacy_store = JsonlSessionStore(legacy_sessions_dir)
     legacy_store.append("legacy-owner-session", [Message(role="user", content="legacy")])
     store.session_index_create(
         session_id="legacy-owner-session",
@@ -144,26 +155,21 @@ def test_owner_ignores_existing_user_directory_session(tmp_path):
     )
 
     assert state.messages == []
+    assert (legacy_sessions_dir / "legacy-owner-session.jsonl").is_file()
 
 
-def test_ensure_session_checks_write_permission_before_creating_index(tmp_path):
+def test_ensure_session_uses_authenticated_ownership_without_own_permission_keys(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     user = store.initialize_owner("admin", "Admin", "password-123")
     service = SessionAccessService(store, FilesystemUserContextResolver(tmp_path / "contexts"))
     actor = store.actor_for_user(user.id, channel="web")
-    create_without_write = replace(
+    resolved = service.ensure_session(
         actor,
-        permission_keys=frozenset({"session.create", "session.read.own"}),
+        "session-created",
+        channel="web",
+        write=True,
     )
 
-    with pytest.raises(SessionAccessError) as exc_info:
-        service.ensure_session(
-            create_without_write,
-            "session-denied",
-            channel="web",
-            write=True,
-        )
-
-    assert exc_info.value.code == "AUTH_PERMISSION_DENIED"
-    assert exc_info.value.details == {"required_permission": "session.write.own"}
-    assert store.session_index_get("session-denied") is None
+    assert resolved.created is True
+    assert resolved.owner_user_id == user.id
+    assert store.session_index_get("session-created")["owner_user_id"] == user.id

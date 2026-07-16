@@ -84,6 +84,7 @@ const elements = {
   managementClose: document.querySelector("#managementClose"),
   managementBody: document.querySelector("#managementBody"),
   confirmationDialog: document.querySelector("#confirmationDialog"),
+  confirmationTitle: document.querySelector("#confirmationTitle"),
   confirmationDetails: document.querySelector("#confirmationDetails"),
   confirmationApprove: document.querySelector("#confirmationApprove"),
   confirmationDeny: document.querySelector("#confirmationDeny"),
@@ -929,7 +930,9 @@ async function handleSubmit(event) {
 
   try {
     const selectedModel =
-      state.model.currentModel && !isSlashCommand(text) ? elements.modelSelect.value : "";
+      !isSlashCommand(text) && elements.modelSelect.value !== state.model.currentModel
+        ? elements.modelSelect.value
+        : "";
     const status = await sendWebSocketMessage(state.activeSessionId, text, selectedModel);
     const assistant = status.assistant || {};
     pendingMessage.role = assistant.role || "assistant";
@@ -1528,11 +1531,15 @@ async function renderAuditEvents() {
 
 function showToolConfirmation(confirmation) {
   state.pendingConfirmation = confirmation;
+  elements.confirmationTitle.textContent = confirmation.confirmation_title || "Confirm tool action";
   elements.confirmationDetails.replaceChildren();
+  const customFields = Array.isArray(confirmation.confirmation_fields)
+    ? confirmation.confirmation_fields.map((item) => [item.label, item.value])
+    : [];
   const fields = [
     ["Tool", confirmation.tool_name],
     ["Risk", `${confirmation.risk_level} / ${confirmation.risk_category || ""}`],
-    ["Command", confirmation.command_preview || ""],
+    ...customFields,
     ["Permission", confirmation.permission_key || ""],
     ["Session", confirmation.session_id || state.activeSessionId],
     ["Turn", confirmation.turn_id || ""],

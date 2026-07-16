@@ -8,7 +8,7 @@ from typing import Any
 from agent.core.context_relevance import select_relevant_turns
 from agent.core.turns import group_messages_by_turn
 from agent.message import Message
-from agent.prompt_loader import PromptLoader
+from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.protocols.skill import SkillProvider
 
 DEFAULT_CONTEXT_PROMPTS = ["identity", "tool_use_policy", "skills_intro"]
@@ -21,8 +21,8 @@ class ContextBuilder:
         self,
         prompt_loader: PromptLoader,
         skills: SkillProvider | None = None,
-        max_history_turns: int | None = 8,
-        max_relevant_turns: int = 3,
+        max_history_turns: int | None = 30,
+        max_relevant_turns: int = 5,
         max_history_messages: int = 60,
         max_message_chars: int = 8000,
         max_skill_summaries: int = 50,
@@ -112,6 +112,12 @@ class ContextBuilder:
             "# Skill Use Policy",
             prompts["skills_intro"].strip(),
         ]
+        try:
+            memory_policy = self.prompt_loader.load("memory_policy").strip()
+        except PromptNotFoundError:
+            memory_policy = ""
+        if memory_policy:
+            parts.extend(["# Memory Policy", memory_policy])
         skill_summary = self._build_available_skills_prompt()
         if skill_summary:
             parts.extend(["# Available Skills", skill_summary])

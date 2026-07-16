@@ -74,6 +74,12 @@ class AppConfig:
 
         return self.contexts_dir / "shared" / "readonly"
 
+    @property
+    def local_memory_dir(self) -> Path:
+        """Workspace-operator Memory shared by CLI and Owner Web."""
+
+        return self.contexts_dir / "memory"
+
     def ensure_dirs(self) -> None:
         """Create runtime directories that must exist before the CLI runs."""
 
@@ -81,6 +87,7 @@ class AppConfig:
         self.prompts_dir.mkdir(parents=True, exist_ok=True)
         self.contexts_dir.mkdir(parents=True, exist_ok=True)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.local_memory_dir.mkdir(parents=True, exist_ok=True)
         self.extends_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 

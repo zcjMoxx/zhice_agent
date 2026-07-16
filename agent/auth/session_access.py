@@ -76,12 +76,6 @@ class SessionAccessService:
         row = self.store.session_index_get(session_id)
         created = False
         if row is None:
-            self._require(actor, "session.create")
-            requested_permission = "session.write.own" if write else "session.read.own"
-            if not actor.has_permission(requested_permission) and not actor.has_permission(
-                "session.manage.any"
-            ):
-                self._require(actor, requested_permission)
             try:
                 self.store.session_index_create(
                     session_id=session_id,
@@ -96,15 +90,6 @@ class SessionAccessService:
             created = True
         if row is None or not self._can_access(actor, str(row["owner_user_id"])):
             raise self._not_found()
-        if str(row["owner_user_id"]) != actor.user_id and not actor.has_permission("session.manage.any"):
-            raise self._not_found()
-        requested_permission = "session.write.own" if write else "session.read.own"
-        if (
-            str(row["owner_user_id"]) == actor.user_id
-            and not actor.has_permission(requested_permission)
-            and not actor.has_permission("session.manage.any")
-        ):
-            self._require(actor, requested_permission)
         return self._resolved(str(row["owner_user_id"]), session_id, created=created)
 
     def resolve_session(
@@ -123,28 +108,12 @@ class SessionAccessService:
         if row is None or not self._can_access(actor, str(row["owner_user_id"])):
             raise self._not_found()
         owner = str(row["owner_user_id"])
-        is_owner = owner == actor.user_id
-        if delete:
-            if not (is_owner and actor.has_permission("session.delete.own")) and not actor.has_permission(
-                "session.manage.any"
-            ):
-                raise self._not_found()
-        elif write:
-            if not (is_owner and actor.has_permission("session.write.own")) and not actor.has_permission(
-                "session.manage.any"
-            ):
-                raise self._not_found()
-        elif not (is_owner and actor.has_permission("session.read.own")) and not actor.has_permission(
-            "session.manage.any"
-        ):
-            raise self._not_found()
         return self._resolved(owner, session_id)
 
     def list_sessions(self, actor: ActorContext) -> list[SessionSummary]:
         """List the actor's own sessions for the normal chat surface."""
 
         self._require_user(actor)
-        self._require(actor, "session.read.own")
         self._reconcile_owner_cli_sessions(actor)
         rows = self.store.session_index_list(str(actor.user_id))
         summaries: list[SessionSummary] = []
@@ -169,7 +138,7 @@ class SessionAccessService:
         user = self.store.get_user(str(actor.user_id))
         if "owner" not in user.role_keys:
             return
-        context = self.user_contexts.resolve(user.id, use_global_sessions=True)
+        context = self.user_contexts.resolve(user.id, use_workspace_context=True)
         for summary in JsonlSessionStore(context.sessions_dir).list_sessions():
             if self.store.session_index_get(summary.session_id) is not None:
                 continue
@@ -254,7 +223,7 @@ class SessionAccessService:
         is_owner = "owner" in owner.role_keys
         context = self.user_contexts.resolve(
             owner_user_id,
-            use_global_sessions=is_owner,
+            use_workspace_context=is_owner,
         )
         return ResolvedSession(
             session_id=session_id,
@@ -267,16 +236,6 @@ class SessionAccessService:
     @staticmethod
     def _can_access(actor: ActorContext, owner_user_id: str) -> bool:
         return actor.user_id == owner_user_id or actor.has_permission("session.manage.any")
-
-    @staticmethod
-    def _require(actor: ActorContext, permission_key: str) -> None:
-        if not actor.has_permission(permission_key):
-            raise SessionAccessError(
-                ErrorCode.AUTH_PERMISSION_DENIED,
-                "Permission denied",
-                status_code=403,
-                details={"required_permission": permission_key},
-            )
 
     @staticmethod
     def _require_user(actor: ActorContext) -> None:

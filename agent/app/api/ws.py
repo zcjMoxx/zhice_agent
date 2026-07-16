@@ -227,7 +227,7 @@ async def _run_message_frame(
                     actor,
                     session_id,
                     model,
-                    request_id="ws-" + turn_id,
+                    request_id="",
                 )
             result = _runtime_call(
                 runtime,
@@ -238,7 +238,7 @@ async def _run_message_frame(
                 turn_id=turn_id,
                 on_event=on_event,
                 command_profile=command_profile,
-                request_id="ws-" + turn_id,
+                request_id="",
             )
         except Exception as exc:  # noqa: BLE001 - errors must be sent over the channel.
             loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))

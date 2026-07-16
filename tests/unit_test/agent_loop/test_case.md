@@ -63,12 +63,14 @@
 
 ## Part 8 Logging Coverage
 
-- AgentLoop emits concise INFO lifecycle logs for `turn.start` and `turn.done`; repetitive `llm.call`, `llm.direct`, and `session.save` remain available at DEBUG with `session_id` and `turn_id`.
+- AgentLoop emits concise INFO lifecycle logs for `turn.start` and `turn.done`; `turn.done.output_preview` keeps only the first non-empty answer line up to 80 characters in terminal and trace. `llm.call` and `llm.done` remain at DEBUG, while duplicate `llm.direct` and successful `session.save` events are omitted.
 - Tool dispatch emits `tool.start` and `tool.done` with `session_id`, `turn_id`, tool name, success flag, duration, and safe output preview.
 - Lifecycle log fields must not leak secret-like values or full long user/tool content.
 
 ## Part 9 Tool Policy Coverage
 
-- Tool policy 拒绝时不调用工具，但仍写入结构化 tool result 和 audit。
+- Tool policy 拒绝时不调用工具，但仍写入结构化 activity；安全拒绝继续写 audit。
+- 普通 turn 和安全工具成功只写 Runtime Activity/trace，不进入 Security Audit；危险工具、确认、Memory 写入和 Skill 同步继续审计。
+- LLM trace 增加带 Session/Turn/request 关联的 `llm.done` / `llm.error duration_ms`，用于自助性能诊断。
 - 确认通过后才执行工具，拒绝、超时或取消均不得执行。
 - `llm_override` 只作用于当前 turn，不修改 AgentLoop 默认 provider。

@@ -45,7 +45,9 @@
 - Workspace trace writes JSONL to `logs/YYYY-MM-DD/trace.log` with `component` and no full internal logger name.
 - Logging configuration is idempotent and can disable terminal Agent logs while keeping trace on.
 - Preview helpers redact sensitive fields, collapse multiline text, and truncate long values.
-- WebRuntime keeps correlated `chat.accepted` and `chat.done` events at DEBUG with `session_id` and `turn_id`, while stop/error events remain visible at higher levels.
+- WebRuntime relies on `turn.start/done` for ordinary chat lifecycle and only keeps Web stop/error, cancel, Session mutation, real model changes, and background Memory extraction events.
+- Tool terminal lines render `TOOL name | START/DONE/FAILED`, use username and turn index, and hide full session/request/tool-call ids while JSONL trace retains them.
+- WebSocket chat does not propagate the derived `ws-{turn_id}` value as a second Agent request identity.
 
 ## Part 9 Auth Coverage
 
@@ -67,4 +69,12 @@
 - 登录、注册、Owner 初始化、setup credential、账号改密和动态管理员创建用户的敏感输入框都有固定的小眼睛按钮；按钮可切换显示/隐藏并在表单重开时恢复隐藏状态，不进入 Tab 顺序。Enter 保留浏览器原生表单行为；Edge 原生密码 reveal/clear 控件被隐藏，避免双眼睛。
 - 登录页、侧边栏和 favicon 使用用户选定的 A 版 ZC 星芒 Logo PNG 资产；用户入口采用 C 版交叠双字母结构与 F 版白底深蓝配色，取用户名前两个字符。
 - Owner 和其他角色的聊天侧栏默认只列当前用户自己的 session；前端账号切换会清空上一账号的 active session 和 messages。
-- Recent diagnostics 不出现在常驻 Web UI，也不保留 REST 表单入口；诊断由 `diagnose_my_recent_activity` 工具按当前用户 trace/audit 证据触发。
+- Recent diagnostics 不出现在常驻 Web UI，也不保留 REST 表单入口；普通聊天通过 `diagnose_my_recent_activity` 自动诊断当前 Session 的上一轮或最近失败。
+- 普通成功 HTTP 请求不写 Security Audit；认证失败、特权拒绝和安全相关操作继续审计。
+
+## Part 10 Memory Coverage
+
+- `/memory` 只展示当前 actor 的长期 Memory；Session Summary 和手动提取子命令均已删除。
+- Owner Web 与 CLI 使用全局 Memory，普通用户使用各自目录；Web turn 绑定 Memory Tool、候选策略和 confirmation broker。
+- Memory 写入通过普通对话授权；持久 trace/audit 不保存 query、写入内容或读取结果原文。
+- Web 不提供 Memory 专用确认弹窗或编辑 API；Memory 授权通过普通对话完成。

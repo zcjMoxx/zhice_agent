@@ -61,7 +61,7 @@ class CommandPolicyResult:
     category: str = "local"
     risk_level: str = "low"
     risk_category: str = "safe"
-    required_permission: str = "tool.exec.safe"
+    required_permission: str = ""
     requires_confirmation: bool = False
 
 

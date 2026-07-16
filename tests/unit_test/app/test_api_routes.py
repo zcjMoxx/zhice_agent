@@ -517,7 +517,6 @@ class _FakeRuntime:
     def delete_session(self, session_id: str) -> None:
         self.deleted_sessions.append(session_id)
 
-
 def _assert_error(response, status: int, code: str, message: str, *, details=None) -> None:
     payload = response.json()["error"]
     assert response.status_code == status

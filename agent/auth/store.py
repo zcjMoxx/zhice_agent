@@ -14,6 +14,7 @@ from typing import Any, Iterable
 from agent.auth.passwords import hash_password, verify_password
 from agent.auth.schema import PERMISSIONS, ROLE_NAMES, ROLE_PERMISSIONS, SCHEMA_SQL
 from agent.auth.tokens import generate_token, hash_token
+from agent.protocols.activity import RuntimeActivityEvent
 from agent.protocols.auth import ActorContext, AuditEvent, AuthLogin, UserAccount
 
 DEFAULT_AUTH_TTL = timedelta(days=7)
@@ -78,6 +79,11 @@ class SQLiteAuthStore:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(SCHEMA_SQL)
+            turn_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(turn_runs)").fetchall()
+            }
+            if "duration_ms" not in turn_columns:
+                connection.execute("ALTER TABLE turn_runs ADD COLUMN duration_ms INTEGER")
             for key, (description, category) in PERMISSIONS.items():
                 connection.execute(
                     """
@@ -89,6 +95,14 @@ class SQLiteAuthStore:
                     """,
                     (key, description, category),
                 )
+            if PERMISSIONS:
+                placeholders = ", ".join("?" for _ in PERMISSIONS)
+                connection.execute(
+                    f"DELETE FROM permissions WHERE key NOT IN ({placeholders})",
+                    tuple(PERMISSIONS),
+                )
+            else:
+                connection.execute("DELETE FROM permissions")
             for role_key, permission_keys in ROLE_PERMISSIONS.items():
                 role_id = f"role-{role_key}"
                 connection.execute(
@@ -778,8 +792,6 @@ class SQLiteAuthStore:
         event_id = "audit-" + uuid.uuid4().hex
         actor = event.actor
         with self._connect() as connection:
-            self._record_turn_run(connection, event)
-            self._record_tool_call(connection, event)
             connection.execute(
                 """
                 INSERT INTO audit_events(
@@ -811,6 +823,15 @@ class SQLiteAuthStore:
                 ),
             )
         return event_id
+
+    def record_activity(self, event: RuntimeActivityEvent) -> None:
+        """Maintain structured turn/tool runtime indexes without writing audit rows."""
+
+        if not self.is_initialized():
+            return
+        with self._connect() as connection:
+            self._record_turn_run(connection, event)
+            self._record_tool_call(connection, event)
 
     def create_tool_confirmation(
         self,
@@ -991,8 +1012,62 @@ class SQLiteAuthStore:
                 row["metadata"] = {}
         return rows
 
-    def _record_turn_run(self, connection: sqlite3.Connection, event: AuditEvent) -> None:
-        """Maintain turn_runs as a query index beside generic audit events."""
+    def list_turn_runs(
+        self,
+        *,
+        actor_user_id: str,
+        session_id: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return recent structured turn activity for one actor."""
+
+        clauses = ["actor_user_id=?"]
+        values: list[Any] = [actor_user_id]
+        if session_id:
+            clauses.append("session_id=?")
+            values.append(session_id)
+        values.append(max(1, min(int(limit), 500)))
+        query = (
+            "SELECT * FROM turn_runs WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY started_at DESC LIMIT ?"
+        )
+        with self._connect() as connection:
+            return [dict(row) for row in connection.execute(query, values).fetchall()]
+
+    def list_tool_call_records(
+        self,
+        *,
+        actor_user_id: str,
+        session_id: str = "",
+        turn_id: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return recent structured tool activity for one actor."""
+
+        clauses = ["actor_user_id=?"]
+        values: list[Any] = [actor_user_id]
+        if session_id:
+            clauses.append("session_id=?")
+            values.append(session_id)
+        if turn_id:
+            clauses.append("turn_id=?")
+            values.append(turn_id)
+        values.append(max(1, min(int(limit), 500)))
+        query = (
+            "SELECT * FROM tool_call_records WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY started_at DESC LIMIT ?"
+        )
+        with self._connect() as connection:
+            return [dict(row) for row in connection.execute(query, values).fetchall()]
+
+    def _record_turn_run(
+        self,
+        connection: sqlite3.Connection,
+        event: RuntimeActivityEvent,
+    ) -> None:
+        """Maintain the structured turn runtime index."""
 
         actor = event.actor
         if actor is None or actor.user_id is None or not event.action.startswith("chat.turn_"):
@@ -1001,10 +1076,12 @@ class SQLiteAuthStore:
             connection.execute(
                 """
                 INSERT INTO turn_runs(
-                  id, session_id, turn_id, turn_index, actor_user_id, auth_session_id,
+                  turn_id, session_id, turn_index, actor_user_id, auth_session_id,
                   request_id, channel, status, started_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)
-                ON CONFLICT(session_id, turn_id) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'started', ?)
+                ON CONFLICT(turn_id) DO UPDATE SET
+                  session_id=excluded.session_id,
+                  turn_index=excluded.turn_index,
                   actor_user_id=excluded.actor_user_id,
                   auth_session_id=excluded.auth_session_id,
                   request_id=excluded.request_id,
@@ -1012,9 +1089,8 @@ class SQLiteAuthStore:
                   status='started'
                 """,
                 (
-                    "turn-run-" + uuid.uuid4().hex,
-                    event.session_id,
                     event.turn_id,
+                    event.session_id,
                     event.metadata.get("turn_index"),
                     actor.user_id,
                     actor.auth_session_id or "",
@@ -1027,20 +1103,24 @@ class SQLiteAuthStore:
         status = event.action.removeprefix("chat.turn_")
         connection.execute(
             """
-            UPDATE turn_runs SET status=?, finished_at=?, error_code=?
-            WHERE session_id=? AND turn_id=?
+            UPDATE turn_runs SET status=?, finished_at=?, duration_ms=?, error_code=?
+            WHERE turn_id=?
             """,
             (
                 status,
                 _utc_now(),
+                event.metadata.get("duration_ms"),
                 event.reason_code if status == "error" else "",
-                event.session_id,
                 event.turn_id,
             ),
         )
 
-    def _record_tool_call(self, connection: sqlite3.Connection, event: AuditEvent) -> None:
-        """Maintain diagnostic tool_call_records from AgentLoop audit events."""
+    def _record_tool_call(
+        self,
+        connection: sqlite3.Connection,
+        event: RuntimeActivityEvent,
+    ) -> None:
+        """Maintain the structured tool-call runtime index."""
 
         actor = event.actor
         if actor is None or actor.user_id is None or not event.action.startswith("tool."):
@@ -1098,7 +1178,12 @@ class SQLiteAuthStore:
                 """,
                 (
                     _utc_now(),
-                    metadata.get("duration_seconds"),
+                    metadata.get("duration_seconds")
+                    or (
+                        float(metadata["duration_ms"]) / 1000
+                        if metadata.get("duration_ms") is not None
+                        else None
+                    ),
                     1 if event.action == "tool.call_error" else 0,
                     event.reason_code,
                     metadata.get("exit_code"),

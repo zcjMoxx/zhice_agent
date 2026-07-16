@@ -59,3 +59,9 @@
 - 输入：workspace 内安全命令、子目录 cwd、非 0 exit code、超时命令、长输出和 secret-like 输出。
 - 预期：成功命令返回 stdout/stderr/exit_code；失败、超时、cwd 越界和策略拦截都返回 `ToolResult(is_error=True)`。
 - 检查点：命令只在 workspace 内执行；输出会截断；疑似 secret 会脱敏；危险命令不会真实执行。
+
+### Case 10: Memory 工具
+
+- 输入：绑定 actor MemoryContext 的 `memory_read(mode=list/search)` 与用户对话授权后的 `memory_write`。
+- 预期：列表按固定类别整理并返回分页数量，搜索要求具体 query，摘要读取要求 session id；写入支持 add/replace/delete。
+- 检查点：敏感内容拒绝时不回显原文；ToolResult metadata 只包含 id/category/mode/count 等安全字段。

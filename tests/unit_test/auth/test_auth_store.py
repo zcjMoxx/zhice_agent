@@ -29,54 +29,52 @@ def test_init_owner_seeds_roles_permissions_and_authenticates(tmp_path):
     assert store.is_initialized() is True
 
 
-def test_viewer_has_complete_safe_self_service_permissions(tmp_path):
+def test_viewer_has_no_extra_privileges(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     store.initialize_schema()
     viewer = store.create_user("alice", "Alice", "alice-password")
 
     actor = store.actor_for_user(viewer.id, channel="web")
 
-    assert {
-        "auth.me.read",
-        "session.create",
-        "session.read.own",
-        "session.write.own",
-        "session.delete.own",
-        "chat.run",
-        "chat.stop.own",
-        "turn.read.own",
-        "model.view",
-        "model.switch",
-        "tool.readonly.use",
-        "tool.exec.safe",
-        "skill.read",
-    } <= actor.permission_keys
-    assert {
-        "auth.users.manage",
-        "auth.roles.manage",
-        "session.manage.any",
-        "chat.stop.any",
-        "tool.exec.dangerous",
-        "skill.sync",
-        "audit.read",
-    }.isdisjoint(actor.permission_keys)
+    assert actor.role_keys == frozenset({"viewer"})
+    assert actor.permission_keys == frozenset()
 
 
-def test_reinitializing_schema_restores_current_viewer_permissions(tmp_path):
+def test_reinitializing_schema_removes_obsolete_baseline_permissions(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     store.initialize_schema()
     viewer = store.create_user("alice", "Alice", "alice-password")
 
     with sqlite3.connect(store.path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
-            "DELETE FROM role_permissions WHERE role_id='role-viewer' AND permission_key='model.switch'"
+            "INSERT INTO permissions(key, description, category) VALUES (?, ?, ?)",
+            ("model.switch", "obsolete baseline capability", "model"),
+        )
+        connection.execute(
+            "INSERT INTO role_permissions(role_id, permission_key) VALUES (?, ?)",
+            ("role-viewer", "model.switch"),
+        )
+        connection.execute(
+            "INSERT INTO user_permissions(user_id, permission_key, granted_at) VALUES (?, ?, ?)",
+            (viewer.id, "model.switch", "2026-07-16T00:00:00+00:00"),
         )
 
-    assert not store.actor_for_user(viewer.id, channel="web").has_permission("model.switch")
+    assert store.actor_for_user(viewer.id, channel="web").has_permission("model.switch")
 
     store.initialize_schema()
 
-    assert store.actor_for_user(viewer.id, channel="web").has_permission("model.switch")
+    assert not store.actor_for_user(viewer.id, channel="web").has_permission("model.switch")
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM permissions WHERE key='model.switch'"
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM role_permissions WHERE permission_key='model.switch'"
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM user_permissions WHERE permission_key='model.switch'"
+        ).fetchone() is None
 
 
 def test_init_owner_allows_existing_viewer_but_refuses_second_owner(tmp_path):
@@ -230,4 +228,5 @@ def test_external_identity_resolves_to_internal_actor(tmp_path):
     assert actor is not None
     assert actor.user_id == user.id
     assert actor.channel == "feishu"
-    assert "chat.run" in actor.permission_keys
+    assert actor.role_keys == frozenset({"developer"})
+    assert actor.permission_keys == frozenset()

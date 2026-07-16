@@ -50,7 +50,7 @@
 2. 分离 Agent lifecycle log、HTTP access log 和 HTTP server log，避免一个 `--log-level` 同时表达多件事。
 3. 终端日志每行必须带本地日期时间、等级、`component.event` 和关键字段，避免只看到零散消息。
 4. 在 `${ZHICE_AGENT_WORKSPACE}/logs/YYYY-MM-DD/trace.log` 写入结构化 JSONL trace。
-5. 所有 Agent 日志都带 `session_id` 和可用时的 `turn_id`。
+5. JSONL trace 使用 `session_id` 和可用时的 `turn_id` 关联运行轨迹；人读终端日志不重复展开完整内部 ID。
 6. `AgentLoop` 打印 turn、LLM、tool decision、session save 和 stop/error 关键生命周期。
 7. AgentLoop tool dispatch 层打印 tool start/done/error，包含耗时和安全 preview。
 8. `WebRuntime` 沿用已有 chat/session lifecycle log，但 logger 命名和字段与 AgentLoop 对齐。
@@ -108,34 +108,35 @@ zcagent.agent.tool
 zcagent.agent.session
 ```
 
-默认 `info` 输出路标，不输出大对象。终端格式必须带中括号包裹的本地日期时间，不带毫秒；不同部分用 ` | ` 分隔，第三段把面向人的短 component 和 event 合成一个动作段：
+默认 `info` 输出路标，不输出大对象。终端格式必须带中括号包裹的本地日期时间，不带毫秒；不同部分用 ` | ` 分隔。普通事件第三段使用短 `component.event`，Tool 事件直接突出工具名：
 
 ```text
 [YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | key=value ...
+[YYYY-MM-DD HH:MM:SS] | LEVEL | TOOL tool_name | PHASE | key=value ...
 ```
 
 示例：
 
 ```text
-[2026-07-07 21:34:12] | INFO | agent.turn.start | session=chat-20260707 turn=turn-abc input="帮我看一下..."
-[2026-07-07 21:34:13] | INFO | agent.tool.start | session=chat-20260707 turn=turn-abc tool=read_file
-[2026-07-07 21:34:13] | INFO | agent.tool.done | session=chat-20260707 turn=turn-abc tool=read_file ok duration_ms=18 output="..."
-[2026-07-07 21:34:14] | INFO | agent.turn.done | session=chat-20260707 turn=turn-abc duration_ms=2270 output="..."
+[2026-07-07 21:34:12] | INFO | agent.turn.start | user=user001 turn=5 input="帮我看一下..."
+[2026-07-07 21:34:13] | INFO | TOOL read_file | START | user=user001 turn=5
+[2026-07-07 21:34:13] | INFO | TOOL read_file | DONE | user=user001 turn=5 duration=18ms
+[2026-07-07 21:34:14] | INFO | agent.turn.done | turn=5 duration=2.27s output_preview=结论：先检查真实代码路径。
 ```
 
-默认 INFO 只保留路标。`llm.call`、`llm.direct`、`llm.tool_calls`、`session.save`、`web.chat.accepted`、`web.chat.done` 这类重复确认事件降到 DEBUG；需要排查细节时用 `--agent-log-level debug`，或者直接看 workspace `trace.log`。
+默认 INFO 只保留路标。`llm.call`、`llm.done`、`llm.tool_calls` 保留在 DEBUG；`llm.direct`、成功 `session.save`、`web.chat.accepted` 和 `web.chat.done` 已因与主生命周期重复而删除。需要排查细节时用 `--agent-log-level debug`，或者直接看 workspace `trace.log`。
 
 `debug` 增加 LLM/session 细节和 preview：
 
 ```text
-[2026-07-07 21:34:12] | DEBUG | agent.llm.call | session=chat-20260707 turn=turn-abc messages=8 tools=6
-[2026-07-07 21:34:12] | DEBUG | agent.llm.tool_calls | session=chat-20260707 turn=turn-abc count=2 tools=read_file,grep
-[2026-07-07 21:34:14] | DEBUG | agent.llm.direct | session=chat-20260707 turn=turn-abc output="..."
-[2026-07-07 21:34:14] | DEBUG | agent.session.save | session=chat-20260707 turn=turn-abc messages=2
-[2026-07-07 21:34:13] | DEBUG | agent.tool.args | session=chat-20260707 turn=turn-abc tool=exec args={"command":"python -m pytest ..."}
+[2026-07-07 21:34:12] | DEBUG | agent.llm.call | messages=8 tools=6
+[2026-07-07 21:34:12] | DEBUG | agent.llm.tool_calls | count=2 tools=read_file,grep
+[2026-07-07 21:34:14] | DEBUG | agent.llm.done | endpoint=cpa_one model=gpt-5.4 duration_ms=2100
 ```
 
-字段区继续用空格分隔 `key=value`，因为这些字段数量可变；固定区一律使用 ` | ` 分隔，便于人工扫描和复制搜索。
+字段区继续用空格分隔 `key=value`，因为这些字段数量可变；固定区一律使用 ` | ` 分隔。终端 formatter 使用事件专属白名单：`actor_user_id`、`request_id`、`tool_call_id`、完整 `session_id` / `turn_id` 留在 trace，不在普通 Tool 行铺开；终端使用 `username` 和 `turn_index`。
+
+终端中的实际 `duration_ms` 自适应显示为 `duration`：小于一秒使用 ms，小于一分钟使用最多两位小数的 s，分钟级以上四舍五入为整数秒并组合 m/s，小时级组合 h/m/s。Trace 继续保留原始数值 `duration_ms`。
 
 交互式终端允许使用 ANSI 颜色增强可读性：时间段使用和 uvicorn `INFO:` 一致的绿色，`component.event` 段按 component 着色。重定向输出、测试输出或设置 `NO_COLOR` 时保持纯文本。
 
@@ -279,7 +280,7 @@ set-cookie
 - 多行文本压成单行，连续空白折叠为一个空格。
 - user input 默认保留 40 字符以内。
 - assistant output 默认保留 80 字符以内。
-- tool args 在 `info` 不打印；`debug` 打印脱敏后 JSON preview。
+- tool args 不单独生成事件；安全 JSON preview 合并到 `tool.start` 的 trace 字段，普通终端 Tool 行不展开参数。
 - tool output 在 `info` 只打印短 preview；`debug` 最多 200 到 300 字符。
 - provider error message 继续沿用现有安全错误文本，不输出请求体或 secret。
 
@@ -368,10 +369,10 @@ session_logger = logging.getLogger("zcagent.agent.session")
 
 打点：
 
-- chat accepted：`session_id`、`turn_id`。
-- chat done/stopped/error：`session_id`、`turn_id`、duration。
+- chat stopped/error：`session_id`、`turn_id`；普通 accepted/done 由 `turn.start/done` 覆盖。
 - cancel requested：`session_id`、`turn_id`。
 - session renamed/deleted：`session_id`。
+- model switched/reset：仅在 Session 有效模型真实变化时记录；不再逐 Turn 记录 `model.turn_selected`。
 
 WebRuntime 负责 transport/app shell 层生命周期，不重复打印 LLM 和 tool 细节。
 
@@ -390,14 +391,13 @@ session_logger = logging.getLogger("zcagent.agent.session")
 
 - turn start：`session_id`、`turn_id`、`turn_index`、user preview。
 - LLM call：`session_id`、`turn_id`、messages count、tools count。
-- LLM direct output：assistant preview。
 - LLM tool decision：工具名列表。
-- tool start/done/error：工具名、`ok|error`、duration、output preview。
+- tool start/done/error：工具名、安全参数摘要、`ok|error`、duration、output preview；不再拆分 `tool.args` 事件。
 - tool iteration limit。
 - cancellation stopped。
 - LLM/provider error：error type、安全摘要。
 - session save failed。
-- turn done/error/stopped：duration。
+- turn done：duration + 最终回答第一条非空行的 `output_preview`，最多 80 字符，终端和 trace 都保留；error/stopped 继续记录状态，不伪造正常回答。
 
 注意：
 
@@ -430,18 +430,17 @@ zcagent gateway
 
 browser / external WS / REST
   -> WebRuntime.run_chat_events(session_id, message, turn_id)
-      -> log chat accepted
       -> AgentLoop.run_turn(session_id, user_text, turn_id)
           -> log turn start
           -> ContextBuilder builds prompt/history/current user
           -> log LLM call
           -> LLMProvider.chat or stream_chat
-          -> log direct output or tool decision
+          -> log LLM done or tool decision
           -> ToolRegistry.execute(...)
               -> log tool execution result
           -> SessionStore.append(...)
           -> log turn done/stopped/error
-      -> log chat done/stopped/error
+      -> only log Web stop/error or real model state changes
 ```
 
 ---

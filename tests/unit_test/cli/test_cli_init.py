@@ -485,6 +485,48 @@ def test_cli_tools_lists_default_tools(tmp_path, capsys, monkeypatch):
     assert "load_skills" in output
     assert "run_skill_script" not in output
     assert "sync_skills" in output
+    assert "memory_read" in output
+    assert "memory_write" in output
+
+
+def test_cli_memory_defaults_to_showing_current_memory(tmp_path, capsys, monkeypatch):
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    inputs = iter(["/memory", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main(["--session", "alpha"])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "Memory is empty." in output
+
+
+def test_cli_memory_shows_current_memory(tmp_path, capsys, monkeypatch):
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    memory = tmp_path / "contexts" / "memory" / "MEMORY.md"
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text(
+        "# ZhiCe-Agent Memory\n\n<!-- zhice-memory:start -->\n\n"
+        "## profile\n\n## preferences\n\n- 喜欢吃西瓜\n\n"
+        "## projects\n\n## constraints\n\n## decisions\n\n"
+        "<!-- zhice-memory:end -->\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    inputs = iter(["/memory", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "preferences:" in output
+    assert "喜欢吃西瓜" in output
 
 
 def test_cli_help_keeps_skill_sync_as_skills_tip(tmp_path, capsys, monkeypatch):
@@ -503,6 +545,8 @@ def test_cli_help_keeps_skill_sync_as_skills_tip(tmp_path, capsys, monkeypatch):
     assert result == 0
     assert "/skills" in output
     assert "/skills sync" not in output
+    assert "show current Memory" in output
+    assert "/memory session" not in output
     assert "/stop" not in output
 
 
@@ -782,6 +826,7 @@ def _write_runtime_prompts(workspace):
     (prompts_dir / "identity.md").write_text("identity prompt", encoding="utf-8")
     (prompts_dir / "tool_use_policy.md").write_text("tool policy prompt", encoding="utf-8")
     (prompts_dir / "skills_intro.md").write_text("skills intro prompt", encoding="utf-8")
+    (prompts_dir / "memory_extraction.md").write_text("extract prompt", encoding="utf-8")
 
 
 def _write_demo_skill(workspace):

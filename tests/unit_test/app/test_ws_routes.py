@@ -44,6 +44,7 @@ def test_ws_message_streams_text_and_done(tmp_path):
     assert done["turn_id"] == turn_id
     assert done["data"]["assistant"]["content"] == "one two"
     assert runtime.chat_calls == [("alpha", "hello", "web", turn_id)]
+    assert runtime.request_ids == [""]
 
 
 def test_ws_stop_frame_calls_runtime_cancel(tmp_path):
@@ -206,6 +207,7 @@ class _WsRuntime:
     def __init__(self, chunks: list[str] | None = None):
         self.chunks = chunks or ["ok"]
         self.chat_calls: list[tuple[str, str, str, str]] = []
+        self.request_ids: list[str] = []
         self.cancelled_sessions: list[str] = []
 
     def run_chat_events(
@@ -216,8 +218,10 @@ class _WsRuntime:
         turn_id: str | None = None,
         on_event=None,
         command_profile: str = "web",
+        request_id: str = "",
     ):
         self.chat_calls.append((session_id, message, command_profile, turn_id or ""))
+        self.request_ids.append(request_id)
         for chunk in self.chunks:
             if on_event is not None:
                 on_event({"type": "text_delta", "content": chunk})

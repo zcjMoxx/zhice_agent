@@ -6,11 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from agent.protocols.auth import ActorContext
+from agent.protocols.diagnostics import DiagnosticContext
+from agent.protocols.memory import MemoryStore
 from agent.protocols.skill import SkillProvider
 from agent.protocols.tool import ToolResult
 from agent.skills.sync import SkillSourceSync
 from agent.tools.diagnostics import DiagnoseRecentActivityTool
 from agent.tools.exec import ExecTool
+from agent.tools.memory import MemoryReadTool, MemoryWriteTool
 from agent.tools.readonly import GrepTool, ListDirTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
 from agent.tools.skill import LoadSkillsTool, SyncSkillsTool
@@ -30,6 +33,9 @@ class UserScopedToolProvider:
         skills: SkillProvider | None = None,
         skill_sync: SkillSourceSync | None = None,
         diagnostics=None,
+        diagnostic_context: DiagnosticContext | None = None,
+        memory_store: MemoryStore | None = None,
+        memory_safety=None,
     ):
         primary_tools = [
             ListDirTool(files_dir),
@@ -43,7 +49,23 @@ class UserScopedToolProvider:
             primary_tools.append(SyncSkillsTool(files_dir, skill_sync))
         if diagnostics is not None:
             primary_tools.append(
-                DiagnoseRecentActivityTool(files_dir, actor=actor, diagnostics=diagnostics)
+                DiagnoseRecentActivityTool(
+                    files_dir,
+                    actor=actor,
+                    diagnostics=diagnostics,
+                    context=diagnostic_context,
+                )
+            )
+        if memory_store is not None and memory_safety is not None:
+            primary_tools.extend(
+                [
+                    MemoryReadTool(files_dir, store=memory_store),
+                    MemoryWriteTool(
+                        files_dir,
+                        store=memory_store,
+                        safety=memory_safety,
+                    ),
+                ]
             )
         self._primary = ToolRegistry(primary_tools)
         self._shared = ToolRegistry(
@@ -75,4 +97,3 @@ class UserScopedToolProvider:
             output = f"{result.output}\nDIR  shared" if result.output else "DIR  shared"
             return ToolResult(output=output, metadata=dict(result.metadata))
         return result
-

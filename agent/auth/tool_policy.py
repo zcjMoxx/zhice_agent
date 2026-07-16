@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from agent.protocols.errors import ErrorCode
 from agent.protocols.tool import ToolExecutionContext, ToolExecutionDecision
 from agent.tools.shell_policy import validate_command
 
-_TOOL_PERMISSIONS = {
-    "list_dir": "tool.readonly.use",
-    "read_file": "tool.readonly.use",
-    "grep": "tool.readonly.use",
-    "load_skills": "skill.read",
+_PRIVILEGED_TOOL_PERMISSIONS = {
     "sync_skills": "skill.sync",
-    "diagnose_my_recent_activity": "turn.read.own",
 }
 
 
@@ -24,8 +21,10 @@ class RbacToolExecutionPolicy:
 
         if tool_name == "exec":
             return self._decide_exec(args, context)
-        permission_key = _TOOL_PERMISSIONS.get(tool_name, "tool.readonly.use")
-        if not context.actor.has_permission(permission_key):
+        if tool_name == "memory_write":
+            return self._decide_memory_write(args, context)
+        permission_key = _PRIVILEGED_TOOL_PERMISSIONS.get(tool_name, "")
+        if permission_key and not context.actor.has_permission(permission_key):
             return _denied(permission_key)
         return ToolExecutionDecision(
             action="allow",
@@ -47,8 +46,8 @@ class RbacToolExecutionPolicy:
                 risk_level=result.risk_level,
                 risk_category=result.risk_category,
             )
-        permission_key = result.required_permission or "tool.exec.safe"
-        if not context.actor.has_permission(permission_key):
+        permission_key = result.required_permission or ""
+        if permission_key and not context.actor.has_permission(permission_key):
             return ToolExecutionDecision(
                 action="deny",
                 code=ErrorCode.AUTH_PERMISSION_DENIED,
@@ -65,6 +64,39 @@ class RbacToolExecutionPolicy:
             risk_level=result.risk_level,
             risk_category=result.risk_category,
             audit_metadata={"command_category": result.category},
+        )
+
+    @staticmethod
+    def _decide_memory_write(args, context: ToolExecutionContext) -> ToolExecutionDecision:
+        authorization = str(args.get("authorization") or "") if isinstance(args, dict) else ""
+        if authorization not in {"user_explicit", "user_confirmed"}:
+            return ToolExecutionDecision(
+                action="deny",
+                code="MEMORY_USER_AUTHORIZATION_REQUIRED",
+                message="Memory write requires conversational user authorization.",
+                permission_key="",
+                risk_level="low",
+                risk_category="memory_write",
+            )
+        content = args.get("content") if isinstance(args, dict) else ""
+        return ToolExecutionDecision(
+            action="allow",
+            code="MEMORY_WRITE_AUTHORIZED",
+            message="Memory write authorized by the user conversation.",
+            permission_key="",
+            risk_level="low",
+            risk_category="memory_write",
+            audit_metadata={
+                "operation": str(args.get("operation") or "") if isinstance(args, dict) else "",
+                "category": str(args.get("category") or "") if isinstance(args, dict) else "",
+                "authorization": authorization,
+                "content_length": len(content) if isinstance(content, str) else 0,
+                "content_hash": (
+                    hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    if isinstance(content, str) and content
+                    else ""
+                ),
+            },
         )
 
 

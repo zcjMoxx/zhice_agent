@@ -1,5 +1,7 @@
 # ZhiCe-Agent 用户登录与权限执行边界设计记录
 
+> 说明：当前代码已于 2026-07-16 将登录用户日常功能收敛为基础能力，RBAC 只保留跨用户、管理、审计、危险执行和全局同步特权；本文早期的 `*.own`、safe tool 等权限清单不再适用。请参考 `docs_design/2026-07-16-authenticated-user-baseline-capabilities-design.md` 和当前 Part 9 活文档。
+
 > 说明：2026-07-10 对模型偏好范围做了补充修正，并在后续讨论中最终确定为 session 级持久化：不增加用户默认层，`/model reset` 清当前 session 偏好，`/new` 创建使用系统默认的新 session。详见 `docs_design/2026-07-10-session-model-preference-scope-design.md` 和当前 Part 9 活文档。本文其余正文保留当时方案原貌。
 >
 > 说明：后续实现已将最高特权账号收敛为唯一 Owner；Owner Web 只复用全局 `contexts/sessions*`，列出会话时为未索引 CLI 历史补 Owner index，不复制、不移动、不回退到 Owner 用户目录。普通用户 CLI 历史导入暂未纳入当前实现。当前口径以 Part 9 活文档和 `docs_design/2026-07-14-owner-cli-session-index-reconciliation-design.md` 为准。

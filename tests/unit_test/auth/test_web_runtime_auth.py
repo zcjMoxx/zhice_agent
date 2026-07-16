@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from agent.app.auth import AuthService
 from agent.app.runtime import ActiveTurn, WebRuntime
 from agent.auth.audit import SqliteAuditSink
@@ -31,6 +33,47 @@ def test_web_runtime_model_preference_isolated_by_session_and_user_directory(tmp
     assert user_context.sessions_meta_dir.joinpath("session-a.json").is_file()
     assert not user_context.sessions_meta_dir.joinpath("session-b.json").is_file()
     assert admin.id != viewer.id
+
+
+def test_same_model_preference_does_not_emit_switched_event(tmp_path, caplog):
+    store = SQLiteAuthStore(tmp_path / "state" / "auth.sqlite3")
+    store.initialize_schema()
+    viewer = store.create_user("viewer", "Viewer", "viewer-password")
+    runtime = _runtime(tmp_path, store)
+    actor = store.actor_for_user(viewer.id, channel="web")
+    caplog.set_level("INFO", logger="zcagent.agent.web")
+
+    runtime.set_model_preference(actor, "session-a", "model-a")
+    runtime.set_model_preference(actor, "session-a", "model-b")
+    runtime.set_model_preference(actor, "session-a", "model-b")
+
+    switched = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "model.switched"
+    ]
+    assert len(switched) == 1
+    assert switched[0].fields["model"] == "model-b"  # type: ignore[attr-defined]
+
+
+def test_background_memory_notification_is_shown_once_on_next_turn(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "state" / "auth.sqlite3")
+    owner = store.initialize_owner("owner", "Owner", "password-123")
+    runtime = _runtime(tmp_path, store)
+    runtime.agent_loop = _CapturingAgentLoop()
+    actor = store.actor_for_user(owner.id, channel="web")
+    notification = tmp_path / "contexts" / "memory" / "extraction_state" / "pending_notification.json"
+    notification.parent.mkdir(parents=True)
+    notification.write_text(
+        json.dumps(["回答时先给结论，最多列三点。"], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    first = runtime.run_chat_events(actor, "owner-chat", "hello")
+    second = runtime.run_chat_events(actor, "owner-chat", "again")
+
+    assert first.content == "💾 根据上次对话，我记住了：回答时先给结论，最多列三点。\n\ndone"
+    assert second.content == "done"
 
 
 def test_active_turn_key_prevents_other_user_stop_but_admin_can_stop_any(tmp_path):
@@ -71,6 +114,21 @@ def test_owner_chat_uses_workspace_tools_while_viewer_stays_in_user_files(tmp_pa
     )
     assert "DIR  contexts" in owner_kwargs["tools_override"].execute("list_dir", {"path": "."}).output
     assert "DIR  contexts" not in viewer_kwargs["tools_override"].execute("list_dir", {"path": "."}).output
+    owner_tool_names = {
+        item["function"]["name"] for item in owner_kwargs["tools_override"].definitions()
+    }
+    viewer_tool_names = {
+        item["function"]["name"] for item in viewer_kwargs["tools_override"].definitions()
+    }
+    assert {"memory_read", "memory_write"} <= owner_tool_names
+    assert {"memory_read", "memory_write"} <= viewer_tool_names
+    owner_kwargs["tools_override"].execute("memory_read", {"mode": "list"})
+    viewer_kwargs["tools_override"].execute("memory_read", {"mode": "list"})
+    assert (tmp_path / "contexts" / "memory" / "MEMORY.md").is_file()
+    assert (
+        tmp_path / "contexts" / "users" / viewer.id / "memory" / "MEMORY.md"
+    ).is_file()
+    assert not (tmp_path / "contexts" / "users" / owner.id / "memory").exists()
 
 
 def _runtime(tmp_path, store):

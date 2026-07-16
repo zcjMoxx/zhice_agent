@@ -6,9 +6,9 @@
 >
 > 承接文档：`docs_design/zhice-agent-part8-gateway-agent-logging-design.md`
 >
-> 设计依据：`docs_design/2026-07-06-next-stage-sequencing-design.md`、`docs_design/2026-07-08-user-auth-permission-boundary-design.md`、`docs_design/2026-07-10-session-model-preference-scope-design.md`、`docs_design/2026-07-10-owner-admin-delegation-design.md`、`docs_design/2026-07-11-password-change-reauthentication-design.md`、`docs_design/2026-07-11-viewer-normal-use-permissions-design.md`
+> 设计依据：`docs_design/2026-07-06-next-stage-sequencing-design.md`、`docs_design/2026-07-08-user-auth-permission-boundary-design.md`、`docs_design/2026-07-10-session-model-preference-scope-design.md`、`docs_design/2026-07-10-owner-admin-delegation-design.md`、`docs_design/2026-07-11-password-change-reauthentication-design.md`、`docs_design/2026-07-16-authenticated-user-baseline-capabilities-design.md`
 >
-> 当前状态：第九部分 Owner 权限模型已落地。当前代码实现本地 SQLite auth/RBAC、部署 Secret 保护的唯一 Web Owner 初始化、CLI Owner 初始化、Owner 前后均可用的普通用户自助注册、Owner 对 `auth.admin.manage` 的直接委派、不可变 Owner 边界、cookie 登录态、个人设置、用户上下文与 session_index、session 模型偏好、ToolExecutionPolicy、危险工具确认、audit/诊断和原生静态管理 UI。仍不包含通用审批流、OAuth/SSO、多租户或工程化前端。
+> 当前状态：第九部分身份与特权边界已落地。登录用户默认拥有账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 等基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。Owner 是 CLI 本地 workspace operator 在 Web 端的登录身份：认证表示不同，但共用全局 workspace、sessions、metadata 和 Memory，不拥有独立的 `contexts/users/{owner_id}`。仍不包含通用审批流、OAuth/SSO、多租户或工程化前端。
 
 ---
 
@@ -201,7 +201,7 @@ ${ZHICE_AGENT_WORKSPACE}/
     sessions_meta/            # CLI 与 Owner Web 会话元数据
     shared/
       readonly/
-    users/
+    users/                     # 只存普通用户，不存 Owner
       {user_id}/
         sessions/             # 非 Owner 用户会话
         sessions_meta/        # 非 Owner 用户会话元数据
@@ -210,14 +210,17 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 规则：
 
-- `contexts/users/{user_id}` 是该用户文件工作区的权限边界。
+- `contexts/users/{user_id}` 是普通用户文件工作区的权限边界；Owner 不进入该目录。
 - `contexts/users/{user_id}/files` 是该用户默认可写工作目录，`exec` 和未来文件写入工具默认只在这里工作。
 - Owner 的 Web 会话只复用 CLI 的 `contexts/sessions` 和 `contexts/sessions_meta`，不回退到 Owner 用户目录；普通用户仍使用自己的 `contexts/users/{user_id}/sessions*`。
+- Owner 是 CLI workspace operator 的 Web 登录投影，除认证记录、session index 和 audit actor 外不形成第二套物理存储身份。
 - `sessions/` 和 `sessions_meta/` 是系统维护的对话记录与元数据目录，普通工具默认不可写，避免误改会话历史。
 - `contexts/shared/readonly` 是普通用户可读的公共资料区，不能包含其它用户敏感信息；拥有 `admin` 角色的用户可维护。
 - `logs/` 是系统级运行 trace，不放进用户目录。
 - `state/auth.sqlite3` 是运行状态数据库，不属于配置模板。
 - `{user_id}` 必须是稳定内部用户 id，不能使用可改名的 username。
+
+> 当前实现：`FilesystemUserContextResolver.resolve(..., use_workspace_context=True)` 直接返回 workspace 根目录和全局 `contexts/sessions*`，不会创建或使用 `contexts/users/{owner_id}`。参数名明确表达这是完整 workspace operator 上下文，而不只是切换 session 路径。历史残留目录不自动删除，避免误删既有文件。
 
 未来接入飞书、QQ 等渠道时，不在 `contexts/users/{user_id}` 下按渠道再拆权限边界。外部渠道身份通过数据库映射到内部 `user_id`；如果确实需要保存渠道文件，可在 `files/channels/{channel}/` 下组织，但权限边界仍然是内部用户。
 
@@ -316,7 +319,7 @@ class ActorContext:
 - app shell 负责从 cookie / token 解析 actor。
 - core 层只消费 ActorContext，不查询用户库。
 - Web 和外部渠道必须解析到 DB 内部 `user_id` 后才能进入用户目录。
-- CLI 是本地 no-login 操作者入口，可使用 `actor_type=local_operator` 且 `user_id=None` 或保留审计用哨兵值；它不写入 `contexts/users/{user_id}`，也不是 DB 里的默认拥有 `admin` 角色的用户。
+- CLI 使用 `actor_type=local_operator` 的 no-login 表示，Web 使用唯一 `owner` DB 账号的登录表示；两者是同一个 workspace operator，共用全局物理目录。Owner 的 DB id 用于认证、权限、索引和审计，不用于创建 Owner 用户目录。
 - CLI 仍要经过 tool policy、危险命令策略、确认、超时、脱敏和审计策略。
 - ActorContext 不携带 password hash、token、cookie 或完整请求头。
 
@@ -541,9 +544,8 @@ CLI 与 Owner Web 写入全局 `contexts/sessions_meta/{session_id}.json`；其�
 
 ```sql
 CREATE TABLE turn_runs (
-  id TEXT PRIMARY KEY,
+  turn_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
-  turn_id TEXT NOT NULL,
   turn_index INTEGER,
   actor_user_id TEXT NOT NULL REFERENCES users(id),
   auth_session_id TEXT NOT NULL DEFAULT '',
@@ -552,15 +554,14 @@ CREATE TABLE turn_runs (
   status TEXT NOT NULL,
   started_at TEXT NOT NULL,
   finished_at TEXT,
-  error_code TEXT NOT NULL DEFAULT '',
-  UNIQUE(session_id, turn_id)
+  error_code TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX idx_turn_runs_session ON turn_runs(session_id, started_at);
 CREATE INDEX idx_turn_runs_actor ON turn_runs(actor_user_id, started_at);
 ```
 
-`turn_runs` 是 audit 关联表，不替代 JSONL message。
+`turn_runs` 是 Runtime Activity 运行索引，不替代 JSONL message。`turn_id` 已经全局唯一，直接作为主键，不再额外生成重复的 `turn-run-*` id。本地项目不保留旧表兼容结构。
 
 ### 6.7 tool_call_records
 
@@ -668,133 +669,84 @@ Audit 与 trace 的分工：
 
 ---
 
-## 7. 权限 key
+## 7. 基础能力与特权 key
 
-### 7.1 Auth / 用户管理
+### 7.1 登录用户基础能力
+
+以下功能是每个已认证内部用户的基础能力，不进入 RBAC：
+
+- 查看和修改自己的资料、修改自己的密码。
+- 创建、读取、改名、清空和删除自己的 Session。
+- 发起聊天、停止自己的活动 turn、读取自己的 turn 信息。
+- 查看模型并设置或重置自己 Session 的模型偏好。
+- 使用只读工具、低风险 `exec` 和已安装 Skill。
+- 查询自己的近期诊断。
+- 读取自己的 Memory；在获得对话式用户授权后写入自己的 Memory；汇总自己的 Session。
+
+基础能力不等于取消边界。Session、files、metadata 和 Memory 继续通过 `actor.user_id` 与资源 owner 匹配来隔离；访问其他用户资源默认隐藏，不能通过猜测 id 绕过。
+
+### 7.2 特权权限
+
+当前 `PERMISSIONS` 只包含：
 
 ```text
-auth.me.read
 auth.users.read
 auth.users.manage
+auth.admin.manage
 auth.roles.read
 auth.roles.manage
-```
-
-### 7.2 Session
-
-```text
-session.create
-session.read.own
-session.write.own
-session.delete.own
 session.manage.any
-```
-
-说明：
-
-- `session.write.own` 包含 rename、clear、append chat turn。
-- `session.manage.any` 允许拥有该权限的用户查看、转移、删除任意 session。
-- 第一版不做共享 session，所以没有 `session.share`。
-
-### 7.3 Chat / Turn
-
-```text
-chat.run
-chat.stop.own
 chat.stop.any
-turn.read.own
 turn.read.any
-```
-
-### 7.4 Model
-
-```text
-model.view
-model.switch
-```
-
-第一版模型偏好直接按 session 隔离：
-
-- `model.view` 返回当前 actor 可访问的当前 session 有效 endpoint/model 和可选模型。
-- `model.switch` 允许修改或重置当前 session 的模型偏好；它属于普通用户正常使用能力，默认授予 `viewer`、`developer`、`admin` 和 `owner`，但权限判断不能硬编码角色名。
-- 同一用户的不同 session 可以使用不同模型；不同用户、不同渠道 session 之间也不共享可变偏好。
-- `/model reset` 清除当前 session 偏好，恢复系统默认 endpoint/model。
-- `/new` 创建新的 session id；新 session 没有偏好，因此使用系统默认，不继承旧 session 的选择。
-- 第一版不增加用户默认模型，也不设计 `session -> user -> system` 的额外继承层。
-
-WebRuntime 禁止通过共享 `EndpointFailoverProvider.set_preferred()` 修改 gateway 全局状态。每个 turn 应先解析当前 session metadata，再绑定 turn-local `LLMProvider` 或等价的 call-scoped model selection。首选模型 failover 只影响当前 turn 的实际调用，不反向覆盖 session 保存的偏好。
-
-### 7.5 Tools / Skills
-
-```text
-tool.readonly.use
-tool.exec.safe
 tool.exec.dangerous
-skill.read
 skill.sync
-```
-
-映射建议：
-
-```text
-list_dir/read_file/grep -> tool.readonly.use
-load_skills             -> skill.read
-sync_skills             -> skill.sync
-exec safe               -> tool.exec.safe
-exec dangerous          -> tool.exec.dangerous + confirmation
-```
-
-`tool.exec.dangerous` 不是“任意删改本机”的许可。它只表示用户可以请求进入危险命令确认流程；最终仍受 command policy、用户 `files/` 写入边界、workspace guard 和确认结果约束。具体风险类型继续写入 `risk_category`，例如 `network`、`destructive`、`env_dump`、`unsupported_shell`。
-
-### 7.6 Audit
-
-```text
 audit.read
 audit.export
 ```
 
-第一版可以先实现 `audit.read`。`audit.export` 留给后续导出文件能力。
+- `session.manage.any`、`chat.stop.any`、`turn.read.any` 只用于跨用户范围。
+- `tool.exec.dangerous` 只允许请求进入高风险命令确认流程，不能绕过 command policy、workspace guard、永久禁止项或用户确认。
+- `skill.sync` 会改变全局 Skill source 状态，因此保留为特权；读取和使用已安装 Skill 是基础能力。
+- 用户、角色和审计接口继续检查对应特权。
+
+### 7.3 Ownership 与 permission
+
+```text
+资源属于当前 actor
+  -> 基础能力直接允许
+
+资源属于其他 actor
+  -> 默认拒绝或表现为不存在
+  -> 具有对应 any/manage 特权时才允许
+```
+
+因此不再保留 `session.read.own`、`session.write.own`、`memory.read.own` 等重复表达 ownership 的 key。`/api/auth/me` 返回的 `permissions` 现在只表示额外特权，不是完整功能清单。
+
+模型偏好仍按 Session 隔离；每个 turn 绑定 call-scoped provider，不修改 gateway 共享 provider 的全局状态。
 
 ---
 
 ## 8. 默认角色
 
-`owner` 是唯一永久最高角色；`admin` 是日常运营角色。CLI 本地操作者不因此自动变成 DB 用户。普通 Admin 默认不能任命管理员；只有 Owner 和被 Owner 直接委派 `auth.admin.manage` 的 Admin 可以提升或降级普通 Admin，且该委派不会传播。
+`owner` 是 CLI workspace operator 在 Web 端的唯一永久最高身份；`admin` 是日常运营角色。CLI 入口不要求登录或持有 DB token，但与 Owner 表示同一个本地运维主体。普通 Admin 默认不能任命管理员；只有 Owner 和被 Owner 直接委派 `auth.admin.manage` 的 Admin 可以提升或降级普通 Admin，且该委派不会传播。
 
 ### 8.1 owner
 
-用途：唯一系统拥有者。拥有全部权限，不能被禁用、删除、降级或通过普通角色管理修改。Web 初始化受 `ZHICE_AGENT_SETUP_TOKEN` 保护；CLI 可初始化或恢复同一个 Owner。
+用途：唯一系统拥有者。拥有全部特权，不能被禁用、删除、降级或通过普通角色管理修改。Web 初始化受 `ZHICE_AGENT_SETUP_TOKEN` 保护；CLI 可初始化或恢复同一个 Owner。
 
 ### 8.2 admin
 
-用途：运营用户和系统。默认拥有用户管理、运行管理、审计和诊断能力，但不包含 `auth.admin.manage` 与 `auth.roles.manage`。
+用途：用户与运行管理。默认拥有用户读取/管理、角色读取和跨用户运行管理能力，但不包含管理员任命、角色权限修改、危险执行、Skill 同步和审计特权。
 
 权限：
 
 ```text
-auth.me.read
 auth.users.read
 auth.users.manage
 auth.roles.read
-session.create
-session.read.own
-session.write.own
-session.delete.own
 session.manage.any
-chat.run
-chat.stop.own
 chat.stop.any
-turn.read.own
 turn.read.any
-model.view
-model.switch
-tool.readonly.use
-tool.exec.safe
-tool.exec.dangerous
-skill.read
-skill.sync
-audit.read
-audit.export
 ```
 
 Owner 可向指定 Admin 直接委派：
@@ -807,66 +759,22 @@ auth.admin.manage
 
 ### 8.3 developer
 
-用途：普通本地使用者。
-
-权限：
-
-```text
-auth.me.read
-session.create
-session.read.own
-session.write.own
-session.delete.own
-chat.run
-chat.stop.own
-turn.read.own
-model.view
-model.switch
-tool.readonly.use
-tool.exec.safe
-skill.read
-```
-
-默认不给 `tool.exec.dangerous`、`skill.sync`。这些可以由拥有 `admin` 角色的用户按需授予。
+用途：普通本地使用者。当前没有额外特权，日常功能来自登录用户基础能力。保留该角色用于兼容现有账号和后续可能出现的开发类特权，不为维持角色差异硬造权限。
 
 ### 8.4 viewer
 
-用途：普通注册用户。默认具备账号自身范围内的完整正常使用能力，不具备管理他人、跨用户控制、审计、Skill 同步或危险执行权限。
-
-权限：
-
-```text
-auth.me.read
-session.create
-session.read.own
-session.write.own
-session.delete.own
-chat.run
-chat.stop.own
-turn.read.own
-model.view
-model.switch
-tool.readonly.use
-tool.exec.safe
-skill.read
-```
-
-viewer 可以管理自己的会话、聊天、切换当前会话模型并执行低风险工具。`tool.exec.dangerous`、`session.manage.any`、用户/角色管理和审计能力仍不授予 viewer。
+用途：普通注册用户。额外特权为空，但作为已认证内部用户可以管理自己的会话、聊天、切换当前会话模型、使用安全工具和本人 Memory。跨用户管理、用户/角色管理、审计、Skill 同步和危险执行仍不可用。
 
 ### 8.5 auditor
 
 用途：查看审计。
 
-权限：
+特权：
 
 ```text
-auth.me.read
 audit.read
-session.read.own
-turn.read.own
+turn.read.any
 ```
-
-如需全局审计，可额外授予 `session.manage.any` 和 `turn.read.any`。
 
 ---
 
@@ -984,10 +892,10 @@ POST /api/chat with new session_id
 
 ```text
 PATCH /api/sessions/{session_id}
-  -> require session.write.own or session.manage.any
+  -> owner match, or require session.manage.any for cross-user access
 
 DELETE /api/sessions/{session_id}
-  -> require session.delete.own or session.manage.any
+  -> owner match, or require session.manage.any for cross-user access
 ```
 
 删除当前 active turn 时，active turn key 必须包含 owner：
@@ -1087,7 +995,7 @@ class ToolExecutionDecision:
 
 ```text
 safe
-  -> requires tool.exec.safe
+  -> authenticated user baseline capability
   -> no confirmation
 
 network_or_install
@@ -1110,7 +1018,7 @@ unclassified_destructive
 
 第一版只允许可分类的高风险命令进入确认。无法判断路径范围或命令含义的破坏性 shell 仍拒绝。
 
-权限 UI 第一版只暴露 `tool.exec.safe` 和 `tool.exec.dangerous` 两个开关；诊断、审计和 trace 继续保留更细的 `risk_category`，例如 `network`、`destructive`、`env_dump`、`unsupported_shell`。这样角色配置保持简单，失败分析仍能说清楚风险来源。
+权限 UI 只暴露真正的特权，例如 `tool.exec.dangerous`；安全 exec 不显示权限开关。诊断、审计和 trace 继续保留更细的 `risk_category`，例如 `network`、`destructive`、`env_dump`、`unsupported_shell`。
 
 ### 11.4 确认内容
 
@@ -1179,9 +1087,9 @@ AgentLoop 在 broker 上等待结果。等待期间如果 Web stop 触发 cancel
 
 ---
 
-## 12. Audit 事件
+## 12. Runtime Activity、Audit 与诊断
 
-### 12.1 必须记录的 action
+### 12.1 Security Audit 必须记录的 action
 
 ```text
 auth.login_success
@@ -1194,24 +1102,9 @@ user.updated
 user.disabled
 role.updated
 
-session.created
-session.read
-session.renamed
 session.deleted
-session.claimed
-
-chat.turn_started
-chat.turn_done
-chat.turn_stopped
-chat.turn_error
-
-model.viewed
-model.switched
-model.reset
-model.preference_fallback
 
 tool.call_requested
-tool.call_allowed
 tool.call_denied
 tool.confirmation_requested
 tool.confirmation_approved
@@ -1219,11 +1112,33 @@ tool.confirmation_denied
 tool.confirmation_expired
 tool.call_done
 tool.call_error
+
+memory.write
+audit.read
+audit.export
 ```
 
-`model.switched` / `model.reset` 至少记录 `actor_user_id`、`session_id`、旧/新 endpoint 和 model；`model.preference_fallback` 记录失效 session 偏好、回退原因和本次实际选择。普通 trace 记录当前 turn 的 preferred endpoint/model 与 actual endpoint/model，不能只记录共享 provider 的全局 current model。
+这里的 tool action 只针对危险执行、确认、特权工具、Memory 持久化修改和安全拒绝。普通安全工具的 requested/allowed/done 只写 Runtime Activity 和 trace。
 
-### 12.2 脱敏规则
+### 12.2 Runtime Activity action
+
+```text
+chat.turn_started
+chat.turn_done
+chat.turn_stopped
+chat.turn_error
+
+tool.call_requested
+tool.call_allowed
+tool.call_denied
+tool.confirmation_requested
+tool.call_done
+tool.call_error
+```
+
+模型查看/切换、Provider fallback 和 Session 创建/重命名等普通运行事件写 trace 或业务状态，不写 Security Audit。trace 记录当前 turn 的 preferred/actual 模型、reason code 和耗时。
+
+### 12.3 脱敏规则
 
 Audit 不写：
 
@@ -1248,7 +1163,7 @@ Audit 不写：
 - request id。
 - session_id / turn_id / tool_call_id。
 
-### 12.3 和 trace log 的一致性
+### 12.4 和 trace log 的一致性
 
 同一 tool call 至少应能通过以下字段关联：
 
@@ -1269,45 +1184,55 @@ trace log 仍保持轻量，但第九部分实现阶段开始应尽量写入 `ac
 
 HTTP access / gateway 事件未必都有 `turn_id`，例如登录失败、WebSocket 鉴权失败、session 无权限、模型选择接口失败、请求格式错误。此类事件至少应带 `actor_user_id`（能解析时）、`auth_session_id`、`request_id`、`route`、`status_code` 和安全错误码，方便用户级诊断按用户和时间范围聚合。
 
-### 12.4 用户可见诊断工具
+### 12.5 用户可见诊断工具
 
-普通用户不能直接读取 raw `trace.log`，但可以让 Agent 查询自己的近期问题。诊断只作为受权限控制的工具提供，不放在常驻菜单或独立 REST 表单中：
+普通用户不能直接读取 raw `trace.log`，但可以在当前对话中让 Agent 自助诊断自己的近期问题：
 
 ```text
 diagnose_my_recent_activity
 ```
 
-查询范围：
+Tool 由 WebRuntime 注入当前诊断上下文：
 
 ```text
-actor_user_id = 当前用户
-time_range = 默认最近 30 分钟，可由用户指定更宽范围
-session_id = 可选
-turn_id = 可选
-event_type = 可选
-include_http = 可选
+actor = 当前用户
+session_id = 当前 Session
+current_turn_id = 正在询问诊断的这一轮
+current_request_id = 当前请求
 ```
 
-它可以聚合：
+模型只表达自然诊断意图：
+
+```text
+focus = auto | latency | failure | trend
+target = auto | previous_turn | latest_failure | recent_activity
+minutes = 默认 30
+```
+
+模型和用户都不需要知道 `session_id`、`turn_id` 或 `request_id`。后端自动排除当前诊断 Turn，并从当前 Session 选择上一条已完成 Turn、最近一次失败或近期失败趋势。
+
+证据读取顺序：
 
 ```text
 turn_runs
+  -> 定位目标 Turn、状态、总耗时和 request_id
+
 tool_call_records
-audit_events
-trace.log 中 actor_user_id=当前用户的事件摘要
-HTTP / gateway 中 actor_user_id=当前用户的安全摘要
-用户自己的 sessions JSONL 元数据
+  -> 工具决策、耗时、错误码、timeout 和安全输出尾部
+
+相关 trace
+  -> 补充 LLM 调用耗时、Provider 和 Session 保存证据
 ```
 
-查询不必强制限定当前 turn。只要属于当前用户，就可以按时间范围、session、turn、request_id 或 event_type 缩小。`diagnose_my_recent_activity` 始终只查当前用户自己的摘要；跨用户诊断必须使用未来单独设计的显式管理工具。
+`diagnose_my_recent_activity` 始终只查当前用户和当前 Session。即使当前 actor 是 Developer、Admin 或 Owner，在普通聊天中也不会自动扩大到全系统范围。
 
 诊断工具返回安全摘要，不返回 raw trace、cookie、authorization header、完整请求体、完整响应体、完整 prompt、完整 tool args、完整 tool output、其它用户信息、服务器堆栈或敏感路径。
 
 ### Owner 工作区工具范围
 
-Owner 是本地工作区的运维主体。Owner Web turn 的 `list_dir`、`read_file`、`grep`、`exec`、Skill 工具及 ContextBuilder 均以 `${ZHICE_AGENT_WORKSPACE}` 为根；普通 Web / 外部用户继续以 `contexts/users/{user_id}/files` 为根并只可读取虚拟 `shared/` 挂载。Owner 的全局文件范围不改变 `diagnose_my_recent_activity` 的数据边界：该工具仍只返回 Owner 自己的安全 trace/audit 摘要。
+Owner 是本地工作区的运维主体。Owner Web turn 的文件和 Skill 工具仍以 `${ZHICE_AGENT_WORKSPACE}` 为根，但普通聊天中的 `diagnose_my_recent_activity` 仍只返回 Owner 自己当前 Session 的安全 activity/trace 摘要。全系统诊断放入后续独立监控平台。
 
-### 12.5 用户可见诊断报告规范
+### 12.6 用户可见诊断报告规范
 
 用户问“刚才为什么失败了”时，Agent 不能只回答“超时了”或只给错误码。诊断报告必须区分：
 
@@ -1319,27 +1244,28 @@ Owner 是本地工作区的运维主体。Owner Web turn 的 `list_dir`、`read_
 下一步建议
 ```
 
-诊断结果建议结构：
+当前诊断结果结构：
 
 ```json
 {
-  "summary": "exec 工具在运行 pytest 时超时，失败发生在工具执行阶段。",
+  "status": "diagnosed",
+  "focus": "failure",
+  "target": {
+    "session_id": "自动解析",
+    "turn_id": "自动解析",
+    "request_id": "自动关联"
+  },
+  "summary": "上一轮失败发生在 exec 工具执行阶段。",
   "failure_stage": "tool.exec",
-  "failure_type": "timeout",
-  "probable_cause": "命令输出停在 test_runtime_commands.py::test_stop，30 秒内没有继续输出，推断是该用例或其等待条件卡住；不是权限拒绝，也不是模型调用失败。",
-  "evidence": [
-    "tool_name=exec",
-    "command_preview=python -m pytest ...",
-    "timeout_seconds=30",
-    "stdout_tail=... test_runtime_commands.py::test_stop",
-    "trace shows tool.start followed by COMMAND_TIMEOUT"
-  ],
-  "confidence": "medium",
+  "cause_code": "COMMAND_TIMEOUT",
+  "confirmed_facts": ["tool=exec", "duration_ms=30000"],
+  "probable_cause": "命令超过配置的执行时间限制。",
+  "confidence": "high",
+  "evidence": [],
   "next_actions": [
-    "单独运行该测试并加 -vv -s",
-    "检查 stop/cancellation 等待条件",
-    "必要时提高 timeout 只用于验证，不把超时掩盖成成功"
-  ]
+    "根据 stdout/stderr 安全尾部缩小复现范围"
+  ],
+  "limitations": []
 }
 ```
 
@@ -1352,7 +1278,28 @@ Owner 是本地工作区的运维主体。Owner Web turn 的 `list_dir`、`read_
 下一步：用更小范围或 verbose 参数重跑。
 ```
 
-为支持这类报告，`tool_call_records` 和 trace 至少要保留安全字段：
+### 12.7 Runtime Activity 与 Security Audit
+
+`turn_runs`、`tool_call_records` 由独立 `RuntimeActivitySink` 维护，不再通过 AuditSink 的副作用更新。
+
+```text
+Runtime Activity
+  -> 普通 turn 生命周期
+  -> 普通工具 requested/decision/result
+  -> 失败、耗时和诊断索引
+
+Security Audit
+  -> 登录和账号安全
+  -> 用户、角色和特权管理
+  -> 跨用户访问
+  -> 危险工具、确认和安全拒绝
+  -> Memory 持久化修改安全摘要
+  -> Session 删除等安全相关操作
+```
+
+普通聊天成功、普通安全工具成功、普通成功 HTTP 请求、模型查看/切换等运行流水不再写入 audit；它们继续存在于 trace、业务状态或 activity records 中。
+
+为支持诊断，`tool_call_records` 和 trace 至少保留安全字段：
 
 ```text
 tool_name
@@ -1427,12 +1374,10 @@ HTTP 错误 body 统一为 `error.status/code/message/request_id/details`。HTTP
 
 ```text
 GET  /api/models?session_id={session_id}
-  -> require model.view
   -> 校验 actor 对 session 的访问权限
   -> 返回当前 session 的 effective endpoint/model 和可选模型
 
 POST /api/model/preference
-  -> require model.switch
   -> 请求体携带 session_id
   -> 校验 actor 对 session 的写权限
   -> 校验 endpoint/model
@@ -1440,7 +1385,6 @@ POST /api/model/preference
   -> 不修改共享 gateway provider
 
 DELETE /api/model/preference?session_id={session_id}
-  -> require model.switch
   -> 清除当前 session 偏好并恢复系统默认
 ```
 
@@ -1718,11 +1662,10 @@ browser
 ```text
 POST /api/model/preference
   -> resolve actor
-  -> require model.switch
   -> authorize session_id
   -> validate endpoint/model against current config
   -> update sessions_meta/{session_id}.json
-  -> audit model.switched with actor/session/old/new preference
+  -> trace model.switched with actor/session/new preference
 ```
 
 该操作不能调用共享 provider 的 `set_preferred()`，因此不会改变其它 session 正在运行或后续发起的 turn。
@@ -1744,12 +1687,12 @@ POST /api/model/preference
 ```text
 browser /ws message
   -> resolve actor from cookie
-  -> require chat.run
   -> authorize session_id
   -> resolve session model preference
   -> bind turn-local LLMProvider
-  -> resolve contexts/users/{actor.user_id}
-  -> ensure session_index and user JSONL session
+  -> Owner resolves global workspace/contexts/sessions
+  -> ordinary user resolves contexts/users/{actor.user_id}
+  -> ensure session_index and authorized JSONL session
   -> WebRuntime.run_chat_events(actor, session_id, message, turn_id)
   -> AgentLoop.run_turn(actor=actor, session_id, turn_id, llm_override=turn_llm)
   -> tool policy checks each tool call
@@ -1900,22 +1843,23 @@ tests/unit_test/tools/*
 
 | 用例 | actor | action | 期望 |
 | --- | --- | --- | --- |
-| admin role user | session.manage.any | allow |
-| developer | session.manage.any | deny |
-| viewer | tool.readonly.use | allow |
-| viewer | session.delete.own | allow |
-| viewer | model.switch | allow |
-| viewer | tool.exec.safe | allow |
-| developer | tool.exec.safe | allow |
-| developer | tool.exec.dangerous | deny |
-| admin role user | tool.exec.dangerous | confirm |
+| viewer | 查看/修改自己的账号 | allow，额外权限为空 |
+| viewer | 自己的 Session 增删读写 | allow，按 ownership |
+| viewer | 聊天、模型切换、安全工具、Memory | allow，属于基础能力 |
+| viewer | 访问其他用户 Session | deny/404 |
+| admin | `session.manage.any` 跨用户访问 | allow |
+| viewer/developer | `tool.exec.dangerous` | deny |
+| owner 或被授予特权的用户 | dangerous exec | 进入 confirmation |
+| viewer/developer | `skill.sync` / audit / user manage | deny |
+| auditor | `audit.read`、`turn.read.any` | allow |
+| schema reinitialize | 数据库含旧基础权限 | 清理 permission、role permission、user permission 残留 |
 
 ### 18.3 User context / session index
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
-| create user context | 新用户首次 chat | 创建 `contexts/users/{user_id}` |
-| default cwd | exec 默认 cwd | 指向 `contexts/users/{user_id}/files` |
+| create user context | 普通新用户首次 chat | 创建 `contexts/users/{user_id}` |
+| default cwd | 普通用户 exec 默认 cwd | 指向 `contexts/users/{user_id}/files` |
 | protect sessions | 工具写 sessions | 默认拒绝 |
 | shared readonly | 普通用户读 shared | 允许只读 |
 | create index | 新 session 首次 chat | 写入 session_index |
@@ -1934,14 +1878,14 @@ tests/unit_test/tools/*
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
 | default selection | session metadata 没有模型字段 | 使用系统默认 endpoint/model |
-| switch session | session A 有 `model.switch` | 只写 session A metadata |
+| switch session | 登录用户切换自己的 session A | 只写 session A metadata |
 | isolate sessions | 同一用户 session A/B | A 切换不影响 B |
 | isolate users | 不同用户使用相同 session 名称 | 按用户目录隔离 metadata |
 | external session | 飞书 chat/thread 映射到内部 session | 使用该 session 偏好 |
 | model reset | 当前 session 执行 `/model reset` | 清偏好字段并恢复系统默认 |
 | new session | 当前 session 有偏好后执行 `/new` | 新 session 使用系统默认，不继承旧偏好 |
 | reopen session | 切回已有 session | 恢复该 session 保存的偏好 |
-| forbidden switch | 用户无 `model.switch` | 403，metadata 不变 |
+| cross-user switch | 用户尝试修改其他人的 session | 404/deny，metadata 不变 |
 | stale preference | endpoint/model 已删除或禁用 | 本次回退默认并记录原因，不改写 metadata |
 | turn-local provider | 两个 session 并发聊天 | 各自使用独立选择，无共享状态串扰 |
 | failover | 首选模型失败后回退 | session 偏好不变，记录 actual endpoint/model |
@@ -1975,7 +1919,7 @@ tests/unit_test/tools/*
 | confirmation deny | Web deny | 不执行，tool error |
 | confirmation timeout | 超时 | 不执行，audit expired |
 | cancellation | 等待确认时 stop | confirmation cancelled |
-| provider error | LLM 错误 | turn audit error，不泄露 secret |
+| provider error | LLM 错误 | Runtime Activity 标记 turn error，trace 不泄露 secret |
 | llm override | runtime 传入 turn-local provider | 当前 turn 使用本 session override，不继承其它 session 状态 |
 | diagnostic tails | exec 失败 | 保存 stdout_tail/stderr_tail 等安全摘要 |
 
@@ -1985,23 +1929,23 @@ tests/unit_test/tools/*
 | --- | --- | --- |
 | login success | 正确登录 | audit auth.login_success |
 | login failure | 错误密码 | audit auth.login_failed |
-| tool args | 参数含 token | audit preview 脱敏 |
-| tool output | 大输出 | audit output_preview 截断 |
-| session action | rename/delete | audit 含 actor/session |
-| model switch | session 切换模型 | audit 含 actor、session、旧/新偏好 |
-| model reset | session 重置模型 | audit 含 actor、session 和恢复系统默认结果 |
-| model fallback | session 偏好失效或调用 failover | audit/trace 区分 preferred 与 actual 模型 |
+| activity secret | 普通 tool 参数含 token | activity record preview 脱敏，不写 audit |
+| dangerous tool | 危险 exec 请求和结果 | audit 含 actor、risk、confirmation 和安全 preview |
+| safe tool | 普通只读工具成功 | 只写 activity/trace，不写 audit |
+| session delete | 用户删除 Session | audit 含 actor/session |
+| model switch/reset | 用户切换或重置模型 | 写 trace 和业务状态，不写 audit |
+| model fallback | session 偏好失效或调用 failover | trace 区分 preferred 与 actual 模型 |
 
 ### 18.8 Diagnostics
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
-| recent own | 普通用户查最近 30 分钟 | 只返回当前 actor 的摘要 |
-| owner recent own | Owner 调用 `diagnose_my_recent_activity` | 仍只返回 Owner 自己的摘要 |
-| turn filter | 指定 turn_id | 返回该 turn 的 tool/trace/audit 摘要 |
-| http no turn | 登录或 403 失败 | 通过 request_id/route/status_code 说明失败阶段 |
-| timeout cause | exec 超时且有输出尾部 | 工具返回安全证据，由 LLM 判断卡住位置和下一步 |
-| unknown cause | exec 超时无输出 | LLM 区分确定事实和无法确认部分 |
+| previous turn | 用户问“刚刚为什么慢” | 自动选择当前 Session 上一条已完成 Turn |
+| latest failure | 用户问“刚才为什么报错” | 上一轮无错误时自动选择当前 Session 最近失败 |
+| exclude current | Tool 在诊断 Turn 中运行 | 不把正在执行的诊断 Turn 当成目标 |
+| owner recent own | Owner 普通聊天调用 Tool | 仍只返回 Owner 当前 Session 摘要 |
+| timeout cause | exec 超时且有输出尾部 | 返回 `COMMAND_TIMEOUT`、证据和下一步 |
+| unknown cause | 缺少完整 duration/trace | 返回 `insufficient_evidence`，不猜测 |
 | no raw trace | 普通用户诊断 | 不返回 cookie、header、完整 prompt、完整 tool output |
 
 ### 18.9 验证命令
@@ -2036,7 +1980,7 @@ git diff --check
 9. 让 WebRuntime 和 active turn 使用 actor-aware key。
 10. 增加 audit sink，记录 auth/model/session/turn/request/tool 基础事件。
 11. 增加 ToolExecutionPolicy，并在 AgentLoop tool dispatch 前后接入。
-12. 扩展 shell_policy 风险分类，先覆盖 safe exec、network/install、destructive/env dump，并将权限收敛为 `tool.exec.safe` / `tool.exec.dangerous`。
+12. 扩展 shell_policy 风险分类，覆盖 safe exec、network/install、destructive/env dump；safe exec 是登录用户基础能力，`tool.exec.dangerous` 只用于高风险确认资格。
 13. 增加 confirmation broker 和 Web confirmation API/UI。
 14. 增加用户可见诊断工具和诊断报告格式。
 15. 补齐 Owner bootstrap、普通用户自助注册、个人显示名/密码设置、用户管理、管理员委派、角色权限、审计/诊断基础页面。
@@ -2065,14 +2009,14 @@ git diff --check
 6. session list/read/rename/delete 按用户目录、session_index 或 `session.manage.any` 控制。
 7. `contexts/shared/readonly` 对普通用户只读，不能包含其它用户敏感信息。
 8. WebSocket stop 只能停止当前 actor 可操作的 active turn。
-9. `model.switch`、`skill.sync` 和 tool 权限按 permission key 判断。
+9. 模型查看/切换、只读工具、安全 `exec`、已安装 Skill 和本人 Memory 作为登录用户基础能力；`skill.sync` 与危险执行继续按特权 key 判断。
 10. 模型偏好保存在当前 session 的 `sessions_meta/{session_id}.json`，不增加用户默认模型或用户偏好表。
 11. 同一用户的不同 session 可以使用不同模型；一个 session 切换不会改变另一个 session。
 12. Web / 外部渠道每个 turn 使用当前 session 对应的 call-scoped 模型选择，不能调用共享 provider 的进程级 `set_preferred()`。
 13. `/model reset` 只清当前 session 偏好并恢复系统默认。
 14. `/new` 创建无模型偏好的新 session，不继承旧 session 选择。
 15. CLI `/model` 也按当前 CLI session 读写 `contexts/sessions_meta/{session_id}.json`。
-16. read-only tools、safe exec、高风险 exec、Skill 工具都有权限测试。
+16. read-only tools、safe exec 和已安装 Skill 有基础能力测试；高风险 exec 与 Skill 同步有特权测试。
 17. 高风险 `exec` 不会只因为 admin 身份自动执行，必须经过确认。
 18. `tool.exec.dangerous` 只表示进入危险确认流程，具体风险类型写入 `risk_category`。
 19. env dump 和不可分类危险 shell 第一版继续拒绝。
@@ -2085,7 +2029,8 @@ git diff --check
 26. CLI 本地操作者继续使用全局 `contexts/sessions` 和 `contexts/sessions_meta`，不被自动迁入 DB 用户目录。
 27. 现有 CLI、Web、AgentLoop、ToolRegistry、日志相关测试继续通过。
 28. Owner 初始化前后，匿名用户都可以自定义用户名和密码注册；服务端令 `display_name=username`、固定授予 `viewer`，注册请求不能覆盖显示名或提升角色权限。
-29. `viewer` 作为普通用户默认拥有自己的 session 增删读写、聊天、模型切换、只读工具和低风险 exec；管理、审计、跨用户和危险执行权限仍被隔离。
+29. `viewer` 作为普通用户即使 `permission_keys` 为空，也默认拥有自己的 session 增删读写、聊天、模型切换、只读工具、低风险 exec 和本人 Memory；管理、审计、跨用户和危险执行特权仍被隔离。
+30. schema 初始化会清理已废弃的基础 permission key 及其角色/用户关联，但不删除用户、角色或用户角色绑定。
 
 ---
 
@@ -2095,4 +2040,6 @@ git diff --check
 - `docs_design/2026-07-06-next-stage-sequencing-design.md` 说明了 turn、日志、用户权限的依赖顺序。本文是该排序中 Milestone 9 的详细设计。
 - `docs_design/2026-07-08-user-auth-permission-boundary-design.md` 是本次设计记录，保留当次决策背景；本文是后续实现应优先阅读的活文档。
 - `docs_design/2026-07-10-session-model-preference-scope-design.md` 是当前模型偏好范围：所有入口按 session 持久化，不增加用户默认层。
+- `docs_design/2026-07-16-authenticated-user-baseline-capabilities-design.md` 将普通功能从 RBAC 中移除：登录用户的本人资源和安全工具属于基础能力，权限只表达少数特权。
+- `docs_design/zhice-agent-part10-memory-design.md` 在本文的 workspace operator、普通用户目录、ownership 和 audit 边界上增加长期 Memory：CLI 与 Owner 共用全局 Memory，普通用户使用私有 Memory；当前不提供跨用户 Memory 管理接口。
 - 第九部分实现阶段以本文为依据。实现落地后，如果字段、权限 key 或确认流程发生变化，应先新增日期记录，再更新本文当前口径。

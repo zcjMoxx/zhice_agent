@@ -55,7 +55,7 @@ class SQLiteToolConfirmationBroker:
             )
         confirmation_id = "conf-" + uuid.uuid4().hex
         args_hash = _args_hash(args)
-        command_preview = redact_secrets(str(args.get("command") or ""))[:300]
+        command_preview, confirmation_fields = _confirmation_view(args)
         expires_at = datetime.now(UTC) + timedelta(seconds=self.timeout_seconds)
         self.store.create_tool_confirmation(
             confirmation_id=confirmation_id,
@@ -77,6 +77,8 @@ class SQLiteToolConfirmationBroker:
                 {
                     "confirmation_id": confirmation_id,
                     "command_preview": command_preview,
+                    "confirmation_title": "Confirm high-risk tool",
+                    "confirmation_fields": confirmation_fields,
                     "expires_at": expires_at.isoformat(timespec="seconds"),
                 }
             )
@@ -87,7 +89,10 @@ class SQLiteToolConfirmationBroker:
                     status = self.store.expire_tool_confirmation(
                         confirmation_id, status="cancelled"
                     )
-                    return ToolConfirmationResult(status=status, confirmation_id=confirmation_id)
+                    return ToolConfirmationResult(
+                        status=status,
+                        confirmation_id=confirmation_id,
+                    )
                 event.wait(timeout=0.1)
                 row = self.store.get_tool_confirmation(confirmation_id)
                 status = str((row or {}).get("status") or "pending")
@@ -97,7 +102,10 @@ class SQLiteToolConfirmationBroker:
                         confirmation_id=confirmation_id,
                     )
             status = self.store.expire_tool_confirmation(confirmation_id)
-            return ToolConfirmationResult(status=status, confirmation_id=confirmation_id)  # type: ignore[arg-type]
+            return ToolConfirmationResult(  # type: ignore[arg-type]
+                status=status,
+                confirmation_id=confirmation_id,
+            )
         finally:
             with self._lock:
                 self._events.pop(confirmation_id, None)
@@ -157,18 +165,23 @@ class ConsoleConfirmationBroker:
         is_cancelled=None,
     ) -> ToolConfirmationResult:
         confirmation_id = "conf-" + uuid.uuid4().hex[:12]
-        command_preview = redact_secrets(str(args.get("command") or ""))[:300]
+        command_preview, confirmation_fields = _confirmation_view(args)
         if on_requested is not None:
             on_requested(
                 {
                     "confirmation_id": confirmation_id,
                     "command_preview": command_preview,
+                    "confirmation_title": "Confirm high-risk tool",
+                    "confirmation_fields": confirmation_fields,
                     "expires_at": "",
                 }
             )
+        details = "\n".join(
+            f"{field['label']}: {field['value']}" for field in confirmation_fields
+        )
         prompt = (
-            "High-risk exec requires confirmation.\n"
-            f"command: {command_preview}\n"
+            "Confirm high-risk tool.\n"
+            f"{details}\n"
             f"risk: {decision.risk_level} ({decision.risk_category})\n"
             f"Type {confirmation_id} to approve, or press Enter to deny: "
         )
@@ -184,3 +197,7 @@ def _args_hash(args: dict[str, Any]) -> str:
     encoded = json.dumps(args, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
+
+def _confirmation_view(args: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
+    command_preview = redact_secrets(str(args.get("command") or ""))[:300]
+    return command_preview, [{"label": "Command", "value": command_preview or "-"}]

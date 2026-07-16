@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agent.app.runtime import (
+    DEFAULT_WEB_HISTORY_MESSAGES,
     EXTERNAL_COMMAND_PROFILE,
     WEB_COMMAND_PROFILE,
     WebRuntime,
 )
 from agent.config import AppConfig
 from agent.message import Message
+from agent.prompt_loader import PromptLoader
+from agent.protocols.llm import LLMResponse
 from agent.protocols.session import SessionState, SessionSummary
+
+
+def test_web_context_history_message_guard_matches_context_builder_default():
+    assert DEFAULT_WEB_HISTORY_MESSAGES == 60
 
 
 def test_web_profile_rejects_history_command(tmp_path):
@@ -61,6 +69,9 @@ def test_web_help_hides_external_only_commands(tmp_path):
     assert "/exit" not in result
     assert "/stop" not in result
     assert "- `/model` - show or switch the preferred model" in result
+    assert "- `/memory` - show current Memory" in result
+    assert "/memory list" not in result
+    assert "/memory summarize" not in result
     assert "- `/model list`" not in result
     assert "- `/sessions` - list or manage recent sessions" in result
     assert "- `/sessions rename" not in result
@@ -140,6 +151,48 @@ def test_sessions_invalid_subcommand_returns_usage(tmp_path):
     assert "/sessions delete [id]" in result
 
 
+def test_memory_command_defaults_to_showing_current_memory(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    result = runtime.handle_command("alpha", "/memory")
+
+    assert result is not None
+    assert result.startswith("Memory is empty.")
+
+
+def test_memory_command_shows_scoped_memory(tmp_path):
+    runtime = _runtime(tmp_path)
+    memory = tmp_path / "contexts" / "memory" / "MEMORY.md"
+    memory.parent.mkdir(parents=True, exist_ok=True)
+    memory.write_text(
+        "# ZhiCe-Agent Memory\n\n<!-- zhice-memory:start -->\n\n"
+        "## profile\n\n## preferences\n\n- 喜欢吃西瓜\n\n"
+        "## projects\n\n## constraints\n\n## decisions\n\n"
+        "<!-- zhice-memory:end -->\n",
+        encoding="utf-8",
+    )
+
+    result = runtime.handle_command("alpha", "/memory")
+
+    assert result is not None
+    assert "preferences:" in result
+    assert "- 喜欢吃西瓜" in result
+
+
+def test_removed_memory_subcommands_return_current_usage(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    for command in (
+        "/memory session",
+        "/memory list",
+        "/memory extract alpha",
+        "/memory summarize",
+    ):
+        result = runtime.handle_command("alpha", command)
+        assert result is not None
+        assert result == "Usage: `/memory`"
+
+
 def test_run_chat_events_passes_external_turn_id_to_agent_loop(tmp_path):
     agent_loop = _RecordingAgentLoop()
     runtime = _runtime(tmp_path, agent_loop=agent_loop)
@@ -166,25 +219,44 @@ def test_run_chat_events_logs_web_runtime_lifecycle(tmp_path, caplog):
     runtime.run_chat_events("alpha", "hello", turn_id="turn-web")
 
     records = [record for record in caplog.records if record.name == "zcagent.agent.web"]
-    assert [record.event for record in records] == ["chat.accepted", "chat.done"]  # type: ignore[attr-defined]
-    assert records[0].fields["session_id"] == "alpha"  # type: ignore[attr-defined]
-    assert records[0].fields["turn_id"] == "turn-web"  # type: ignore[attr-defined]
+    assert records == []
 
 
-def _runtime(tmp_path: Path, *, agent_loop=None) -> WebRuntime:
+def test_run_chat_events_resets_idle_memory_job(tmp_path):
+    scheduler = _RecordingMemoryScheduler()
+    runtime = _runtime(tmp_path, agent_loop=_RecordingAgentLoop())
+    runtime.memory_extraction_enabled = True
+    runtime.memory_scheduler = scheduler
+
+    runtime.run_chat_events("alpha", "first")
+    runtime.run_chat_events("alpha", "second")
+
+    assert scheduler.calls == [
+        ("cancel", "workspace-operator", "alpha"),
+        ("schedule", "workspace-operator", "alpha"),
+        ("cancel", "workspace-operator", "alpha"),
+        ("schedule", "workspace-operator", "alpha"),
+    ]
+
+
+def _runtime(tmp_path: Path, *, agent_loop=None, sessions=None, llm=None) -> WebRuntime:
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir(exist_ok=True)
+    (prompts_dir / "memory_extraction.md").write_text("extract prompt", encoding="utf-8")
     return WebRuntime(
         config=AppConfig(
             workspace=tmp_path,
             config_dir=tmp_path / "config",
-            prompts_dir=tmp_path / "prompts",
+            prompts_dir=prompts_dir,
             contexts_dir=tmp_path / "contexts",
             sessions_dir=tmp_path / "contexts" / "sessions",
             extends_dir=tmp_path / "extends",
             logs_dir=tmp_path / "logs",
         ),
-        sessions=_SessionStore(),
+        sessions=sessions or _SessionStore(),
         agent_loop=agent_loop or _AgentLoop(),
-        llm=_Llm(),
+        llm=llm or _Llm(),
+        prompt_loader=PromptLoader(prompts_dir),
     )
 
 
@@ -198,8 +270,18 @@ class _SessionStore:
         return SessionState(
             session_id=session_id,
             messages=[
-                Message(role="user", content="hello from user"),
-                Message(role="assistant", content="hello from assistant"),
+                Message(
+                    role="user",
+                    content="hello from user",
+                    turn_id="turn-1",
+                    turn_index=1,
+                ),
+                Message(
+                    role="assistant",
+                    content="hello from assistant",
+                    turn_id="turn-1",
+                    turn_index=1,
+                ),
             ],
         )
 
@@ -224,6 +306,29 @@ class _SessionStore:
                 message_count=2,
             )
         ]
+
+
+class _ThreeTurnSessionStore(_SessionStore):
+    def load(self, session_id: str) -> SessionState:
+        messages = []
+        for index in range(1, 4):
+            messages.extend(
+                [
+                    Message(
+                        role="user",
+                        content="先给结论，最多三点",
+                        turn_id=f"turn-{index}",
+                        turn_index=index,
+                    ),
+                    Message(
+                        role="assistant",
+                        content="好的",
+                        turn_id=f"turn-{index}",
+                        turn_index=index,
+                    ),
+                ]
+            )
+        return SessionState(session_id=session_id, messages=messages)
 
 
 class _AgentLoop:
@@ -257,5 +362,44 @@ class _RecordingAgentLoop:
         return "ok"
 
 
+class _RecordingMemoryScheduler:
+    def __init__(self):
+        self.calls = []
+
+    def schedule(self, actor_key, actor, session_id):
+        self.calls.append(("schedule", actor_key, session_id))
+        return True
+
+    def cancel(self, actor_key, session_id):
+        self.calls.append(("cancel", actor_key, session_id))
+        return True
+
+    def shutdown(self):
+        return None
+
+
 class _Llm:
-    pass
+    def chat(self, messages, tools=None):
+        return LLMResponse(content="ok")
+
+
+class _ExtractionLlm:
+    def chat(self, messages, tools=None):
+        return LLMResponse(
+            content=json.dumps(
+                {
+                    "memories": [
+                        {
+                            "category": "preferences",
+                            "content": "回答时先给结论，最多三点。",
+                            "confidence": "high",
+                            "evidence": [
+                                {"turn_index": 1, "quote": "先给结论，最多三点"},
+                                {"turn_index": 3, "quote": "先给结论，最多三点"},
+                            ],
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )

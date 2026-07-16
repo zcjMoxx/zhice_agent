@@ -431,6 +431,39 @@ def test_build_raises_clear_error_when_required_prompt_is_missing(tmp_path):
         )
 
 
+def test_context_builder_includes_optional_memory_policy(tmp_path):
+    prompts_dir = _write_required_prompts(tmp_path)
+    (prompts_dir / "memory_policy.md").write_text(
+        "Ask in conversation before writing inferred Memory.", encoding="utf-8"
+    )
+    from agent.core.context import ContextBuilder
+
+    builder = ContextBuilder(PromptLoader(prompts_dir))
+
+    messages = builder.build(
+        history=[],
+        user_message=Message(role="user", content="hello"),
+        workspace=tmp_path,
+        session_id="session-a",
+    )
+
+    assert "# Memory Policy" in messages[0]["content"]
+    assert "Ask in conversation before writing inferred Memory." in messages[0]["content"]
+
+
+def test_repository_memory_policy_uses_conversational_authorization():
+    policy = (
+        Path(__file__).resolve().parents[3] / "prompts" / "memory_policy.md"
+    ).read_text(encoding="utf-8")
+
+    assert "authorization=user_explicit" in policy
+    assert "authorization=user_confirmed" in policy
+    assert "独立的 idle-session Extractor" in policy
+    assert "不要增加隐藏 review 调用" in policy
+    assert "assistant_inferred" not in policy
+    assert "confirmation broker" not in policy
+
+
 def _write_required_prompts(tmp_path: Path) -> Path:
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir()
@@ -439,3 +472,11 @@ def _write_required_prompts(tmp_path: Path) -> Path:
     (prompts_dir / "skills_intro.md").write_text("skills intro prompt", encoding="utf-8")
     return prompts_dir
 
+
+def test_context_builder_defaults_use_thirty_candidates_and_five_relevant_turns(tmp_path):
+    from agent.core.context import ContextBuilder
+
+    builder = ContextBuilder(PromptLoader(_write_required_prompts(tmp_path)))
+
+    assert builder.max_history_turns == 30
+    assert builder.max_relevant_turns == 5

@@ -5,9 +5,12 @@ import json
 import logging
 from datetime import datetime
 
+import pytest
+
 from agent.app.logging import (
     GatewayLogOptions,
     TerminalLogFormatter,
+    _format_duration_ms,
     configure_gateway_logging,
     reset_gateway_logging,
 )
@@ -52,6 +55,58 @@ def test_terminal_formatter_combines_component_and_event():
     assert _format_action(formatter, "zcagent.gateway", "startup") == "gateway.startup"
     assert _format_action(formatter, "zcagent.ws", "connection.open") == "ws.connection.open"
     assert _format_action(formatter, "zcagent.other", "event") == "zcagent.event"
+
+
+def test_terminal_formatter_highlights_tool_and_hides_trace_ids():
+    formatter = TerminalLogFormatter()
+
+    rendered = _format_record(
+        formatter,
+        "zcagent.agent.tool",
+        "tool.done",
+        {
+            "tool": "memory_read",
+            "actor_username": "user001",
+            "actor_user_id": "user-internal",
+            "session_id": "session-long",
+            "turn_id": "turn-long",
+            "turn_index": 5,
+            "request_id": "ws-turn-long",
+            "tool_call_id": "call-long",
+            "duration_ms": 11,
+            "match_count": 1,
+            "total": 1,
+        },
+    )
+
+    assert rendered == (
+        "[2026-07-07 21:34:12] | INFO | TOOL memory_read | DONE | "
+        "user=user001 turn=5 duration=11ms matches=1 total=1"
+    )
+    assert "session-long" not in rendered
+    assert "turn-long" not in rendered
+    assert "call-long" not in rendered
+    assert "user-internal" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("duration_ms", "expected"),
+    [
+        (57, "57ms"),
+        (500, "500ms"),
+        (1000, "1s"),
+        (1250, "1.25s"),
+        (10500, "10.5s"),
+        (60000, "1m"),
+        (60500, "1m1s"),
+        (200000, "3m20s"),
+        (3600000, "1h"),
+        (3900000, "1h5m"),
+        (3905000, "1h5m5s"),
+    ],
+)
+def test_format_duration_ms_uses_natural_unit_boundaries(duration_ms, expected):
+    assert _format_duration_ms(duration_ms) == expected
 
 
 def test_terminal_formatter_can_color_time_and_action_segments():
@@ -136,6 +191,69 @@ def test_configure_gateway_logging_writes_date_partitioned_trace_jsonl(tmp_path)
     assert payload["api_key"] == "***"
     assert "secret" not in result.trace_path.read_text(encoding="utf-8")
     assert "[20" in stream.getvalue()
+
+
+def test_tool_terminal_is_compact_while_trace_keeps_full_ids(tmp_path):
+    stream = io.StringIO()
+    result = configure_gateway_logging(
+        GatewayLogOptions(trace_log=True),
+        logs_dir=tmp_path / "logs",
+        terminal_stream=stream,
+    )
+
+    log_event(
+        logging.getLogger("zcagent.agent.tool"),
+        logging.INFO,
+        "tool.start",
+        tool="memory_read",
+        actor_username="user001",
+        actor_user_id="user-internal",
+        session_id="session-full",
+        turn_id="turn-full",
+        turn_index=5,
+        request_id="request-full",
+        tool_call_id="call-full",
+    )
+
+    terminal = stream.getvalue()
+    assert "TOOL memory_read | START | user=user001 turn=5" in terminal
+    assert "session-full" not in terminal
+    assert "request-full" not in terminal
+    assert "call-full" not in terminal
+    assert result.trace_path is not None
+    payload = json.loads(result.trace_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert payload["session_id"] == "session-full"
+    assert payload["turn_id"] == "turn-full"
+    assert payload["request_id"] == "request-full"
+    assert payload["tool_call_id"] == "call-full"
+
+
+def test_turn_done_output_preview_is_visible_in_terminal_and_trace(tmp_path):
+    stream = io.StringIO()
+    result = configure_gateway_logging(
+        GatewayLogOptions(trace_log=True),
+        logs_dir=tmp_path / "logs",
+        terminal_stream=stream,
+    )
+
+    log_event(
+        logging.getLogger("zcagent.agent.turn"),
+        logging.INFO,
+        "turn.done",
+        session_id="session-full",
+        turn_id="turn-full",
+        turn_index=6,
+        duration_ms=9969,
+        output_preview="结论：抽象是提取多个对象的共同特征。",
+    )
+
+    assert "output_preview=结论：抽象是提取多个对象的共同特征。" in stream.getvalue()
+    assert "duration=9.97s" in stream.getvalue()
+    assert result.trace_path is not None
+    payload = json.loads(result.trace_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert payload["output_preview"] == "结论：抽象是提取多个对象的共同特征。"
+    assert payload["duration_ms"] == 9969
+    assert "duration" not in payload
 
 
 def test_configure_gateway_logging_is_idempotent_for_terminal_handlers(tmp_path):

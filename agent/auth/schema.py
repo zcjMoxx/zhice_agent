@@ -3,28 +3,15 @@
 from __future__ import annotations
 
 PERMISSIONS: dict[str, tuple[str, str]] = {
-    "auth.me.read": ("Read the current account", "auth"),
     "auth.users.read": ("List users", "auth"),
     "auth.users.manage": ("Create and update users", "auth"),
     "auth.admin.manage": ("Promote and demote administrators", "auth"),
     "auth.roles.read": ("List roles and permissions", "auth"),
     "auth.roles.manage": ("Update role permissions", "auth"),
-    "session.create": ("Create sessions", "session"),
-    "session.read.own": ("Read owned sessions", "session"),
-    "session.write.own": ("Write owned sessions", "session"),
-    "session.delete.own": ("Delete owned sessions", "session"),
     "session.manage.any": ("Manage all sessions", "session"),
-    "chat.run": ("Run chat turns", "chat"),
-    "chat.stop.own": ("Stop owned turns", "chat"),
     "chat.stop.any": ("Stop any turn", "chat"),
-    "turn.read.own": ("Read owned turn summaries", "turn"),
     "turn.read.any": ("Read all turn summaries", "turn"),
-    "model.view": ("View session model state", "model"),
-    "model.switch": ("Change session model preference", "model"),
-    "tool.readonly.use": ("Use read-only tools", "tool"),
-    "tool.exec.safe": ("Use low-risk exec", "tool"),
     "tool.exec.dangerous": ("Request confirmed high-risk exec", "tool"),
-    "skill.read": ("Read installed Skills", "skill"),
     "skill.sync": ("Synchronize Skill sources", "skill"),
     "audit.read": ("Read audit events", "audit"),
     "audit.export": ("Export audit events", "audit"),
@@ -33,43 +20,21 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
 ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "owner": tuple(PERMISSIONS),
     "admin": tuple(
-        key for key in PERMISSIONS if key not in {"auth.admin.manage", "auth.roles.manage"}
+        key
+        for key in (
+            "auth.users.read",
+            "auth.users.manage",
+            "auth.roles.read",
+            "session.manage.any",
+            "chat.stop.any",
+            "turn.read.any",
+        )
     ),
-    "developer": (
-        "auth.me.read",
-        "session.create",
-        "session.read.own",
-        "session.write.own",
-        "session.delete.own",
-        "chat.run",
-        "chat.stop.own",
-        "turn.read.own",
-        "model.view",
-        "model.switch",
-        "tool.readonly.use",
-        "tool.exec.safe",
-        "skill.read",
-    ),
-    "viewer": (
-        "auth.me.read",
-        "session.create",
-        "session.read.own",
-        "session.write.own",
-        "session.delete.own",
-        "chat.run",
-        "chat.stop.own",
-        "turn.read.own",
-        "model.view",
-        "model.switch",
-        "tool.readonly.use",
-        "tool.exec.safe",
-        "skill.read",
-    ),
+    "developer": (),
+    "viewer": (),
     "auditor": (
-        "auth.me.read",
         "audit.read",
-        "session.read.own",
-        "turn.read.own",
+        "turn.read.any",
     ),
 }
 
@@ -172,9 +137,8 @@ CREATE TABLE IF NOT EXISTS session_index (
 );
 
 CREATE TABLE IF NOT EXISTS turn_runs (
-  id TEXT PRIMARY KEY,
+  turn_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
-  turn_id TEXT NOT NULL,
   turn_index INTEGER,
   actor_user_id TEXT NOT NULL REFERENCES users(id),
   auth_session_id TEXT NOT NULL DEFAULT '',
@@ -183,8 +147,8 @@ CREATE TABLE IF NOT EXISTS turn_runs (
   status TEXT NOT NULL,
   started_at TEXT NOT NULL,
   finished_at TEXT,
-  error_code TEXT NOT NULL DEFAULT '',
-  UNIQUE(session_id, turn_id)
+  duration_ms INTEGER,
+  error_code TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS tool_call_records (

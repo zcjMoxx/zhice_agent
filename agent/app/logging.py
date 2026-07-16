@@ -18,6 +18,7 @@ _OUR_HANDLER_ATTR = "_zhice_gateway_logging_handler"
 _COLORAMA_FIXED = False
 _COLOR_RESET = "\033[0m"
 _TIME_COLOR = "32"
+_TOOL_COLOR = "33"
 _COMPONENT_COLORS = {
     "agent": "36",
     "web": "35",
@@ -57,12 +58,22 @@ class TerminalLogFormatter(logging.Formatter):
         timestamp = datetime.fromtimestamp(record.created).strftime("[%Y-%m-%d %H:%M:%S]")
         component = _component_for_logger(record.name)
         event = str(getattr(record, "event", record.getMessage()))
-        action = f"{component}.{event}"
-        fields = _format_fields(getattr(record, "fields", {}))
+        action, phase, terminal_fields = _terminal_view(
+            component,
+            event,
+            getattr(record, "fields", {}),
+        )
+        fields = _format_fields(terminal_fields)
         if self.color:
             timestamp = _style(timestamp, _TIME_COLOR)
-            action = _style(action, _COMPONENT_COLORS.get(component, _COMPONENT_COLORS["zcagent"]))
+            action_color = _TOOL_COLOR if action.startswith("TOOL ") else _COMPONENT_COLORS.get(
+                component,
+                _COMPONENT_COLORS["zcagent"],
+            )
+            action = _style(action, action_color)
         fixed = f"{timestamp} | {record.levelname} | {action}"
+        if phase:
+            fixed = f"{fixed} | {phase}"
         if fields:
             return f"{fixed} | {fields}"
         return fixed
@@ -194,6 +205,107 @@ def _format_fields(raw_fields: object) -> str:
     for key, value in fields.items():
         parts.append(f"{key}={_format_field_value(value)}")
     return " ".join(parts)
+
+
+def _terminal_view(
+    component: str,
+    event: str,
+    raw_fields: object,
+) -> tuple[str, str, dict[str, object]]:
+    """Return an event-specific human view without flattening trace identifiers."""
+
+    fields = redact_mapping(raw_fields) if isinstance(raw_fields, dict) else {}
+    fields = _humanize_duration_fields(fields)
+    if component == "agent" and event.startswith("tool.") and fields.get("tool"):
+        phase = {
+            "tool.start": "START",
+            "tool.done": "DONE",
+            "tool.error": "FAILED",
+        }.get(event, event.removeprefix("tool.").upper())
+        selected = _human_context_fields(fields)
+        if event in {"tool.done", "tool.error"}:
+            if fields.get("duration") is not None:
+                selected["duration"] = fields["duration"]
+            for source_key, terminal_key in (
+                ("match_count", "matches"),
+                ("total", "total"),
+                ("category", "category"),
+                ("operation", "operation"),
+                ("code", "code"),
+            ):
+                value = fields.get(source_key)
+                if value not in (None, ""):
+                    selected[terminal_key] = value
+        return f"TOOL {fields['tool']}", phase, selected
+
+    selected = {
+        key: value
+        for key, value in fields.items()
+        if key
+        not in {
+            "actor_user_id",
+            "actor_username",
+            "auth_session_id",
+            "request_id",
+            "tool_call_id",
+            "tool_call_record_id",
+            "turn_id",
+            "turn_index",
+        }
+    }
+    if not event.startswith("session."):
+        selected.pop("session_id", None)
+    context = _human_context_fields(fields)
+    return f"{component}.{event}", "", {**context, **selected}
+
+
+def _human_context_fields(fields: dict[str, object]) -> dict[str, object]:
+    selected: dict[str, object] = {}
+    username = fields.get("actor_username")
+    turn_index = fields.get("turn_index")
+    if username:
+        selected["user"] = username
+    if turn_index not in (None, ""):
+        selected["turn"] = turn_index
+    return selected
+
+
+def _humanize_duration_fields(fields: dict[str, object]) -> dict[str, object]:
+    """Replace terminal duration_ms with a compact human-readable duration."""
+
+    result: dict[str, object] = {}
+    for key, value in fields.items():
+        if key == "duration_ms" and _is_duration_number(value):
+            result["duration"] = _format_duration_ms(float(value))
+        else:
+            result[key] = value
+    return result
+
+
+def _format_duration_ms(duration_ms: float) -> str:
+    """Format non-negative milliseconds using natural unit boundaries."""
+
+    milliseconds = max(0.0, duration_ms)
+    if milliseconds < 1000:
+        return f"{int(round(milliseconds))}ms"
+    if milliseconds < 60000:
+        seconds = round(milliseconds / 1000, 2)
+        return f"{seconds:g}s"
+    total_seconds = int(milliseconds / 1000 + 0.5)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds:
+        parts.append(f"{seconds}s")
+    return "".join(parts) or "0s"
+
+
+def _is_duration_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
 
 
 def _stream_supports_color(stream: TextIO) -> bool:
