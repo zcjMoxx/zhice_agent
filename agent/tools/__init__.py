@@ -4,8 +4,10 @@ from pathlib import Path
 
 from agent.protocols.memory import MemoryStore
 from agent.protocols.skill import SkillProvider
+from agent.protocols.tool import Tool
 from agent.skills.sync import SkillSourceSync
 from agent.tools.exec import ExecTool
+from agent.tools.mcp import McpToolAdapter
 from agent.tools.memory import MemoryReadTool, MemoryWriteTool
 from agent.tools.readonly import GrepTool, ListDirTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
@@ -21,6 +23,7 @@ def create_default_tool_registry(
     allow_confirmable_exec: bool = False,
     memory_store: MemoryStore | None = None,
     memory_safety=None,
+    extra_tools: list[Tool] | None = None,
 ) -> ToolRegistry:
     """Create the default local workspace tool registry."""
 
@@ -46,6 +49,7 @@ def create_default_tool_registry(
                 ),
             ]
         )
+    tools.extend(extra_tools or [])
     return ToolRegistry(tools)
 
 
@@ -56,6 +60,7 @@ __all__ = [
     "LoadSkillsTool",
     "MemoryReadTool",
     "MemoryWriteTool",
+    "McpToolAdapter",
     "ReadFileTool",
     "SyncSkillsTool",
     "ToolRegistry",

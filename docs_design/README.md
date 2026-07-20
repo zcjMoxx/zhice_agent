@@ -20,10 +20,13 @@
 - `zhice-agent-part8-gateway-agent-logging-design.md`：Part 8，Gateway / Agent 运行日志优化。
 - `zhice-agent-part9-user-auth-permission-design.md`：Part 9，用户、登录与权限执行边界设计。
 - `zhice-agent-part10-memory-design.md`：Part 10，已实现的 CLI/Owner workspace Memory、普通用户私有 Memory、对话式用户授权写入、后台高置信提取与受控检索。
+- `zhice-agent-part11-mcp-design.md`：Part 11，已实现并进入当前代码基线，包含 stdio / Streamable HTTP / SSE、常见 `mcpServers` 直贴、自动 Tool 发现、共享 Runtime、ArtifactGateway、Elicitation 与 `/mcp`；Windows OS 级 stdio 读取隔离仍待硬化。
 
 第九部分用户、登录与权限执行边界已经落地：登录用户的账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 是基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。基础能力收敛见 `2026-07-16-authenticated-user-baseline-capabilities-design.md`；当前自助诊断和 Runtime Activity / Security Audit 拆分见 `2026-07-16-self-diagnostics-activity-audit-separation-design.md`。
 
-第十部分 Memory 已完成代码落地并进入当前基线。当前实现口径以 `zhice-agent-part10-memory-design.md` 为准；初始作用域设计见 `2026-07-15-memory-boundary-design.md`，当前对话式授权调整见 `2026-07-16-conversational-memory-consent-design.md`，Memory list/search、核心运行 ID 和终端日志收敛见 `2026-07-16-memory-read-runtime-id-terminal-log-convergence-design.md`。后续开发从 Part 11 MCP 开始。
+第十部分 Memory 已完成代码落地并进入当前基线。当前实现口径以 `zhice-agent-part10-memory-design.md` 为准；初始作用域设计见 `2026-07-15-memory-boundary-design.md`，当前对话式授权调整见 `2026-07-16-conversational-memory-consent-design.md`，Memory list/search、核心运行 ID 和终端日志收敛见 `2026-07-16-memory-read-runtime-id-terminal-log-convergence-design.md`。
+
+第十一部分 MCP 已实现并进入当前代码基线。当前实现口径以 `zhice-agent-part11-mcp-design.md` 为准，本次边界和取舍记录见 `2026-07-17-mcp-tool-runtime-boundary-design.md`。Runtime 支持 stdio、Streamable HTTP 和 SSE，直接读取常见 `mcpServers` JSON，通过 `tools/list` 自动暴露有效 Tool，并提供共享连接、credential、OAuth refresh、ArtifactGateway、Elicitation 和 `/mcp`。stdio 当前使用专用临时 cwd、最小环境、无 shell、stderr 丢弃和 Windows Job Object 回收；真正的 OS 级读取隔离仍是明确的后续硬化项。后续开发从 Part 12 Hooks 开始。
 
 维护规则：
 
@@ -58,28 +61,32 @@
 10. `zhice-agent-part8-gateway-agent-logging-design.md`
 11. `zhice-agent-part9-user-auth-permission-design.md`
 12. `zhice-agent-part10-memory-design.md`
-13. `2026-07-16-memory-extraction-concurrency-design.md`
-14. `2026-07-16-prompt-language-convergence-design.md`
-15. `2026-07-16-minimal-memory-content-protocol-design.md`
-16. `2026-07-16-turn-done-output-preview-design.md`
-17. `2026-07-16-terminal-adaptive-duration-design.md`
-18. `2026-07-16-remove-unclosed-session-summary-design.md`
-19. `2026-07-16-memory-command-display-and-session-summary-design.md`
-20. `2026-07-16-memory-command-semantics-design.md`
-21. `2026-07-16-background-memory-extraction-and-trace-convergence-design.md`
-22. `2026-07-16-memory-read-runtime-id-terminal-log-convergence-design.md`
-23. `2026-07-16-conversational-memory-consent-design.md`
-24. `2026-07-15-memory-boundary-design.md`
-25. `2026-07-10-session-model-preference-scope-design.md`
-26. `2026-07-08-user-auth-permission-boundary-design.md`
-27. `2026-07-06-context-relevance-selection-design.md`
-28. `2026-07-06-next-stage-sequencing-design.md`
-29. `2026-07-04-turn-runtime-and-context-design.md`
-30. `2026-07-02-gateway-runtime-logging-design.md`
-31. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
+13. `zhice-agent-part11-mcp-design.md`
+14. `2026-07-17-mcp-tool-runtime-boundary-design.md`
+15. `2026-07-16-memory-extraction-concurrency-design.md`
+16. `2026-07-16-prompt-language-convergence-design.md`
+17. `2026-07-16-minimal-memory-content-protocol-design.md`
+18. `2026-07-16-turn-done-output-preview-design.md`
+19. `2026-07-16-terminal-adaptive-duration-design.md`
+20. `2026-07-16-remove-unclosed-session-summary-design.md`
+21. `2026-07-16-memory-command-display-and-session-summary-design.md`
+22. `2026-07-16-memory-command-semantics-design.md`
+23. `2026-07-16-background-memory-extraction-and-trace-convergence-design.md`
+24. `2026-07-16-memory-read-runtime-id-terminal-log-convergence-design.md`
+25. `2026-07-16-conversational-memory-consent-design.md`
+26. `2026-07-15-memory-boundary-design.md`
+27. `2026-07-10-session-model-preference-scope-design.md`
+28. `2026-07-08-user-auth-permission-boundary-design.md`
+29. `2026-07-06-context-relevance-selection-design.md`
+30. `2026-07-06-next-stage-sequencing-design.md`
+31. `2026-07-04-turn-runtime-and-context-design.md`
+32. `2026-07-02-gateway-runtime-logging-design.md`
+33. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
 
 ## 日期设计记录清单
 
+- `2026-07-17-test-runtime-optimization-design.md`
+- `2026-07-17-mcp-tool-runtime-boundary-design.md`
 - `2026-07-16-remove-unclosed-session-summary-design.md`
 - `2026-07-16-memory-command-display-and-session-summary-design.md`
 - `2026-07-16-memory-command-semantics-design.md`

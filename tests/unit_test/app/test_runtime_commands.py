@@ -70,6 +70,7 @@ def test_web_help_hides_external_only_commands(tmp_path):
     assert "/stop" not in result
     assert "- `/model` - show or switch the preferred model" in result
     assert "- `/memory` - show current Memory" in result
+    assert "- `/mcp` - show available MCP capabilities" in result
     assert "/memory list" not in result
     assert "/memory summarize" not in result
     assert "- `/model list`" not in result
@@ -158,6 +159,14 @@ def test_memory_command_defaults_to_showing_current_memory(tmp_path):
 
     assert result is not None
     assert result.startswith("Memory is empty.")
+
+
+def test_mcp_command_uses_shared_runtime_summary(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.mcp_runtime = _McpRuntime()
+
+    assert runtime.handle_command("alpha", "/mcp") == "MCP summary"
+    assert runtime.handle_command("alpha", "/mcp details") == "Usage: `/mcp`"
 
 
 def test_memory_command_shows_scoped_memory(tmp_path):
@@ -381,6 +390,11 @@ class _RecordingMemoryScheduler:
 class _Llm:
     def chat(self, messages, tools=None):
         return LLMResponse(content="ok")
+
+
+class _McpRuntime:
+    def format_capabilities(self):
+        return "MCP summary"
 
 
 class _ExtractionLlm:

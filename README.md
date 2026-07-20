@@ -18,9 +18,10 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - 用户上下文目录、session owner/index、session 级模型偏好和 call-scoped provider
 - 登录用户基础能力、跨用户/管理/审计特权、高风险 `exec` 明确确认、独立 Runtime Activity/Security Audit 和当前 Session 自助诊断
 - CLI/Owner 共用 workspace Memory、普通用户私有 Memory、明确 list/search 的 `memory_read` 与对话授权 `memory_write`
-- 对话式 Memory 授权、Session 空闲高可信提取、一次性通知、Memory 安全过滤和显式 session 摘要
+- 对话式 Memory 授权、Session 空闲高可信提取、一次性通知和 Memory 安全过滤
+- workspace 共享 MCP Runtime、stdio / Streamable HTTP / SSE、自动 Tool 发现、OAuth 刷新、Elicitation 和 actor-scoped artifact 导入
 
-当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、MCP、Subagent、Hook 或市集。Part 10 Memory 已进入当前代码基线，下一部分是 Part 11 MCP。Web 侧使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
+当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、Subagent、Hook 或市集。Part 10 Memory 和 Part 11 MCP 已进入当前代码基线。MCP Runtime 直接读取常见 `mcpServers` 配置，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Web 侧使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
 
 ## 设计文档
 
@@ -31,6 +32,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - 新设计落地后，再把已经成为当前准则的内容收敛进总体设计或对应 Part 文档。
 - 第九部分权限设计入口是 `docs_design/zhice-agent-part9-user-auth-permission-design.md`；当前“基础能力与特权分离”记录见 `docs_design/2026-07-16-authenticated-user-baseline-capabilities-design.md`，自助诊断和 Activity/Audit 拆分见 `docs_design/2026-07-16-self-diagnostics-activity-audit-separation-design.md`。
 - 第十部分 Memory 当前实现入口是 `docs_design/zhice-agent-part10-memory-design.md`，最新日期设计记录是 `docs_design/2026-07-16-background-memory-extraction-and-trace-convergence-design.md`。
+- 第十一部分 MCP 当前实现入口是 `docs_design/zhice-agent-part11-mcp-design.md`，本次边界与取舍记录见 `docs_design/2026-07-17-mcp-tool-runtime-boundary-design.md`。
 
 ## 快速开始
 

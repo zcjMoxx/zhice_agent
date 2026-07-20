@@ -63,6 +63,18 @@ class AppConfig:
         return self.state_dir / "auth.sqlite3"
 
     @property
+    def mcp_config_path(self) -> Path:
+        """Workspace runtime MCP configuration path."""
+
+        return self.config_dir / "mcp.json"
+
+    @property
+    def mcp_runtime_dir(self) -> Path:
+        """Workspace-shared MCP process and temporary state root."""
+
+        return self.state_dir / "mcp_runtime"
+
+    @property
     def users_contexts_dir(self) -> Path:
         """Root of per-user Web/external-channel contexts."""
 

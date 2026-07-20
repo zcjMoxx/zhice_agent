@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from threading import Lock
 from typing import Any, Callable
 
@@ -25,6 +25,7 @@ from agent.core.turns import new_turn_id
 from agent.llm.runtime import create_configured_llm_provider
 from agent.llm.selection import ConfiguredLLMProviderResolver
 from agent.logging_utils import log_event
+from agent.mcp import McpRuntime, load_mcp_server_specs
 from agent.memory import MemoryStoreError
 from agent.memory.context import build_memory_context
 from agent.memory.extraction import MemoryExtractionService, pop_memory_notification
@@ -36,6 +37,7 @@ from agent.prompt_loader import PromptLoader
 from agent.protocols.auth import ActorContext, AuditEvent
 from agent.protocols.diagnostics import DiagnosticContext
 from agent.protocols.llm import LLMEndpoint, LLMProvider
+from agent.protocols.mcp import McpInteractionResponse
 from agent.protocols.session import (
     SessionModelPreference,
     SessionState,
@@ -107,6 +109,7 @@ class WebRuntime:
     memory_extraction_max_workers: int = 2
     memory_extraction_max_pending_jobs: int = 1000
     memory_scheduler: MemoryExtractionScheduler | None = None
+    mcp_runtime: McpRuntime | None = None
 
     def __post_init__(self) -> None:
         self._active_turns: dict[tuple[str, str], ActiveTurn] = {}
@@ -238,6 +241,18 @@ class WebRuntime:
                 ),
                 memory_store=memory_store,
                 memory_safety=memory_safety,
+                extra_tools=(
+                    self.mcp_runtime.tools_for_actor(
+                        actor,
+                        workspace,
+                        interaction_notifier=lambda request: _emit_runtime_event(
+                            on_event,
+                            {"type": "mcp_elicitation_requested", **asdict(request)},
+                        ),
+                    )
+                    if self.mcp_runtime is not None
+                    else None
+                ),
             )
         try:
             notice_text = _format_memory_notice(memory_notice)
@@ -309,6 +324,14 @@ class WebRuntime:
             return self._handle_model_command(actor, session_id, target, request_id=request_id)
         if command == "memory":
             return self._handle_memory_command(actor, session_id, target)
+        if command == "mcp":
+            if target:
+                return "Usage: `/mcp`"
+            return (
+                self.mcp_runtime.format_capabilities()
+                if self.mcp_runtime is not None
+                else "当前没有可用的 MCP Server。"
+            )
         if command == "stop":
             if command_profile != EXTERNAL_COMMAND_PROFILE:
                 return _command_not_supported_for_client(stripped)
@@ -758,6 +781,23 @@ class WebRuntime:
 
         if self.memory_scheduler is not None:
             self.memory_scheduler.shutdown()
+        if self.mcp_runtime is not None:
+            self.mcp_runtime.close()
+
+    def submit_mcp_interaction(
+        self,
+        interaction_id: str,
+        action: str,
+        content: dict[str, Any] | None = None,
+    ) -> bool:
+        """Forward one Web/WS Elicitation response to the shared MCP Runtime."""
+
+        if self.mcp_runtime is None or action not in {"accept", "decline", "cancel"}:
+            return False
+        return self.mcp_runtime.submit_interaction(
+            interaction_id,
+            McpInteractionResponse(action=action, content=content),  # type: ignore[arg-type]
+        )
 
     def _schedule_memory_extraction(self, actor: ActorContext, session_id: str) -> None:
         if not self.memory_extraction_enabled or self.prompt_loader is None:
@@ -883,10 +923,18 @@ def build_web_runtime(
     confirmation_broker = SQLiteToolConfirmationBroker(auth_store)
     diagnostics = RecentActivityDiagnostics(auth_store, config.logs_dir)
     tool_policy = RbacToolExecutionPolicy()
+    mcp_runtime = McpRuntime(
+        load_mcp_server_specs(config.config_dir),
+        workspace=config.workspace,
+        activity_sink=activity_sink,
+        audit_sink=audit_sink,
+    )
+    operator = local_operator_actor(channel="web")
     tool_registry = create_default_tool_registry(
         config.workspace,
         skills=skill_loader,
         skill_sync=skill_sync,
+        extra_tools=mcp_runtime.tools_for_actor(operator, config.workspace),
     )
     agent_loop = AgentLoop(
         llm=llm,
@@ -917,6 +965,7 @@ def build_web_runtime(
         skill_sync=skill_sync,
         prompt_loader=prompt_loader,
         memory_extraction_enabled=True,
+        mcp_runtime=mcp_runtime,
     )
 
 
@@ -1079,6 +1128,7 @@ def _web_help_text(command_profile: str = WEB_COMMAND_PROFILE) -> str:
         "- `/help` - show commands",
         "- `/model` - show or switch the preferred model",
         "- `/memory` - show current Memory",
+        "- `/mcp` - show available MCP capabilities",
         "- `/reset` - clear this session history",
         "- `/sessions` - list or manage recent sessions",
     ]

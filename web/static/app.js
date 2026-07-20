@@ -370,6 +370,10 @@ async function sendWebSocketMessage(sessionId, message, model) {
 
 function handleWebSocketMessage(event) {
   const payload = JSON.parse(event.data);
+  if (payload.event === "mcp_elicitation_requested") {
+    handleMcpElicitation(payload.data || {}, payload.session_id || "");
+    return;
+  }
   if (payload.event === "tool_confirmation_required") {
     showToolConfirmation(payload.data || {});
     return;
@@ -410,6 +414,36 @@ function handleWebSocketMessage(event) {
     }
     active.reject(new Error(error.message || "Request failed"));
     state.activeTurn = null;
+  }
+}
+
+function handleMcpElicitation(request, sessionId) {
+  const source = request.server_id ? `MCP ${request.server_id}` : "MCP Server";
+  const schema = request.requested_schema || {};
+  const details = Object.keys(schema).length ? `\n\nExpected JSON schema:\n${JSON.stringify(schema, null, 2)}` : "";
+  const url = request.url ? `\n\nURL: ${request.url}` : "";
+  const answer = window.prompt(`${source}: ${request.message || "Input requested"}${url}${details}\n\nEnter a JSON object, or Cancel to reject.`);
+  let action = "cancel";
+  let response = null;
+  if (answer !== null) {
+    try {
+      response = answer.trim() ? JSON.parse(answer) : {};
+      if (!response || Array.isArray(response) || typeof response !== "object") {
+        throw new Error("Response must be a JSON object");
+      }
+      action = "accept";
+    } catch (error) {
+      window.alert(error.message || "Invalid JSON response");
+    }
+  }
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({
+      type: "mcp_elicitation_response",
+      session_id: sessionId,
+      interaction_id: request.interaction_id,
+      action,
+      response,
+    }));
   }
 }
 

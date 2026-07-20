@@ -83,7 +83,7 @@ memory_read   按需检索当前 actor 的长期 Memory
 memory_write  执行用户通过对话明确授权的 Memory 修改
 ```
 
-`write_file`、外部 API、MCP 和 Subagent 仍属于后续扩展；Skill 正文加载与同步、受控 Memory 读写已经进入当前轻量工具主线。
+`write_file`、外部 API 和 Subagent 仍属于后续扩展；Skill 正文加载与同步、受控 Memory 读写和 MCP Tool 已经进入当前轻量工具主线。
 
 工具系统最值得学习的设计是：
 
@@ -287,18 +287,17 @@ contexts/sessions/chat-YYYYMMDD.jsonl
 
 ### 3.2 未来扩展方向
 
-Part 10 Memory 已经完成。后续先完成当前代码尚不存在的能力，再进入分领域优化：
+Part 10 Memory 和 Part 11 MCP 基础实现已经完成；后续先完成当前代码尚不存在的能力，再进入分领域优化：
 
-1. Part 11 MCP：把外部 MCP 工具接入现有 `ToolRegistry`、权限和审计边界。
-2. Part 12 Hooks：提供工具执行前后的安全与结果处理扩展点。
-3. Part 13 Subagent：复用同一个 AgentLoop 执行受限子任务并把摘要交回父 Agent。
-4. Part 14 外部渠道：接入 IM / 协作平台，并统一身份、命令、session 和 turn 语义。
-5. Part 15 生产部署与发布：补齐容器、反向代理、Secret 注入、健康检查和发布产物。
-6. Part 16 Agent 运行可靠性与上下文优化。
-7. Part 17 Web、会话与用户治理优化。
-8. Part 18 Skill、CLI 与本地运维优化。
+1. Part 12 Hooks：提供工具执行前后的安全与结果处理扩展点。
+2. Part 13 Subagent：复用同一个 AgentLoop 执行受限子任务并把摘要交回父 Agent。
+3. Part 14 外部渠道：接入 IM / 协作平台，并统一身份、命令、session 和 turn 语义。
+4. Part 15 生产部署与发布：补齐容器、反向代理、Secret 注入、健康检查和发布产物。
+5. Part 16 Agent 运行可靠性与上下文优化。
+6. Part 17 Web、会话与用户治理优化。
+7. Part 18 Skill、CLI 与本地运维优化。
 
-Part 11～15 继续补齐新能力；Part 16～18 再优化 Part 1～15 已经形成的运行链路。第十部分当前实现见 `docs_design/zhice-agent-part10-memory-design.md`，排序背景见 `docs_design/2026-07-06-next-stage-sequencing-design.md`。
+Part 12～15 继续补齐新能力；Part 16～18 再优化 Part 1～15 已经形成的运行链路。第十部分当前实现见 `docs_design/zhice-agent-part10-memory-design.md`；Part 11 当前实现见 `docs_design/zhice-agent-part11-mcp-design.md`，本次边界取舍见 `docs_design/2026-07-17-mcp-tool-runtime-boundary-design.md`；排序背景见 `docs_design/2026-07-06-next-stage-sequencing-design.md`。
 
 ### 3.3 推荐目录结构
 
@@ -482,13 +481,13 @@ flowchart TD
     P --> M["print assistant text or error message"]
 ```
 
-当前实现已经包含工具调用、多轮 tool loop、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、受控 Memory、显式 session 摘要、FastAPI gateway、WebSocket 主聊天通道和静态 Web UI；MCP、Hook 和 Subagent 仍是后续能力。
+当前实现已经包含工具调用、多轮 tool loop、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、受控 Memory、MCP Tool、显式 session 摘要、FastAPI gateway、WebSocket 主聊天通道和静态 Web UI；Hook 和 Subagent 仍是后续能力。
 
 ---
 
 ## 5. 数据结构设计
 
-下面第 5 节开始同时包含当前代码结构和长期路线图。当前已实现 CLI、配置、Prompt、Session、无工具聊天、工具调用、安全 exec、LiteLLM、endpoint failover、`/model`、FastAPI gateway、REST/SSE 兼容接口、WebSocket 主聊天通道、静态 Web UI、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、Memory 和显式 session 摘要；MCP、Hooks、Subagent 仍是后续设计。
+下面第 5 节开始同时包含当前代码结构和长期路线图。当前已实现 CLI、配置、Prompt、Session、无工具聊天、工具调用、安全 exec、LiteLLM、endpoint failover、`/model`、FastAPI gateway、REST/SSE 兼容接口、WebSocket 主聊天通道、静态 Web UI、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、Memory、MCP 和显式 session 摘要；Hooks、Subagent 仍是后续设计。
 
 ### 5.1 Message
 
@@ -1371,13 +1370,10 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 ## 15. 后续部分设计
 
-本章按真实开发顺序保留 Part 10～18。Part 10 已实现，后续从 Part 11 开始；Part 11～15 先完成当前代码尚不存在的新能力，Part 16～18 再按领域处理已有能力的优化。
+本章只保留尚未实现的 Part 12～18。Part 10 Memory 和 Part 11 MCP 已进入当前代码基线，不再作为未来工作重复保留；其当前实现分别见对应 Part 活文档。
 
 ```text
-Part 9 用户权限已实现
-  -> Part 10 Memory 已实现
-  -> Part 11 MCP
-  -> Part 12 Hooks
+Part 12 Hooks
   -> Part 13 Subagent
   -> Part 14 外部渠道
   -> Part 15 生产部署与发布
@@ -1386,48 +1382,7 @@ Part 9 用户权限已实现
   -> Part 18 Skill、CLI 与本地运维优化
 ```
 
-### 15.1 Part 10：Memory
-
-当前状态：已实现并进入当前代码基线。当前实现依据见 `docs_design/zhice-agent-part10-memory-design.md`，设计背景和权衡见 `docs_design/2026-07-15-memory-boundary-design.md`。
-
-Part 10 已增加按 actor 隔离的轻量 Markdown Memory：
-
-```text
-CLI local operator + Owner Web
-  -> contexts/memory/MEMORY.md
-
-ordinary database user
-  -> contexts/users/{user_id}/memory/MEMORY.md
-```
-
-Owner 是 CLI workspace operator 在 Web 端的登录身份，不创建或使用 `contexts/users/{owner_id}`。Owner 的 DB id 只用于登录、权限、session index 和 audit。
-
-当前主线：
-
-```text
-明确 list/search 的 memory_read / 用户明确请求或自然语言同意后的 memory_write
-固定 category + 纯内容条目
-本地关键词/CJK 相关性检索
-登录用户本人 Memory 基础能力 + 对话式写入授权
-不保留未接入上下文消费链路的 Session Summary 半成品
-```
-
-用户明确要求记住、修改或忘记时，该请求本身就是授权，Memory Tool 在 RBAC 和安全校验后直接执行。普通聊天模型不再承担高频行为识别；Session 空闲五分钟后，统一调度器以默认两个全局 Worker、同一用户串行的方式调用独立 Extractor，只处理至少三个用户 Turn 中具有两到三条原文证据的高可信 `profile/preferences/constraints`，自动写入后在下一次对话显示一次通知。Memory 不使用 tool confirmation 弹窗、候选状态机、逐 Turn 隐藏 review 调用或 Session Summary 半成品。
-
-不把完整 Memory 固定注入每轮上下文，不做跨用户管理、embedding、vector database 或 graph memory。Session JSONL 继续是聊天真值；真正的 Context Compaction 留到后续上下文优化单独设计。当前提取与授权调整见 `docs_design/2026-07-16-background-memory-extraction-and-trace-convergence-design.md`。
-
-### 15.2 Part 11：MCP
-
-当前 ToolRegistry、权限和审计边界已经稳定，Part 11 在这些现有协议上接入 MCP：
-
-设计：
-
-- 读取 `${ZHICE_AGENT_WORKSPACE}/config/mcp.json`。
-- 启动或连接 MCP server。
-- 把 MCP tool 包装成 `BaseTool`。
-- 注册到 `ToolRegistry`。
-
-### 15.3 Part 12：Hooks
+### 15.1 Part 12：Hooks
 
 Hooks 可以用于安全和结果整理。
 
@@ -1467,9 +1422,9 @@ hooks/safety/pre_tooluse/exec.py
 }
 ```
 
-### 15.4 Part 13：Subagent
+### 15.2 Part 13：Subagent
 
-Subagent 放在 Memory、MCP 和 Hooks 之后实现。
+Memory 和 MCP 已经落地，Subagent 放在 Hooks 之后实现。
 
 关键原则：
 
@@ -1483,7 +1438,7 @@ Subagent 放在 Memory、MCP 和 Hooks 之后实现。
 - 让它跑同一个 AgentLoop。
 - 把结果摘要交回父 Agent。
 
-### 15.5 Part 14：外部渠道
+### 15.3 Part 14：外部渠道
 
 Part 14 在现有 Web/WS runtime、渠道身份映射、用户权限、session 和 turn 边界上增加真实外部渠道适配器：
 
@@ -1495,7 +1450,7 @@ Part 14 在现有 Web/WS runtime、渠道身份映射、用户权限、session �
 
 渠道适配属于 app shell，不能把平台 SDK 或渠道业务分支写入 AgentLoop。
 
-### 15.6 Part 15：生产部署与发布
+### 15.4 Part 15：生产部署与发布
 
 Part 15 把当前本地开发运行方式收敛为可发布、可部署、可诊断的运行形态：
 
@@ -1509,9 +1464,9 @@ Part 15 把当前本地开发运行方式收敛为可发布、可部署、可诊
 
 部署层继续保持 `app -> core -> protocols`，core 不依赖容器、反向代理或平台 SDK。
 
-### 15.7 Part 16：Agent 运行可靠性与上下文优化
+### 15.5 Part 16：Agent 运行可靠性与上下文优化
 
-Part 16 优化模型调用、工具披露和 turn 控制，不引入新的业务能力：
+Part 16 优化模型调用、工具运行、能力披露和 turn 控制，不引入领域业务 Tool：
 
 - 为 `LLMProviderError` 增加稳定错误码、HTTP 状态、`retryable` 和安全用户提示。
 - 区分鉴权失败、模型不存在、限流、网络错误、无效响应和其它 provider 错误。
@@ -1522,8 +1477,11 @@ Part 16 优化模型调用、工具披露和 turn 控制，不引入新的业务
 - 在 actor 权限过滤后增加 Capability Selection，根据当前请求和最近相关 turn 只披露本轮需要的 Tool/Skill，不把意图判断硬编码进 AgentLoop。
 - 为连续翻译、明确执行、模糊请求、权限拒绝和 Skill 相关性建立 Fake LLM 回归用例。
 - CLI `/stop` 复用 active turn registry 和 cancellation token，并增加 CLI/Web 共用的 stopped/error turn 查询。
+- 增强 MCP Runtime：处理 `tools/list_changed`、原子刷新 catalog、连接重建和活动调用 cancellation。
+- 增强 MCP artifact 的预览、版本、保留策略和大文件流式导入。
+- 评估 MCP Prompts/Resources 与 ContextBuilder、Capability Selection 的统一装配边界。
 
-### 15.8 Part 17：Web、会话与用户治理优化
+### 15.6 Part 17：Web、会话与用户治理优化
 
 Part 17 处理当前静态 Web、会话管理和 Part 9 用户治理的产品化增强：
 
@@ -1532,11 +1490,13 @@ Part 17 处理当前静态 Web、会话管理和 Part 9 用户治理的产品化
 - 在现有会话列表、重命名和删除之外，增加自动标题、归档、搜索、过滤和导出。
 - 增加审计筛选、分页、导出、清理归档和保留策略。
 - 增加 Developer/Admin/Owner 可进入的监控与诊断平台：独立诊断聊天框、事故列表、Turn/request/tool 时间线以及用户/组件/时间范围筛选。
+- 在监控与诊断平台中增加 MCP Server 健康状态、连接历史、Tool 延迟/错误统计、配置校验和安全的在线 reload。
+- 增加 MCP OAuth connect/disconnect、credential 状态和 token 刷新失败处理，credential 内容始终脱敏。
 - 增加 `diagnostics.system.use` 特权和系统级 `diagnose_system_activity` Tool；普通聊天中的自助诊断仍只查询当前用户当前 Session。
 - 增加更完整的账号安全策略、特权模板和管理操作诊断。
 - 保持现有 API、WebSocket frame、Session JSONL 和权限 key 兼容。
 
-### 15.9 Part 18：Skill、CLI 与本地运维优化
+### 15.7 Part 18：Skill、CLI 与本地运维优化
 
 Part 18 收敛 Skill source、初始化、本地配置和日常管理入口：
 
@@ -1868,10 +1828,8 @@ session 模型偏好与 turn-local LLM 选择
 独立 Runtime Activity 索引与 Security Audit 账本
 ```
 
-### Milestone 10 已实现，Milestone 11～18 后续部分
+### Milestone 12～18 后续部分
 
-- Part 10 Memory（已实现）：长期记忆、对话授权写入、后台高置信提取和受控检索。
-- Part 11 MCP：外部 MCP 工具注册到现有 ToolRegistry，并复用权限与审计边界。
 - Part 12 Hooks：工具执行前后的安全策略和结果处理扩展点。
 - Part 13 Subagent：复用同一个 AgentLoop 创建受限子任务 Agent。
 - Part 14 外部渠道：接入真实 IM / 协作平台适配器。
@@ -1952,7 +1910,7 @@ Part 10 已实现扩展项：
 1. CLI/Owner workspace Memory 与普通用户私有 Memory、极简 Markdown 内容、原子写入和本地相关性检索。
 2. `memory_read` / `memory_write` 本人基础能力、对话式用户授权、模型自然语言询问、安全过滤、`/memory` 展示和隐私化 trace/audit。
 
-下一阶段进入 Part 11 MCP，依次完成 Part 11～15 的新能力，再进入 Part 16～18 的分领域优化。
+Part 11 MCP 已实现并进入当前基线：支持 stdio、Streamable HTTP、SSE、自动 Tool 发现、共享 Runtime、OAuth refresh、ArtifactGateway、Elicitation 和 `/mcp`；Windows OS 级 stdio 读取隔离仍是后续安全硬化项。下一阶段从 Part 12 Hooks 开始。
 
 ---
 
@@ -2133,10 +2091,9 @@ Part 10 已实现扩展项：
 能用 turn 串起 WebSocket、AgentLoop、Session 历史和上下文选择。
 ```
 
-当前目标已经继续完成 Part 10 Memory。后续按剩余核心 Part 的依赖顺序逐步增加：
+当前代码已经完成 Part 10 Memory 和 Part 11 MCP。后续按剩余核心 Part 的依赖顺序逐步增加：
 
 ```text
-Part 11 MCP
 Part 12 Hooks
 Part 13 Subagent
 Part 14 外部渠道
@@ -2146,7 +2103,7 @@ Part 17 Web、会话与用户治理优化
 Part 18 Skill、CLI 与本地运维优化
 ```
 
-新功能完成后再进入优化阶段，避免优化中的协议调整反复打断 MCP、Hooks、Subagent 和渠道接入主线。
+新功能完成后再进入优化阶段，避免优化中的协议调整反复打断 Hooks、Subagent 和渠道接入主线。
 
 这样做的好处是：
 

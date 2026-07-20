@@ -36,6 +36,7 @@ class UserScopedToolProvider:
         diagnostic_context: DiagnosticContext | None = None,
         memory_store: MemoryStore | None = None,
         memory_safety=None,
+        extra_tools=None,
     ):
         primary_tools = [
             ListDirTool(files_dir),
@@ -67,6 +68,7 @@ class UserScopedToolProvider:
                     ),
                 ]
             )
+        primary_tools.extend(list(extra_tools or ()))
         self._primary = ToolRegistry(primary_tools)
         self._shared = ToolRegistry(
             [

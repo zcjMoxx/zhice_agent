@@ -141,6 +141,25 @@ async def websocket_chat(websocket: WebSocket) -> None:
             if frame_type == "heartbeat":
                 await send_event("pong", {"connection_id": connection_id}, session_id=session_id)
                 continue
+            if frame_type == "mcp_elicitation_response":
+                interaction_id = str(frame.get("interaction_id") or "").strip()
+                action = str(frame.get("action") or "cancel").strip().lower()
+                content_value = frame.get("response")
+                content = content_value if isinstance(content_value, dict) else None
+                accepted = _runtime_call(
+                    runtime,
+                    "submit_mcp_interaction",
+                    actor,
+                    interaction_id,
+                    action,
+                    content,
+                )
+                await send_event(
+                    "mcp_elicitation_response",
+                    {"interaction_id": interaction_id, "accepted": bool(accepted)},
+                    session_id=session_id,
+                )
+                continue
             if not session_id:
                 if frame_type == "message" and content.lower() == "/exit" and command_profile == EXTERNAL_COMMAND_PROFILE:
                     await _close_external_connection(websocket, send_event, active_tasks, session_id="")
@@ -260,6 +279,13 @@ async def _run_message_frame(
                 elif payload.get("type") == "tool_confirmation_required":
                     await send_event(
                         "tool_confirmation_required",
+                        payload,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                    )
+                elif payload.get("type") == "mcp_elicitation_requested":
+                    await send_event(
+                        "mcp_elicitation_requested",
                         payload,
                         session_id=session_id,
                         turn_id=turn_id,

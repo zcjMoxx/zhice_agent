@@ -184,6 +184,31 @@ def test_ws_external_exit_closes_current_connection(tmp_path):
     assert runtime.chat_calls == []
 
 
+def test_ws_mcp_elicitation_response_is_forwarded(tmp_path):
+    runtime = _WsRuntime()
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json(
+            {
+                "type": "mcp_elicitation_response",
+                "session_id": "alpha",
+                "interaction_id": "mcp-int-1",
+                "action": "accept",
+                "response": {"code": "1234"},
+            }
+        )
+        response = websocket.receive_json()
+
+    assert response == {
+        "event": "mcp_elicitation_response",
+        "data": {"interaction_id": "mcp-int-1", "accepted": True},
+        "session_id": "alpha",
+    }
+    assert runtime.mcp_interactions == [("mcp-int-1", "accept", {"code": "1234"})]
+
+
 def _client(tmp_path: Path, runtime: "_WsRuntime") -> TestClient:
     static_dir = tmp_path / "static"
     static_dir.mkdir(exist_ok=True)
@@ -209,6 +234,7 @@ class _WsRuntime:
         self.chat_calls: list[tuple[str, str, str, str]] = []
         self.request_ids: list[str] = []
         self.cancelled_sessions: list[str] = []
+        self.mcp_interactions: list[tuple[str, str, dict | None]] = []
 
     def run_chat_events(
         self,
@@ -230,3 +256,7 @@ class _WsRuntime:
     def cancel_session(self, session_id: str):
         self.cancelled_sessions.append(session_id)
         return {"session_id": session_id, "cancelled": 1}
+
+    def submit_mcp_interaction(self, interaction_id: str, action: str, content=None):
+        self.mcp_interactions.append((interaction_id, action, content))
+        return True

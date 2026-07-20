@@ -76,5 +76,6 @@
 
 - `/memory` 只展示当前 actor 的长期 Memory；Session Summary 和手动提取子命令均已删除。
 - Owner Web 与 CLI 使用全局 Memory，普通用户使用各自目录；Web turn 绑定 Memory Tool、候选策略和 confirmation broker。
+- `/mcp` 在 Web/external WS 使用同一共享 Runtime 摘要；MCP Elicitation 响应帧回传到 Runtime。
 - Memory 写入通过普通对话授权；持久 trace/audit 不保存 query、写入内容或读取结果原文。
 - Web 不提供 Memory 专用确认弹窗或编辑 API；Memory 授权通过普通对话完成。

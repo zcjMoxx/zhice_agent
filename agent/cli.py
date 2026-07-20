@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import getpass
 import hmac
+import json
 import os
 import sys
 from collections.abc import Sequence
@@ -13,6 +15,7 @@ from datetime import datetime
 from agent.app.auth import local_operator_actor
 from agent.app.gateway import format_gateway_check, run_gateway
 from agent.app.logging import GatewayLogOptions
+from agent.auth.activity import SqliteRuntimeActivitySink
 from agent.auth.audit import SqliteAuditSink
 from agent.auth.confirmation import ConsoleConfirmationBroker
 from agent.auth.store import AuthSetupError, AuthStoreError, SQLiteAuthStore
@@ -37,6 +40,7 @@ from agent.llm.runtime import (
     validate_startup_llm_endpoints,
 )
 from agent.llm.selection import ConfiguredLLMProviderResolver
+from agent.mcp import McpRuntime, load_mcp_server_specs
 from agent.memory.context import build_memory_context
 from agent.memory.markdown_store import MarkdownMemoryStore
 from agent.memory.presentation import format_memory_list
@@ -44,6 +48,7 @@ from agent.memory.safety import MemorySafetyPolicy
 from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.protocols.auth import AuditEvent
+from agent.protocols.mcp import McpInteractionRequest, McpInteractionResponse
 from agent.protocols.session import SessionContext, SessionModelPreference
 from agent.session import JsonlSessionStore, JsonSessionModelPreferenceStore
 from agent.skills import SkillLoader, SkillSourceSync
@@ -206,6 +211,16 @@ def _run_chat(argv: Sequence[str]) -> int:
     confirmation_broker = ConsoleConfirmationBroker()
     auth_store = SQLiteAuthStore(config.auth_db_path)
     audit_sink = SqliteAuditSink(auth_store) if auth_store.is_initialized() else None
+    activity_sink = (
+        SqliteRuntimeActivitySink(auth_store) if auth_store.is_initialized() else None
+    )
+    mcp_runtime = McpRuntime(
+        load_mcp_server_specs(config.config_dir),
+        workspace=config.workspace,
+        activity_sink=activity_sink,
+        audit_sink=audit_sink,
+    )
+    atexit.register(mcp_runtime.close)
     memory_store = MarkdownMemoryStore(
         build_memory_context(
             config.local_memory_dir,
@@ -221,6 +236,13 @@ def _run_chat(argv: Sequence[str]) -> int:
         allow_confirmable_exec=True,
         memory_store=memory_store,
         memory_safety=memory_safety,
+        extra_tools=mcp_runtime.tools_for_actor(
+            cli_actor,
+            config.workspace,
+            interaction_notifier=lambda request: _handle_cli_mcp_interaction(
+                mcp_runtime, request
+            ),
+        ),
     )
     agent_loop = AgentLoop(
         llm=llm,
@@ -239,12 +261,14 @@ def _run_chat(argv: Sequence[str]) -> int:
             user_text = input("> ").strip()
         except EOFError:
             print(console.warning("bye"))
+            mcp_runtime.close()
             return 0
 
         if not user_text:
             continue
         if user_text == "/exit":
             print(console.warning("bye"))
+            mcp_runtime.close()
             return 0
         if user_text == "/help":
             _print_help()
@@ -272,6 +296,9 @@ def _run_chat(argv: Sequence[str]) -> int:
             continue
         if user_text == "/tools":
             _print_tools(tool_registry)
+            continue
+        if user_text == "/mcp":
+            print(mcp_runtime.format_capabilities())
             continue
         if user_text == "/skills" or user_text.startswith("/skills "):
             _handle_skills_command(
@@ -324,6 +351,13 @@ def _run_chat(argv: Sequence[str]) -> int:
             allow_confirmable_exec=True,
             memory_store=memory_store,
             memory_safety=memory_safety,
+            extra_tools=mcp_runtime.tools_for_actor(
+                cli_actor,
+                config.workspace,
+                interaction_notifier=lambda request: _handle_cli_mcp_interaction(
+                    mcp_runtime, request
+                ),
+            ),
         )
         try:
             with Spinner("thinking"):
@@ -1103,10 +1137,43 @@ def _print_help() -> None:
         ("/skills", "list discovered local Skills"),
         ("/model", "show or switch the preferred LLM endpoint"),
         ("/memory", "show current Memory"),
+        ("/mcp", "show available MCP capabilities"),
         ("/exit", "leave the CLI"),
     ]
     for name, description in commands:
         print(f"{console.command(name):<18}{description}")
+
+
+def _handle_cli_mcp_interaction(
+    runtime: McpRuntime,
+    request: McpInteractionRequest,
+) -> None:
+    """Prompt for one Server-originated Elicitation and submit the answer."""
+
+    print(f"\nMCP {request.server_id}: {request.message}")
+    if request.url:
+        print(f"URL: {request.url}")
+    if request.requested_schema:
+        print("Expected JSON schema:")
+        print(json.dumps(request.requested_schema, indent=2, ensure_ascii=False))
+    try:
+        raw = input("MCP response JSON (blank=accept {}, /decline, /cancel): ").strip()
+    except EOFError:
+        raw = "/cancel"
+    if raw == "/decline":
+        response = McpInteractionResponse(action="decline")
+    elif raw == "/cancel":
+        response = McpInteractionResponse(action="cancel")
+    else:
+        try:
+            content = json.loads(raw) if raw else {}
+            if not isinstance(content, dict):
+                raise ValueError("response must be a JSON object")
+            response = McpInteractionResponse(action="accept", content=content)
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(console.error(f"Invalid MCP response: {exc}"))
+            response = McpInteractionResponse(action="cancel")
+    runtime.submit_interaction(request.interaction_id, response)
 
 
 def _print_skills(skill_loader: SkillLoader) -> None:
