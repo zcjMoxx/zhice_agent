@@ -509,3 +509,4 @@ docs_design/zhice-agent-overall-design.md
 - Part 8 提供 trace 格式。
 - Part 9 提供 actor、Runtime Activity 和 Security Audit。
 - Part 10 提供普通用户目录与 Owner/workspace operator 边界。
+- Part 12 为 MCP Tool 和内置 Tool 增加统一 `tool.started/completed/failed` RuntimeEvent，并通过真实 post Hook 为 MCP 归一化结果补充受限业务展示 metadata；pre Hook 修改参数后仍重新经过核心 schema、RBAC 和 MCP/ArtifactGateway 边界，不能改变“不自动重放当前远端调用”的规则。当前设计见 `docs_design/zhice-agent-part12-hooks-design.md`。

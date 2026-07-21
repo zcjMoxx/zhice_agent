@@ -85,7 +85,7 @@ def test_password_inputs_have_persistent_visibility_controls():
     assert ".password-input-wrap" in css
     assert "::-ms-reveal" in css
     assert "::-ms-clear" in css
-    assert "20260716-background-memory-trace" in html
+    assert "20260720-runtime-hooks" in html
     assert 'id="confirmationEdit"' not in html
     assert 'id="confirmationContent"' not in html
     assert "editMemoryConfirmation" not in javascript
@@ -110,7 +110,7 @@ def test_web_brand_uses_selected_image_asset_and_a_distinct_user_icon():
     assert "Array.from" in javascript
     assert "state.currentUser?.username" in javascript
     assert ".logo-avatar" not in css
-    assert "20260716-background-memory-trace" in html
+    assert "20260720-runtime-hooks" in html
 
 
 def test_owner_setup_page_is_only_served_while_secret_is_configured_and_owner_missing(tmp_path):

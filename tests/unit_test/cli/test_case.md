@@ -78,3 +78,9 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 - `zcagent gateway` parses split log flags for Agent lifecycle log, workspace trace log, HTTP access log, and HTTP server log.
 - Removed legacy flags `--log-level` and `--access-log` are rejected instead of being kept as aliases.
+
+## Part 12 RuntimeEvent Coverage
+
+- CLI 将 RuntimeEvent 的 started/waiting 安全短标题原位更新到 Spinner。
+- completed Event、text_delta 和未知事件不额外刷状态行。
+- Hook 配置从当前 workspace/config 加载；显式非法配置阻断 chat 启动并给出稳定提示。

@@ -52,6 +52,7 @@ from agent.message import Message
 from agent.protocols.auth import AuditEvent
 from agent.protocols.errors import ErrorCode
 from agent.protocols.llm import LLMConfigurationError, LLMProviderError
+from agent.protocols.runtime_event import is_runtime_event_payload
 
 router = APIRouter(prefix="/api")
 
@@ -958,8 +959,17 @@ def _chat_stream_events(runtime, actor, session_id: str, message: str, *, reques
     while True:
         kind, payload = events.get()
         if kind == "event":
-            if payload.get("type") == "text_delta":
+            if is_runtime_event_payload(payload):
+                yield _sse("runtime", payload)
+            elif payload.get("type") == "text_delta":
                 yield _sse("delta", {"content": payload.get("content", ""), "turn_id": turn_id})
+            elif payload.get("type") in {
+                "tool_confirmation_required",
+                "mcp_elicitation_requested",
+            }:
+                interaction = dict(payload)
+                interaction.setdefault("turn_id", turn_id)
+                yield _sse(str(payload["type"]), interaction)
             continue
         if kind == "error":
             error = _api_error_from_exception(payload)

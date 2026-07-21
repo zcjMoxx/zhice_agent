@@ -287,17 +287,16 @@ contexts/sessions/chat-YYYYMMDD.jsonl
 
 ### 3.2 未来扩展方向
 
-Part 10 Memory 和 Part 11 MCP 基础实现已经完成；后续先完成当前代码尚不存在的能力，再进入分领域优化：
+Part 10 Memory、Part 11 MCP 和 Part 12 生命周期事件/Hook Runtime 已经完成；后续先完成当前代码尚不存在的能力，再进入分领域优化：
 
-1. Part 12 Hooks：提供工具执行前后的安全与结果处理扩展点。
-2. Part 13 Subagent：复用同一个 AgentLoop 执行受限子任务并把摘要交回父 Agent。
-3. Part 14 外部渠道：接入 IM / 协作平台，并统一身份、命令、session 和 turn 语义。
-4. Part 15 生产部署与发布：补齐容器、反向代理、Secret 注入、健康检查和发布产物。
-5. Part 16 Agent 运行可靠性与上下文优化。
-6. Part 17 Web、会话与用户治理优化。
-7. Part 18 Skill、CLI 与本地运维优化。
+1. Part 13 Subagent：复用同一个 AgentLoop 执行受限子任务并把摘要交回父 Agent。
+2. Part 14 外部渠道：接入 IM / 协作平台，并统一身份、命令、session 和 turn 语义。
+3. Part 15 生产部署与发布：补齐容器、反向代理、Secret 注入、健康检查和发布产物。
+4. Part 16 Agent 运行可靠性与上下文优化。
+5. Part 17 Web、会话与用户治理优化。
+6. Part 18 Skill Runtime、CLI 与本地运维优化：独立承接 SkillExecutor、`skill.*` 与 ProgressSink。
 
-Part 12～15 继续补齐新能力；Part 16～18 再优化 Part 1～15 已经形成的运行链路。第十部分当前实现见 `docs_design/zhice-agent-part10-memory-design.md`；Part 11 当前实现见 `docs_design/zhice-agent-part11-mcp-design.md`，本次边界取舍见 `docs_design/2026-07-17-mcp-tool-runtime-boundary-design.md`；排序背景见 `docs_design/2026-07-06-next-stage-sequencing-design.md`。
+Part 13～15 继续补齐新能力；Part 16～18 再优化 Part 1～15 已经形成的运行链路。第十部分当前实现见 `docs_design/zhice-agent-part10-memory-design.md`；Part 11 当前实现见 `docs_design/zhice-agent-part11-mcp-design.md`，本次边界取舍见 `docs_design/2026-07-17-mcp-tool-runtime-boundary-design.md`；Part 12 当前实现见 `docs_design/zhice-agent-part12-hooks-design.md` 和 `docs_design/2026-07-20-hook-runtime-boundary-design.md`；排序背景见 `docs_design/2026-07-06-next-stage-sequencing-design.md`。
 
 ### 3.3 推荐目录结构
 
@@ -481,13 +480,13 @@ flowchart TD
     P --> M["print assistant text or error message"]
 ```
 
-当前实现已经包含工具调用、多轮 tool loop、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、受控 Memory、MCP Tool、显式 session 摘要、FastAPI gateway、WebSocket 主聊天通道和静态 Web UI；Hook 和 Subagent 仍是后续能力。
+当前实现已经包含工具调用、多轮 tool loop、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、受控 Memory、MCP Tool、显式 session 摘要、FastAPI gateway、WebSocket 主聊天通道、静态 Web UI、RuntimeEvent 和受限 pre/post Tool Hook Runtime；Subagent 仍是后续实现。
 
 ---
 
 ## 5. 数据结构设计
 
-下面第 5 节开始同时包含当前代码结构和长期路线图。当前已实现 CLI、配置、Prompt、Session、无工具聊天、工具调用、安全 exec、LiteLLM、endpoint failover、`/model`、FastAPI gateway、REST/SSE 兼容接口、WebSocket 主聊天通道、静态 Web UI、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、Memory、MCP 和显式 session 摘要；Hooks、Subagent 仍是后续设计。
+下面第 5 节开始同时包含当前代码结构和长期路线图。当前已实现 CLI、配置、Prompt、Session、无工具聊天、工具调用、安全 exec、LiteLLM、endpoint failover、`/model`、FastAPI gateway、REST/SSE 兼容接口、WebSocket 主聊天通道、静态 Web UI、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、Memory、MCP、显式 session 摘要、RuntimeEvent 和受限 Tool Hook Runtime；Subagent 仍待设计与实现。
 
 ### 5.1 Message
 
@@ -1368,63 +1367,41 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 ---
 
-## 15. 后续部分设计
+## 15. Part 12 当前基线与后续部分设计
 
-本章只保留尚未实现的 Part 12～18。Part 10 Memory 和 Part 11 MCP 已进入当前代码基线，不再作为未来工作重复保留；其当前实现分别见对应 Part 活文档。
+本章记录已完成的 Part 12 当前边界和尚未实现的 Part 13～18。Part 10 Memory、Part 11 MCP 和 Part 12 RuntimeEvent/Hook Runtime 已进入当前代码基线，不再作为未来工作重复保留；其当前实现分别见对应 Part 活文档。
 
 ```text
-Part 12 Hooks
+Part 12 生命周期事件与 Hook Runtime（已完成）
   -> Part 13 Subagent
   -> Part 14 外部渠道
   -> Part 15 生产部署与发布
   -> Part 16 Agent 运行可靠性与上下文优化
   -> Part 17 Web、会话与用户治理优化
-  -> Part 18 Skill、CLI 与本地运维优化
+  -> Part 18 Skill Runtime、CLI 与本地运维优化
 ```
 
-### 15.1 Part 12：Hooks
+### 15.1 Part 12：生命周期事件与 Hook Runtime
 
-Hooks 可以用于安全和结果整理。
+Part 12 已按固定 Definition of Done 同批完成前端运行状态和真实 Hook 执行边界：
 
-第一版可选：
+- 建立 transport-neutral RuntimeEvent，覆盖 turn/context/LLM/tool 的 started/completed/failed/stopped/waiting 状态。
+- 复用当前 `on_event -> WebRuntime -> WebSocket /ws`，同时对齐 SSE 和 CLI，不新建实时通道。
+- 前端先用单行确定性状态展示“整理上下文、请求模型、执行工具、根据结果继续生成”。
+- 不展示思维链，不制造虚假百分比，RuntimeEvent 不写入 Session。
+- 显式加载 `${ZHICE_AGENT_WORKSPACE}/config/hooks.yml`，实现无 shell、最小环境、workspace path guard、timeout、输出限制和严格 JSON 校验的本地 Python Hook Runner。
+- pre Hook 支持 continue/block/modify；修改参数后重新经过 Tool schema、RBAC、危险确认和具体 Tool 安全检查。
+- post Hook 只补充受限业务标题、图标和 `ui_metadata`，不能篡改 ToolResult 或 Event 的成功失败事实。
+- Hook 默认对所有身份生效；单 Hook 可显式配置 `exempt_roles` / `exempt_permissions`。owner 可按角色显式豁免，admin 只按实际生效权限豁免；两者均无全局自动豁免，跳过 Hook 后仍执行全部核心安全判断。
+- 核心 RBAC、危险确认、workspace/用户隔离、timeout、脱敏和 SSRF 继续留在内核和具体 Tool。
+- RuntimeEvent、渠道/前端状态、真实 pre/post Hook Runtime 和测试已全部完成，Part 12 已关闭。
+- SkillExecutor、`skill.started/progress/completed/failed` 与 ProgressSink 归入未来 Skill Runtime / Part 18，不作为 Part 12 欠账。
 
-```text
-hooks/safety/pre_tooluse/exec.py
-```
-
-输入 JSON：
-
-```json
-{
-  "phase": "pre_tooluse",
-  "tool_name": "exec",
-  "arguments": {"command": "ls"},
-  "context": {"session_id": "default"}
-}
-```
-
-输出 JSON：
-
-```json
-{
-  "action": "continue",
-  "arguments": {"command": "ls"},
-  "message": ""
-}
-```
-
-或阻止：
-
-```json
-{
-  "action": "block",
-  "message": "危险命令，已拦截"
-}
-```
+当前实现依据：`docs_design/zhice-agent-part12-hooks-design.md`；设计取舍记录：`docs_design/2026-07-20-hook-runtime-boundary-design.md`。
 
 ### 15.2 Part 13：Subagent
 
-Memory 和 MCP 已经落地，Subagent 放在 Hooks 之后实现。
+Memory、MCP 和 Hook Runtime 已经落地，Subagent 从当前统一 AgentLoop / RuntimeEvent 基线继续实现。
 
 关键原则：
 
@@ -1828,15 +1805,15 @@ session 模型偏好与 turn-local LLM 选择
 独立 Runtime Activity 索引与 Security Audit 账本
 ```
 
-### Milestone 12～18 后续部分
+### Milestone 12 当前基线与 13～18 后续部分
 
-- Part 12 Hooks：工具执行前后的安全策略和结果处理扩展点。
+- Part 12 生命周期事件与 Hook Runtime：已完成 RuntimeEvent、现有 WS/SSE/CLI、前端运行状态和真实受限 pre/post Tool Hook Runtime，DoD 已满足并关闭。
 - Part 13 Subagent：复用同一个 AgentLoop 创建受限子任务 Agent。
 - Part 14 外部渠道：接入真实 IM / 协作平台适配器。
 - Part 15 生产部署与发布：容器、反向代理、Secret 注入、健康检查和发布产物。
 - Part 16 Agent 运行可靠性与上下文优化。
 - Part 17 Web、会话与用户治理优化。
-- Part 18 Skill、CLI 与本地运维优化。
+- Part 18 Skill Runtime、CLI 与本地运维优化，独立承接 SkillExecutor、`skill.*` 与 ProgressSink。
 
 ---
 
@@ -1910,7 +1887,7 @@ Part 10 已实现扩展项：
 1. CLI/Owner workspace Memory 与普通用户私有 Memory、极简 Markdown 内容、原子写入和本地相关性检索。
 2. `memory_read` / `memory_write` 本人基础能力、对话式用户授权、模型自然语言询问、安全过滤、`/memory` 展示和隐私化 trace/audit。
 
-Part 11 MCP 已实现并进入当前基线：支持 stdio、Streamable HTTP、SSE、自动 Tool 发现、共享 Runtime、OAuth refresh、ArtifactGateway、Elicitation 和 `/mcp`；Windows OS 级 stdio 读取隔离仍是后续安全硬化项。下一阶段从 Part 12 Hooks 开始。
+Part 11 MCP 已实现并进入当前基线：支持 stdio、Streamable HTTP、SSE、自动 Tool 发现、共享 Runtime、OAuth refresh、ArtifactGateway、Elicitation 和 `/mcp`；Windows OS 级 stdio 读取隔离仍是后续安全硬化项。Part 12 已按 `docs_design/zhice-agent-part12-hooks-design.md` 完成 RuntimeEvent、渠道/前端状态和真实 pre/post Tool Hook Runtime。
 
 ---
 
@@ -2091,16 +2068,16 @@ Part 11 MCP 已实现并进入当前基线：支持 stdio、Streamable HTTP、SS
 能用 turn 串起 WebSocket、AgentLoop、Session 历史和上下文选择。
 ```
 
-当前代码已经完成 Part 10 Memory 和 Part 11 MCP。后续按剩余核心 Part 的依赖顺序逐步增加：
+当前代码已经完成 Part 10 Memory、Part 11 MCP 和 Part 12 生命周期事件/Hook Runtime。后续按剩余核心 Part 的依赖顺序逐步增加：
 
 ```text
-Part 12 Hooks
+Part 12 生命周期事件与 Hook Runtime（已完成并关闭）
 Part 13 Subagent
 Part 14 外部渠道
 Part 15 生产部署与发布
 Part 16 Agent 运行可靠性与上下文优化
 Part 17 Web、会话与用户治理优化
-Part 18 Skill、CLI 与本地运维优化
+Part 18 Skill Runtime、CLI 与本地运维优化
 ```
 
 新功能完成后再进入优化阶段，避免优化中的协议调整反复打断 Hooks、Subagent 和渠道接入主线。

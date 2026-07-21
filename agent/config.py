@@ -69,6 +69,12 @@ class AppConfig:
         return self.config_dir / "mcp.json"
 
     @property
+    def hooks_config_path(self) -> Path:
+        """Workspace runtime Tool Hook configuration path."""
+
+        return self.config_dir / "hooks.yml"
+
+    @property
     def mcp_runtime_dir(self) -> Path:
         """Workspace-shared MCP process and temporary state root."""
 

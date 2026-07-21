@@ -214,6 +214,23 @@ def test_chat_stream_api_uses_runtime_streaming_events(tmp_path):
     assert events[-1][0] == "done"
 
 
+def test_chat_stream_api_forwards_runtime_events(tmp_path):
+    runtime = _FakeRuntime(runtime_events=[_runtime_event("llm.started", 4)])
+    client = _client(tmp_path, runtime)
+
+    response = client.post(
+        "/api/chat/stream",
+        json={"session_id": "alpha", "message": "hello"},
+    )
+
+    events = _parse_sse(response.text)
+    turn_id = events[0][1]["turn_id"]
+    runtime_payload = next(payload for name, payload in events if name == "runtime")
+    assert runtime_payload["type"] == "llm.started"
+    assert runtime_payload["turn_id"] == turn_id
+    assert runtime_payload["sequence"] == 4
+
+
 def test_chat_stream_api_handles_slash_commands_without_calling_llm(tmp_path):
     runtime = _FakeRuntime(command_result="unknown command")
     client = _client(tmp_path, runtime)
@@ -441,6 +458,7 @@ class _FakeRuntime:
     model_error: Exception | None = None
     command_result: str | None = None
     stream_chunks: list[str] | None = None
+    runtime_events: list[dict] | None = None
 
     def __post_init__(self) -> None:
         self.chat_calls: list[tuple[str, str]] = []
@@ -475,12 +493,17 @@ class _FakeRuntime:
         self.chat_calls.append((session_id, message))
         if self.chat_error:
             raise self.chat_error
+        for runtime_event in self.runtime_events or []:
+            event = dict(runtime_event)
+            event["session_id"] = session_id
+            event["turn_id"] = turn_id or "turn-fake"
+            if on_event is not None:
+                on_event(event)
         chunks = self.stream_chunks or [self.chat_result]
         for chunk in chunks:
             if on_event is not None:
                 on_event({"type": "text_delta", "content": chunk})
         return ChatTurnResult(content="".join(chunks), turn_id=turn_id or "turn-fake")
-
     def handle_command(self, session_id: str, message: str) -> str | None:
         if not message.startswith("/"):
             return None
@@ -516,6 +539,27 @@ class _FakeRuntime:
 
     def delete_session(self, session_id: str) -> None:
         self.deleted_sessions.append(session_id)
+
+
+def _runtime_event(event_type: str, sequence: int) -> dict:
+    return {
+        "protocol_version": 1,
+        "event_id": f"event-{sequence}",
+        "type": event_type,
+        "status": "started",
+        "timestamp": "2026-07-20T00:00:00Z",
+        "sequence": sequence,
+        "session_id": "",
+        "turn_id": "",
+        "request_id": "",
+        "tool_call_id": "",
+        "tool_call_record_id": "",
+        "parent_event_id": "",
+        "display": {"title": "正在请求模型"},
+        "ui_metadata": {},
+        "metadata": {},
+    }
+
 
 def _assert_error(response, status: int, code: str, message: str, *, details=None) -> None:
     payload = response.json()["error"]

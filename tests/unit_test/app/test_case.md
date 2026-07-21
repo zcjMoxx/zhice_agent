@@ -37,6 +37,8 @@
 - WebSocket accepted, text, done, stopped, and error events carry the aligned turn id.
 - Session history API exposes optional message turn fields.
 - SSE status, delta, done, stopped, and error payloads carry one consistent turn id.
+- WS 使用 `runtime_event` 信封转发 RuntimeEvent；SSE 使用 `event: runtime`，均保持旧 text/status/interaction 兼容。
+- 浏览器 RuntimeEvent reducer 按 turn_id + sequence 忽略旧状态，并在 terminal turn Event 清理运行状态。
 
 ## Part 8 Logging Coverage
 

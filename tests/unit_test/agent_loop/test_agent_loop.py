@@ -4,7 +4,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from agent.message import Message
+from agent.protocols.llm import LLMResponse
 from agent.protocols.session import SessionState
 
 
@@ -146,8 +149,9 @@ def test_run_turn_records_error_marker_when_llm_raises(tmp_path):
         context_builder=FakeContextBuilder(),
         workspace=tmp_path,
     )
+    events = []
 
-    result = loop.run_turn("default", "hello")
+    result = loop.run_turn("default", "hello", on_event=events.append)
 
     assert "LLM" in result
     assert "sk-test" not in result
@@ -158,6 +162,40 @@ def test_run_turn_records_error_marker_when_llm_raises(tmp_path):
     ]
     assert appended[1].metadata["is_error"] is True
     _assert_single_turn(appended, expected_index=1)
+    assert [event["type"] for event in events if event.get("protocol_version") == 1][-2:] == [
+        "llm.failed",
+        "turn.failed",
+    ]
+
+
+def test_run_turn_context_failure_emits_failed_lifecycle_without_session_write(tmp_path):
+    """Context load/build failures should close the transient runtime state."""
+
+    from agent.core.loop import AgentLoop
+
+    class _FailingContextBuilder:
+        def build(self, history, user_message, workspace, session_id):
+            raise ValueError("context unavailable")
+
+    sessions = InMemorySessionStore()
+    events = []
+    loop = AgentLoop(
+        llm=FakeLLM(LLMResponse(content="unused")),
+        sessions=sessions,
+        context_builder=_FailingContextBuilder(),
+        workspace=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="context unavailable"):
+        loop.run_turn("default", "hello", on_event=events.append)
+
+    assert [event["type"] for event in events if event.get("protocol_version") == 1] == [
+        "turn.started",
+        "context.started",
+        "context.failed",
+        "turn.failed",
+    ]
+    assert sessions.appended == {}
 
 
 def test_run_turn_explains_missing_api_key(tmp_path):
@@ -268,18 +306,63 @@ def test_run_turn_emits_streaming_text_events(tmp_path):
     result = loop.run_turn("default", "hello", on_event=events.append)
 
     assert result == "hello"
-    assert events == [
+    assert [event for event in events if event.get("type") == "text_delta"] == [
         {"type": "text_delta", "content": "hel"},
         {"type": "text_delta", "content": "lo"},
     ]
+
+
+def test_run_turn_emits_complete_runtime_lifecycle(tmp_path):
+    """A no-tool turn should expose real context, LLM, and terminal lifecycle facts."""
+
+    from agent.core.loop import AgentLoop
+
+    events = []
+    loop = AgentLoop(
+        llm=FakeLLM(LLMResponse(content="hello")),
+        sessions=InMemorySessionStore(),
+        context_builder=FakeContextBuilder(),
+        workspace=tmp_path,
+    )
+
+    loop.run_turn("default", "hello", turn_id="turn-runtime", on_event=events.append)
+
+    runtime_events = [event for event in events if event.get("protocol_version") == 1]
+    assert [event["type"] for event in runtime_events] == [
+        "turn.started",
+        "context.started",
+        "context.completed",
+        "llm.started",
+        "llm.completed",
+        "turn.completed",
+    ]
+    assert [event["sequence"] for event in runtime_events] == list(range(1, 7))
+    assert {event["turn_id"] for event in runtime_events} == {"turn-runtime"}
+
+
+def test_run_turn_event_sink_failure_does_not_change_result(tmp_path):
+    """RuntimeEvent and legacy text callbacks are best-effort observations."""
+
+    from agent.core.loop import AgentLoop
+
+    def failing_sink(_event):
+        raise RuntimeError("channel closed")
+
+    sessions = InMemorySessionStore()
+    loop = AgentLoop(
+        llm=FakeLLM(LLMResponse(content="hello")),
+        sessions=sessions,
+        context_builder=FakeContextBuilder(),
+        workspace=tmp_path,
+    )
+
+    assert loop.run_turn("default", "hello", on_event=failing_sink) == "hello"
     assert sessions.appended["default"][-1].content == "hello"
     _assert_single_turn(sessions.appended["default"], expected_index=1)
 
 
 def test_stream_chunk_rejects_shapes_outside_protocol():
     """Streaming providers should return strings or LLMStreamChunk objects."""
-
-    import pytest
 
     from agent.core.loop import _normalize_stream_chunk
 
@@ -300,14 +383,20 @@ def test_run_turn_stops_when_cancellation_token_is_set(tmp_path):
 
     def on_event(event):
         events.append(event)
-        token.cancel()
+        if event.get("type") == "text_delta":
+            token.cancel()
 
     loop = AgentLoop(llm=llm, sessions=sessions, context_builder=FakeContextBuilder(), workspace=tmp_path)
 
     result = loop.run_turn("default", "hello", on_event=on_event, cancellation_token=token)
 
     assert result == TURN_CANCELLED_TEXT
-    assert events == [{"type": "text_delta", "content": "first"}]
+    assert [event for event in events if event.get("type") == "text_delta"] == [
+        {"type": "text_delta", "content": "first"}
+    ]
+    assert [event["type"] for event in events if event.get("protocol_version") == 1][-1] == (
+        "turn.stopped"
+    )
     assert sessions.appended["default"][-1].content == TURN_CANCELLED_TEXT
     assert sessions.appended["default"][-1].metadata["stopped"] is True
     _assert_single_turn(sessions.appended["default"], expected_index=1)

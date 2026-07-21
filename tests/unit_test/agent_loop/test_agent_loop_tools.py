@@ -113,13 +113,16 @@ def test_tool_error_is_returned_to_llm(tmp_path):
     )
     llm = ScriptedLLM([LLMResponse(content="", tool_calls=[call]), LLMResponse(content="explained")])
     loop = _make_loop(tmp_path, llm=llm, tools=FakeTools(results=[result]))
+    events = []
 
-    final = loop.run_turn("default", "read outside")
+    final = loop.run_turn("default", "read outside", on_event=events.append)
 
     tool_payload = json.loads(llm.calls[1]["messages"][-1]["content"])
     assert final == "explained"
     assert tool_payload["status"] == "error"
     assert tool_payload["metadata"]["code"] == "PATH_OUTSIDE_WORKSPACE"
+    failed = next(event for event in events if event.get("type") == "tool.failed")
+    assert failed["metadata"]["reason_code"] == "PATH_OUTSIDE_WORKSPACE"
 
 
 def test_malformed_tool_arguments_do_not_crash_loop(tmp_path):
@@ -176,8 +179,9 @@ def test_tool_iteration_limit_saves_error_marker(tmp_path):
         sessions=sessions,
         max_tool_iterations=1,
     )
+    events = []
 
-    result = loop.run_turn("default", "loop")
+    result = loop.run_turn("default", "loop", on_event=events.append)
 
     assert result == "The tool limit was reached after collecting partial evidence."
     assert [message.role for message in sessions.appended["default"]] == [
@@ -193,6 +197,13 @@ def test_tool_iteration_limit_saves_error_marker(tmp_path):
     assert sessions.appended["default"][-3].metadata["code"] == "TOOL_ITERATION_LIMIT"
     assert llm.calls[-1]["tools"] is None
     _assert_single_turn(sessions.appended["default"], expected_index=1)
+    limit_failures = [
+        event
+        for event in events
+        if event.get("type") == "tool.failed"
+        and event.get("metadata", {}).get("reason_code") == "TOOL_ITERATION_LIMIT"
+    ]
+    assert len(limit_failures) == 1
 
 
 def test_tool_iteration_limit_falls_back_when_final_summary_requests_tools(tmp_path):
@@ -325,11 +336,12 @@ class FakeTools:
             {
                 "type": "function",
                 "function": {
-                    "name": "read_file",
+                    "name": name,
                     "description": "Read a file.",
                     "parameters": {"type": "object"},
                 },
             }
+            for name in ("read_file", "list_dir", "grep")
         ]
 
     def execute(self, name, args):

@@ -32,6 +32,7 @@ from agent.console import Spinner, console
 from agent.core.context import ContextBuilder
 from agent.core.loop import AgentLoop
 from agent.core.turns import assign_turn, new_turn_id, next_turn_index
+from agent.hooks import HookConfigurationError, create_hook_runtime
 from agent.llm import LLMConfigurationError
 from agent.llm.failover_provider import EndpointFailoverProvider
 from agent.llm.runtime import (
@@ -49,6 +50,7 @@ from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.protocols.auth import AuditEvent
 from agent.protocols.mcp import McpInteractionRequest, McpInteractionResponse
+from agent.protocols.runtime_event import is_runtime_event_payload
 from agent.protocols.session import SessionContext, SessionModelPreference
 from agent.session import JsonlSessionStore, JsonSessionModelPreferenceStore
 from agent.skills import SkillLoader, SkillSourceSync
@@ -181,6 +183,11 @@ def _run_chat(argv: Sequence[str]) -> int:
         return 1
     if not _ensure_runtime_dirs(config):
         return 1
+    try:
+        hook_runtime = create_hook_runtime(config.workspace, config.config_dir)
+    except HookConfigurationError as exc:
+        print(console.error(f"Hook configuration is invalid: {exc}"))
+        return 1
 
     skill_sync = SkillSourceSync(
         workspace=config.workspace,
@@ -253,6 +260,7 @@ def _run_chat(argv: Sequence[str]) -> int:
         tool_policy=tool_policy,
         confirmation_broker=confirmation_broker,
         audit_sink=audit_sink,
+        hook_runtime=hook_runtime,
     )
     print(console.bold(CHAT_BANNER))
 
@@ -360,7 +368,7 @@ def _run_chat(argv: Sequence[str]) -> int:
             ),
         )
         try:
-            with Spinner("thinking"):
+            with Spinner("已接收问题") as spinner:
                 turn_llm = _cli_turn_provider(model_runtime, session_id) if model_runtime else None
                 result = agent_loop.run_turn(
                     session_id,
@@ -372,6 +380,7 @@ def _run_chat(argv: Sequence[str]) -> int:
                     tool_policy=tool_policy,
                     confirmation_broker=confirmation_broker,
                     channel="cli",
+                    on_event=lambda event: _update_cli_runtime_status(spinner, event),
                 )
             print(result)
         except KeyboardInterrupt:
@@ -394,6 +403,17 @@ def _run_chat(argv: Sequence[str]) -> int:
                     ),
                 ],
             )
+
+
+def _update_cli_runtime_status(spinner: Spinner, event: dict[str, object]) -> None:
+    """Render only active RuntimeEvent states on the existing CLI status line."""
+
+    if not is_runtime_event_payload(event) or event.get("status") not in {"started", "waiting"}:
+        return
+    display = event.get("display")
+    title = display.get("title") if isinstance(display, dict) else ""
+    if isinstance(title, str) and title.strip():
+        spinner.set_label(title)
 
 
 def _run_gateway(argv: Sequence[str]) -> int:

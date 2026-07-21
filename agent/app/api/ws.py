@@ -15,6 +15,7 @@ from agent.app.runtime import EXTERNAL_COMMAND_PROFILE, WEB_COMMAND_PROFILE, Cha
 from agent.core.turns import new_turn_id
 from agent.protocols.auth import AuditEvent
 from agent.protocols.errors import ErrorCode
+from agent.protocols.runtime_event import is_runtime_event_payload
 
 router = APIRouter()
 
@@ -269,7 +270,14 @@ async def _run_message_frame(
         while True:
             kind, payload = await queue.get()
             if kind == "event":
-                if payload.get("type") == "text_delta":
+                if is_runtime_event_payload(payload):
+                    await send_event(
+                        "runtime_event",
+                        payload,
+                        session_id=str(payload.get("session_id") or session_id),
+                        turn_id=str(payload.get("turn_id") or turn_id),
+                    )
+                elif payload.get("type") == "text_delta":
                     await send_event(
                         "channel_text",
                         payload.get("content", ""),

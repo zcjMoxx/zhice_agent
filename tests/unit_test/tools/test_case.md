@@ -2,7 +2,7 @@
 
 ## 测试目标
 
-验证第三部分只读工具系统和第四部分安全 `exec` 工具的协议、注册表、workspace guard、结构化错误、命令拦截、超时和输出截断能力，为后续 Skill 工具复用同一入口打基础。
+验证第三部分只读工具系统和第四部分安全 `exec` 工具的协议、注册表、workspace guard、结构化错误、命令拦截、超时和输出截断能力，为后续 Skill 工具复用同一入口打基础。Part 12 还验证 pre Hook 修改参数后重新经过完整 JSON Schema 校验器，支持本地 `$ref/$defs`，不能绕过 required/type/additionalProperties 等公开约束；外部、无效或无法解析引用 fail closed。
 
 ## 用例覆盖
 

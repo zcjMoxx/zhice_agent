@@ -236,6 +236,26 @@ def test_cli_chat_errors_when_enabled_llm_has_no_api_key(tmp_path, capsys, monke
     assert "llm_endpoints.json" in output
 
 
+def test_cli_chat_rejects_invalid_hook_config(tmp_path, capsys, monkeypatch):
+    """An explicitly configured but invalid Hook must not be silently skipped."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "hooks.yml").write_text(
+        "version: 1\nhooks:\n  - name: invalid\n    stage: unknown\n    script: hook.py\n",
+        encoding="utf-8",
+    )
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "Hook configuration is invalid" in output
+    assert "Unsupported Hook stage" in output
+
+
 def test_cli_chat_warns_when_skill_sources_config_is_missing(tmp_path, capsys, monkeypatch):
     """Chat startup should not silently ignore a missing Skill source config."""
 
@@ -291,6 +311,35 @@ def test_cli_chat_respects_explicit_session_id(tmp_path, capsys, monkeypatch):
     capsys.readouterr()
     assert result == 0
     assert (tmp_path / "contexts" / "sessions" / "named-session.jsonl").exists()
+
+
+def test_cli_runtime_status_updates_spinner_only_for_active_events():
+    from agent.cli import _update_cli_runtime_status
+
+    class _Spinner:
+        labels = []
+
+        def set_label(self, label):
+            self.labels.append(label)
+
+    spinner = _Spinner()
+    base = {
+        "protocol_version": 1,
+        "event_id": "event-1",
+        "type": "llm.started",
+        "status": "started",
+        "timestamp": "2026-07-20T00:00:00Z",
+        "sequence": 1,
+        "session_id": "session-1",
+        "turn_id": "turn-1",
+        "display": {"title": "正在请求模型"},
+    }
+
+    _update_cli_runtime_status(spinner, base)
+    _update_cli_runtime_status(spinner, {**base, "type": "llm.completed", "status": "completed"})
+    _update_cli_runtime_status(spinner, {"type": "text_delta", "content": "hello"})
+
+    assert spinner.labels == ["正在请求模型"]
 
 
 def test_cli_auto_endpoint_uses_default_alias_when_configured(tmp_path):

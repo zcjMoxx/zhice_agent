@@ -59,6 +59,15 @@
 - Generate a stable turn id and 1-based turn index for CLI-style calls.
 - Reuse externally provided turn ids for Web/runtime calls.
 - Stamp user, assistant, tool, error, stopped, and tool-iteration-limit messages with the same turn fields.
+
+## Part 12 RuntimeEvent 与 Hook Coverage
+
+- 无 Tool Turn 发出 turn/context/LLM 的完整 RuntimeEvent 顺序，sequence 在同一 Turn 内单调递增。
+- Tool Turn 发出 started/completed/failed/waiting_confirmation，并在 Tool 结果后重新进入 LLM 状态。
+- RuntimeEvent sink 异常不改变 Session 或最终回答；RuntimeEvent 不写入 Session Message。
+- pre Hook block 只增加限制；modify 后重新通过 Tool schema，policy、确认 broker 和 Tool 收到最终参数。
+- admin 的有效权限显式命中单 Hook `exempt_permissions` 时不启动 Runner，但 admin 仍继续经过核心 policy、危险确认和具体 Tool guard。
+- post Hook 只增强最终 Tool Event 的 display/ui_metadata，不改变 ToolResult 或成功失败状态。
 - Keep Fake LLM tests deterministic while covering normal, error, streaming, cancellation, and tool paths.
 
 ## Part 8 Logging Coverage

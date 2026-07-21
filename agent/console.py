@@ -146,6 +146,13 @@ class Spinner:
         self._thread.start()
         return self
 
+    def set_label(self, label: str) -> None:
+        """Update the current in-place status label from a RuntimeEvent."""
+
+        normalized = str(label).strip()
+        if normalized:
+            self._label = normalized
+
     def __exit__(self, exc_type: type | None, exc_val: object, exc_tb: object) -> None:
         """Stop the spinner and print the final elapsed-time line."""
 

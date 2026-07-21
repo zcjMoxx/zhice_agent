@@ -15,12 +15,19 @@ from typing import Any
 
 from agent.console import console
 from agent.core.context import ContextBuilder
+from agent.core.event_emitter import RuntimeEventEmitter, callback_runtime_event_sink
 from agent.core.turns import assign_turn, new_turn_id, next_turn_index
 from agent.logging_utils import log_event, preview_json, preview_text
 from agent.message import Message
 from agent.protocols.activity import RuntimeActivityEvent, RuntimeActivitySink
 from agent.protocols.auth import ActorContext, AuditEvent, AuditSink
 from agent.protocols.errors import ErrorCode
+from agent.protocols.hook import (
+    HookRuntime,
+    PostToolHookRequest,
+    PostToolHookResult,
+    PreToolHookRequest,
+)
 from agent.protocols.llm import (
     LLMConfigurationError,
     LLMProvider,
@@ -37,6 +44,7 @@ from agent.protocols.tool import (
     ToolProvider,
     ToolResult,
 )
+from agent.tools.schema import validate_tool_arguments
 
 ASSISTANT_ERROR_TEXT = "LLM call failed. Check the workspace configuration and retry."
 TOOL_ITERATION_LIMIT_TEXT = "Tool call limit reached. Please retry with a narrower request."
@@ -101,6 +109,7 @@ class AgentLoop:
         confirmation_broker: ToolConfirmationBroker | None = None,
         activity_sink: RuntimeActivitySink | None = None,
         audit_sink: AuditSink | None = None,
+        hook_runtime: HookRuntime | None = None,
     ):
         """Wire provider dependencies and guard the tool-iteration limit."""
 
@@ -117,6 +126,7 @@ class AgentLoop:
         self.confirmation_broker = confirmation_broker
         self.activity_sink = activity_sink
         self.audit_sink = audit_sink
+        self.hook_runtime = hook_runtime
 
     def run_turn(
         self,
@@ -149,20 +159,44 @@ class AgentLoop:
         activity = activity_sink or self.activity_sink
         audit = audit_sink or self.audit_sink
         resolved_channel = channel or (actor.channel if actor is not None else "")
-        session = sessions.load(session_id)
         resolved_turn_id = turn_id or new_turn_id()
-        resolved_turn_index = next_turn_index(session.messages)
         turn_started = time.perf_counter()
-        user_msg = assign_turn(
-            Message(role="user", content=user_text),
-            turn_id=resolved_turn_id,
-            turn_index=resolved_turn_index,
-        )
-        messages = self.context_builder.build(
-            history=session.messages,
-            user_message=user_msg,
-            workspace=workspace,
+        runtime_events = RuntimeEventEmitter(
             session_id=session_id,
+            turn_id=resolved_turn_id,
+            request_id=request_id,
+            sink=callback_runtime_event_sink(on_event),
+        )
+        runtime_events.emit("turn.started")
+        runtime_events.emit("context.started")
+        context_started = time.perf_counter()
+        try:
+            session = sessions.load(session_id)
+            resolved_turn_index = next_turn_index(session.messages)
+            user_msg = assign_turn(
+                Message(role="user", content=user_text),
+                turn_id=resolved_turn_id,
+                turn_index=resolved_turn_index,
+            )
+            messages = self.context_builder.build(
+                history=session.messages,
+                user_message=user_msg,
+                workspace=workspace,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            runtime_events.emit(
+                "context.failed",
+                metadata={"error_type": type(exc).__name__, "duration_ms": _duration_ms(context_started)},
+            )
+            runtime_events.emit(
+                "turn.failed",
+                metadata={"error_type": type(exc).__name__, "duration_ms": _duration_ms(turn_started)},
+            )
+            raise
+        runtime_events.emit(
+            "context.completed",
+            metadata={"context_items": len(messages), "duration_ms": _duration_ms(context_started)},
         )
         log_event(
             turn_logger,
@@ -228,7 +262,11 @@ class AgentLoop:
                     turn_id=resolved_turn_id,
                     decision="stopped",
                     metadata={"duration_ms": _duration_ms(turn_started)},
-                ),
+                    ),
+                )
+            runtime_events.emit(
+                "turn.stopped",
+                metadata={"duration_ms": _duration_ms(turn_started)},
             )
             return _with_save_error(TURN_CANCELLED_TEXT, save_error)
 
@@ -236,6 +274,13 @@ class AgentLoop:
             llm_started = time.perf_counter()
             try:
                 _raise_if_cancelled(cancellation_token)
+                runtime_events.emit(
+                    "llm.started",
+                    metadata={
+                        "reason": "initial" if tool_iterations == 0 else "tool_result",
+                        "iteration": tool_iterations + 1,
+                    },
+                )
                 log_event(
                     llm_logger,
                     logging.DEBUG,
@@ -256,6 +301,14 @@ class AgentLoop:
                     cancellation_token=cancellation_token,
                 )
                 _raise_if_cancelled(cancellation_token)
+                runtime_events.emit(
+                    "llm.completed",
+                    metadata={
+                        "duration_ms": _duration_ms(llm_started),
+                        "has_tool_calls": bool(response.tool_calls),
+                        "tool_call_count": len(response.tool_calls or []),
+                    },
+                )
                 log_event(
                     llm_logger,
                     logging.DEBUG,
@@ -272,6 +325,10 @@ class AgentLoop:
             except TurnCancelledError:
                 return persist_cancelled_turn()
             except Exception as exc:  # noqa: BLE001 - the loop must persist failed turns.
+                runtime_events.emit(
+                    "llm.failed",
+                    metadata={"error_type": type(exc).__name__, "duration_ms": _duration_ms(llm_started)},
+                )
                 log_event(
                     llm_logger,
                     logging.ERROR,
@@ -324,6 +381,10 @@ class AgentLoop:
                         reason_code=type(exc).__name__,
                         metadata={"duration_ms": _duration_ms(turn_started)},
                     ),
+                )
+                runtime_events.emit(
+                    "turn.failed",
+                    metadata={"error_type": type(exc).__name__, "duration_ms": _duration_ms(turn_started)},
                 )
                 return _with_save_error(error_text, save_error)
 
@@ -386,6 +447,10 @@ class AgentLoop:
                         },
                     ),
                 )
+                runtime_events.emit(
+                    "turn.completed",
+                    metadata={"duration_ms": _duration_ms(turn_started)},
+                )
                 return _with_save_error(assistant_msg.content, save_error)
 
             if tool_iterations >= self.max_tool_iterations:
@@ -399,12 +464,41 @@ class AgentLoop:
                 )
                 for index, raw_call in enumerate(assistant_msg.tool_calls):
                     call = _parse_tool_call(raw_call, index)
+                    record_id = "tool-record-" + uuid.uuid4().hex
+                    runtime_events.emit(
+                        "tool.started",
+                        tool_call_id=call.id,
+                        tool_call_record_id=record_id,
+                        metadata={"tool_name": call.name},
+                    )
                     result = ToolResult(
                         output=TOOL_ITERATION_LIMIT_TEXT,
                         is_error=True,
                         metadata={"code": "TOOL_ITERATION_LIMIT", "tool_name": call.name},
                     )
-                    tool_msg = _tool_result_to_message(call, call.error or result)
+                    final_tool_result = call.error or result
+                    presentation = _apply_post_tool_hooks(
+                        self.hook_runtime,
+                        call,
+                        final_tool_result,
+                        actor=actor,
+                        session_id=session_id,
+                        turn_id=resolved_turn_id,
+                        channel=resolved_channel,
+                        request_id=request_id,
+                    )
+                    runtime_events.emit(
+                        "tool.failed",
+                        tool_call_id=call.id,
+                        tool_call_record_id=record_id,
+                        display=presentation.display,
+                        ui_metadata=presentation.ui_metadata,
+                        metadata={
+                            "tool_name": call.name,
+                            "reason_code": str(final_tool_result.metadata.get("code") or ""),
+                        },
+                    )
+                    tool_msg = _tool_result_to_message(call, final_tool_result)
                     _assign_turn_fields(tool_msg, resolved_turn_id, resolved_turn_index)
                     pending_session_messages.append(tool_msg)
                 limit_msg = Message(
@@ -420,6 +514,11 @@ class AgentLoop:
                 messages.append(_message_to_llm_dict(limit_msg))
                 final_text = limit_msg.content
                 try:
+                    limit_llm_started = time.perf_counter()
+                    runtime_events.emit(
+                        "llm.started",
+                        metadata={"reason": "iteration_limit_summary", "iteration": tool_iterations + 2},
+                    )
                     log_event(
                         llm_logger,
                         logging.DEBUG,
@@ -441,7 +540,22 @@ class AgentLoop:
                     _assign_turn_fields(final_msg, resolved_turn_id, resolved_turn_index)
                     pending_session_messages.append(final_msg)
                     final_text = final_msg.content
+                    runtime_events.emit(
+                        "llm.completed",
+                        metadata={
+                            "duration_ms": _duration_ms(limit_llm_started),
+                            "has_tool_calls": False,
+                            "tool_call_count": 0,
+                        },
+                    )
                 except Exception as exc:  # noqa: BLE001 - retain the deterministic limit result.
+                    runtime_events.emit(
+                        "llm.failed",
+                        metadata={
+                            "error_type": type(exc).__name__,
+                            "duration_ms": _duration_ms(limit_llm_started),
+                        },
+                    )
                     log_event(
                         llm_logger,
                         logging.WARNING,
@@ -476,6 +590,10 @@ class AgentLoop:
                         metadata={"duration_ms": _duration_ms(turn_started)},
                     ),
                 )
+                runtime_events.emit(
+                    "turn.completed",
+                    metadata={"duration_ms": _duration_ms(turn_started), "reason_code": "TOOL_ITERATION_LIMIT"},
+                )
                 return _with_save_error(final_text, save_error)
 
             tool_iterations += 1
@@ -485,8 +603,26 @@ class AgentLoop:
                 except TurnCancelledError:
                     return persist_cancelled_turn()
                 call = _parse_tool_call(raw_call, index)
-                if call.error is not None:
-                    result = call.error
+                record_id = "tool-record-" + uuid.uuid4().hex
+                runtime_events.emit(
+                    "tool.started",
+                    tool_call_id=call.id,
+                    tool_call_record_id=record_id,
+                    metadata={"tool_name": call.name},
+                )
+                result = call.error
+                if result is None:
+                    call, result = _apply_pre_tool_hooks(
+                        self.hook_runtime,
+                        tools,
+                        call,
+                        actor=actor,
+                        session_id=session_id,
+                        turn_id=resolved_turn_id,
+                        channel=resolved_channel,
+                        request_id=request_id,
+                    )
+                if result is not None:
                     _log_tool_result(
                         result,
                         session_id=session_id,
@@ -495,22 +631,65 @@ class AgentLoop:
                         duration_ms=0,
                     )
                 else:
-                    result = _dispatch_tool(
-                        tools,
-                        call,
-                        actor=actor,
-                        session_id=session_id,
-                        turn_id=resolved_turn_id,
-                        turn_index=resolved_turn_index,
-                        channel=resolved_channel,
-                        request_id=request_id,
-                        policy=execution_policy,
-                        confirmation_broker=confirmations,
-                        audit_sink=audit,
-                        activity_sink=activity,
-                        on_event=on_event,
-                        cancellation_token=cancellation_token,
-                    )
+                    try:
+                        result = _dispatch_tool(
+                            tools,
+                            call,
+                            actor=actor,
+                            session_id=session_id,
+                            turn_id=resolved_turn_id,
+                            turn_index=resolved_turn_index,
+                            channel=resolved_channel,
+                            request_id=request_id,
+                            policy=execution_policy,
+                            confirmation_broker=confirmations,
+                            audit_sink=audit,
+                            activity_sink=activity,
+                            on_event=on_event,
+                            cancellation_token=cancellation_token,
+                            tool_call_record_id=record_id,
+                            runtime_events=runtime_events,
+                        )
+                    except Exception as exc:
+                        runtime_events.emit(
+                            "tool.failed",
+                            tool_call_id=call.id,
+                            tool_call_record_id=record_id,
+                            metadata={"tool_name": call.name, "error_type": type(exc).__name__},
+                        )
+                        runtime_events.emit(
+                            "turn.failed",
+                            metadata={
+                                "error_type": type(exc).__name__,
+                                "duration_ms": _duration_ms(turn_started),
+                            },
+                        )
+                        raise
+                presentation = _apply_post_tool_hooks(
+                    self.hook_runtime,
+                    call,
+                    result,
+                    actor=actor,
+                    session_id=session_id,
+                    turn_id=resolved_turn_id,
+                    channel=resolved_channel,
+                    request_id=request_id,
+                )
+                runtime_events.emit(
+                    "tool.failed" if result.is_error else "tool.completed",
+                    tool_call_id=call.id,
+                    tool_call_record_id=record_id,
+                    display=presentation.display,
+                    ui_metadata=presentation.ui_metadata,
+                    metadata={
+                        "tool_name": call.name,
+                        **(
+                            {"reason_code": str(result.metadata.get("code") or "")}
+                            if result.is_error
+                            else {}
+                        ),
+                    },
+                )
                 try:
                     _raise_if_cancelled(cancellation_token)
                 except TurnCancelledError:
@@ -569,10 +748,19 @@ def _normalize_stream_chunk(raw_chunk: LLMStreamChunk | str) -> LLMStreamChunk:
 
 
 def _emit_event(on_event: TurnEventCallback | None, event: dict[str, Any]) -> None:
-    """Emit one turn event without coupling AgentLoop to a transport."""
+    """Best-effort emit one legacy text or interaction event."""
 
     if on_event is not None:
-        on_event(event)
+        try:
+            on_event(event)
+        except Exception as exc:  # noqa: BLE001 - channel observation cannot break a turn.
+            log_event(
+                turn_logger,
+                logging.WARNING,
+                "runtime_event.sink_failed",
+                event_type=str(event.get("type") or "unknown"),
+                error_type=type(exc).__name__,
+            )
 
 
 def _raise_if_cancelled(cancellation_token: CancellationToken | None) -> None:
@@ -580,6 +768,104 @@ def _raise_if_cancelled(cancellation_token: CancellationToken | None) -> None:
 
     if cancellation_token is not None:
         cancellation_token.raise_if_cancelled()
+
+
+def _apply_pre_tool_hooks(
+    hook_runtime: HookRuntime | None,
+    tools: ToolProvider | None,
+    call: ParsedToolCall,
+    *,
+    actor: ActorContext | None,
+    session_id: str,
+    turn_id: str,
+    channel: str,
+    request_id: str,
+) -> tuple[ParsedToolCall, ToolResult | None]:
+    """Validate, run pre Hooks, then revalidate the final Tool arguments."""
+
+    validation_error = validate_tool_arguments(tools, call.name, call.arguments)
+    if validation_error is not None:
+        return call, validation_error
+    if hook_runtime is None:
+        return call, None
+    try:
+        decision = hook_runtime.run_pre_tooluse(
+            PreToolHookRequest(
+                tool_name=call.name,
+                arguments=dict(call.arguments),
+                session_id=session_id,
+                turn_id=turn_id,
+                request_id=request_id,
+                channel=channel,
+                actor_type=actor.actor_type if actor else "",
+                role_keys=tuple(sorted(actor.role_keys)) if actor else (),
+                permission_keys=tuple(sorted(actor.permission_keys)) if actor else (),
+            )
+        )
+    except Exception:  # noqa: BLE001 - unexpected pre Hook failures must fail closed.
+        return call, ToolResult(
+            output="Tool execution was blocked because the pre-tool Hook Runtime failed safely.",
+            is_error=True,
+            metadata={"code": "HOOK_RUNTIME_FAILED", "tool_name": call.name},
+        )
+    if decision.action == "block":
+        return call, ToolResult(
+            output=decision.message or "Tool execution was blocked by a pre-tool Hook.",
+            is_error=True,
+            metadata={"code": decision.code or "HOOK_BLOCKED", "tool_name": call.name},
+        )
+    if decision.action == "modify":
+        if not isinstance(decision.arguments, dict):
+            return call, ToolResult(
+                output="Tool execution was blocked because a pre-tool Hook returned invalid arguments.",
+                is_error=True,
+                metadata={"code": "HOOK_INVALID_OUTPUT", "tool_name": call.name},
+            )
+        call.arguments = dict(decision.arguments)
+        validation_error = validate_tool_arguments(tools, call.name, call.arguments)
+        if validation_error is not None:
+            validation_error.metadata["hook_modified"] = True
+            return call, validation_error
+    return call, None
+
+
+def _apply_post_tool_hooks(
+    hook_runtime: HookRuntime | None,
+    call: ParsedToolCall,
+    result: ToolResult,
+    *,
+    actor: ActorContext | None,
+    session_id: str,
+    turn_id: str,
+    channel: str,
+    request_id: str,
+) -> PostToolHookResult:
+    """Return optional presentation enrichment without changing ToolResult."""
+
+    if hook_runtime is None:
+        return PostToolHookResult()
+    try:
+        presentation = hook_runtime.run_post_tooluse(
+            PostToolHookRequest(
+                tool_name=call.name,
+                arguments=dict(call.arguments),
+                output=result.output,
+                is_error=result.is_error,
+                result_metadata=dict(result.metadata),
+                session_id=session_id,
+                turn_id=turn_id,
+                request_id=request_id,
+                channel=channel,
+                actor_type=actor.actor_type if actor else "",
+                role_keys=tuple(sorted(actor.role_keys)) if actor else (),
+                permission_keys=tuple(sorted(actor.permission_keys)) if actor else (),
+            )
+        )
+    except Exception:  # noqa: BLE001 - post Hook failures must fail open.
+        return PostToolHookResult()
+    if not isinstance(presentation, PostToolHookResult):
+        return PostToolHookResult()
+    return presentation
 
 
 def _dispatch_tool(
@@ -598,10 +884,12 @@ def _dispatch_tool(
     audit_sink: AuditSink | None,
     on_event: TurnEventCallback | None,
     cancellation_token: CancellationToken | None,
+    tool_call_record_id: str,
+    runtime_events: RuntimeEventEmitter,
 ) -> ToolResult:
     """Apply actor-aware policy and confirmation before the existing registry dispatch."""
 
-    record_id = "tool-record-" + uuid.uuid4().hex
+    record_id = tool_call_record_id
     if actor is None and policy is not None:
         return ToolResult(
             output="Tool execution actor is required.",
@@ -725,6 +1013,12 @@ def _dispatch_tool(
             return result
 
         def on_requested(payload: dict[str, Any]) -> None:
+            runtime_events.emit(
+                "tool.waiting_confirmation",
+                tool_call_id=call.id,
+                tool_call_record_id=record_id,
+                metadata={"tool_name": call.name},
+            )
             event = {
                 "type": "tool_confirmation_required",
                 "tool_name": call.name,

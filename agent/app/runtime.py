@@ -22,6 +22,7 @@ from agent.config import AppConfig
 from agent.core.context import DEFAULT_CONTEXT_PROMPTS, ContextBuilder
 from agent.core.loop import AgentLoop, CancellationToken
 from agent.core.turns import new_turn_id
+from agent.hooks import create_hook_runtime
 from agent.llm.runtime import create_configured_llm_provider
 from agent.llm.selection import ConfiguredLLMProviderResolver
 from agent.logging_utils import log_event
@@ -929,6 +930,7 @@ def build_web_runtime(
         activity_sink=activity_sink,
         audit_sink=audit_sink,
     )
+    hook_runtime = create_hook_runtime(config.workspace, config.config_dir)
     operator = local_operator_actor(channel="web")
     tool_registry = create_default_tool_registry(
         config.workspace,
@@ -946,6 +948,7 @@ def build_web_runtime(
         confirmation_broker=confirmation_broker,
         activity_sink=activity_sink,
         audit_sink=audit_sink,
+        hook_runtime=hook_runtime,
     )
     return WebRuntime(
         config=config,
@@ -1053,10 +1056,19 @@ def _find_endpoint(endpoints: list[LLMEndpoint], endpoint_name: str) -> LLMEndpo
 
 
 def _emit_runtime_event(on_event: RuntimeEventCallback | None, event: dict[str, Any]) -> None:
-    """Emit a runtime event when a caller provided a callback."""
+    """Best-effort emit a legacy text or interaction event."""
 
     if on_event is not None:
-        on_event(event)
+        try:
+            on_event(event)
+        except Exception as exc:  # noqa: BLE001 - channel observation cannot break a turn.
+            log_event(
+                web_logger,
+                logging.WARNING,
+                "runtime_event.sink_failed",
+                event_type=str(event.get("type") or "unknown"),
+                error_type=type(exc).__name__,
+            )
 
 
 def _format_memory_notice(contents: tuple[str, ...]) -> str:

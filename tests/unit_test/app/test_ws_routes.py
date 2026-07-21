@@ -47,6 +47,27 @@ def test_ws_message_streams_text_and_done(tmp_path):
     assert runtime.request_ids == [""]
 
 
+def test_ws_forwards_runtime_event_envelope(tmp_path):
+    runtime = _WsRuntime(runtime_events=[_runtime_event("context.started", 2)])
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        assert websocket.receive_json()["event"] == "connected"
+        websocket.send_json({"type": "message", "session_id": "alpha", "content": "hello"})
+        accepted = websocket.receive_json()
+        runtime_frame = websocket.receive_json()
+        text = websocket.receive_json()
+        done = websocket.receive_json()
+
+    turn_id = accepted["turn_id"]
+    assert runtime_frame["event"] == "runtime_event"
+    assert runtime_frame["session_id"] == "alpha"
+    assert runtime_frame["turn_id"] == turn_id
+    assert runtime_frame["data"]["type"] == "context.started"
+    assert text["event"] == "channel_text"
+    assert done["data"]["type"] == "done"
+
+
 def test_ws_stop_frame_calls_runtime_cancel(tmp_path):
     runtime = _WsRuntime()
     client = _client(tmp_path, runtime)
@@ -229,8 +250,9 @@ def _config(tmp_path: Path) -> AppConfig:
 
 
 class _WsRuntime:
-    def __init__(self, chunks: list[str] | None = None):
+    def __init__(self, chunks: list[str] | None = None, runtime_events: list[dict] | None = None):
         self.chunks = chunks or ["ok"]
+        self.runtime_events = runtime_events or []
         self.chat_calls: list[tuple[str, str, str, str]] = []
         self.request_ids: list[str] = []
         self.cancelled_sessions: list[str] = []
@@ -248,6 +270,12 @@ class _WsRuntime:
     ):
         self.chat_calls.append((session_id, message, command_profile, turn_id or ""))
         self.request_ids.append(request_id)
+        for runtime_event in self.runtime_events:
+            event = dict(runtime_event)
+            event["session_id"] = session_id
+            event["turn_id"] = turn_id or "turn-ws"
+            if on_event is not None:
+                on_event(event)
         for chunk in self.chunks:
             if on_event is not None:
                 on_event({"type": "text_delta", "content": chunk})
@@ -260,3 +288,23 @@ class _WsRuntime:
     def submit_mcp_interaction(self, interaction_id: str, action: str, content=None):
         self.mcp_interactions.append((interaction_id, action, content))
         return True
+
+
+def _runtime_event(event_type: str, sequence: int) -> dict:
+    return {
+        "protocol_version": 1,
+        "event_id": f"event-{sequence}",
+        "type": event_type,
+        "status": "started",
+        "timestamp": "2026-07-20T00:00:00Z",
+        "sequence": sequence,
+        "session_id": "",
+        "turn_id": "",
+        "request_id": "",
+        "tool_call_id": "",
+        "tool_call_record_id": "",
+        "parent_event_id": "",
+        "display": {"title": "正在整理上下文"},
+        "ui_metadata": {},
+        "metadata": {},
+    }

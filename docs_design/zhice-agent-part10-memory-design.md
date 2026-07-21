@@ -903,4 +903,4 @@ python -m pytest --basetemp .tmp/pytest-basetemp
 - `docs_design/zhice-agent-part7-turn-context-design.md` 提供 turn 分组和短期上下文选择；Part 10 不替代该逻辑。
 - `docs_design/zhice-agent-part9-user-auth-permission-design.md` 提供 actor、用户目录、权限和 audit 边界；Part 10 必须复用内部 `user_id` 隔离 Memory。
 - `docs_design/zhice-agent-overall-design.md` 维护 Part 10～18 的当前顺序；本文是 Part 10 的直接开发依据。
-- Part 11 MCP、Part 12 Hooks 和 Part 13 Subagent 可以读取 Memory 协议，但不能绕过 Memory 权限或直接操作其它用户文件。
+- Part 11 MCP、Part 12 生命周期事件/Hook 扩展点和 Part 13 Subagent 可以读取 Memory 协议，但不能绕过 Memory 权限或直接操作其它用户文件；Part 12 RuntimeEvent 不默认携带 Memory 内容。

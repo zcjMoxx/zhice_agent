@@ -358,7 +358,7 @@ function ensureWebSocket() {
 async function sendWebSocketMessage(sessionId, message, model) {
   const socket = await ensureWebSocket();
   return new Promise((resolve, reject) => {
-    state.activeTurn = { sessionId, resolve, reject };
+    state.activeTurn = { sessionId, turnId: "", resolve, reject };
     socket.send(JSON.stringify({
       type: "message",
       session_id: sessionId,
@@ -378,9 +378,17 @@ function handleWebSocketMessage(event) {
     showToolConfirmation(payload.data || {});
     return;
   }
+  if (payload.event === "runtime_event") {
+    handleRuntimeEvent(payload);
+    return;
+  }
   if (payload.event === "channel_text") {
     const active = state.activeTurn;
-    if (!active || payload.session_id !== active.sessionId) {
+    if (
+      !active ||
+      payload.session_id !== active.sessionId ||
+      (active.turnId && payload.turn_id && payload.turn_id !== active.turnId)
+    ) {
       return;
     }
     const pending = state.messages.find((message) => message.isPending);
@@ -396,6 +404,14 @@ function handleWebSocketMessage(event) {
 
   const status = payload.data || {};
   if (status.type === "accepted") {
+    const active = state.activeTurn;
+    if (active && payload.session_id === active.sessionId) {
+      active.turnId = String(status.turn_id || payload.turn_id || "");
+      const pending = findPendingMessage();
+      if (pending) {
+        pending.runtimeTurnId = active.turnId;
+      }
+    }
     return;
   }
   const active = state.activeTurn;
@@ -415,6 +431,25 @@ function handleWebSocketMessage(event) {
     active.reject(new Error(error.message || "Request failed"));
     state.activeTurn = null;
   }
+}
+
+function handleRuntimeEvent(envelope) {
+  const active = state.activeTurn;
+  const pending = findPendingMessage();
+  const reducer = window.ZhiCeRuntimeEventState?.applyRuntimeEvent;
+  if (!pending || typeof reducer !== "function" || !reducer(active, pending, envelope)) {
+    return;
+  }
+  renderMessages();
+}
+
+function findPendingMessage() {
+  for (let index = state.messages.length - 1; index >= 0; index -= 1) {
+    if (state.messages[index].isPending) {
+      return state.messages[index];
+    }
+  }
+  return null;
 }
 
 function handleMcpElicitation(request, sessionId) {
@@ -645,13 +680,15 @@ function createMessageNode(message) {
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   if (message.role === "assistant" && message.isPending && !message.content) {
-    bubble.classList.add("typing-bubble");
-    bubble.append(createTypingIndicator());
+    bubble.classList.add("runtime-status-bubble");
+    if (message.runtimeStatus) {
+      bubble.append(createRuntimeStatus(message.runtimeStatus));
+    }
   } else if (message.role === "assistant" && !message.isError) {
     bubble.classList.add("markdown");
     bubble.append(renderMarkdown(message.content || ""));
-    if (message.isPending) {
-      bubble.append(createStreamingCursor());
+    if (message.isPending && message.runtimeStatus) {
+      bubble.append(createRuntimeStatus(message.runtimeStatus));
     }
   } else {
     bubble.textContent = message.content;
@@ -660,23 +697,17 @@ function createMessageNode(message) {
   return wrap;
 }
 
-function createTypingIndicator() {
+function createRuntimeStatus(title) {
   const indicator = document.createElement("span");
-  indicator.className = "typing-indicator";
-  indicator.setAttribute("aria-label", "ZhiCe-Agent is thinking");
-  for (let index = 0; index < 3; index += 1) {
-    const dot = document.createElement("span");
-    dot.setAttribute("aria-hidden", "true");
-    indicator.append(dot);
-  }
+  indicator.className = "runtime-status";
+  indicator.setAttribute("role", "status");
+  const dot = document.createElement("span");
+  dot.className = "runtime-status-dot";
+  dot.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span");
+  text.textContent = title;
+  indicator.append(dot, text);
   return indicator;
-}
-
-function createStreamingCursor() {
-  const cursor = document.createElement("span");
-  cursor.className = "streaming-cursor";
-  cursor.setAttribute("aria-hidden", "true");
-  return cursor;
 }
 
 function renderMarkdown(text) {
@@ -958,7 +989,14 @@ async function handleSubmit(event) {
   autoSizeTextarea();
 
   state.messages.push({ role: "user", content: text });
-  const pendingMessage = { role: "assistant", content: "", isPending: true };
+  const pendingMessage = {
+    role: "assistant",
+    content: "",
+    isPending: true,
+    runtimeStatus: "已接收问题",
+    runtimeSequence: 0,
+    runtimeEvents: [],
+  };
   state.messages.push(pendingMessage);
   renderMessages();
 

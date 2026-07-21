@@ -37,3 +37,11 @@ def test_spinner_shorter_final_line_erases_previous_frame_tail(monkeypatch):
     assert buffer.parts[-1].endswith("   ")
     assert buffer.text.endswith("\r⠿ thinking 3.9s   ")
 
+
+def test_spinner_runtime_label_can_be_updated():
+    from agent.console import Spinner
+
+    spinner = Spinner("已接收问题")
+    spinner.set_label("正在执行 read_file")
+
+    assert spinner._label == "正在执行 read_file"

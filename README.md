@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到第十部分受控长期 Memory。主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到第十二部分生命周期事件与 Hook Runtime。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -21,7 +21,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - 对话式 Memory 授权、Session 空闲高可信提取、一次性通知和 Memory 安全过滤
 - workspace 共享 MCP Runtime、stdio / Streamable HTTP / SSE、自动 Tool 发现、OAuth 刷新、Elicitation 和 actor-scoped artifact 导入
 
-当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、Subagent、Hook 或市集。Part 10 Memory 和 Part 11 MCP 已进入当前代码基线。MCP Runtime 直接读取常见 `mcpServers` 配置，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Web 侧使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
+当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、Subagent 或市集。Part 10 Memory 和 Part 11 MCP 已进入当前代码基线。MCP Runtime 直接读取常见 `mcpServers` 配置，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Part 12 本次同时完成 turn/context/LLM/tool RuntimeEvent、WebSocket/SSE/CLI 与前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime；Hook 只能增加业务阻断、修改后重新走核心校验或补充安全 display/ui_metadata，不能降低 RBAC、危险确认、workspace guard、timeout、脱敏或 SSRF。SkillExecutor、`skill.*` 和 ProgressSink 属于未来 Skill Runtime / Part 18。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
 
 ## 设计文档
 
@@ -33,6 +33,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - 第九部分权限设计入口是 `docs_design/zhice-agent-part9-user-auth-permission-design.md`；当前“基础能力与特权分离”记录见 `docs_design/2026-07-16-authenticated-user-baseline-capabilities-design.md`，自助诊断和 Activity/Audit 拆分见 `docs_design/2026-07-16-self-diagnostics-activity-audit-separation-design.md`。
 - 第十部分 Memory 当前实现入口是 `docs_design/zhice-agent-part10-memory-design.md`，最新日期设计记录是 `docs_design/2026-07-16-background-memory-extraction-and-trace-convergence-design.md`。
 - 第十一部分 MCP 当前实现入口是 `docs_design/zhice-agent-part11-mcp-design.md`，本次边界与取舍记录见 `docs_design/2026-07-17-mcp-tool-runtime-boundary-design.md`。
+- 第十二部分生命周期事件与 Hook Runtime 当前实现入口是 `docs_design/zhice-agent-part12-hooks-design.md`，最终边界与取舍记录见 `docs_design/2026-07-20-hook-runtime-boundary-design.md`；RuntimeEvent、渠道/前端状态、真实 pre/post Hook Runtime 和测试均已完成，Part 12 已关闭。
 
 ## 快速开始
 
@@ -175,6 +176,25 @@ ${ZHICE_AGENT_WORKSPACE}/extends/zhice-official/
 ```
 
 Agent 从 `${ZHICE_AGENT_WORKSPACE}/extends/zhice-official/skills` 发现和执行 Skill，并在模型上下文和 `/skills` 中显示 `zhice-official/{skill_name}`。`sources[].name` 用在日志、命名空间和 `/skills sync <name>`；`sources[].sync` 表示是否同步该 source。`local_dir` 存在时优先使用本地仓库，缺失时可用 `git_url` + `target` 分支兜底。
+
+## Tool Hook 配置
+
+Part 12 Hook Runtime 从 `${ZHICE_AGENT_WORKSPACE}/config/hooks.yml` 显式加载本地 Python Hook。配置缺失或 `hooks: []` 时禁用 Hook，不创建子进程；示例模板见 `config/hooks.example.yml`。
+
+```yaml
+version: 1
+hooks:
+  - name: restrict-exec
+    stage: pre_tooluse
+    script: extends/hooks/restrict_exec.py
+    tools: [exec]
+    exempt_roles: [owner]
+    exempt_permissions: [tool.exec.dangerous]
+    timeout_seconds: 2
+    max_output_chars: 16384
+```
+
+脚本路径解析后必须位于 `ZHICE_AGENT_WORKSPACE` 内。Runner 使用当前 Python、`shell=False`、workspace cwd、最小环境、短 timeout 和有界 stdin/stdout/stderr；stdin/stdout 均为单个 UTF-8 JSON object。`pre_tooluse` 支持 `continue/block/modify`，修改后的参数会重新经过 Tool schema、RBAC、危险确认和具体 Tool guard；`post_tooluse` 支持 `continue/enrich`，只能补充受限 `display/ui_metadata`，不能修改 ToolResult 的成功失败事实。`exempt_roles` / `exempt_permissions` 是可选的单 Hook 豁免：owner 可显式按角色跳过，admin 根据已生效的角色权限或直接授权匹配权限跳过；缺省时所有身份都执行 Hook，豁免后仍经过全部核心安全检查。完整协议和错误策略见 `docs_design/zhice-agent-part12-hooks-design.md`，角色/权限作用域设计见 `docs_design/2026-07-21-hook-role-scope-design.md`。
 
 ## 命令说明
 
