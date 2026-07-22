@@ -40,6 +40,25 @@ def test_runtime_event_serializes_stable_payload():
     assert is_runtime_event_payload({"type": "text_delta", "content": "x"}) is False
 
 
+def test_runtime_event_serializes_child_scope_fields():
+    payload = _event(
+        agent_id="subagent-1",
+        parent_agent_id="main",
+        root_session_id="root-session",
+        root_turn_id="root-turn",
+        parent_session_id="parent-session",
+        parent_turn_id="parent-turn",
+        batch_id="batch-1",
+        task_id="task-1",
+        depth=1,
+    ).to_dict()
+
+    assert payload["agent_id"] == "subagent-1"
+    assert payload["root_turn_id"] == "root-turn"
+    assert payload["task_id"] == "task-1"
+    assert payload["depth"] == 1
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -48,6 +67,7 @@ def test_runtime_event_serializes_stable_payload():
         ({"status": "completed"}, "requires status started"),
         ({"sequence": 0}, "sequence must be positive"),
         ({"timestamp": "not-a-time"}, "ISO-8601"),
+        ({"depth": 2}, "depth must be between"),
     ],
 )
 def test_runtime_event_rejects_invalid_identity(overrides, message):

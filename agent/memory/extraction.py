@@ -8,12 +8,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+from agent.core.context import estimate_llm_tokens
 from agent.core.turns import group_messages_by_turn
 from agent.memory import MemoryStoreError
 from agent.memory.safety import MemorySafetyPolicy
 from agent.message import Message
-from agent.prompt_loader import PromptLoader
-from agent.protocols.llm import LLMProvider
+from agent.prompt_loader import PromptLoader, PromptNotFoundError
+from agent.protocols.llm import ContextBudget, LLMProvider
 from agent.protocols.memory import (
     MemoryContext,
     MemoryExtractionCandidate,
@@ -52,6 +53,7 @@ class MemoryExtractionService:
         messages: list[Message],
         llm: LLMProvider,
         *,
+        context_budget: ContextBudget | None = None,
         should_commit: Callable[[], bool] | None = None,
         notify: bool = True,
     ) -> MemoryExtractionResult:
@@ -73,20 +75,20 @@ class MemoryExtractionService:
         source_turns = self._source_turns(selected)
         reviewed_through = max(group.turn_index or 0 for group in new_groups)
         try:
-            response = llm.chat(
-                messages=[
-                    {"role": "system", "content": self.prompt_loader.load("memory_extraction")},
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {"session_id": session_id, "user_turns": source_turns},
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                    },
-                ],
-                tools=None,
-            )
+            extraction_prompt = self.prompt_loader.load("memory_extraction")
+        except PromptNotFoundError as exc:
+            raise MemoryStoreError(
+                "MEMORY_EXTRACTION_PROMPT_NOT_FOUND",
+                "Required built-in Memory extraction prompt is missing: memory_extraction.md",
+            ) from exc
+        extraction_messages, source_turns = _fit_extraction_messages(
+            extraction_prompt,
+            session_id,
+            source_turns,
+            context_budget,
+        )
+        try:
+            response = llm.chat(messages=extraction_messages, tools=None)
         except Exception as exc:
             raise MemoryStoreError(
                 "MEMORY_EXTRACTION_PROVIDER_FAILED",
@@ -242,6 +244,56 @@ def _parse_candidates(
             )
         )
     return tuple(result)
+
+
+def _fit_extraction_messages(
+    extraction_prompt: str,
+    session_id: str,
+    source_turns: list[dict[str, Any]],
+    context_budget: ContextBudget | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Fit the built-in extraction call without bypassing endpoint input limits."""
+
+    selected = [dict(item) for item in source_turns]
+
+    def build_messages() -> list[dict[str, Any]]:
+        return [
+            {"role": "system", "content": extraction_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"session_id": session_id, "user_turns": selected},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+        ]
+
+    messages = build_messages()
+    if context_budget is None:
+        return messages, selected
+
+    while len(selected) > 2 and estimate_llm_tokens(messages) > context_budget.input_token_limit:
+        selected.pop(0)
+        messages = build_messages()
+
+    while selected and estimate_llm_tokens(messages) > context_budget.input_token_limit:
+        largest = max(
+            range(len(selected)),
+            key=lambda index: len(str(selected[index].get("content") or "")),
+        )
+        content = str(selected[largest].get("content") or "")
+        if len(content) <= 128:
+            break
+        selected[largest]["content"] = content[: max(128, len(content) // 2)]
+        messages = build_messages()
+
+    if estimate_llm_tokens(messages) > context_budget.input_token_limit:
+        raise MemoryStoreError(
+            "MEMORY_EXTRACTION_INPUT_TOO_LARGE",
+            "Built-in Memory extraction prompt exceeds the configured LLM input budget.",
+        )
+    return messages, selected
 
 
 def pop_memory_notification(context: MemoryContext) -> tuple[str, ...]:

@@ -11,6 +11,7 @@
 - 输入：Fake LLM 返回普通 assistant 文本。
 - 预期：返回 assistant 文本，并按 `user -> assistant` 顺序写入 Session。
 - 检查点：LLM 通过 `LLMProvider.chat` 调用；无工具时 `tools=None`。
+- 动态 ToolProvider 每次 LLM 调用前重新读取 definitions；`discover_tools` 激活后，下一模型步只新增被选中的业务 schema。
 
 ### Case 2: 历史上下文传递
 

@@ -1,0 +1,44 @@
+enabled: true
+max_parallel: 3
+max_tasks_per_call: 4
+max_depth: 1
+max_subagents_per_parent_turn: 6
+max_batches_per_parent_turn: 1
+max_batch_result_chars: 32000
+
+profiles:
+  explorer:
+    description: Read, search, inspect Skills, and summarize.
+    tools: [list_dir, read_file, grep, load_skills, memory_read]
+    denied_tools: [delegate_tasks]
+    allowed_skills: []
+    preload_skills: []
+    workspace_mode: shared_readonly
+    model_role: fast
+    max_tool_iterations: 10
+    timeout_seconds: 180
+    max_result_chars: 12000
+
+  developer:
+    description: Inspect code, use Skills, run commands, test, and prepare isolated changes.
+    tools: [list_dir, read_file, grep, load_skills, memory_read, exec]
+    denied_tools: [delegate_tasks, sync_skills]
+    allowed_skills: []
+    preload_skills: []
+    workspace_mode: worktree
+    model_role: inherit
+    max_tool_iterations: 20
+    timeout_seconds: 600
+    max_result_chars: 12000
+
+  operator:
+    description: Use explicitly configured MCP or operational tools under inherited permissions.
+    tools: [list_dir, read_file, grep, load_skills, memory_read, "mcp__approved__*"]
+    denied_tools: [delegate_tasks]
+    allowed_skills: []
+    preload_skills: []
+    workspace_mode: shared_exclusive
+    model_role: inherit
+    max_tool_iterations: 15
+    timeout_seconds: 300
+    max_result_chars: 12000

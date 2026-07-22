@@ -180,6 +180,35 @@ def test_failover_provider_uses_model_override_only_for_preferred_endpoint():
     assert calls == [("a", "model-a-plus"), ("b", "model-b")]
 
 
+def test_failover_provider_uses_smallest_enabled_endpoint_input_budget():
+    """A request prepared for the preferred endpoint must remain safe after failover."""
+
+    provider = EndpointFailoverProvider(
+        [
+            _endpoint(
+                "large",
+                "model-large",
+                context_window=32768,
+                max_tokens=4096,
+            ),
+            _endpoint(
+                "small",
+                "model-small",
+                context_window=16384,
+                max_tokens=2048,
+            ),
+        ],
+        preferred_endpoint="large",
+        provider_factory=_factory([], success={"large": "ok"}),
+    )
+
+    response = provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert provider.context_budget.input_token_limit == 14336
+    assert provider.context_budget.endpoint_names == ("large", "small")
+    assert response.metadata["input_token_limit"] == 14336
+
+
 def _endpoint(
     name: str,
     model: str,
@@ -188,6 +217,8 @@ def _endpoint(
     enabled: bool = True,
     api_key: str = "key",
     supported_models: tuple[str, ...] = (),
+    context_window: int = 32768,
+    max_tokens: int = 4096,
 ) -> LLMEndpoint:
     return LLMEndpoint(
         name=name,
@@ -195,6 +226,8 @@ def _endpoint(
         base_url=f"https://{name}.test/v1",
         api_key=api_key,
         model=model,
+        context_window=context_window,
+        max_tokens=max_tokens,
         priority=priority,
         enabled=enabled,
         supported_models=supported_models,

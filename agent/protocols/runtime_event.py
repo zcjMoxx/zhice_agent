@@ -75,6 +75,15 @@ class RuntimeEvent:
     tool_call_id: str = ""
     tool_call_record_id: str = ""
     parent_event_id: str = ""
+    agent_id: str = ""
+    parent_agent_id: str = ""
+    root_session_id: str = ""
+    root_turn_id: str = ""
+    parent_session_id: str = ""
+    parent_turn_id: str = ""
+    batch_id: str = ""
+    task_id: str = ""
+    depth: int = 0
     display: dict[str, Any] = field(default_factory=dict)
     ui_metadata: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -104,9 +113,19 @@ class RuntimeEvent:
             ("tool_call_id", self.tool_call_id),
             ("tool_call_record_id", self.tool_call_record_id),
             ("parent_event_id", self.parent_event_id),
+            ("agent_id", self.agent_id),
+            ("parent_agent_id", self.parent_agent_id),
+            ("root_session_id", self.root_session_id),
+            ("root_turn_id", self.root_turn_id),
+            ("parent_session_id", self.parent_session_id),
+            ("parent_turn_id", self.parent_turn_id),
+            ("batch_id", self.batch_id),
+            ("task_id", self.task_id),
         ):
             if len(str(value)) > 200:
                 raise ValueError(f"runtime event {name} is too long")
+        if self.depth < 0 or self.depth > 1:
+            raise ValueError("runtime event depth must be between 0 and 1")
         _validate_timestamp(self.timestamp)
         _validate_display(self.display)
         _validate_ui_metadata(self.ui_metadata)
@@ -131,6 +150,15 @@ class RuntimeEvent:
             "tool_call_id": self.tool_call_id,
             "tool_call_record_id": self.tool_call_record_id,
             "parent_event_id": self.parent_event_id,
+            "agent_id": self.agent_id,
+            "parent_agent_id": self.parent_agent_id,
+            "root_session_id": self.root_session_id,
+            "root_turn_id": self.root_turn_id,
+            "parent_session_id": self.parent_session_id,
+            "parent_turn_id": self.parent_turn_id,
+            "batch_id": self.batch_id,
+            "task_id": self.task_id,
+            "depth": self.depth,
             "display": deepcopy(self.display),
             "ui_metadata": deepcopy(self.ui_metadata),
             "metadata": deepcopy(self.metadata),

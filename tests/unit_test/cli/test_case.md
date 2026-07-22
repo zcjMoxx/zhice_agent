@@ -12,7 +12,7 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 - 输入：显式 workspace、endpoint、base_url、api_key、model 等参数。
 - 预期：在 workspace 下生成运行时配置和 prompts。
-- 检查点：默认不生成 `.env`；已有文件默认保留，缺失文件会补齐；显式 env file 可提供 workspace。
+- 检查点：默认不生成 `.env`；已有文件默认保留，缺失文件会补齐，包括可选 `prompts/diagnostics.md` 和 `prompts/exec.md`；显式 env file 可提供 workspace。完成提示明确 LLM endpoint 是聊天必需配置，`context_window/max_tokens` 已有默认值，Skill source 与其它扩展能力仅在启用时配置。
 
 ### Case 2: 缺少 workspace
 
@@ -35,8 +35,9 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 ### Case 4.1: chat 启动 LLM 配置检查
 
 - 输入：workspace 缺少 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`，或 endpoint 缺少必需字段如 `api_key`。
-- 预期：CLI 返回失败并提示运行 `zcagent init` 或编辑 `llm_endpoints.json`。
-- 检查点：这类必需配置缺失会阻断聊天启动；Skill source 缺失只打印 warning。
+- 预期：缺少文件时提示运行 `zcagent init`；已有文件非法时优先提示编辑现有文件，仅把 `zcagent init --force` 作为明确覆盖模板的选项。
+- 检查点：这类必需配置缺失会阻断聊天启动；Skill source 缺失表示可选扩展未启用，静默使用空 SkillLoader。
+- Skill source 文件已经存在但非法时只打印一次 `Skill capability unavailable`，不再同时显示“sync skipped”和“disabled”；启动同步失败但配置仍可加载时显示 degraded 并提示 `/skills sync --verbose`。
 
 ### Case 5: 默认和显式 session
 
@@ -48,7 +49,8 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 - 输入：`/help`、`/new`、`/reset`、`/sessions`、`/history`、`/prompts`、`/model`、`/memory`、`/exit` 等命令。
 - 预期：命令在 CLI 层处理，不进入 AgentLoop 普通对话路径。
-- 检查点：新 session 可写入文件；reset 后 history 为空；sessions 能显示 preview；`/help` 只列顶层命令，`/skills sync` 放在 `/skills` 的 tip 中；`/model` 能紧凑显示当前模型，`/model list` 能列出 endpoint/model，`/model list endpoint` 能列出单个 endpoint 的 supported_models，且能切换、临时覆盖模型并重置当前首选 endpoint。
+- 检查点：新 session 可写入文件；reset 后 history 为空；sessions 能显示 preview；`/help` 只列顶层命令，`/skills sync` 放在 `/skills` 的 tip 中；`/model` 能紧凑显示当前模型，`/model list` 能列出 endpoint/model，`/model list endpoint` 能列出单个 endpoint 的 supported_models，且能切换、临时覆盖模型并重置当前首选 endpoint；`/subagent` 只在裸命令 Tip 中提示 `auto/off/once`，状态按 Session sidecar 隔离。
+- Subagent 显式配置非法或必需 Prompt 缺失时，CLI 主聊天仍可启动，并输出包含真实 message/hint 的人类可读说明，不直接打印结构化 JSON；one-shot 只消费一次。
 
 ### Case 7: `/tools`
 
@@ -65,6 +67,7 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 ### Case 8: Fake LLM 对话
 
 - 输入：普通用户消息，测试中替换为 Fake LLM。
+- Tool：每个 CLI Turn 使用独立 discovery Provider，首轮只暴露 `discover_tools`，发现后才激活实际 Tool schema。
 - 预期：CLI 调用 AgentLoop 并打印 assistant 文本。
 - 检查点：测试不访问真实网络或真实 LLM。
 

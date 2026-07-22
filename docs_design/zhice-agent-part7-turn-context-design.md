@@ -20,7 +20,7 @@
 - `WebRuntime.ActiveTurn(turn_id, token)`：Web 侧内存态 active turn 和 cancellation token。
 - `WebSocket /ws`：浏览器主聊天通道，已经有 accepted、text、done、stopped 等事件。
 - `JsonlSessionStore`：继续以 JSONL 保存会话消息。
-- `ContextBuilder`：按最近 message 数裁剪历史，并尽量保留合法 tool-call block。
+- `ContextBuilder`：按 Turn 做最近 3 + 旧相关最多 3 的混合选择，保留合法 tool-call block，并应用 60 message 与 endpoint token 预算。
 
 第七部分启动前的问题是这些能力还没有共享同一个持久 turn 边界：
 
@@ -50,7 +50,7 @@ Web accepted turn_id
 5. 没有显式 `turn_id` 的历史消息不参与 turn-based context selection。
 6. `AgentLoop.run_turn()` 支持外部传入 `turn_id`，Web accepted 的 id 能传到 AgentLoop 和 Session。
 7. WebSocket accepted、channel_text、done、stopped、error 使用同一个 `turn_id`。
-8. `ContextBuilder` 支持先取最近 N 个 user turn 作为候选，再按当前输入做本地相关性选择。
+8. `ContextBuilder` 从最近 50 个 user Turn 中优先保留最近 3 个，再从更早候选中选择最多 3 个相关 Turn。
 9. 历史 tool-call block 在 turn 裁剪后仍保持 OpenAI-compatible，不出现孤立 tool result。
 10. 为后续运行日志、权限审计、CLI stop、memory compaction 提供稳定字段，但不在本阶段主动实现这些独立系统。
 
@@ -70,6 +70,7 @@ Web accepted turn_id
 - WebRuntime active turn id 与 AgentLoop turn id 统一。
 - WebSocket event 携带一致 `turn_id`。
 - `ContextBuilder(max_history_turns=...)`。
+- CLI/Web 共用的 `ContextBudget` 与 60 message 兜底。
 - turn 裁剪后的 tool-call block 合法性。
 - 单元测试和 `test_case.md` 更新。
 
@@ -317,18 +318,13 @@ run_turn 内部收集 pending_session_messages
 
 ### 8.1 参数
 
-当前：
-
-```python
-ContextBuilder(max_history_messages=30)
-```
-
-第七部分新增：
+当前实现：
 
 ```python
 ContextBuilder(
-    max_history_turns: int | None = 30,
-    max_relevant_turns: int = 5,
+    max_history_turns: int | None = 50,
+    max_relevant_turns: int = 3,
+    always_include_recent_turns: int = 3,
     max_history_messages: int = 60,
     max_message_chars: int = 8000,
     ...
@@ -339,22 +335,26 @@ ContextBuilder(
 
 - `max_history_turns=None` 表示沿用 message-based 裁剪，主要用于测试或特殊调用。
 - `max_history_turns=0` 表示不带历史，只带当前 user message。
-- `max_history_turns>0` 表示最近 user turn 候选数量；当前默认取最近 30 个候选，候选还必须通过本地相关性选择。
-- `max_relevant_turns` 限制最终保留的相关 turn 数量，当前默认最多 5 个。
-- `max_history_messages` 保留为消息数量兜底，防止单次上下文异常膨胀。
+- `max_history_turns>0` 表示最近 user Turn 候选数量；当前默认取最近 50 个候选。
+- `always_include_recent_turns=3` 表示正常预算下直接保留最近 3 个 Turn，不要求词法相关。
+- `max_relevant_turns=3` 表示从 recent 分区之前的较早候选中最多选择 3 个相关 Turn。
+- `max_history_messages=60` 是 CLI/Web 共用的消息数量兜底；发送前还必须服从本次 endpoint/failover `ContextBudget`。
 
 ### 8.2 构建流程
 
 ```text
-ContextBuilder.build(history, user_message, workspace, session_id)
+ContextBuilder.build(history, user_message, workspace, session_id, context_budget)
   -> group history by explicit turns
-  -> select recent max_history_turns user turns as candidates
-  -> score candidates against current user message locally
-  -> keep only relevant turns
+  -> take latest 50 user turns as candidates
+  -> reserve latest 3 turns as recent context
+  -> score only older candidates against current user message
+  -> keep up to 3 older relevant turns
+  -> merge in original chronological order
   -> drop oldest selected turns until message count is within max_history_messages
   -> flatten selected turn messages
   -> _history_to_llm_dicts()
   -> append current user message
+  -> fit messages within ContextBudget
 ```
 
 关键点：
@@ -362,9 +362,12 @@ ContextBuilder.build(history, user_message, workspace, session_id)
 - 先按 turn 选，再转 LLM messages。
 - 不把当前 user message 放进 history 分组。
 - 本地相关性比较使用 turn 内完整文本，不只看 anchor 或关键词。
-- “你好”“谢谢”等无相关信号时不带历史；“好的/ok/嗯”只有在最近 assistant 明确等待确认时才通过邻接关系加分。
+- 最近 3 个 Turn 在正常预算下直接进入上下文，因此短期代词、确认和“我刚刚问了什么”不再依赖词法命中才能获得上一轮；相关性算法只负责补充更早历史。
+- “你好”“谢谢”等新问题不会额外召回更早无关 Turn；“好的/ok/嗯”和明确回指信号仍用于旧候选评分与极端预算降级时的保护。
+- 长期 Memory 通知只表示持久偏好或事实，不替代 Session Turn 历史。
 - tool-call block 的合法性继续由 `_history_to_llm_dicts()` 兜底。
-- 单个超大 turn 如果超过 `max_history_messages`，优先保留完整 turn，再依赖 `max_message_chars` 和 tool block 过滤；后续压缩另开设计。
+- `fit_messages()` 将当次 Tool schemas 纳入估算；超限时从最旧历史 Turn 开始删除，再截断 tool result，必要时删除当前 Turn 中较早的完整已完成 Tool 块。system、current user 与最新必要调用链仍超限时抛出 `LLMContextBudgetError`。
+- AgentLoop 在初次和每次工具结果调用前都重新预算；Session JSONL 仍保存完整消息真值。
 
 ### 8.3 tool block 原子性
 
@@ -557,11 +560,13 @@ tests/unit_test/core/test_turns.py
 | 用例 | 输入/场景 | 期望 |
 | --- | --- | --- |
 | recent turns | 5 个 user turn，max_history_turns=2 | 只带最近 2 个 user turn |
+| default hybrid | 50 个候选且更早历史有相关项 | 最近 3 个 Turn + 旧相关最多 3 个 |
 | no history | max_history_turns=0 | 只带 system 和当前 user |
 | message fallback | max_history_turns=None | 使用原 message-based 行为 |
-| local relevance | 当前输入和候选 turn 无关 | 不带该 turn |
-| follow-up relevance | 当前输入引用候选 turn 的术语/代码/错误 | 带该 turn |
+| local relevance | 当前输入和较早候选 Turn 无关 | 不额外带该旧 Turn |
+| follow-up relevance | 当前输入引用较早 Turn 的术语/代码/错误 | 带该旧 Turn |
 | hard cap | selected turns 超过 max_history_messages | 从旧 turn 开始整体丢弃 |
+| token budget | messages + schemas 超过 endpoint input limit | 从最旧历史 Turn 开始收窄，并保持当前必要链路 |
 | tool block complete | assistant tool_calls + tool | block 完整保留 |
 | tool block incomplete | 缺 tool result | 不产生孤立 tool result |
 
@@ -593,7 +598,7 @@ tests/unit_test/core/test_turns.py
 2. 扩展 `Message` 和 `JsonlSessionStore` 顶层 turn 字段读写，不保留 metadata fallback。
 3. 增加 turn grouping 和 next index helper。
 4. 改 `AgentLoop.run_turn(..., turn_id=None)`，统一标注 pending messages。
-5. 改 `ContextBuilder`，支持 `max_history_turns` 候选和本地相关性选择。
+5. 改 `ContextBuilder`，支持最近 3 + 旧相关最多 3 的混合选择、60 message 兜底和 endpoint ContextBudget。
 6. 改 `WebRuntime.run_chat_events(..., turn_id=None)`，统一 active turn id。
 7. 改 WebSocket event，accepted/text/done/stopped/error 使用同一个 turn id。
 8. 视需要给 session API response 增加可选 turn 字段。
@@ -618,18 +623,20 @@ python -m pytest --basetemp .tmp/pytest_basetemp
 3. 同一轮 user、assistant、tool、error、stopped marker 共享同一个 turn。
 4. WebSocket accepted、channel_text、done、stopped、error 使用同一个 `turn_id`。
 5. Web stop 后持久化 stopped marker 归属对应 turn。
-6. `ContextBuilder` 支持最近 N 个 user turn 候选，并只注入和当前输入相关的 turn。
+6. `ContextBuilder` 默认从最近 50 个 user Turn 中直接保留最近 3 个，并从更早历史选择最多 3 个相关 Turn。
 7. 工具调用历史保持 OpenAI-compatible，不产生孤立 tool result。
-8. CLI 当前不声明未实现的运行中 `/stop`。
-9. 没有把独立数据库、多用户鉴权、长期 memory、子代理或跨进程 registry 提前并入第七部分。
-10. `python -m ruff check .` 和 `python -m pytest --basetemp .tmp/pytest_basetemp` 通过；如果存在无关历史失败，交付说明中明确写出。
+8. CLI/Web 每次 LLM 调用都服从 endpoint/failover ContextBudget，Tool schemas 和工具结果迭代纳入估算。
+9. CLI 当前不声明未实现的运行中 `/stop`。
+10. 没有把独立数据库、多用户鉴权、长期 memory、子代理或跨进程 registry 提前并入第七部分。
+11. `python -m ruff check .` 和 `python -m pytest --basetemp .tmp/pytest_basetemp` 通过；如果存在无关历史失败，交付说明中明确写出。
 
 ---
 
 ## 15. 和其它文档的关系
 
 - `docs_design/2026-07-04-turn-runtime-and-context-design.md` 是未来设计记录，保留更完整的后续方向；本文是第七部分当前实现口径。
+- `docs_design/2026-07-22-endpoint-context-budget-and-hybrid-turn-selection-design.md` 记录当前最近 3 + 旧相关最多 3、endpoint 字段与 failover-safe ContextBudget 的落地方案。
 - `docs_design/2026-07-06-next-stage-sequencing-design.md` 确定第七部分排在日志和用户权限之前。
 - `docs_design/zhice-agent-part8-gateway-agent-logging-design.md` 已承接第八部分运行日志施工图；`docs_design/2026-07-02-gateway-runtime-logging-design.md` 保留为历史背景。
 - 第九部分用户、登录与权限执行边界已经基于本文形成的关系完成第一版实现：`User -> Session -> Turn -> ToolCall / AuditLog`，详见 `docs_design/zhice-agent-part9-user-auth-permission-design.md`。
-- 第十部分 Memory 已复用本文的 turn 分组和相关性边界形成开发设计，详见 `docs_design/zhice-agent-part10-memory-design.md`；Session JSONL 仍是真值，Memory 与 session summary 使用独立存储。
+- 第十部分 Memory 已复用本文的 Turn 分组和 ContextBudget，详见 `docs_design/zhice-agent-part10-memory-design.md`；Session JSONL 仍是真值，长期 Memory 使用独立存储，后台 extraction 不绕过 endpoint 预算。

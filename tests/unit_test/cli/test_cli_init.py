@@ -1,6 +1,7 @@
 """Tests for local runtime initialization from the CLI."""
 
 import builtins
+import json
 
 import pytest
 
@@ -28,18 +29,30 @@ def test_cli_init_generates_runtime_files(tmp_path, capsys, monkeypatch):
             "local-json-secret",
             "--model",
             "test-model",
+            "--max-tokens",
+            "8192",
         ]
     )
 
     output = capsys.readouterr().out
     assert result == 0
     assert "created:" in output
-    assert "Runtime templates created" in output
-    assert "actual endpoint, model, api_key, and Skill sources" in output
+    assert "Runtime files created" in output
+    assert "Configure an enabled LLM endpoint before chatting" in output
+    assert "Extension capabilities are optional" in output
+    assert "context_window" not in output
+    assert "api_key" not in output
     assert not (tmp_path / ".env").exists()
     assert (tmp_path / "config" / "llm_endpoints.json").is_file()
+    endpoint = json.loads(
+        (tmp_path / "config" / "llm_endpoints.json").read_text(encoding="utf-8")
+    )["local"]
+    assert endpoint["max_tokens"] == 8192
+    assert "max_input_tokens" not in endpoint
     assert (tmp_path / "config" / "skill_sources.yml").is_file()
     assert (tmp_path / "prompts" / "identity.md").is_file()
+    assert (tmp_path / "prompts" / "diagnostics.md").is_file()
+    assert (tmp_path / "prompts" / "exec.md").is_file()
 
 
 def test_cli_init_preserves_existing_files_and_fills_missing(tmp_path, capsys, monkeypatch):
@@ -223,7 +236,8 @@ def test_cli_chat_errors_when_enabled_llm_has_no_api_key(tmp_path, capsys, monke
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_dir.joinpath("llm_endpoints.json").write_text(
-        '{"default":{"protocol":"openai","base_url":"https://api.test/v1","api_key":"","model":"m"}}',
+        '{"default":{"protocol":"openai","base_url":"https://api.test/v1",'
+        '"api_key":"","model":"m","context_window":8192}}',
         encoding="utf-8",
     )
 
@@ -234,6 +248,9 @@ def test_cli_chat_errors_when_enabled_llm_has_no_api_key(tmp_path, capsys, monke
     assert "LLM endpoint is missing required field: api_key" in output
     assert "Chat cannot start" in output
     assert "llm_endpoints.json" in output
+    assert "edit" in output
+    assert "zcagent init --force" in output
+    assert "run zcagent init to create" not in output
 
 
 def test_cli_chat_rejects_invalid_hook_config(tmp_path, capsys, monkeypatch):
@@ -256,8 +273,8 @@ def test_cli_chat_rejects_invalid_hook_config(tmp_path, capsys, monkeypatch):
     assert "Unsupported Hook stage" in output
 
 
-def test_cli_chat_warns_when_skill_sources_config_is_missing(tmp_path, capsys, monkeypatch):
-    """Chat startup should not silently ignore a missing Skill source config."""
+def test_cli_chat_treats_missing_skill_sources_config_as_disabled(tmp_path, capsys, monkeypatch):
+    """An unconfigured optional Skill source should stay silent."""
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
@@ -269,9 +286,32 @@ def test_cli_chat_warns_when_skill_sources_config_is_missing(tmp_path, capsys, m
 
     output = capsys.readouterr().out
     assert result == 0
-    assert "skills sync skipped: missing" in output
-    assert "skill_sources.yml" in output
-    assert "zcagent init" in output
+    assert "skills sync skipped" not in output
+    assert "skill_sources.yml" not in output
+
+
+def test_cli_chat_reports_one_warning_for_invalid_skill_sources_config(
+    tmp_path, capsys, monkeypatch
+):
+    """An explicitly configured invalid Skill source should be unavailable, not disabled."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.joinpath("skill_sources.yml").write_text("sources: [", encoding="utf-8")
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "/exit")
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert output.count("Skill capability unavailable") == 1
+    assert "invalid config/skill_sources.yml" in output
+    assert "skills disabled" not in output
+    assert "skills sync skipped" not in output
 
 
 def test_cli_chat_defaults_to_daily_session_without_banner_noise(tmp_path, capsys, monkeypatch):
@@ -281,7 +321,8 @@ def test_cli_chat_defaults_to_daily_session_without_banner_noise(tmp_path, capsy
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
     _write_runtime_prompts(tmp_path)
     monkeypatch.setattr("agent.cli._default_session_id", lambda: "chat-20260621")
-    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    echo = _EchoLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: echo)
     inputs = iter(["hello", "/exit"])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
 
@@ -294,6 +335,7 @@ def test_cli_chat_defaults_to_daily_session_without_banner_noise(tmp_path, capsy
     assert "session:" not in output
     assert (tmp_path / "contexts" / "sessions" / "chat-20260621.jsonl").exists()
     assert not (tmp_path / "contexts" / "sessions" / "default.jsonl").exists()
+    assert [item["function"]["name"] for item in echo.tools_calls[0]] == ["discover_tools"]
 
 
 def test_cli_chat_respects_explicit_session_id(tmp_path, capsys, monkeypatch):
@@ -594,9 +636,67 @@ def test_cli_help_keeps_skill_sync_as_skills_tip(tmp_path, capsys, monkeypatch):
     assert result == 0
     assert "/skills" in output
     assert "/skills sync" not in output
+    assert "/subagent" in output
+    assert "/subagent auto" not in output
+    assert "/subagent off" not in output
+    assert "/subagent once" not in output
     assert "show current Memory" in output
     assert "/memory session" not in output
     assert "/stop" not in output
+
+
+def test_cli_missing_subagent_prompt_warns_but_chat_still_starts(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    """Optional Subagent prompt failures must not block the main CLI."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(exist_ok=True)
+    config_dir.joinpath("subagents.yml").write_text(
+        "enabled: true\nprofiles:\n  explorer:\n    description: inspect\n"
+        "    tools: [read_file]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    inputs = iter(["/subagent", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "Subagent is currently unavailable:" in output
+    assert "Required Subagent runtime prompt is missing: subagent.md" in output
+    assert "Run zcagent init" in output
+    assert "cause_code" not in output
+    assert "bye" in output
+
+
+def test_cli_invalid_mcp_config_warns_but_chat_still_starts(tmp_path, capsys, monkeypatch):
+    """Optional MCP configuration failures must not block the main CLI."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(exist_ok=True)
+    config_dir.joinpath("mcp.json").write_text("{invalid", encoding="utf-8")
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
+    inputs = iter(["/mcp", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "MCP_CONFIG_INVALID" in output
+    assert "Fix config/mcp.json" in output
+    assert "bye" in output
 
 
 def test_cli_skills_lists_empty_directory(tmp_path, capsys, monkeypatch):
@@ -916,11 +1016,13 @@ sources:
 class _EchoLLM:
     def __init__(self):
         self.chat_calls = 0
+        self.tools_calls = []
 
     def chat(self, messages, tools=None):
         from agent.protocols.llm import LLMResponse
 
         self.chat_calls += 1
+        self.tools_calls.append(tools)
         return LLMResponse(content="ok")
 
 
@@ -931,6 +1033,7 @@ def _endpoint(name: str, *, priority: int = 1) -> LLMEndpoint:
         base_url=f"https://{name}.test/v1",
         api_key="key",
         model=name,
+        context_window=32768,
         priority=priority,
     )
 
@@ -946,6 +1049,7 @@ class _SwitchableLLM:
                 base_url="https://a.test/v1",
                 api_key="key",
                 model="model-a",
+                context_window=32768,
                 priority=1,
             ),
             LLMEndpoint(
@@ -954,6 +1058,7 @@ class _SwitchableLLM:
                 base_url="https://b.test/v1",
                 api_key="key",
                 model="model-b",
+                context_window=32768,
                 priority=2,
                 supported_models=("model-b-plus",),
             ),

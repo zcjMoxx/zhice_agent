@@ -16,13 +16,29 @@ class LLMEndpoint:
     base_url: str
     model: str
     api_key: str
+    context_window: int = 131072
     provider: str = ""
+    # Maximum number of output tokens requested from the provider.
     max_tokens: int = 4096
     temperature: float = 0.7
     priority: int = 1
     enabled: bool = True
     role: str = "default"
     supported_models: tuple[str, ...] = ()
+
+
+def effective_input_token_limit(endpoint: LLMEndpoint) -> int:
+    """Return the endpoint input budget after reserving maximum output tokens."""
+
+    return endpoint.context_window - endpoint.max_tokens
+
+
+@dataclass(frozen=True)
+class ContextBudget:
+    """Input budget that remains valid across one complete failover chain."""
+
+    input_token_limit: int
+    endpoint_names: tuple[str, ...] = ()
 
 
 @dataclass
@@ -57,6 +73,10 @@ class LLMConfigurationError(LLMProviderError):
     """Raised when LLM configuration is missing or invalid."""
 
 
+class LLMContextBudgetError(LLMProviderError):
+    """Raised when required prompt content cannot fit the endpoint input budget."""
+
+
 @dataclass(frozen=True)
 class ModelSelection:
     """Provider-neutral, call-scoped endpoint and model selection."""
@@ -65,6 +85,7 @@ class ModelSelection:
     model_name: str
     source: str = "system"
     reason_code: str = ""
+    context_budget: ContextBudget | None = None
 
 
 class LLMProvider(Protocol):
@@ -94,3 +115,6 @@ class LLMProviderResolver(Protocol):
 
     def bind(self, selection: ModelSelection) -> LLMProvider:
         """Return a provider whose mutable preference is not shared across turns."""
+
+    def context_budget(self, selection: ModelSelection | None = None) -> ContextBudget:
+        """Return the input budget valid for every endpoint in the failover chain."""

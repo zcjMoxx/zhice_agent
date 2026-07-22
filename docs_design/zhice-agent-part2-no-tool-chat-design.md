@@ -95,6 +95,7 @@ class LLMEndpoint:
     base_url: str
     model: str
     api_key: str
+    context_window: int = 131072
     max_tokens: int = 4096
     temperature: float = 0.7
 
@@ -117,7 +118,8 @@ class LLMProvider(Protocol):
 
 设计要求：
 
-- `LLMEndpoint` 只表达运行所需的最小配置，不混入 CLI、Session 等上下文。
+- `LLMEndpoint` 只表达运行所需的最小配置，不混入 CLI、Session 等上下文；`context_window` 是带默认值的总窗口，`max_tokens` 是单次最大输出 token。
+- endpoint 有效输入上限固定为 `context_window - max_tokens`；Failover 链取所有 enabled 候选的最小值形成 `ContextBudget.input_token_limit`。
 - `LLMResponse` 保留 `tool_calls` 字段，为第三部分工具调用预留兼容面。
 - `metadata` 用于容纳 `model`、`finish_reason`、`usage` 等扩展信息。
 - `LLMProvider` 保持同步接口，先把链路打通；异步化不是本阶段目标。
@@ -170,6 +172,7 @@ class LLMProvider(Protocol):
     "provider": "anthropic",
     "api_key": "${ANTHROPIC_API_KEY}",
     "model": "claude-sonnet-4",
+    "context_window": 200000,
     "max_tokens": 4096,
     "temperature": 0.7
   }
@@ -188,21 +191,32 @@ class LLMProvider(Protocol):
 - `prompts/tool_use_policy.md`
 - `prompts/skills_intro.md`
 
+可选加载的专项 Prompt：
+
+- `prompts/memory_policy.md`
+- `prompts/diagnostics.md`
+- `prompts/exec.md`
+
+专项 Prompt 缺失不阻断主聊天；诊断工具的 Trace 读取与归因规则只放在 `diagnostics.md`，Exec 的命令、风险与结果处理规则只放在 `exec.md`，均不混入通用 `tool_use_policy.md`。安全边界仍由 Tool 运行时代码执行。
+
 系统 Prompt 内容由以下几层拼接而成：
 
 1. 身份说明
 2. 工具使用规则
 3. Skill 使用规则
-4. 当前阶段限制说明
-5. 运行时元信息：
+4. 可选 Memory/Diagnostics/Exec 专项规则
+5. 当前阶段限制说明
+6. 运行时元信息：
    - `workspace=...`
    - `session_id=...`
 
-设计要求：
+当前设计要求：
 
-- 历史消息只保留最近 `max_history_messages` 条。
+- Session 历史按 Turn 处理：最近 50 个 user Turn 为候选，最近 3 个直接保留，更早历史最多选择 3 个相关 Turn。
+- CLI 与 Web 统一保留 `max_history_messages=60` 的消息数量兜底。
+- `ContextBuilder.build(..., context_budget=...)` 根据 endpoint 输入预算裁剪最旧历史；无工具聊天虽然没有 Tool schema，仍服从同一 token budget。
 - 超长消息按 `max_message_chars` 截断，并在尾部追加 `[truncated]`。
-- 当前第二阶段不支持工具调用，因此历史中的 `tool` 消息会被跳过。
+- 第三部分落地后，历史中的合法 assistant tool call / tool result 块也会进入 ContextBuilder；本文的无工具链路不单独维护另一套上下文实现。
 - 当前用户消息必须是 `role="user"`，否则抛出明确错误。
 - Prompt 缺失时不吞错，直接向上抛出，交给 CLI 在启动阶段提前失败。
 
@@ -214,8 +228,8 @@ class LLMProvider(Protocol):
 
 1. 从 `SessionStore` 读取历史
 2. 构造本轮 `user_msg`
-3. 调用 `ContextBuilder.build()`
-4. 调用 `LLMProvider.chat()`
+3. 调用 `ContextBuilder.build(..., context_budget=...)`
+4. 在调用前按本次 `ContextBudget` 再次 fit messages，然后调用 `LLMProvider.chat()`
 5. 生成 `assistant_msg`
 6. 追加 `[user_msg, assistant_msg]` 到 Session
 7. 返回 assistant 文本
@@ -312,6 +326,7 @@ ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
     "base_url": "https://api.openai.com/v1",
     "api_key": "your-local-key",
     "model": "gpt-5",
+    "context_window": 131072,
     "max_tokens": 4096,
     "temperature": 0.7
   }
@@ -326,10 +341,13 @@ ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
     "protocol": "openai",
     "base_url": "https://api.openai.com/v1",
     "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
-    "model": "gpt-5"
+    "model": "gpt-5",
+    "context_window": 131072
   }
 }
 ```
+
+`context_window` 缺失时默认 `131072`；`max_tokens` 缺失时沿用当前默认输出上限，并且只表示单次最大输出 token。输入预算固定按二者差值计算，不再提供第三个输入预算配置字段。
 
 对应环境变量可来自：
 
@@ -351,6 +369,8 @@ zcagent init
 - 复制默认 prompts
 - 默认保留已有用户文件，只补齐缺失文件
 
+完成提示按当前运行边界区分：聊天前必须校验至少一个 enabled LLM endpoint 的真实 service address/provider、model 和 api_key；`context_window` 与 `max_tokens` 已有默认值，只需按模型限制校准；Skill source、MCP、Subagent、Hook 等扩展能力只在启用时配置，未配置不属于错误。
+
 可选行为：
 
 - `--force`：覆盖已存在本地文件
@@ -366,11 +386,12 @@ zcagent init
 flowchart TD
     A["用户输入"] --> B["CLI 接收输入"]
     B --> C["SessionStore.load(session_id)"]
-    C --> D["ContextBuilder.build(...)"]
-    D --> E["LLMProvider.chat(...)"]
-    E --> F["AgentLoop 生成 assistant 消息"]
-    F --> G["SessionStore.append(user, assistant)"]
-    G --> H["CLI 打印回复"]
+    C --> D["ContextBuilder.build(..., ContextBudget)"]
+    D --> E["fit messages within endpoint input budget"]
+    E --> F["LLMProvider.chat(...)"]
+    F --> G["AgentLoop 生成 assistant 消息"]
+    G --> H["SessionStore.append(user, assistant)"]
+    H --> I["CLI 打印回复"]
 ```
 
 ### 6.2 错误对话流程
@@ -439,9 +460,10 @@ sequenceDiagram
 验证：
 
 - 能拼出 system prompt 与当前用户消息
-- 能保留最近历史且顺序正确
+- 能优先保留最近 3 个 Turn，并从更早候选中最多保留 3 个相关 Turn
+- CLI/Web 均保留 60 message 兜底并服从 endpoint ContextBudget
 - 能截断超长历史消息
-- 能跳过 `tool` 消息
+- 合法 Tool 块进入统一 ContextBuilder 后仍保持 call/result 完整
 - 缺少必需 Prompt 时能抛出清晰错误
 
 ### 8.2 `AgentLoop`
@@ -478,7 +500,7 @@ sequenceDiagram
 - 缺少 workspace 时能打印设置提示
 - 缺少启动 prompts 时能引导用户执行 `zcagent init`
 - 缺少或未正确填写 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 时，`zcagent` 聊天入口直接失败并提示配置；因为 LLM 是聊天运行必需能力
-- 缺少 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 时只打印 warning 并跳过 Skill 同步；因为 Skill source 是可选扩展能力
+- 缺少 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 时静默跳过 Skill 同步并视为 disabled；因为 Skill source 是可选扩展能力，只有显式配置后非法或同步失败才记录 warning
 
 提交前建议运行：
 
@@ -494,7 +516,7 @@ python -m pytest
 1. `zcagent` 能完成一次真实的无工具本地对话调用。
 2. `AgentLoop` 主链路只依赖协议与基础组件，不直接耦合具体 Provider 实现细节。
 3. 成功与失败路径都能稳定写入 Session。
-4. `ContextBuilder` 能稳定装配 Prompt、历史和运行时信息。
+4. `ContextBuilder` 能稳定装配 Prompt、混合 Turn 历史和运行时信息，并在无工具调用中同样服从 endpoint ContextBudget。
 5. LLM endpoint 配置完全来自工作目录，不要求把真实 key 放进仓库。
 6. 第二部分为第三部分工具调用预留兼容接口，但不提前引入额外复杂度。
 

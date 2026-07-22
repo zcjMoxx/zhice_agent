@@ -8,6 +8,7 @@ from typing import Any
 
 from agent.protocols.session import SessionContext, SessionModelPreference
 from agent.session.jsonl_store import validate_session_id
+from agent.session.sidecar_lock import session_sidecar_lock
 
 _ENDPOINT_FIELD = "preferred_endpoint_name"
 _MODEL_FIELD = "preferred_model_name"
@@ -23,7 +24,8 @@ class JsonSessionModelPreferenceStore:
     ) -> SessionModelPreference | None:
         """Return the complete saved preference or None for system default."""
 
-        metadata = self._read(session_context, session_id)
+        with session_sidecar_lock(self._path(session_context, session_id)):
+            metadata = self._read(session_context, session_id)
         endpoint_name = str(metadata.get(_ENDPOINT_FIELD) or "").strip()
         model_name = str(metadata.get(_MODEL_FIELD) or "").strip()
         if not endpoint_name or not model_name:
@@ -42,22 +44,24 @@ class JsonSessionModelPreferenceStore:
         model_name = preference.model_name.strip()
         if not endpoint_name or not model_name:
             raise ValueError("endpoint_name and model_name are required")
-        metadata = self._read(session_context, session_id)
-        metadata[_ENDPOINT_FIELD] = endpoint_name
-        metadata[_MODEL_FIELD] = model_name
-        self._write(session_context, session_id, metadata)
+        with session_sidecar_lock(self._path(session_context, session_id)):
+            metadata = self._read(session_context, session_id)
+            metadata[_ENDPOINT_FIELD] = endpoint_name
+            metadata[_MODEL_FIELD] = model_name
+            self._write(session_context, session_id, metadata)
 
     def reset(self, session_context: SessionContext, session_id: str) -> None:
         """Remove only the model fields and preserve other sidecar metadata."""
 
-        metadata = self._read(session_context, session_id)
-        metadata.pop(_ENDPOINT_FIELD, None)
-        metadata.pop(_MODEL_FIELD, None)
         path = self._path(session_context, session_id)
-        if metadata:
-            self._write(session_context, session_id, metadata)
-        elif path.exists():
-            path.unlink()
+        with session_sidecar_lock(path):
+            metadata = self._read(session_context, session_id)
+            metadata.pop(_ENDPOINT_FIELD, None)
+            metadata.pop(_MODEL_FIELD, None)
+            if metadata:
+                self._write(session_context, session_id, metadata)
+            elif path.exists():
+                path.unlink()
 
     def _read(self, session_context: SessionContext, session_id: str) -> dict[str, Any]:
         path = self._path(session_context, session_id)
@@ -92,4 +96,3 @@ class JsonSessionModelPreferenceStore:
         except ValueError as exc:
             raise ValueError("session metadata path is outside the metadata directory") from exc
         return path
-

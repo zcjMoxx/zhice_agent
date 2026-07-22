@@ -153,6 +153,7 @@ def test_create_llm_provider_creates_litellm_provider():
         api_key="dummy",
         provider="anthropic",
         model="claude-sonnet-4",
+        context_window=32768,
     )
 
     provider = create_llm_provider(endpoint)
@@ -190,6 +191,7 @@ def test_litellm_provider_calls_in_process_sdk_completion():
         api_key="litellm-secret",
         provider="anthropic",
         model="claude-sonnet-4",
+        context_window=32768,
         max_tokens=256,
         temperature=0.1,
     )
@@ -228,6 +230,7 @@ def test_litellm_provider_passes_custom_api_base_when_configured():
         api_key="gateway-secret",
         provider="openai",
         model="custom-model",
+        context_window=32768,
     )
 
     LiteLLMProvider(endpoint, completion=recorder).chat(
@@ -246,6 +249,7 @@ def _endpoint(api_key=""):
         base_url="https://example.test/v1",
         api_key=api_key,
         model="fake-openai",
+        context_window=32768,
         max_tokens=128,
         temperature=0.2,
     )

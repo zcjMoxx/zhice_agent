@@ -6,6 +6,13 @@
 
 ## 用例覆盖
 
+### Case 0: Turn-scoped Tool discovery
+
+- 首次 schema 只暴露 `discover_tools`，不会把全部业务 Tool 与 system prompt 一起注入。
+- `discover_tools` 只从已做 actor/Profile 过滤的 Provider catalog 中匹配并激活有界候选。
+- 下一次 definitions 只增加已激活 schema；未激活 Tool dispatch 返回 `TOOL_NOT_ACTIVATED`。
+- 多次发现可累积激活，contextual dispatch 仍保留可信 actor/session/turn 上下文。
+
 ### Case 1: ToolRegistry 定义生成
 
 - 输入：注册多个工具。

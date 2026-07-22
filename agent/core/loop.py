@@ -14,7 +14,7 @@ from threading import Event
 from typing import Any
 
 from agent.console import console
-from agent.core.context import ContextBuilder
+from agent.core.context import ContextBuilder, estimate_llm_tokens
 from agent.core.event_emitter import RuntimeEventEmitter, callback_runtime_event_sink
 from agent.core.turns import assign_turn, new_turn_id, next_turn_index
 from agent.logging_utils import log_event, preview_json, preview_text
@@ -29,6 +29,7 @@ from agent.protocols.hook import (
     PreToolHookRequest,
 )
 from agent.protocols.llm import (
+    ContextBudget,
     LLMConfigurationError,
     LLMProvider,
     LLMProviderError,
@@ -147,6 +148,10 @@ class AgentLoop:
         audit_sink: AuditSink | None = None,
         channel: str = "",
         request_id: str = "",
+        parent_turn_id: str = "",
+        runtime_event_scope: dict[str, Any] | None = None,
+        system_prompt_addendum: str = "",
+        context_budget: ContextBudget | None = None,
     ) -> str:
         """Run one user turn, saving user, assistant, and tool messages."""
 
@@ -166,6 +171,7 @@ class AgentLoop:
             turn_id=resolved_turn_id,
             request_id=request_id,
             sink=callback_runtime_event_sink(on_event),
+            scope=runtime_event_scope,
         )
         runtime_events.emit("turn.started")
         runtime_events.emit("context.started")
@@ -178,12 +184,22 @@ class AgentLoop:
                 turn_id=resolved_turn_id,
                 turn_index=resolved_turn_index,
             )
-            messages = self.context_builder.build(
-                history=session.messages,
-                user_message=user_msg,
-                workspace=workspace,
-                session_id=session_id,
-            )
+            user_msg.parent_turn_id = parent_turn_id or None
+            build_kwargs = {
+                "history": session.messages,
+                "user_message": user_msg,
+                "workspace": workspace,
+                "session_id": session_id,
+            }
+            if context_budget is not None:
+                build_kwargs["context_budget"] = context_budget
+            messages = self.context_builder.build(**build_kwargs)
+            if system_prompt_addendum and messages and messages[0].get("role") == "system":
+                messages[0]["content"] = (
+                    str(messages[0].get("content") or "")
+                    + "\n\n# Turn Requirement\n"
+                    + system_prompt_addendum.strip()
+                )
         except Exception as exc:
             runtime_events.emit(
                 "context.failed",
@@ -225,7 +241,6 @@ class AgentLoop:
         )
 
         pending_session_messages = [user_msg]
-        tool_definitions = tools.definitions() if tools else None
         tool_iterations = 0
 
         def persist_cancelled_turn() -> str:
@@ -235,6 +250,7 @@ class AgentLoop:
                 metadata={"stopped": True},
             )
             _assign_turn_fields(assistant_msg, resolved_turn_id, resolved_turn_index)
+            assistant_msg.parent_turn_id = parent_turn_id or None
             pending_session_messages.append(assistant_msg)
             save_error = _append_session_messages(
                 sessions,
@@ -271,7 +287,18 @@ class AgentLoop:
             return _with_save_error(TURN_CANCELLED_TEXT, save_error)
 
         while True:
+            tool_definitions = tools.definitions() if tools else None
+            llm_messages = _fit_llm_messages(
+                self.context_builder,
+                messages,
+                tool_definitions=tool_definitions,
+                context_budget=context_budget,
+            )
             llm_started = time.perf_counter()
+            estimated_input_tokens = estimate_llm_tokens(
+                llm_messages,
+                tool_definitions=tool_definitions,
+            )
             try:
                 _raise_if_cancelled(cancellation_token)
                 runtime_events.emit(
@@ -287,15 +314,19 @@ class AgentLoop:
                     "llm.call",
                     session_id=session_id,
                     turn_id=resolved_turn_id,
-                    messages=len(messages),
+                    messages=len(llm_messages),
                     tools=len(tool_definitions or []),
+                    estimated_input_tokens=estimated_input_tokens,
+                    input_token_limit=(
+                        context_budget.input_token_limit if context_budget is not None else 0
+                    ),
                     actor_user_id=actor.user_id if actor else "",
                     request_id=request_id,
                     channel=resolved_channel,
                 )
                 response = _call_llm(
                     llm,
-                    messages=list(messages),
+                    messages=llm_messages,
                     tools=tool_definitions,
                     on_event=on_event,
                     cancellation_token=cancellation_token,
@@ -351,6 +382,7 @@ class AgentLoop:
                     },
                 )
                 _assign_turn_fields(assistant_msg, resolved_turn_id, resolved_turn_index)
+                assistant_msg.parent_turn_id = parent_turn_id or None
                 pending_session_messages.append(assistant_msg)
                 save_error = _append_session_messages(
                     sessions,
@@ -406,6 +438,7 @@ class AgentLoop:
                 metadata=dict(response.metadata or {}),
             )
             _assign_turn_fields(assistant_msg, resolved_turn_id, resolved_turn_index)
+            assistant_msg.parent_turn_id = parent_turn_id or None
             pending_session_messages.append(assistant_msg)
             messages.append(_message_to_llm_dict(assistant_msg))
 
@@ -500,6 +533,7 @@ class AgentLoop:
                     )
                     tool_msg = _tool_result_to_message(call, final_tool_result)
                     _assign_turn_fields(tool_msg, resolved_turn_id, resolved_turn_index)
+                    tool_msg.parent_turn_id = parent_turn_id or None
                     pending_session_messages.append(tool_msg)
                 limit_msg = Message(
                     role="assistant",
@@ -510,6 +544,7 @@ class AgentLoop:
                     metadata={"is_error": True, "code": "TOOL_ITERATION_LIMIT"},
                 )
                 _assign_turn_fields(limit_msg, resolved_turn_id, resolved_turn_index)
+                limit_msg.parent_turn_id = parent_turn_id or None
                 pending_session_messages.append(limit_msg)
                 messages.append(_message_to_llm_dict(limit_msg))
                 final_text = limit_msg.content
@@ -526,7 +561,13 @@ class AgentLoop:
                         session_id=session_id,
                         turn_id=resolved_turn_id,
                     )
-                    limit_response = llm.chat(messages, tools=None)
+                    limit_messages = _fit_llm_messages(
+                        self.context_builder,
+                        messages,
+                        tool_definitions=None,
+                        context_budget=context_budget,
+                    )
+                    limit_response = llm.chat(limit_messages, tools=None)
                     if limit_response.tool_calls or not str(limit_response.content).strip():
                         raise RuntimeError("LLM did not produce a final limit summary")
                     final_msg = Message(
@@ -538,6 +579,7 @@ class AgentLoop:
                         },
                     )
                     _assign_turn_fields(final_msg, resolved_turn_id, resolved_turn_index)
+                    final_msg.parent_turn_id = parent_turn_id or None
                     pending_session_messages.append(final_msg)
                     final_text = final_msg.content
                     runtime_events.emit(
@@ -604,7 +646,7 @@ class AgentLoop:
                     return persist_cancelled_turn()
                 call = _parse_tool_call(raw_call, index)
                 record_id = "tool-record-" + uuid.uuid4().hex
-                runtime_events.emit(
+                tool_started_event = runtime_events.emit(
                     "tool.started",
                     tool_call_id=call.id,
                     tool_call_record_id=record_id,
@@ -649,6 +691,10 @@ class AgentLoop:
                             cancellation_token=cancellation_token,
                             tool_call_record_id=record_id,
                             runtime_events=runtime_events,
+                            tool_started_event_id=(
+                                tool_started_event.event_id if tool_started_event is not None else ""
+                            ),
+                            runtime_event_scope=runtime_event_scope,
                         )
                     except Exception as exc:
                         runtime_events.emit(
@@ -696,6 +742,7 @@ class AgentLoop:
                     return persist_cancelled_turn()
                 tool_msg = _tool_result_to_message(call, result)
                 _assign_turn_fields(tool_msg, resolved_turn_id, resolved_turn_index)
+                tool_msg.parent_turn_id = parent_turn_id or None
                 pending_session_messages.append(tool_msg)
                 messages.append(_message_to_llm_dict(tool_msg))
 
@@ -735,6 +782,25 @@ def _call_llm(
     if response.content:
         _emit_event(on_event, {"type": "text_delta", "content": response.content})
     return response
+
+
+def _fit_llm_messages(
+    context_builder: ContextBuilder,
+    messages: list[dict[str, Any]],
+    *,
+    tool_definitions: list[dict[str, Any]] | None,
+    context_budget: ContextBudget | None,
+) -> list[dict[str, Any]]:
+    """Apply an optional provider-neutral context budget before every LLM call."""
+
+    fit_messages = getattr(context_builder, "fit_messages", None)
+    if not callable(fit_messages):
+        return list(messages)
+    return fit_messages(
+        list(messages),
+        tool_definitions=tool_definitions,
+        context_budget=context_budget,
+    )
 
 
 def _normalize_stream_chunk(raw_chunk: LLMStreamChunk | str) -> LLMStreamChunk:
@@ -886,6 +952,8 @@ def _dispatch_tool(
     cancellation_token: CancellationToken | None,
     tool_call_record_id: str,
     runtime_events: RuntimeEventEmitter,
+    tool_started_event_id: str = "",
+    runtime_event_scope: dict[str, Any] | None = None,
 ) -> ToolResult:
     """Apply actor-aware policy and confirmation before the existing registry dispatch."""
 
@@ -899,6 +967,7 @@ def _dispatch_tool(
 
     context = None
     if actor is not None:
+        scope = dict(runtime_event_scope or {})
         context = ToolExecutionContext(
             actor=actor,
             session_id=session_id,
@@ -909,6 +978,13 @@ def _dispatch_tool(
             tool_name=call.name,
             tool_call_id=call.id,
             tool_call_record_id=record_id,
+            tool_started_event_id=tool_started_event_id,
+            root_session_id=str(scope.get("root_session_id") or session_id),
+            root_turn_id=str(scope.get("root_turn_id") or turn_id),
+            parent_session_id=str(scope.get("parent_session_id") or ""),
+            parent_turn_id=str(scope.get("parent_turn_id") or ""),
+            subagent_id=str(scope.get("agent_id") or "") if int(scope.get("depth") or 0) else "",
+            task_id=str(scope.get("task_id") or ""),
         )
     metadata = {
         "tool_name": call.name,
@@ -1027,6 +1103,10 @@ def _dispatch_tool(
                 "permission_key": decision.permission_key,
                 "session_id": session_id,
                 "turn_id": turn_id,
+                "root_session_id": context.root_session_id,
+                "root_turn_id": context.root_turn_id,
+                "subagent_id": context.subagent_id,
+                "task_id": context.task_id,
                 **payload,
             }
             _emit_event(on_event, event)
@@ -1060,7 +1140,11 @@ def _dispatch_tool(
                 tool_call_record_id=record_id,
                 decision=confirmation.status,
                 risk_category=decision.risk_category,
-                metadata={"tool_name": call.name},
+                metadata={
+                    "tool_name": call.name,
+                    "subagent_id": context.subagent_id,
+                    "task_id": context.task_id,
+                },
             ),
         )
         if confirmation.status != "approved":
@@ -1092,6 +1176,7 @@ def _dispatch_tool(
         actor=actor,
         request_id=request_id,
         channel=channel,
+        context=context,
     )
     result_metadata = {
         "tool_name": call.name,
@@ -1164,6 +1249,8 @@ def _record_tool_decision(
         "tool_name": context.tool_name,
         "permission_key": decision.permission_key,
         "risk_level": decision.risk_level,
+        "subagent_id": context.subagent_id,
+        "task_id": context.task_id,
         **decision.audit_metadata,
     }
     event = RuntimeActivityEvent(
@@ -1298,6 +1385,7 @@ def _execute_tool(
     actor: ActorContext | None = None,
     request_id: str = "",
     channel: str = "",
+    context: ToolExecutionContext | None = None,
 ) -> ToolResult:
     """Dispatch one parsed tool call through the configured tool provider."""
 
@@ -1324,7 +1412,11 @@ def _execute_tool(
             metadata={"code": "TOOLS_UNAVAILABLE", "tool_name": call.name},
         )
     else:
-        result = tools.execute(call.name, call.arguments)
+        contextual_execute = getattr(tools, "execute_with_context", None)
+        if context is not None and callable(contextual_execute):
+            result = contextual_execute(call.name, call.arguments, context)
+        else:
+            result = tools.execute(call.name, call.arguments)
     duration_ms = _duration_ms(started)
     result.metadata.setdefault("duration_ms", duration_ms)
     _log_tool_result(

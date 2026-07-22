@@ -6,13 +6,16 @@ from agent.protocols.memory import MemoryStore
 from agent.protocols.skill import SkillProvider
 from agent.protocols.tool import Tool
 from agent.skills.sync import SkillSourceSync
+from agent.tools.discovery import DiscoverableToolProvider, with_tool_discovery
 from agent.tools.exec import ExecTool
+from agent.tools.filtered import FilteredToolProvider
 from agent.tools.mcp import McpToolAdapter
 from agent.tools.memory import MemoryReadTool, MemoryWriteTool
 from agent.tools.readonly import GrepTool, ListDirTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
 from agent.tools.scoped import UserScopedToolProvider
 from agent.tools.skill import LoadSkillsTool, SyncSkillsTool
+from agent.tools.subagent import AugmentedToolProvider, DelegateTasksTool
 
 
 def create_default_tool_registry(
@@ -55,6 +58,10 @@ def create_default_tool_registry(
 
 __all__ = [
     "ExecTool",
+    "AugmentedToolProvider",
+    "DelegateTasksTool",
+    "DiscoverableToolProvider",
+    "FilteredToolProvider",
     "GrepTool",
     "ListDirTool",
     "LoadSkillsTool",
@@ -66,4 +73,5 @@ __all__ = [
     "ToolRegistry",
     "UserScopedToolProvider",
     "create_default_tool_registry",
+    "with_tool_discovery",
 ]

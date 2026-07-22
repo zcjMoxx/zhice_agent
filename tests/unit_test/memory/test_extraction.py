@@ -104,6 +104,29 @@ def test_extractor_exposes_provider_failure_as_retryable_code(tmp_path):
     assert caught.value.code == "MEMORY_EXTRACTION_PROVIDER_FAILED"
 
 
+def test_extractor_reports_missing_built_in_prompt(tmp_path):
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    context = build_memory_context(
+        tmp_path / "memory",
+        scope="workspace",
+        actor_user_id=None,
+    )
+    service = MemoryExtractionService(
+        context,
+        MarkdownMemoryStore(context),
+        PromptLoader(prompts),
+        MemorySafetyPolicy(),
+    )
+    llm = _Llm({"memories": []})
+
+    with pytest.raises(MemoryStoreError) as caught:
+        service.extract("alpha", _messages(3), llm)
+
+    assert caught.value.code == "MEMORY_EXTRACTION_PROMPT_NOT_FOUND"
+    assert llm.calls == 0
+
+
 def test_extractor_does_not_commit_cancelled_result(tmp_path):
     service, store, llm, context = _service(
         tmp_path,
@@ -185,12 +208,34 @@ class _Llm:
     def __init__(self, payload):
         self.payload = payload
         self.calls = 0
+        self.last_messages = None
 
     def chat(self, messages, tools=None):
         self.calls += 1
+        self.last_messages = messages
         return LLMResponse(content=json.dumps(self.payload, ensure_ascii=False))
 
 
 class _FailingLlm:
     def chat(self, messages, tools=None):
         raise TimeoutError("provider timeout")
+
+
+def test_extractor_fits_source_turns_to_context_budget(tmp_path):
+    from agent.protocols.llm import ContextBudget
+
+    service, _store, llm, _context = _service(tmp_path, {"memories": []})
+    messages = _messages(8)
+    for message in messages:
+        if message.role == "user":
+            message.content += " x" * 1000
+
+    service.extract(
+        "alpha",
+        messages,
+        llm,
+        context_budget=ContextBudget(input_token_limit=900),
+    )
+
+    assert llm.calls == 1
+    assert len(llm.last_messages[1]["content"]) < 4000

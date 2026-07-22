@@ -26,7 +26,7 @@ from agent.hooks import create_hook_runtime
 from agent.llm.runtime import create_configured_llm_provider
 from agent.llm.selection import ConfiguredLLMProviderResolver
 from agent.logging_utils import log_event
-from agent.mcp import McpRuntime, load_mcp_server_specs
+from agent.mcp import McpRuntime, check_mcp_startup
 from agent.memory import MemoryStoreError
 from agent.memory.context import build_memory_context
 from agent.memory.extraction import MemoryExtractionService, pop_memory_notification
@@ -34,27 +34,44 @@ from agent.memory.markdown_store import MarkdownMemoryStore
 from agent.memory.presentation import format_memory_list
 from agent.memory.safety import MemorySafetyPolicy
 from agent.memory.scheduler import MemoryExtractionJob, MemoryExtractionScheduler
+from agent.memory.startup import check_memory_extraction_startup
 from agent.prompt_loader import PromptLoader
 from agent.protocols.auth import ActorContext, AuditEvent
+from agent.protocols.capability import CapabilityStatus
 from agent.protocols.diagnostics import DiagnosticContext
 from agent.protocols.llm import LLMEndpoint, LLMProvider
 from agent.protocols.mcp import McpInteractionResponse
 from agent.protocols.session import (
+    SessionContext,
     SessionModelPreference,
     SessionState,
     SessionStore,
     SessionSummary,
 )
-from agent.session import JsonlSessionStore, JsonSessionModelPreferenceStore
+from agent.protocols.subagent import SubagentProfile
+from agent.session import (
+    JsonlSessionStore,
+    JsonSessionModelPreferenceStore,
+    JsonSessionSubagentPreferenceStore,
+    SessionSubagentPreference,
+)
 from agent.skills import SkillLoader, SkillSourceSync
 from agent.skills.sync import SkillSyncError
-from agent.tools import UserScopedToolProvider, create_default_tool_registry
+from agent.subagents.config import SubagentConfig
+from agent.subagents.presentation import can_view_subagent_details, format_subagent_unavailable
+from agent.subagents.runtime import (
+    build_turn_subagent_provider,
+    build_unavailable_subagent_provider,
+)
+from agent.subagents.startup import check_subagent_startup
+from agent.tools import UserScopedToolProvider, create_default_tool_registry, with_tool_discovery
 
 DEFAULT_WEB_HISTORY_MESSAGES = 60
 RuntimeEventCallback = Callable[[dict[str, Any]], None]
 web_logger = logging.getLogger("zcagent.agent.web")
 session_logger = logging.getLogger("zcagent.agent.session")
 memory_logger = logging.getLogger("zcagent.agent.memory")
+skill_logger = logging.getLogger("zcagent.agent.skills")
 WEB_COMMAND_PROFILE = "web"
 EXTERNAL_COMMAND_PROFILE = "external"
 
@@ -83,6 +100,7 @@ class ActiveTurn:
 
     turn_id: str
     token: CancellationToken
+    subagent_force_once: bool = False
 
 
 @dataclass
@@ -96,6 +114,12 @@ class WebRuntime:
     auth: AuthService | None = None
     session_access: SessionAccessService | None = None
     model_preferences: JsonSessionModelPreferenceStore | None = None
+    subagent_preferences: JsonSessionSubagentPreferenceStore | None = None
+    subagent_profiles: tuple[tuple[str, str], ...] = ()
+    subagent_config: SubagentConfig | None = None
+    subagent_status: CapabilityStatus | None = None
+    mcp_status: CapabilityStatus | None = None
+    memory_extraction_status: CapabilityStatus | None = None
     llm_resolver: ConfiguredLLMProviderResolver | None = None
     tool_policy: RbacToolExecutionPolicy | None = None
     confirmation_broker: SQLiteToolConfirmationBroker | None = None
@@ -115,6 +139,26 @@ class WebRuntime:
     def __post_init__(self) -> None:
         self._active_turns: dict[tuple[str, str], ActiveTurn] = {}
         self._turns_lock = Lock()
+
+    def capability_statuses(self) -> dict[str, CapabilityStatus]:
+        """Return transport-neutral optional capability state for health/UI."""
+
+        statuses: dict[str, CapabilityStatus] = {}
+        if self.subagent_status is not None:
+            statuses["subagent"] = self.subagent_status
+        statuses["mcp"] = self.mcp_status or CapabilityStatus(
+            name="mcp",
+            state="available" if self.mcp_runtime is not None else "disabled",
+            code="MCP_AVAILABLE" if self.mcp_runtime is not None else "MCP_DISABLED",
+            message=(
+                "MCP runtime is available."
+                if self.mcp_runtime is not None
+                else "MCP runtime is not configured."
+            ),
+        )
+        if self.memory_extraction_status is not None:
+            statuses["memory_extraction"] = self.memory_extraction_status
+        return statuses
 
     def list_sessions(
         self,
@@ -185,16 +229,36 @@ class WebRuntime:
             stopped = command_profile == EXTERNAL_COMMAND_PROFILE and command_name == "/stop"
             return ChatTurnResult(content=command_text, stopped=stopped, turn_id=turn_id or "")
 
+        subagent_preference = self.get_subagent_preference(actor, session_id)
+        force_subagent_once = self.consume_subagent_force_once(actor, session_id)
+        if force_subagent_once and not (
+            self.subagent_status is not None and self.subagent_status.available
+        ):
+            text = _format_subagent_unavailable(self.subagent_status, actor)
+            _emit_runtime_event(on_event, {"type": "text_delta", "content": text})
+            return ChatTurnResult(content=text, stopped=False, turn_id=turn_id or "")
         turn_id = turn_id or new_turn_id()
         token = CancellationToken()
         active_key = _active_turn_key(actor, session_id)
         self._cancel_memory_extraction(actor, session_id)
-        self._register_turn(active_key, ActiveTurn(turn_id=turn_id, token=token))
+        self._register_turn(
+            active_key,
+            ActiveTurn(
+                turn_id=turn_id,
+                token=token,
+                subagent_force_once=force_subagent_once,
+            ),
+        )
         sessions = self.sessions
         workspace = self.config.workspace
         tools = getattr(self.agent_loop, "tools", None)
         turn_llm = self.llm
+        turn_context_budget = (
+            self.llm_resolver.context_budget() if self.llm_resolver is not None else None
+        )
         memory_notice: tuple[str, ...] = ()
+        memory_store = None
+        memory_safety = None
         if self.session_access is not None and actor.user_id is not None:
             resolved = self.session_access.ensure_session(
                 actor,
@@ -227,6 +291,7 @@ class WebRuntime:
                 preference = self.model_preferences.get(resolved.model_context(), session_id)
                 selection = self.llm_resolver.resolve(preference)
                 turn_llm = self.llm_resolver.bind(selection)
+                turn_context_budget = selection.context_budget
             tools = UserScopedToolProvider(
                 files_dir=workspace,
                 shared_readonly_dir=resolved.context.shared_readonly_dir,
@@ -255,6 +320,90 @@ class WebRuntime:
                     else None
                 ),
             )
+        if (
+            tools is not None
+            and self.subagent_config is not None
+            and self.subagent_config.enabled
+            and (subagent_preference.mode == "auto" or force_subagent_once)
+            and self.prompt_loader is not None
+        ):
+            sessions_root = getattr(sessions, "sessions_dir", self.config.sessions_dir)
+
+            def child_tools(
+                child_workspace,
+                profile: SubagentProfile,
+                parent_context,
+                child_on_event,
+                child_identity,
+                child_skills,
+            ):
+                del profile, parent_context
+                return UserScopedToolProvider(
+                    files_dir=child_workspace,
+                    shared_readonly_dir=(
+                        resolved.context.shared_readonly_dir
+                        if self.session_access is not None and actor.user_id is not None
+                        else self.config.shared_readonly_dir
+                    ),
+                    actor=actor,
+                    skills=child_skills,
+                    skill_sync=self.skill_sync,
+                    diagnostics=self.diagnostics,
+                    diagnostic_context=DiagnosticContext(
+                        session_id=session_id,
+                        current_turn_id=turn_id,
+                        current_request_id=request_id,
+                        channel=actor.channel,
+                    ),
+                    memory_store=memory_store,
+                    memory_safety=memory_safety,
+                    extra_tools=(
+                        self.mcp_runtime.tools_for_actor(
+                            actor,
+                            child_workspace,
+                            interaction_notifier=lambda request: _emit_runtime_event(
+                                child_on_event,
+                                {
+                                    "type": "mcp_elicitation_requested",
+                                    "subagent_id": child_identity.subagent_id,
+                                    "task_id": child_identity.task_id,
+                                    "batch_id": child_identity.batch_id,
+                                    **asdict(request),
+                                },
+                            ),
+                        )
+                        if self.mcp_runtime is not None
+                        else None
+                    ),
+                )
+
+            tools = build_turn_subagent_provider(
+                base_tools=tools,
+                config=self.subagent_config,
+                prompt_loader=self.prompt_loader,
+                sessions_root=sessions_root,
+                workspace=workspace,
+                parent_llm=turn_llm,
+                context_budget=turn_context_budget,
+                tool_provider_factory=child_tools,
+                skills=self.skill_loader,
+                cancellation_token=token,
+                on_event=on_event,
+                force_once=force_subagent_once,
+                tool_policy=self.tool_policy,
+                confirmation_broker=self.confirmation_broker,
+                activity_sink=self.activity_sink,
+                audit_sink=self.audit_sink,
+                hook_runtime=self.agent_loop.hook_runtime,
+            )
+        elif (
+            tools is not None
+            and self.subagent_status is not None
+            and self.subagent_status.state == "unavailable"
+            and subagent_preference.mode == "auto"
+        ):
+            tools = build_unavailable_subagent_provider(tools, self.subagent_status)
+        tools = with_tool_discovery(tools)
         try:
             notice_text = _format_memory_notice(memory_notice)
             if notice_text:
@@ -268,6 +417,7 @@ class WebRuntime:
                 cancellation_token=token,
                 actor=actor,
                 llm_override=turn_llm,
+                context_budget=turn_context_budget,
                 sessions_override=sessions,
                 tools_override=tools,
                 workspace_override=workspace,
@@ -277,6 +427,11 @@ class WebRuntime:
                 audit_sink=self.audit_sink,
                 channel=actor.channel,
                 request_id=request_id,
+                system_prompt_addendum=(
+                    self.prompt_loader.load("subagent_once")
+                    if force_subagent_once and self.prompt_loader is not None
+                    else ""
+                ),
             )
             if self.session_access is not None and actor.user_id is not None:
                 self.session_access.refresh_index(actor, session_id)
@@ -323,6 +478,8 @@ class WebRuntime:
             return _web_help_text(command_profile)
         if command == "model":
             return self._handle_model_command(actor, session_id, target, request_id=request_id)
+        if command == "subagent":
+            return self._handle_subagent_command(actor, session_id, target)
         if command == "memory":
             return self._handle_memory_command(actor, session_id, target)
         if command == "mcp":
@@ -340,6 +497,7 @@ class WebRuntime:
             return f"Stopped current turn. Cancelled: `{result['cancelled']}`"
         if command == "reset":
             self._cancel_memory_extraction(actor, session_id)
+            self._clear_subagent_force_once(actor, session_id)
             if self.session_access is not None and actor.user_id is not None:
                 self.session_access.clear_session(actor, session_id)
             else:
@@ -417,6 +575,7 @@ class WebRuntime:
             target_session_id = rest or session_id
             if target_session_id == session_id:
                 self._cancel_memory_extraction(actor, session_id)
+                self._clear_subagent_force_once(actor, session_id)
                 if self.session_access is not None and actor.user_id is not None:
                     self.session_access.clear_session(actor, session_id)
                 else:
@@ -425,6 +584,93 @@ class WebRuntime:
             self.delete_session(actor, target_session_id)
             return f"Session deleted: `{target_session_id}`"
         return _sessions_usage_text()
+
+    def get_subagent_preference(
+        self,
+        actor: ActorContext | str,
+        session_id: str | None = None,
+    ) -> SessionSubagentPreference:
+        """Return the current session's Subagent mode and one-shot state."""
+
+        actor, session_id = _normalize_actor_session(actor, session_id)
+        if self.subagent_preferences is None:
+            return SessionSubagentPreference()
+        return self.subagent_preferences.get(
+            self._session_metadata_context(actor, session_id),
+            session_id,
+        )
+
+    def consume_subagent_force_once(
+        self,
+        actor: ActorContext | str,
+        session_id: str | None = None,
+    ) -> bool:
+        """Atomically consume one explicit next-message Subagent request."""
+
+        actor, session_id = _normalize_actor_session(actor, session_id)
+        if self.subagent_preferences is None:
+            return False
+        return self.subagent_preferences.consume_force_once(
+            self._session_metadata_context(actor, session_id),
+            session_id,
+        )
+
+    def _handle_subagent_command(
+        self,
+        actor: ActorContext,
+        session_id: str,
+        target: str,
+    ) -> str:
+        """Handle session-scoped Web /subagent commands."""
+
+        normalized = target.strip().lower()
+        if normalized not in {"", "auto", "off", "once"}:
+            return "Usage: `/subagent`"
+        if self.subagent_status is not None and not self.subagent_status.available:
+            return _format_subagent_unavailable(self.subagent_status, actor)
+        if self.subagent_preferences is None:
+            return "Subagent preferences are unavailable for this runtime."
+        context = self._session_metadata_context(actor, session_id)
+        if normalized in {"auto", "off"}:
+            preference = self.subagent_preferences.set_mode(context, session_id, normalized)
+        elif normalized == "once":
+            preference = self.subagent_preferences.force_once(context, session_id)
+        else:
+            preference = self.subagent_preferences.get(context, session_id)
+        return _format_subagent_status(preference, self.subagent_profiles)
+
+    def _clear_subagent_force_once(self, actor: ActorContext, session_id: str) -> None:
+        if self.subagent_preferences is None:
+            return
+        self.subagent_preferences.clear_force_once(
+            self._session_metadata_context(actor, session_id),
+            session_id,
+        )
+
+    def _session_metadata_context(
+        self,
+        actor: ActorContext,
+        session_id: str,
+    ) -> SessionContext:
+        if self.session_access is not None and actor.user_id is not None:
+            return self.session_access.ensure_session(
+                actor,
+                session_id,
+                channel=actor.channel,
+                write=True,
+            ).model_context()
+        metadata_dir = getattr(
+            self.sessions,
+            "metadata_dir",
+            self.config.sessions_dir.parent / "sessions_meta",
+        )
+        return SessionContext(
+            owner_user_id=None,
+            sessions_dir=self.config.sessions_dir,
+            sessions_meta_dir=metadata_dir,
+            files_dir=self.config.workspace,
+            shared_readonly_dir=self.config.shared_readonly_dir,
+        )
 
     def rename_session(
         self,
@@ -824,6 +1070,7 @@ class WebRuntime:
         scope = "workspace"
         actor_user_id = None
         llm = self.llm
+        context_budget = self.llm_resolver.context_budget() if self.llm_resolver else None
         if self.session_access is not None and actor.user_id is not None:
             resolved = self.session_access.resolve_session(actor, session_id)
             sessions = resolved.store
@@ -833,7 +1080,9 @@ class WebRuntime:
             actor_user_id = None if is_owner else actor.user_id
             if self.model_preferences is not None and self.llm_resolver is not None:
                 preference = self.model_preferences.get(resolved.model_context(), session_id)
-                llm = self.llm_resolver.bind(self.llm_resolver.resolve(preference))
+                selection = self.llm_resolver.resolve(preference)
+                llm = self.llm_resolver.bind(selection)
+                context_budget = selection.context_budget
         if job.cancelled.is_set():
             return
         context = build_memory_context(
@@ -850,6 +1099,7 @@ class WebRuntime:
             session_id,
             sessions.load(session_id).messages,
             llm,
+            context_budget=context_budget,
             should_commit=lambda: not job.cancelled.is_set(),
         )
         if job.cancelled.is_set():
@@ -889,16 +1139,22 @@ def build_web_runtime(
         config_dir=config.config_dir,
         extends_dir=config.extends_dir,
     )
-    _sync_startup_skills(skill_sync)
+    skill_sync_error = _sync_startup_skills(skill_sync)
 
     prompt_loader = PromptLoader(config.prompts_dir)
     prompt_loader.load_many(DEFAULT_CONTEXT_PROMPTS)
     session_store = JsonlSessionStore(config.sessions_dir)
-    skill_loader = _create_skill_loader(skill_sync)
+    subagent_preferences = JsonSessionSubagentPreferenceStore()
+    skill_loader = _create_skill_loader(skill_sync, startup_error=skill_sync_error)
+    subagent_startup = check_subagent_startup(config.config_dir, prompt_loader)
+    mcp_startup = check_mcp_startup(config.config_dir)
+    memory_extraction_startup = check_memory_extraction_startup(prompt_loader)
+    subagent_config = subagent_startup.config
     context_builder = ContextBuilder(
         prompt_loader,
         skills=skill_loader,
         max_history_messages=DEFAULT_WEB_HISTORY_MESSAGES,
+        extra_system_prompts=("subagent_orchestration",) if subagent_config.enabled else (),
     )
     llm = create_configured_llm_provider(config.config_dir, endpoint_name)
     default_endpoint = _current_endpoint(llm).name
@@ -925,7 +1181,7 @@ def build_web_runtime(
     diagnostics = RecentActivityDiagnostics(auth_store, config.logs_dir)
     tool_policy = RbacToolExecutionPolicy()
     mcp_runtime = McpRuntime(
-        load_mcp_server_specs(config.config_dir),
+        mcp_startup.specs,
         workspace=config.workspace,
         activity_sink=activity_sink,
         audit_sink=audit_sink,
@@ -958,6 +1214,12 @@ def build_web_runtime(
         auth=auth,
         session_access=session_access,
         model_preferences=model_preferences,
+        subagent_preferences=subagent_preferences,
+        subagent_profiles=_load_subagent_profile_summaries(config.config_dir),
+        subagent_config=subagent_config,
+        subagent_status=subagent_startup.status,
+        mcp_status=mcp_startup.status,
+        memory_extraction_status=memory_extraction_startup.status,
         llm_resolver=llm_resolver,
         tool_policy=tool_policy,
         confirmation_broker=confirmation_broker,
@@ -967,18 +1229,19 @@ def build_web_runtime(
         skill_loader=skill_loader,
         skill_sync=skill_sync,
         prompt_loader=prompt_loader,
-        memory_extraction_enabled=True,
+        memory_extraction_enabled=memory_extraction_startup.enabled,
         mcp_runtime=mcp_runtime,
     )
 
 
-def _sync_startup_skills(skill_sync: SkillSourceSync) -> None:
-    """Best-effort startup Skill sync for the Web process."""
+def _sync_startup_skills(skill_sync: SkillSourceSync) -> SkillSyncError | None:
+    """Run best-effort startup sync and defer one structured warning to loader setup."""
 
     try:
         skill_sync.sync_on_startup()
-    except SkillSyncError:
-        return
+    except SkillSyncError as exc:
+        return exc
+    return None
 
 
 def _run_agent_turn(agent_loop, session_id: str, message: str, **kwargs) -> str:
@@ -1094,13 +1357,41 @@ def _find_session_summary(summaries: list[SessionSummary], session_id: str) -> S
     )
 
 
-def _create_skill_loader(skill_sync: SkillSourceSync) -> SkillLoader:
-    """Create a SkillLoader without letting optional Skill config block Web chat."""
+def _create_skill_loader(
+    skill_sync: SkillSourceSync,
+    *,
+    startup_error: SkillSyncError | None = None,
+) -> SkillLoader:
+    """Create a SkillLoader and emit at most one warning for one startup cause."""
 
-    try:
-        return SkillLoader(skill_sync.skill_roots())
-    except SkillSyncError:
+    if not skill_sync.has_config():
         return SkillLoader([])
+    try:
+        roots = skill_sync.skill_roots()
+    except SkillSyncError as exc:
+        log_event(
+            skill_logger,
+            logging.WARNING,
+            "skills.runtime_unavailable",
+            code="SKILL_SOURCE_CONFIG_INVALID",
+            message="Skill source configuration is invalid.",
+            hint="Fix config/skill_sources.yml, then restart the process.",
+            config_file="skill_sources.yml",
+            error_type=type(exc).__name__,
+        )
+        return SkillLoader([])
+    if startup_error is not None:
+        log_event(
+            skill_logger,
+            logging.WARNING,
+            "skills.sync_degraded",
+            code="SKILL_SYNC_FAILED",
+            message="Configured Skill source synchronization failed.",
+            hint="Run /skills sync --verbose to inspect and retry synchronization.",
+            config_file="skill_sources.yml",
+            error_type=type(startup_error).__name__,
+        )
+    return SkillLoader(roots)
 
 
 def _current_endpoint(llm: LLMProvider) -> LLMEndpoint:
@@ -1139,6 +1430,7 @@ def _web_help_text(command_profile: str = WEB_COMMAND_PROFILE) -> str:
         "",
         "- `/help` - show commands",
         "- `/model` - show or switch the preferred model",
+        "- `/subagent` - show or control Subagent delegation",
         "- `/memory` - show current Memory",
         "- `/mcp` - show available MCP capabilities",
         "- `/reset` - clear this session history",
@@ -1153,6 +1445,69 @@ def _web_help_text(command_profile: str = WEB_COMMAND_PROFILE) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def _format_subagent_status(
+    preference: SessionSubagentPreference,
+    profiles: tuple[tuple[str, str], ...],
+) -> str:
+    """Format compact /subagent state without expanding subcommands in /help."""
+
+    lines = [
+        f"Current subagent mode: `{preference.mode}`",
+        f"Force once: `{'true' if preference.force_once else 'false'}`",
+        "",
+        "Available profiles:",
+    ]
+    if profiles:
+        lines.extend(f"- `{name}` - {description}" for name, description in profiles)
+    else:
+        lines.append("- No model-callable profiles are currently available.")
+    lines.extend(
+        [
+            "",
+            "Tip: use `/subagent auto` to allow automatic delegation, "
+            "`/subagent off` to disable it, or `/subagent once` to use Subagent "
+            "for the next message.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _format_subagent_unavailable(
+    status: CapabilityStatus | None,
+    actor: ActorContext,
+) -> str:
+    """Return human-facing Subagent capability guidance for commands and chat."""
+
+    return format_subagent_unavailable(
+        status,
+        include_details=can_view_subagent_details(actor),
+    )
+
+
+def _load_subagent_profile_summaries(config_dir) -> tuple[tuple[str, str], ...]:
+    """Load enabled model-callable Profile summaries through the Part 13 loader."""
+
+    try:
+        from agent.subagents.config import load_subagent_config
+
+        config = load_subagent_config(config_dir / "subagents.yml")
+    except (ImportError, OSError, ValueError):
+        return ()
+    summaries: list[tuple[str, str]] = []
+    if not config.enabled:
+        return ()
+    for profile in config.list_profiles():
+        if not getattr(profile, "enabled", True):
+            continue
+        if not getattr(profile, "allow_model_invocation", True):
+            continue
+        name = str(profile.name).strip()
+        description = str(getattr(profile, "description", "")).strip()
+        if name:
+            summaries.append((name, description or "Available Subagent profile"))
+    return tuple(summaries)
 
 
 def _command_not_supported_for_client(command_text: str) -> str:

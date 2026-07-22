@@ -6,6 +6,7 @@ import os
 import pytest
 
 from agent.config import (
+    InitConfigurationError,
     MissingWorkspaceError,
     bootstrap_dotenv,
     init_runtime_files,
@@ -150,6 +151,7 @@ def test_load_llm_endpoint_reads_openai_endpoint(tmp_path):
                     "model": "gpt-test",
                     "supported_models": ["gpt-test", "gpt-alt", "gpt-*"],
                     "max_tokens": 128,
+                    "context_window": 8192,
                     "temperature": 0.2,
                 }
             }
@@ -166,6 +168,7 @@ def test_load_llm_endpoint_reads_openai_endpoint(tmp_path):
     assert endpoint.provider == ""
     assert endpoint.supported_models == ("gpt-test", "gpt-alt", "gpt-*")
     assert endpoint.max_tokens == 128
+    assert endpoint.context_window == 8192
     assert endpoint.temperature == 0.2
     assert endpoint.priority == 1
     assert endpoint.enabled is True
@@ -186,6 +189,7 @@ def test_load_llm_endpoints_reads_priority_and_enabled_keyed_config(tmp_path):
                     "base_url": "https://a.test/v1",
                     "api_key": "a-key",
                     "model": "model-a",
+                    "context_window": 8192,
                     "priority": 2,
                 },
                 "backup": {
@@ -193,6 +197,7 @@ def test_load_llm_endpoints_reads_priority_and_enabled_keyed_config(tmp_path):
                     "base_url": "https://b.test/v1",
                     "api_key": "b-key",
                     "model": "model-b",
+                    "context_window": 8192,
                     "priority": 1,
                     "enabled": False,
                     "role": "default",
@@ -224,6 +229,7 @@ def test_load_llm_endpoint_allows_default_string_alias(tmp_path):
                     "provider": "anthropic",
                     "api_key": "anthropic-key",
                     "model": "claude-sonnet-4",
+                    "context_window": 200000,
                     "priority": 1,
                 },
             }
@@ -254,6 +260,7 @@ def test_load_llm_endpoint_keeps_litellm_models_unprefixed(tmp_path):
                     "provider": "anthropic",
                     "api_key": "anthropic-key",
                     "model": "claude-sonnet-4",
+                    "context_window": 200000,
                     "supported_models": ["claude-sonnet-4", "claude-opus-4"],
                 }
             }
@@ -285,6 +292,7 @@ def test_load_llm_endpoint_allows_default_ref_alias(tmp_path):
                     "base_url": "https://backup.test/v1",
                     "api_key": "backup-key",
                     "model": "backup-model",
+                    "context_window": 8192,
                 },
             }
         ),
@@ -314,6 +322,7 @@ def test_load_llm_endpoints_accepts_reference_endpoints_list_config(tmp_path):
                         "base_url": "https://cpa.test/v1",
                         "api_key": "cpa-key",
                         "model": "gpt-5.5",
+                        "context_window": 131072,
                         "enabled": True,
                     }
                 ],
@@ -370,6 +379,7 @@ def test_load_llm_endpoint_resolves_api_key_placeholder_from_environment(tmp_pat
                     "base_url": "https://example.test/v1",
                     "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
                     "model": "gpt-test",
+                    "context_window": 8192,
                 }
             }
         ),
@@ -397,6 +407,7 @@ def test_load_llm_endpoint_rejects_missing_api_key_placeholder_environment_varia
                     "base_url": "https://example.test/v1",
                     "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
                     "model": "gpt-test",
+                    "context_window": 8192,
                 }
             }
         ),
@@ -420,6 +431,7 @@ def test_load_llm_endpoint_accepts_litellm_provider(tmp_path):
                     "provider": "anthropic",
                     "api_key": "litellm-local-key",
                     "model": "claude-sonnet-4",
+                    "context_window": 200000,
                 }
             }
         ),
@@ -448,6 +460,7 @@ def test_load_llm_endpoint_rejects_prefixed_model_names(tmp_path):
                     "provider": "anthropic",
                     "api_key": "litellm-local-key",
                     "model": "anthropic/claude-sonnet-4",
+                    "context_window": 200000,
                 }
             }
         ),
@@ -471,6 +484,7 @@ def test_load_llm_endpoint_rejects_direct_anthropic_protocol(tmp_path):
                     "base_url": "https://api.anthropic.com/v1",
                     "api_key": "anthropic-local-key",
                     "model": "claude-sonnet-4",
+                    "context_window": 200000,
                 }
             }
         ),
@@ -479,6 +493,61 @@ def test_load_llm_endpoint_rejects_direct_anthropic_protocol(tmp_path):
 
     with pytest.raises(LLMConfigurationError, match="unsupported protocol"):
         load_llm_endpoint(config_dir, "claude")
+
+
+def test_load_llm_endpoint_defaults_context_window(tmp_path):
+    """Endpoints may omit context_window and use the lightweight default."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "llm_endpoints.json").write_text(
+        json.dumps(
+            {
+                "default": {
+                    "protocol": "openai",
+                    "base_url": "https://example.test/v1",
+                    "api_key": "secret",
+                    "model": "gpt-test",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_llm_endpoint(config_dir).context_window == 131072
+
+
+@pytest.mark.parametrize(
+    ("max_tokens", "error"),
+    [
+        (8192, "max_tokens must be less than context_window"),
+        (0, "field must be >= 1: max_tokens"),
+    ],
+)
+def test_load_llm_endpoint_rejects_invalid_context_budgets(
+    tmp_path,
+    max_tokens,
+    error,
+):
+    """Configured input/output limits must describe a usable model context window."""
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    endpoint = {
+        "protocol": "openai",
+        "base_url": "https://example.test/v1",
+        "api_key": "secret",
+        "model": "gpt-test",
+        "context_window": 8192,
+        "max_tokens": max_tokens,
+    }
+    (config_dir / "llm_endpoints.json").write_text(
+        json.dumps({"default": endpoint}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LLMConfigurationError, match=error):
+        load_llm_endpoint(config_dir)
 
 
 def test_init_runtime_files_generates_local_env_and_llm_config(tmp_path, monkeypatch):
@@ -509,6 +578,29 @@ def test_init_runtime_files_generates_local_env_and_llm_config(tmp_path, monkeyp
     assert endpoint.base_url == "https://gateway.test/v1"
     assert endpoint.api_key == "local-json-secret"
     assert endpoint.model == "test-model"
+    assert endpoint.context_window == 131072
+    assert endpoint.max_tokens == 16384
+    raw_endpoint = json.loads(
+        (tmp_path / "config" / "llm_endpoints.json").read_text(encoding="utf-8")
+    )["local"]
+    assert raw_endpoint["max_tokens"] == 16384
+    assert "max_input_tokens" not in raw_endpoint
+
+
+def test_init_runtime_files_rejects_invalid_token_budget(tmp_path, monkeypatch):
+    """Init must not write a config whose output reservation consumes the window."""
+
+    _clear_zhice_env(monkeypatch)
+    config = load_config(tmp_path)
+
+    with pytest.raises(InitConfigurationError, match="less than context_window"):
+        init_runtime_files(
+            config,
+            context_window=4096,
+            max_tokens=4096,
+        )
+
+    assert not (tmp_path / "config" / "llm_endpoints.json").exists()
 
 
 def test_init_runtime_files_preserves_existing_files_without_force(tmp_path, monkeypatch):

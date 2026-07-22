@@ -124,6 +124,24 @@ def test_terminal_formatter_can_color_time_and_action_segments():
     assert rendered.endswith("| session=chat-20260707")
 
 
+def test_terminal_formatter_marks_entire_warning_line_in_bright_red():
+    formatter = TerminalLogFormatter(color=True)
+
+    rendered = _format_record(
+        formatter,
+        "zcagent.agent.subagent",
+        "subagent.runtime_unavailable",
+        {"code": "SUBAGENT_PROMPT_NOT_FOUND", "missing_prompt": "subagent.md"},
+        level=logging.WARNING,
+    )
+
+    assert rendered.startswith("\033[1;91m[2026-07-07 21:34:12] | WARNING | ")
+    assert "agent.subagent.runtime_unavailable" in rendered
+    assert "code=SUBAGENT_PROMPT_NOT_FOUND missing_prompt=subagent.md" in rendered
+    assert rendered.endswith("\033[0m")
+    assert rendered.count("\033[") == 2
+
+
 def test_preview_text_redacts_multiline_and_truncates():
     text = "OPENAI_API_KEY=sk-testsecret123456\n" + "x" * 80
 
@@ -292,8 +310,10 @@ def _format_record(
     logger_name: str,
     event: str,
     fields: dict[str, object] | None = None,
+    *,
+    level: int = logging.INFO,
 ) -> str:
-    record = logging.LogRecord(logger_name, logging.INFO, __file__, 1, event, (), None)
+    record = logging.LogRecord(logger_name, level, __file__, 1, event, (), None)
     record.created = datetime(2026, 7, 7, 21, 34, 12).timestamp()
     record.event = event  # type: ignore[attr-defined]
     if fields is not None:

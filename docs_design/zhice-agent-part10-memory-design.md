@@ -18,7 +18,7 @@ ZhiCe-Agent 当前已经具备稳定的短期上下文链路：
 
 - `JsonlSessionStore` 以 JSONL 保存聊天消息真值。
 - `Message` 使用 `turn_id`、`turn_index` 和 `parent_turn_id` 标记运行单元。
-- `ContextBuilder` 从最近 user turn 中选择与当前请求相关的历史。
+- `ContextBuilder` 默认优先保留最近 3 个 Turn，并从更早候选中选择最多 3 个相关 Turn；CLI/Web 还统一受 60 message 与 endpoint ContextBudget 约束。
 - Part 9 已建立用户、session、turn、tool call 和 audit 的身份与权限边界。
 - CLI 本地操作者与 Owner Web 是同一个 workspace operator 的两个入口，共用全局 `contexts/sessions/`、`sessions_meta/` 和 workspace；普通登录用户通过内部 `user_id` 解析自己的用户上下文。
 
@@ -91,9 +91,9 @@ ZhiCe-Agent 当前已经具备稳定的短期上下文链路：
 
 后续可以继续评估：
 
-- 在后续上下文优化 Part 单独设计 token 预算、`/compact`、上下文替换、续接与失败回退。
+- 在后续上下文优化 Part 单独设计 `/compact`、上下文替换、续接与失败回退；endpoint token 预算已经进入当前基线。
 - 为已保存条目引入过期时间、数值置信度、更完整的来源引用和冲突提示。
-- 在 Part 16 评估自动 recall、token 预算和 ContextBuilder augmenter。
+- 在 Part 16 评估自动 recall 和 ContextBuilder augmenter，并复用当前 ContextBudget。
 - 数据量明显增长后再评估 SQLite FTS 或向量检索。
 
 这些增强不能改变当前原则：Memory 必须可见、可删、可追踪、按用户隔离。
@@ -508,7 +508,7 @@ permission: memory.write.own
 - 用户明确说“记住、保存到记忆、忘掉、修改记忆”，使用 `authorization=user_explicit`。用户请求本身就是授权，不再重复确认。
 - 上一轮助手询问是否保存一项具体 Memory，当前用户通过“可以”“记住吧”等自然语言同意，或给出新的表述，使用 `authorization=user_confirmed`。
 
-模型自行发现的长期偏好、频繁行为、工作风格或稳定约束不在普通 Turn 中处理。Gateway 通过统一 `MemoryExtractionScheduler` 在 Session 空闲五分钟后调用独立 `MemoryExtractionService`：调度器只有一个协调线程，默认全局两个 Worker，同一用户最多一个任务执行；至少三个用户 Turn 才运行，每项必须包含两到三条不同 Turn 的用户原文证据，只接受 `profile/preferences/constraints` 和 `confidence=high`。通过证据及安全校验后直接写入；中低可信结果丢弃，不创建候选状态。
+模型自行发现的长期偏好、频繁行为、工作风格或稳定约束不在普通 Turn 中处理。Gateway 通过统一 `MemoryExtractionScheduler` 在 Session 空闲五分钟后调用独立 `MemoryExtractionService`：调度器只有一个协调线程，默认全局两个 Worker，同一用户最多一个任务执行；至少三个用户 Turn 才运行，每项必须包含两到三条不同 Turn 的用户原文证据，只接受 `profile/preferences/constraints` 和 `confidence=high`。Extractor 使用该 Session call-scoped 模型选择携带的 failover-safe `ContextBudget`；输入超限时先移除较早来源 Turn，再对最长来源文本折半裁剪，仍超限则返回 `MEMORY_EXTRACTION_INPUT_TOO_LARGE`，不绕过 endpoint 输入限制。通过证据及安全校验后直接写入；中低可信结果丢弃，不创建候选状态。
 
 明确请求流程：
 
@@ -526,7 +526,8 @@ user explicitly requests Memory change
 ```text
 normal turns are saved
   -> session remains idle for five minutes
-  -> MemoryExtractionService reviews bounded user turns
+  -> resolve session model + failover-safe ContextBudget
+  -> MemoryExtractionService fits bounded user turns within that budget
   -> validate high confidence + 2-3 exact user-turn evidence items
   -> safety + duplicate checks + atomic add
   -> show one short notification on the next conversation
@@ -617,7 +618,9 @@ Prompt 的自然语言规则统一使用中文；Tool 名、参数名、authoriz
 
 ### 13.2 prompts/memory_extraction.md
 
-该 prompt 只服务 `MemoryExtractionService`。自然语言规则使用中文，JSON key、category enum 和 confidence enum 保留英文；要求严格 JSON、限定 `profile/preferences/constraints`、`confidence=high`，并为每项提供两到三条不同用户 Turn 的原文证据。无合格信息时返回空列表。
+`memory_extraction.md` 是系统内置后台能力的运行 Prompt，由 `zcagent init` 随基础模板安装，不是用户可选插件配置。Gateway 默认检查该 Prompt：文件缺失时返回 `MEMORY_EXTRACTION_PROMPT_NOT_FOUND`，文件为空、不可读或编码非法时返回 `MEMORY_EXTRACTION_PROMPT_INVALID`；两者都只关闭后台自动提取并记录结构化 WARNING，显式 Memory read/write 与普通聊天不受影响。
+
+该 prompt 只服务 `MemoryExtractionService`。自然语言规则使用中文，JSON key、category enum 和 confidence enum 保留英文；要求严格 JSON、限定 `profile/preferences/constraints`、`confidence=high`，并为每项提供两到三条不同用户 Turn 的原文证据。无合格信息时返回空列表。Prompt 与来源 Turn 一起计入 ContextBudget；内置 Prompt 本身和最小输入仍无法放入预算时，提取失败但不影响正常聊天和显式 Memory read/write。
 
 ## 14. 错误码
 
@@ -828,7 +831,7 @@ core/AgentLoop -> ToolProvider only
 
 - 不配置 Memory 时，现有 AgentLoop/ToolRegistry 测试继续通过。
 - Session JSONL 格式不变化。
-- Part 7 ContextBuilder 相关性选择不变化。
+- Part 7 混合 Turn 选择和 endpoint ContextBudget 不被 Memory 绕过。
 - Part 9 session owner、模型偏好、RBAC、危险确认和 audit 测试继续通过。
 - 默认测试不访问真实 LLM 或网络。
 
@@ -885,7 +888,7 @@ python -m pytest --basetemp .tmp/pytest-basetemp
 10. audit/trace 不记录完整 Memory query 或 content。
 11. AgentLoop 不 import MarkdownMemoryStore、auth DB 或用户业务。
 12. Memory 不使用 tool confirmation、Web Memory 弹窗、候选状态机、Session Summary 或 session metadata 抑制状态。
-13. 空闲提取至少要求三个用户 Turn，每项包含两到三条真实用户证据；中低可信结果直接丢弃。
+13. 空闲提取至少要求三个用户 Turn，每项包含两到三条真实用户证据；中低可信结果直接丢弃，并且提取输入服从 session 模型的 failover-safe ContextBudget。
 14. ContextBuilder 不自动注入完整 Memory 文件。
 15. 未配置 Memory 时现有聊天、Tool、Skill、Web、turn、权限和日志行为不变。
 16. 自动写入后下一次对话显示一次简短通知，不增加前端弹窗。

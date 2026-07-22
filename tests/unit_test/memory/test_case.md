@@ -17,6 +17,9 @@
 - `user_explicit` 和 `user_confirmed` 可以写入；缺少授权或模型自行推断不能写入。
 - 普通聊天不负责主动识别；Session 空闲提取器只自动写入有两到三条用户 Turn 证据的高可信长期信息。
 - 少于三个用户 Turn 不调用提取模型，检查点避免重复审查，自动写入通知只消费一次。
+- 缺少内置 `memory_extraction.md` 时返回不可重试的 `MEMORY_EXTRACTION_PROMPT_NOT_FOUND`，空白或不可读时返回 `MEMORY_EXTRACTION_PROMPT_INVALID`，不误报 Provider 故障或调用 LLM。
+- 后台 extraction 使用与当前 endpoint failover 链一致的 ContextBudget，超长 source Turns 只裁剪本次输入，不改写 Session。
+- startup checker 在专属 Prompt 缺失或为空时只禁用后台提取，Memory read/write 不受影响，并提供安全 CapabilityStatus。
 - 统一调度器只使用固定数量 Worker，同一用户串行、不同用户受控并行；重复 Session 调度合并，取消、队列上限和有限重试行为稳定。
 
 ## 关键检查点

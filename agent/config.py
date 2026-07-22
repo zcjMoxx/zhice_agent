@@ -35,6 +35,8 @@ _ENDPOINT_ROUTE_KEYS = {
     "model",
     "supported_models",
     "api_key",
+    "context_window",
+    "max_tokens",
 }
 
 
@@ -235,6 +237,7 @@ def init_runtime_files(
     api_key: str = "",
     model: str = "gpt-5.5",
     max_tokens: int = 16384,
+    context_window: int = 131072,
     temperature: float = 0.7,
     force: bool = False,
 ) -> list[Path]:
@@ -249,6 +252,10 @@ def init_runtime_files(
 
     written: list[Path] = []
     config.ensure_dirs()
+    _validate_init_token_budget(
+        context_window=context_window,
+        max_tokens=max_tokens,
+    )
 
     if create_env:
         env_path = config.workspace / ".env"
@@ -256,19 +263,21 @@ def init_runtime_files(
             written.append(env_path)
     if create_llm_config:
         llm_path = config.config_dir / "llm_endpoints.json"
+        endpoint_payload = {
+            "protocol": protocol,
+            "provider": "",
+            "base_url": base_url,
+            "api_key": api_key,
+            "model": model,
+            "max_tokens": max_tokens,
+            "context_window": context_window,
+            "temperature": temperature,
+            "priority": 1,
+            "enabled": True,
+            "role": "default",
+        }
         payload = {
-            endpoint_name: {
-                "protocol": protocol,
-                "provider": "",
-                "base_url": base_url,
-                "api_key": api_key,
-                "model": model,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "priority": 1,
-                "enabled": True,
-                "role": "default",
-            }
+            endpoint_name: endpoint_payload
         }
         if _write_text_once(
             llm_path,
@@ -364,6 +373,21 @@ def _build_env_template(config: AppConfig) -> str:
     return f"ZHICE_AGENT_WORKSPACE={config.workspace}\n"
 
 
+def _validate_init_token_budget(
+    *,
+    context_window: int,
+    max_tokens: int,
+) -> None:
+    """Reject init arguments that would generate an unusable endpoint config."""
+
+    if context_window < 1:
+        raise InitConfigurationError("context_window must be >= 1")
+    if max_tokens < 1:
+        raise InitConfigurationError("max_tokens must be >= 1")
+    if max_tokens >= context_window:
+        raise InitConfigurationError("max_tokens must be less than context_window")
+
+
 def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
     """Convert one JSON endpoint object into the shared LLMEndpoint shape.
 
@@ -410,6 +434,16 @@ def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
     priority = _coerce_int(data.get("priority"), 1, "priority")
     if priority < 1:
         raise LLMConfigurationError("LLM endpoint field must be >= 1: priority")
+    max_tokens = _coerce_int(data.get("max_tokens"), 4096, "max_tokens")
+    if max_tokens < 1:
+        raise LLMConfigurationError("LLM endpoint field must be >= 1: max_tokens")
+    context_window = _coerce_int(data.get("context_window"), 131072, "context_window")
+    if context_window < 1:
+        raise LLMConfigurationError("LLM endpoint field must be >= 1: context_window")
+    if max_tokens >= context_window:
+        raise LLMConfigurationError(
+            "LLM endpoint max_tokens must be less than context_window"
+        )
 
     return LLMEndpoint(
         name=str(endpoint["name"]),
@@ -417,8 +451,9 @@ def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
         base_url=str(endpoint["base_url"]),
         model=str(endpoint["model"]),
         api_key=_resolve_endpoint_text(name, data.get("api_key"), "api_key"),
+        context_window=context_window,
         provider=str(endpoint["provider"]),
-        max_tokens=_coerce_int(data.get("max_tokens"), 4096, "max_tokens"),
+        max_tokens=max_tokens,
         temperature=_coerce_float(data.get("temperature"), 0.7, "temperature"),
         priority=priority,
         enabled=_coerce_bool(data.get("enabled"), True, "enabled"),

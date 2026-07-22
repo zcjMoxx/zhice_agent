@@ -1,5 +1,7 @@
 # 对话上下文候选窗口扩展设计
 
+> 说明：本文记录当时扩展到 30 个候选 Turn 的方案。2026-07-21 当前代码已进一步调整为 50 个候选、最多 5 个相关 Turn，并增加中文短追问保留紧邻 Turn；当前口径以 `docs_design/zhice-agent-part7-turn-context-design.md` 和 `docs_design/2026-07-21-on-demand-tool-discovery-design.md` 为准。
+
 > 日期：2026-07-16
 > 状态：已确认，进入实现
 

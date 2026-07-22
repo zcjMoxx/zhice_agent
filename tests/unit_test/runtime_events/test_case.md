@@ -11,3 +11,4 @@
 - 同一 emitter 从 1 单调递增，不同 emitter 相互隔离。
 - sink 抛异常时不影响 emitter 调用方。
 - RuntimeEvent payload 可与旧 `text_delta` / interaction dict 区分。
+- Subagent 的 agent/root/parent/batch/task/depth scope 可稳定序列化，depth 超过第一阶段硬上限时拒绝。

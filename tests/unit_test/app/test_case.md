@@ -6,7 +6,9 @@
 
 ## 用例覆盖
 
-- `/health` 和 `/api/health` 只返回基础状态、当前模型和 auth 初始化状态，不暴露 workspace/session 路径。
+- `/health` 和 `/api/health` 返回基础状态、当前模型、auth 初始化状态和安全的可选 capability 状态；Subagent unavailable 不改变 overall `status=ok`，且不暴露 workspace/session 路径。
+- 静态聊天 Web 不渲染或主动请求 capability 启动横幅；health 状态保留给诊断和自动化检查。
+- Gateway/CLI 缺少 `skill_sources.yml` 时按未启用的可选扩展静默处理；文件存在但非法时只记录一次结构化 `skills.runtime_unavailable` WARNING，包含稳定 code 且不泄露绝对路径。
 - `/` 从可替换 `static_dir` 返回静态首页。
 - `/admin` 返回独立管理路由入口；聊天页 Administration 导航到该路由，不再打开管理弹窗。
 - `GET /api/sessions` 返回会话摘要并把更新时间格式化为 ISO 8601。
@@ -24,6 +26,7 @@
 - WebSocket `hello client=web` 返回 web command profile 能力，默认不支持 `/history` 和 `/exit`。
 - WebSocket `hello client=external` 打开 external command profile 能力，`/history` 进入 external profile，`/exit` 关闭当前 WS 连接。
 - `/sessions rename <id> <title>`、`/sessions delete <id>` 和 `/sessions delete` 在 runtime slash command 层有覆盖。
+- assistant Markdown 使用异步 KaTeX 支持 `$...$`、`$$...$$`、`\\(...\\)`、`\\[...\\]`；`\\bm{}` 映射到 `\\boldsymbol{}`。KaTeX 加载失败时保留原始公式文本且不阻断页面，`pre/code` 不参与数学渲染。
 
 ## 关键检查点
 
@@ -39,11 +42,16 @@
 - SSE status, delta, done, stopped, and error payloads carry one consistent turn id.
 - WS 使用 `runtime_event` 信封转发 RuntimeEvent；SSE 使用 `event: runtime`，均保持旧 text/status/interaction 兼容。
 - 浏览器 RuntimeEvent reducer 按 turn_id + sequence 忽略旧状态，并在 terminal turn Event 清理运行状态。
+- Subagent child RuntimeEvent 按 root session/turn 归并，并按 agent/task 维护独立 sequence 与并行任务状态，不能跨 child 用同一 sequence 覆盖。
+- Web `/help` 只新增顶层 `/subagent`；裸命令显示 mode、force-once、可用 Profile，并在 Tip 中提示 `auto/off/once`。`/reset` 与清空当前 Session 只清 one-shot、保留 mode。
+- Subagent unavailable 时，Owner 的 `/subagent` 与 force-once 返回真实 message/hint；普通用户只看到暂时不可用并联系管理员，不直接展示 JSON、Prompt 文件名、初始化命令、`code` 或 `cause_code`；one-shot 仍只消费一次。公共 health 同样只返回通用 capability 状态。
+- Subagent unavailable 且 Session 为 auto 时，普通 Web Turn 注入只返回通用不可用文案的 `delegate_tasks` facade，内部 cause 仅写日志与 trace；它不创建 child，防止模型用其它 Tool 冒充明确的子代理请求。
+- Web LLM-facing ToolProvider 首轮只暴露 `discover_tools`；发现后才按当前 actor 可见集合动态增加 schema，未激活业务 Tool 不能执行。
 
 ## Part 8 Logging Coverage
 
 - Gateway logging options split Agent lifecycle log, HTTP access log, HTTP server log, and workspace trace log.
-- Terminal Agent log lines use `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` without milliseconds, and can color the timestamp and component/event segment on TTY.
+- Terminal Agent log lines use `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` without milliseconds；TTY 下 WARNING 整行使用高亮红色，ERROR/CRITICAL 整行使用红色，普通日志继续按组件着色。
 - Workspace trace writes JSONL to `logs/YYYY-MM-DD/trace.log` with `component` and no full internal logger name.
 - Logging configuration is idempotent and can disable terminal Agent logs while keeping trace on.
 - Preview helpers redact sensitive fields, collapse multiline text, and truncate long values.

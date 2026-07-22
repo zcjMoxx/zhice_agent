@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到第十二部分生命周期事件与 Hook Runtime。主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到第十三部分并行 Subagent 编排。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -9,10 +9,11 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - 多 endpoint priority failover
 - `/model` 查看、列表、切换和 reset
 - 多轮 tool calling
+- Turn-scoped `discover_tools` 按需发现与动态 Tool schema 激活；模型不再首轮接收全部业务 Tool
 - 受限 `exec`、`read_file`、`list_dir`、`grep`
 - Skill source 同步、SkillLoader、`load_skills` 和 `sync_skills`
-- CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道和最小静态 Web UI
-- `turn_id` / `turn_index` 持久化、WebSocket turn 对齐和基于 turn 的相关历史选择
+- CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道，以及支持安全 Markdown 与 KaTeX 公式的静态 Web UI
+- `turn_id` / `turn_index` 持久化、WebSocket turn 对齐、最近 3 个 Turn 与旧相关 Turn 混合选择，以及 endpoint token 预算
 - Gateway / Agent 分层运行日志、终端时间戳格式和 workspace `logs/YYYY-MM-DD/trace.log`
 - SQLite 本地用户、角色、特权权限、可撤销登录态、唯一永久 Owner、Owner 管理权委派、普通用户自助注册和个人设置
 - 用户上下文目录、session owner/index、session 级模型偏好和 call-scoped provider
@@ -20,8 +21,12 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - CLI/Owner 共用 workspace Memory、普通用户私有 Memory、明确 list/search 的 `memory_read` 与对话授权 `memory_write`
 - 对话式 Memory 授权、Session 空闲高可信提取、一次性通知和 Memory 安全过滤
 - workspace 共享 MCP Runtime、stdio / Streamable HTTP / SSE、自动 Tool 发现、OAuth 刷新、Elicitation 和 actor-scoped artifact 导入
+- 有界并行 `delegate_tasks`、独立 child AgentLoop/Session/RuntimeEvent、能力 Profile 和 shared-readonly/worktree/shared-exclusive workspace 隔离
+- `/subagent` 的 `auto/off/once` Session 语义、Web child task 状态和可选能力结构化启动告警
 
-当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、Subagent 或市集。Part 10 Memory 和 Part 11 MCP 已进入当前代码基线。MCP Runtime 直接读取常见 `mcpServers` 配置，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Part 12 本次同时完成 turn/context/LLM/tool RuntimeEvent、WebSocket/SSE/CLI 与前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime；Hook 只能增加业务阻断、修改后重新走核心校验或补充安全 display/ui_metadata，不能降低 RBAC、危险确认、workspace guard、timeout、脱敏或 SSRF。SkillExecutor、`skill.*` 和 ProgressSink 属于未来 Skill Runtime / Part 18。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
+当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge 或市集。MCP Runtime 直接读取常见 `mcpServers` 配置，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Part 12 已完成 turn/context/LLM/tool RuntimeEvent、WebSocket/SSE/CLI 与前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime；Hook 只能增加业务阻断、修改后重新走核心校验或补充安全 display/ui_metadata，不能降低 RBAC、危险确认、workspace guard、timeout、脱敏或 SSRF。Part 13 在此基线上增加同步 Provider 下的有界线程并行、父能力交集、独立 child 运行态和 workspace lease。SkillExecutor、`skill.*` 和 ProgressSink 属于未来 Skill Runtime / Part 18。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
+
+Tool capability selection 已从原 Part 16 路线提前进入当前基线。每个 CLI/Web/child Turn 首次只向模型提供 `discover_tools`；模型判断需要真实能力时先查询并激活最小 Tool 集合，下一模型步才收到这些具体 schema。Catalog 在 actor RBAC 和 Subagent Profile 过滤之后生成，未激活 Tool 即使被编造也返回 `TOOL_NOT_ACTIVATED`；实际 Tool 仍经过确认、Hook、workspace guard 和审计。Session 保存完整历史；CLI 与 Web 使用同一套 ContextBuilder：最近 50 个 user Turn 中固定优先最近 3 个，再从更早历史选择最多 3 个相关 Turn，同时保留 60 条消息兜底，并在每次初始/工具结果 LLM 调用前把实际 Tool schema 一起纳入 failover-safe endpoint token 预算。child 使用新鲜独立 Session 上下文，但继承父 Turn 的同一输入预算。
 
 ## 设计文档
 
@@ -34,6 +39,14 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - 第十部分 Memory 当前实现入口是 `docs_design/zhice-agent-part10-memory-design.md`，最新日期设计记录是 `docs_design/2026-07-16-background-memory-extraction-and-trace-convergence-design.md`。
 - 第十一部分 MCP 当前实现入口是 `docs_design/zhice-agent-part11-mcp-design.md`，本次边界与取舍记录见 `docs_design/2026-07-17-mcp-tool-runtime-boundary-design.md`。
 - 第十二部分生命周期事件与 Hook Runtime 当前实现入口是 `docs_design/zhice-agent-part12-hooks-design.md`，最终边界与取舍记录见 `docs_design/2026-07-20-hook-runtime-boundary-design.md`；RuntimeEvent、渠道/前端状态、真实 pre/post Hook Runtime 和测试均已完成，Part 12 已关闭。
+- 第十三部分并行 Subagent 编排已经实现并进入当前代码基线，入口是 `docs_design/zhice-agent-part13-subagent-design.md`，边界取舍记录见 `docs_design/2026-07-21-subagent-runtime-boundary-design.md`，启动降级与诊断证据闭环见 `docs_design/2026-07-21-startup-capability-and-subagent-diagnostics-design.md`。主 Agent默认直接完成简单任务，只有委派收益明确时才通过批量 `delegate_tasks` 做有界并行 fan-out/fan-in；`/subagent` 提供 `auto/off/once` Session 语义；child 使用独立 AgentLoop、Session、RuntimeEvent scope 和 workspace lease，Skill、`exec`、MCP 通过 Profile、父能力交集、确认与 Hook 受控开放。
+- 按需 Tool 发现与动态 Capability Selection 已提前落地，设计记录见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md`；它是通用运行时能力，不归入 Part 13 的业务委派判断。
+
+Subagent 运行配置位于 `${ZHICE_AGENT_WORKSPACE}/config/subagents.yml`，仓库模板为 `config/subagents.example.yml`。缺少配置时功能默认关闭；启用后可用裸 `/subagent` 查看当前模式和 Profile，详细切换形式由输出中的 Tip 提示。能力不可用时，CLI、本地操作者和 Owner 会看到真实原因与修复建议；普通 Web 用户只会看到能力暂时不可用并联系管理员，不暴露 Prompt 文件名、内部错误码、配置路径或初始化命令。真实 cause 继续保留在终端、trace 和有权限的诊断结果中。
+
+启动失败按能力边界分级处理：workspace/运行目录、基础 Prompt、LLM endpoint、Gateway Auth 等核心依赖继续阻断对应入口；显式 Hook 配置属于已声明安全策略，非法时保持 fail closed 并阻断启动。Skill source、MCP、Subagent 属于可选扩展，完全未配置时正常 disabled、不报警；显式配置后依赖非法或缺失时只禁用对应能力并记录结构化 WARNING。后台 Memory extraction 是系统内置能力，缺少或损坏内置 `memory_extraction.md` 时记录 WARNING 并仅关闭自动提取，基础聊天和显式 Memory 读写继续。Gateway 启动异常统一进入红色终端日志和 workspace trace；Web `/api/health` 保留通用 capability 状态供诊断工具查询，但聊天页面不常驻展示启动告警。单个 MCP server 或 child worktree 的失败仍在使用时返回精确错误，不把整个应用降级。
+
+`diagnose_my_recent_activity` 会自动定位当前用户、当前 Session 的上一轮或最近失败，并从父 `delegate_tasks` Turn 沿 `root_session_id/root_turn_id` 下钻安全 child terminal trace。Tool 除规则摘要外还返回按时间排序、字段白名单过滤且再次脱敏的 `trace_events`，模型必须直接分析其中的 `error_message/stage/code` 和前后事件，不能只复述通用包装码。诊断专用规则位于 `prompts/diagnostics.md`，Exec 专用命令、风险和结果处理规则位于 `prompts/exec.md`；两者由主 ContextBuilder 可选加载，不与通用 `tool_use_policy.md` 混用，也不因文件缺失阻断聊天。真正的 Exec 安全边界仍由 RBAC、确认、Hook、workspace guard、危险命令拦截、timeout 和输出截断强制执行。
 
 ## 快速开始
 
@@ -83,9 +96,9 @@ ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
 
 `zcagent init` 可以重复执行：已有文件默认保留，缺失文件会自动补齐；确实要刷新覆盖已有模板时再加 `--force`。
 
-如果启动 `zcagent` 时缺少或未正确填写 `llm_endpoints.json`，CLI 会直接报错并引导你运行 `zcagent init` 或编辑 endpoint 配置。没有可用 LLM 时聊天无法继续。
+如果启动 `zcagent` 时缺少 `llm_endpoints.json`，CLI 会阻断聊天并引导运行 `zcagent init`；文件已经存在但内容非法时，CLI 会优先引导编辑现有文件，不会误导普通 `init` 可以覆盖修复。聊天至少需要一个 enabled endpoint，并配置与真实服务一致的 protocol、base URL/provider、model 和 api_key。`context_window` 缺失时默认 `131072`，`max_tokens` 缺失时使用兼容默认值；二者已有默认值，但应按实际模型限制校准。没有可用 LLM 时聊天无法继续。
 
-如果启动 `zcagent` 时缺少 `skill_sources.yml`，CLI 只提示 Skill 同步已跳过，并引导你运行 `zcagent init` 补齐。Skill source 是可选扩展能力，不阻断基础聊天。
+Skill source、MCP 和 Subagent 都是可选扩展：未配置时作为 disabled 静默关闭，不影响基础聊天；只有显式配置后内容非法或依赖失败时才记录 WARNING。Hook 未配置时同样 disabled，但显式配置代表已声明安全策略，非法时会阻断启动。
 
 ## LLM 配置
 
@@ -108,6 +121,7 @@ ${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json
     "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
     "model": "gpt-5.5",
     "supported_models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+    "context_window": 131072,
     "max_tokens": 16384,
     "temperature": 0.7,
     "priority": 1,
@@ -120,6 +134,7 @@ ${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json
     "api_key": "${ANTHROPIC_API_KEY}",
     "model": "claude-opus-4.8",
     "supported_models": ["claude-opus-4.8", "claude-opus-4.6"],
+    "context_window": 200000,
     "max_tokens": 16384,
     "temperature": 0.7,
     "priority": 1,
@@ -135,6 +150,9 @@ ${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json
 - `provider` 对 OpenAI-compatible endpoint 保持空字符串；对 LiteLLM endpoint 写模型商前缀，例如 `anthropic`。
 - `model` 和 `supported_models` 都写不带 provider 前缀的模型名。
 - `api_key` 可以直接写本地 key，也可以写 `${ENV_VAR}` 占位符。
+- `context_window` 是 endpoint/model 的总上下文窗口；未填写时默认 `131072`，并且必须大于 `max_tokens`。
+- `max_tokens` 是单次响应允许生成的最大输出 token，不是输入上限或总窗口；它同时用于本地预留输出空间和实际 Provider 请求。
+- 本地输入预算固定按 `context_window - max_tokens` 计算，不再提供第三个输入上限配置字段。
 - `default` 是 endpoint 别名；不写时会按 `priority` 自动选择首选 endpoint。
 
 如果使用 `${ENV_VAR}` 占位符，ZhiCe-Agent 会从当前进程环境中解析。项目 `config/.env` 的加载不会覆盖已有环境变量，所以优先级是：
@@ -303,7 +321,7 @@ ZhiCe-Agent 不支持裸 `/model <model>` 自动猜测 endpoint。`/model` 切�
 /memory
 ```
 
-用户明确要求记忆、修改或忘记时，`memory_write` 直接执行。Web Session 空闲五分钟后，统一调度器通过默认两个全局 Worker、同一用户串行的方式调用独立 Extractor，只把至少三个用户 Turn 中具有两到三条原文证据的高可信长期信息写入 Memory，并在下一次对话显示一次简短通知。手动提取和未闭环的 Session Summary 能力均不提供；真正的 Context Compaction 留到后续上下文优化单独设计。
+用户明确要求记忆、修改或忘记时，`memory_write` 直接执行。Web Session 空闲五分钟后，统一调度器通过默认两个全局 Worker、同一用户串行的方式调用独立 Extractor，只把至少三个用户 Turn 中具有两到三条原文证据的高可信长期信息写入 Memory，并在下一次对话显示一次简短通知。后台提取调用继承当前 session 模型的 failover-safe ContextBudget，超限时先减少较早来源 Turn、再裁剪过长来源文本，不绕过 endpoint 输入上限。手动提取和未闭环的 Session Summary 能力均不提供；真正的 Context Compaction 留到后续上下文优化单独设计。
 
 ### `/skills`
 

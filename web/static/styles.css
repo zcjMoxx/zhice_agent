@@ -1050,6 +1050,17 @@ button {
   text-underline-offset: 2px;
 }
 
+.bubble.markdown .katex-display {
+  margin: 0.8em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.15em 0;
+}
+
+.bubble.markdown .katex {
+  font-size: 1.02em;
+}
+
 .runtime-status-bubble {
   display: inline-flex;
   min-width: 160px;
@@ -1078,6 +1089,24 @@ button {
   border-radius: 50%;
   background: var(--brand);
   animation: runtimePulse 1.2s ease-in-out infinite;
+}
+
+.subagent-task-status {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #62707d;
+  font-size: 12px;
+}
+
+.subagent-task-status li[data-status="completed"] {
+  color: #317a4f;
+}
+
+.subagent-task-status li[data-status="failed"],
+.subagent-task-status li[data-status="stopped"] {
+  color: #a33b3b;
 }
 
 @keyframes runtimePulse {

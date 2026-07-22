@@ -40,11 +40,13 @@ class RuntimeEventEmitter:
         turn_id: str,
         request_id: str = "",
         sink: RuntimeEventSink | None = None,
+        scope: dict[str, Any] | None = None,
     ):
         self.session_id = session_id
         self.turn_id = turn_id
         self.request_id = request_id
         self.sink = sink
+        self.scope = dict(scope or {})
         self._sequence = 0
 
     @property
@@ -84,6 +86,15 @@ class RuntimeEventEmitter:
                 tool_call_id=tool_call_id,
                 tool_call_record_id=tool_call_record_id,
                 parent_event_id=parent_event_id,
+                agent_id=str(self.scope.get("agent_id") or ""),
+                parent_agent_id=str(self.scope.get("parent_agent_id") or ""),
+                root_session_id=str(self.scope.get("root_session_id") or ""),
+                root_turn_id=str(self.scope.get("root_turn_id") or ""),
+                parent_session_id=str(self.scope.get("parent_session_id") or ""),
+                parent_turn_id=str(self.scope.get("parent_turn_id") or ""),
+                batch_id=str(self.scope.get("batch_id") or ""),
+                task_id=str(self.scope.get("task_id") or ""),
+                depth=int(self.scope.get("depth") or 0),
                 display=resolved_display,
                 ui_metadata=dict(ui_metadata or {}),
                 metadata=metadata,

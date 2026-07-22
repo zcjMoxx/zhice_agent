@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent.memory.startup import (
+    MemoryExtractionStartupResult,
+    check_memory_extraction_startup,
+)
+
 
 class MemoryStoreError(RuntimeError):
     """Stable Memory failure safe to convert into a ToolResult."""
@@ -15,4 +20,8 @@ class MemoryStoreError(RuntimeError):
         self.metadata = dict(metadata or {})
 
 
-__all__ = ["MemoryStoreError"]
+__all__ = [
+    "MemoryExtractionStartupResult",
+    "MemoryStoreError",
+    "check_memory_extraction_startup",
+]

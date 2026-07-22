@@ -106,7 +106,11 @@ def test_build_omits_unrelated_turn_history(tmp_path):
     from agent.core.context import ContextBuilder
 
     prompts_dir = _write_required_prompts(tmp_path)
-    builder = ContextBuilder(PromptLoader(prompts_dir), max_history_turns=2)
+    builder = ContextBuilder(
+        PromptLoader(prompts_dir),
+        max_history_turns=2,
+        always_include_recent_turns=0,
+    )
     history = [
         Message(role="user", content="旧 JSONL 是什么？", turn_id="turn-1", turn_index=1),
         Message(role="assistant", content="旧 JSONL 没有 turn_id。", turn_id="turn-1", turn_index=1),
@@ -451,6 +455,70 @@ def test_context_builder_includes_optional_memory_policy(tmp_path):
     assert "Ask in conversation before writing inferred Memory." in messages[0]["content"]
 
 
+def test_context_builder_includes_optional_diagnostics_policy(tmp_path):
+    prompts_dir = _write_required_prompts(tmp_path)
+    (prompts_dir / "diagnostics.md").write_text(
+        "Analyze chronological trace evidence directly.", encoding="utf-8"
+    )
+    from agent.core.context import ContextBuilder
+
+    messages = ContextBuilder(PromptLoader(prompts_dir)).build(
+        history=[],
+        user_message=Message(role="user", content="why did it fail"),
+        workspace=tmp_path,
+        session_id="session-a",
+    )
+
+    assert "# Diagnostics Policy" in messages[0]["content"]
+    assert "Analyze chronological trace evidence directly." in messages[0]["content"]
+
+
+def test_context_builder_does_not_require_diagnostics_policy(tmp_path):
+    prompts_dir = _write_required_prompts(tmp_path)
+    from agent.core.context import ContextBuilder
+
+    messages = ContextBuilder(PromptLoader(prompts_dir)).build(
+        history=[],
+        user_message=Message(role="user", content="hello"),
+        workspace=tmp_path,
+        session_id="session-a",
+    )
+
+    assert "# Diagnostics Policy" not in messages[0]["content"]
+
+
+def test_context_builder_includes_optional_exec_policy(tmp_path):
+    prompts_dir = _write_required_prompts(tmp_path)
+    (prompts_dir / "exec.md").write_text(
+        "Use the smallest non-interactive command.", encoding="utf-8"
+    )
+    from agent.core.context import ContextBuilder
+
+    messages = ContextBuilder(PromptLoader(prompts_dir)).build(
+        history=[],
+        user_message=Message(role="user", content="run tests"),
+        workspace=tmp_path,
+        session_id="session-a",
+    )
+
+    assert "# Exec Policy" in messages[0]["content"]
+    assert "Use the smallest non-interactive command." in messages[0]["content"]
+
+
+def test_context_builder_does_not_require_exec_policy(tmp_path):
+    prompts_dir = _write_required_prompts(tmp_path)
+    from agent.core.context import ContextBuilder
+
+    messages = ContextBuilder(PromptLoader(prompts_dir)).build(
+        history=[],
+        user_message=Message(role="user", content="hello"),
+        workspace=tmp_path,
+        session_id="session-a",
+    )
+
+    assert "# Exec Policy" not in messages[0]["content"]
+
+
 def test_repository_memory_policy_uses_conversational_authorization():
     policy = (
         Path(__file__).resolve().parents[3] / "prompts" / "memory_policy.md"
@@ -473,10 +541,127 @@ def _write_required_prompts(tmp_path: Path) -> Path:
     return prompts_dir
 
 
-def test_context_builder_defaults_use_thirty_candidates_and_five_relevant_turns(tmp_path):
+def test_context_builder_defaults_use_recent_three_plus_three_relevant_turns(tmp_path):
     from agent.core.context import ContextBuilder
 
     builder = ContextBuilder(PromptLoader(_write_required_prompts(tmp_path)))
 
-    assert builder.max_history_turns == 30
-    assert builder.max_relevant_turns == 5
+    assert builder.max_history_turns == 50
+    assert builder.always_include_recent_turns == 3
+    assert builder.max_relevant_turns == 3
+
+
+def test_build_keeps_recent_three_and_adds_three_older_relevant_turns(tmp_path):
+    from agent.core.context import ContextBuilder
+
+    builder = ContextBuilder(PromptLoader(_write_required_prompts(tmp_path)))
+    history = []
+    for index, content in enumerate(
+        [
+            "project-alpha old one",
+            "project-alpha old two",
+            "project-alpha old three",
+            "unrelated old four",
+            "unrelated old five",
+            "recent six",
+            "recent seven",
+            "recent eight",
+        ],
+        start=1,
+    ):
+        turn_id = f"turn-{index}"
+        history.extend(
+            [
+                Message(role="user", content=content, turn_id=turn_id, turn_index=index),
+                Message(
+                    role="assistant",
+                    content=f"answer {index}",
+                    turn_id=turn_id,
+                    turn_index=index,
+                ),
+            ]
+        )
+
+    messages = builder.build(
+        history=history,
+        user_message=Message(role="user", content="continue project-alpha"),
+        workspace=tmp_path,
+        session_id="default",
+    )
+
+    contents = [message["content"] for message in messages]
+    assert contents[1::2][:-1] == [
+        "project-alpha old one",
+        "project-alpha old two",
+        "project-alpha old three",
+        "recent six",
+        "recent seven",
+        "recent eight",
+    ]
+    assert "unrelated old four" not in contents
+    assert "unrelated old five" not in contents
+
+
+def test_context_budget_drops_retrieved_turns_before_recent_three(tmp_path):
+    from agent.core.context import ContextBuilder, estimate_llm_tokens
+    from agent.protocols.llm import ContextBudget
+
+    builder = ContextBuilder(PromptLoader(_write_required_prompts(tmp_path)))
+    history = []
+    for index in range(1, 7):
+        turn_id = f"turn-{index}"
+        history.extend(
+            [
+                Message(
+                    role="user",
+                    content=f"project-alpha question {index} " + "x" * 160,
+                    turn_id=turn_id,
+                    turn_index=index,
+                ),
+                Message(
+                    role="assistant",
+                    content=f"project-alpha answer {index} " + "y" * 160,
+                    turn_id=turn_id,
+                    turn_index=index,
+                ),
+            ]
+        )
+    unbounded = builder.build(
+        history=history,
+        user_message=Message(role="user", content="continue project-alpha"),
+        workspace=tmp_path,
+        session_id="default",
+    )
+    recent_only = [unbounded[0], *unbounded[-7:]]
+    budget = ContextBudget(input_token_limit=estimate_llm_tokens(recent_only))
+
+    messages = builder.build(
+        history=history,
+        user_message=Message(role="user", content="continue project-alpha"),
+        workspace=tmp_path,
+        session_id="default",
+        context_budget=budget,
+    )
+
+    contents = [message["content"] for message in messages]
+    assert not any("question 1" in content for content in contents)
+    assert not any("question 2" in content for content in contents)
+    assert not any("question 3" in content for content in contents)
+    assert all(any(f"question {index}" in content for content in contents) for index in (4, 5, 6))
+    assert estimate_llm_tokens(messages) <= budget.input_token_limit
+
+
+def test_context_budget_rejects_required_content_that_cannot_fit(tmp_path):
+    from agent.core.context import ContextBuilder
+    from agent.protocols.llm import ContextBudget, LLMContextBudgetError
+
+    builder = ContextBuilder(PromptLoader(_write_required_prompts(tmp_path)))
+
+    with pytest.raises(LLMContextBudgetError, match="Required system/current-turn content"):
+        builder.build(
+            history=[],
+            user_message=Message(role="user", content="current request"),
+            workspace=tmp_path,
+            session_id="default",
+            context_budget=ContextBudget(input_token_limit=1),
+        )

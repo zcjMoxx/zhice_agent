@@ -30,7 +30,7 @@ from agent.config import (
 )
 from agent.console import Spinner, console
 from agent.core.context import ContextBuilder
-from agent.core.loop import AgentLoop
+from agent.core.loop import AgentLoop, CancellationToken
 from agent.core.turns import assign_turn, new_turn_id, next_turn_index
 from agent.hooks import HookConfigurationError, create_hook_runtime
 from agent.llm import LLMConfigurationError
@@ -41,7 +41,7 @@ from agent.llm.runtime import (
     validate_startup_llm_endpoints,
 )
 from agent.llm.selection import ConfiguredLLMProviderResolver
-from agent.mcp import McpRuntime, load_mcp_server_specs
+from agent.mcp import McpRuntime, check_mcp_startup
 from agent.memory.context import build_memory_context
 from agent.memory.markdown_store import MarkdownMemoryStore
 from agent.memory.presentation import format_memory_list
@@ -49,16 +49,30 @@ from agent.memory.safety import MemorySafetyPolicy
 from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.protocols.auth import AuditEvent
+from agent.protocols.capability import CapabilityStatus
 from agent.protocols.mcp import McpInteractionRequest, McpInteractionResponse
 from agent.protocols.runtime_event import is_runtime_event_payload
 from agent.protocols.session import SessionContext, SessionModelPreference
-from agent.session import JsonlSessionStore, JsonSessionModelPreferenceStore
+from agent.protocols.subagent import SubagentProfile
+from agent.session import (
+    JsonlSessionStore,
+    JsonSessionModelPreferenceStore,
+    JsonSessionSubagentPreferenceStore,
+    SessionSubagentPreference,
+)
 from agent.skills import SkillLoader, SkillSourceSync
 from agent.skills.sync import SkillSyncError, SkillSyncResult
-from agent.tools import create_default_tool_registry
+from agent.subagents.config import SubagentConfig
+from agent.subagents.presentation import format_subagent_unavailable
+from agent.subagents.runtime import (
+    build_turn_subagent_provider,
+    build_unavailable_subagent_provider,
+)
+from agent.subagents.startup import check_subagent_startup
+from agent.tools import create_default_tool_registry, with_tool_discovery
 
 DEFAULT_PROMPTS = ["identity", "tool_use_policy", "skills_intro"]
-DEFAULT_CHAT_HISTORY_MESSAGES = 12
+DEFAULT_CHAT_HISTORY_MESSAGES = 60
 CHAT_BANNER = "\U0001F408 zcagent - Personal AI Assistant"
 
 
@@ -194,12 +208,11 @@ def _run_chat(argv: Sequence[str]) -> int:
         config_dir=config.config_dir,
         extends_dir=config.extends_dir,
     )
-    _print_missing_skill_sources_hint(skill_sync)
-    _sync_startup_skills(skill_sync, quiet=True)
+    skill_sync_error = _sync_startup_skills(skill_sync)
 
     prompt_loader = PromptLoader(config.prompts_dir)
     session_store = JsonlSessionStore(config.sessions_dir)
-    skill_loader = _create_skill_loader(skill_sync)
+    skill_loader = _create_skill_loader(skill_sync, startup_error=skill_sync_error)
     context_builder = ContextBuilder(
         prompt_loader,
         skills=skill_loader,
@@ -213,6 +226,14 @@ def _run_chat(argv: Sequence[str]) -> int:
         _print_llm_configuration_error(exc, config)
         return 1
     model_runtime = _build_cli_model_runtime(llm, config, session_store)
+    subagent_runtime = _build_cli_subagent_runtime(config, session_store)
+    if subagent_runtime.status.state == "unavailable":
+        print(console.warning(_format_cli_subagent_unavailable(subagent_runtime.status)))
+    mcp_startup = check_mcp_startup(config.config_dir)
+    if mcp_startup.status.state == "unavailable":
+        print(console.warning(_format_cli_capability_status(mcp_startup.status)))
+    if subagent_runtime.config.enabled:
+        context_builder.extra_system_prompts = ("subagent_orchestration",)
     cli_actor = local_operator_actor(channel="cli")
     tool_policy = RbacToolExecutionPolicy()
     confirmation_broker = ConsoleConfirmationBroker()
@@ -222,7 +243,7 @@ def _run_chat(argv: Sequence[str]) -> int:
         SqliteRuntimeActivitySink(auth_store) if auth_store.is_initialized() else None
     )
     mcp_runtime = McpRuntime(
-        load_mcp_server_specs(config.config_dir),
+        mcp_startup.specs,
         workspace=config.workspace,
         activity_sink=activity_sink,
         audit_sink=audit_sink,
@@ -287,6 +308,7 @@ def _run_chat(argv: Sequence[str]) -> int:
             continue
         if user_text == "/reset":
             session_store.clear(session_id)
+            subagent_runtime.preferences.clear_force_once(subagent_runtime.context, session_id)
             print(f"{console.warning('session cleared:')} {console.command(session_id)}")
             continue
         if user_text == "/sessions" or user_text.startswith("/sessions "):
@@ -294,6 +316,7 @@ def _run_chat(argv: Sequence[str]) -> int:
                 session_store,
                 session_id,
                 user_text.removeprefix("/sessions").strip(),
+                subagent_runtime,
             )
             continue
         if user_text == "/history":
@@ -349,7 +372,27 @@ def _run_chat(argv: Sequence[str]) -> int:
                         )
                     )
             continue
+        if user_text == "/subagent" or user_text.startswith("/subagent "):
+            print(
+                _handle_session_subagent_command(
+                    subagent_runtime,
+                    session_id,
+                    user_text.removeprefix("/subagent").strip(),
+                )
+            )
+            continue
 
+        subagent_preference = subagent_runtime.preferences.get(
+            subagent_runtime.context,
+            session_id,
+        )
+        force_subagent_once = subagent_runtime.preferences.consume_force_once(
+            subagent_runtime.context,
+            session_id,
+        )
+        if force_subagent_once and not subagent_runtime.config.enabled:
+            print(console.warning(_format_cli_subagent_unavailable(subagent_runtime.status)))
+            continue
         turn_id = new_turn_id()
         turn_index = next_turn_index(session_store.load(session_id).messages)
         turn_tools = create_default_tool_registry(
@@ -367,20 +410,101 @@ def _run_chat(argv: Sequence[str]) -> int:
                 ),
             ),
         )
+        turn_token = CancellationToken()
         try:
             with Spinner("已接收问题") as spinner:
-                turn_llm = _cli_turn_provider(model_runtime, session_id) if model_runtime else None
+                turn_context_budget = None
+                if model_runtime is not None:
+                    turn_llm, turn_context_budget = _cli_turn_provider(
+                        model_runtime,
+                        session_id,
+                    )
+                else:
+                    turn_llm = llm
+
+                def turn_event_callback(event):
+                    _update_cli_runtime_status(spinner, event)
+
+                if subagent_runtime.config.enabled and (
+                    subagent_preference.mode == "auto" or force_subagent_once
+                ):
+
+                    def child_tools(
+                        child_workspace,
+                        profile: SubagentProfile,
+                        parent_context,
+                        child_on_event,
+                        child_identity,
+                        child_skills,
+                    ):
+                        del profile, parent_context, child_on_event
+
+                        def child_mcp_interaction(request):
+                            print(
+                                console.muted(
+                                    f"Subagent task {child_identity.task_id} requested MCP input."
+                                )
+                            )
+                            return _handle_cli_mcp_interaction(mcp_runtime, request)
+
+                        return create_default_tool_registry(
+                            child_workspace,
+                            skills=child_skills,
+                            skill_sync=skill_sync,
+                            allow_confirmable_exec=True,
+                            memory_store=memory_store,
+                            memory_safety=memory_safety,
+                            extra_tools=mcp_runtime.tools_for_actor(
+                                cli_actor,
+                                child_workspace,
+                                interaction_notifier=child_mcp_interaction,
+                            ),
+                        )
+
+                    turn_tools = build_turn_subagent_provider(
+                        base_tools=turn_tools,
+                        config=subagent_runtime.config,
+                        prompt_loader=prompt_loader,
+                        sessions_root=config.sessions_dir,
+                        workspace=config.workspace,
+                        parent_llm=turn_llm,
+                        context_budget=turn_context_budget,
+                        tool_provider_factory=child_tools,
+                        skills=skill_loader,
+                        cancellation_token=turn_token,
+                        on_event=turn_event_callback,
+                        force_once=force_subagent_once,
+                        tool_policy=tool_policy,
+                        confirmation_broker=confirmation_broker,
+                        activity_sink=activity_sink,
+                        audit_sink=audit_sink,
+                        hook_runtime=hook_runtime,
+                    )
+                elif (
+                    subagent_runtime.status.state == "unavailable"
+                    and subagent_preference.mode == "auto"
+                ):
+                    turn_tools = build_unavailable_subagent_provider(
+                        turn_tools,
+                        subagent_runtime.status,
+                    )
+                turn_tools = with_tool_discovery(turn_tools)
                 result = agent_loop.run_turn(
                     session_id,
                     user_text,
                     turn_id=turn_id,
                     actor=cli_actor,
                     llm_override=turn_llm,
+                    context_budget=turn_context_budget,
                     tools_override=turn_tools,
+                    cancellation_token=turn_token,
                     tool_policy=tool_policy,
                     confirmation_broker=confirmation_broker,
                     channel="cli",
-                    on_event=lambda event: _update_cli_runtime_status(spinner, event),
+                    on_event=turn_event_callback,
+                    system_prompt_addendum=(
+                        prompt_loader.load("subagent_once") if force_subagent_once else ""
+                    ),
                 )
             print(result)
         except KeyboardInterrupt:
@@ -478,13 +602,6 @@ def _run_gateway(argv: Sequence[str]) -> int:
         return 0
     if not _ensure_runtime_dirs(config):
         return 1
-    skill_sync = SkillSourceSync(
-        workspace=config.workspace,
-        config_dir=config.config_dir,
-        extends_dir=config.extends_dir,
-    )
-    _print_missing_skill_sources_hint(skill_sync)
-    _sync_startup_skills(skill_sync)
     try:
         run_gateway(
             config,
@@ -534,8 +651,19 @@ def _run_init(argv: Sequence[str]) -> int:
         default="",
         help="api_key value written to workspace config. Supports a direct key or ${ENV_VAR}.",
     )
-    parser.add_argument("--model", default="gpt-5")
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--model", default="gpt-5.5")
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=16384,
+        help="Maximum output tokens requested for one model call.",
+    )
+    parser.add_argument(
+        "--context-window",
+        type=int,
+        default=131072,
+        help="Total model context window including input and generated output.",
+    )
     parser.add_argument("--temperature", type=float, default=0.7)
     args = parser.parse_args(argv)
 
@@ -554,6 +682,7 @@ def _run_init(argv: Sequence[str]) -> int:
             api_key=args.api_key,
             model=args.model,
             max_tokens=args.max_tokens,
+            context_window=args.context_window,
             temperature=args.temperature,
             force=args.force,
         )
@@ -569,8 +698,8 @@ def _run_init(argv: Sequence[str]) -> int:
         print(f"{console.success('created:')} {console.path(path)}")
     print(
         console.warning(
-            "Runtime templates created. Before use, review workspace config files "
-            "and set your actual endpoint, model, api_key, and Skill sources."
+            "Runtime files created. Configure an enabled LLM endpoint before chatting. "
+            "Extension capabilities are optional."
         )
     )
     return 0
@@ -588,48 +717,43 @@ def _ensure_runtime_dirs(config) -> bool:
     return True
 
 
-def _sync_startup_skills(skill_sync: SkillSourceSync, *, quiet: bool = False) -> None:
-    """Run configured one-shot startup Skill sync without blocking local commands."""
+def _sync_startup_skills(skill_sync: SkillSourceSync) -> SkillSyncError | None:
+    """Run best-effort startup Skill sync and return one optional failure cause."""
 
     try:
-        result = skill_sync.sync_on_startup()
+        skill_sync.sync_on_startup()
     except SkillSyncError as exc:
-        if quiet:
-            return
-        print(console.warning(f"skills sync skipped: {exc}"))
-        return
-    if result is None:
-        return
-    if quiet:
-        return
-    try:
-        settings, _sources = skill_sync.load()
-    except SkillSyncError:
-        return
-    if result.has_changes() or settings.log == "always":
-        print(_format_skill_sync_result(result))
+        return exc
+    return None
 
 
-def _print_missing_skill_sources_hint(skill_sync: SkillSourceSync) -> None:
-    """Print a one-line setup hint when Skill source config has not been initialized."""
+def _create_skill_loader(
+    skill_sync: SkillSourceSync,
+    *,
+    startup_error: SkillSyncError | None = None,
+) -> SkillLoader:
+    """Create a SkillLoader and print at most one accurate optional-capability warning."""
 
-    if skill_sync.has_config():
-        return
-    print(
-        console.warning(
-            f"skills sync skipped: missing {skill_sync.config_path}. Run zcagent init to create it."
-        )
-    )
-
-
-def _create_skill_loader(skill_sync: SkillSourceSync) -> SkillLoader:
-    """Create a SkillLoader without letting optional Skill config block chat."""
-
-    try:
-        return SkillLoader(skill_sync.skill_roots())
-    except SkillSyncError as exc:
-        print(console.warning(f"skills disabled: {exc}"))
+    if not skill_sync.has_config():
         return SkillLoader([])
+    try:
+        roots = skill_sync.skill_roots()
+    except SkillSyncError as exc:
+        print(
+            console.warning(
+                "Skill capability unavailable: invalid config/skill_sources.yml "
+                f"({exc}). Fix the file, then restart."
+            )
+        )
+        return SkillLoader([])
+    if startup_error is not None:
+        print(
+            console.warning(
+                "Skill sync degraded: configured source synchronization failed "
+                f"({startup_error}). Run /skills sync --verbose to inspect and retry."
+            )
+        )
+    return SkillLoader(roots)
 
 
 def _extract_env_file(argv: list[str]) -> tuple[str | None, list[str]]:
@@ -720,16 +844,22 @@ def _print_llm_configuration_error(exc: LLMConfigurationError, config) -> None:
     print(console.error(f"LLM configuration is invalid: {exc}"))
     print(console.warning("Chat cannot start until an enabled LLM endpoint is configured."))
     print()
-    print("Choose one:")
+    endpoint_path = config.config_dir / "llm_endpoints.json"
+    if endpoint_path.exists():
+        print(
+            f"  {console.success('Recommended:')} edit {console.path(endpoint_path)} and fix "
+            "the enabled endpoint. Use protocol-specific base_url/provider, model, and api_key "
+            "values that match the actual service."
+        )
+        print(
+            f"  Replace template intentionally: {console.command('zcagent init --force')}"
+        )
+        return
     print(
         f"  {console.success('Recommended:')} run {console.command('zcagent init')} "
-        "to create missing runtime config templates."
+        "to create the missing runtime files."
     )
-    print(
-        "  Manual: edit "
-        f"{console.path(config.config_dir / 'llm_endpoints.json')} "
-        "and set endpoint fields such as base_url, model, and api_key."
-    )
+    print(f"  Then review: {console.path(endpoint_path)}")
 
 
 def _print_history(session_store: JsonlSessionStore, session_id: str) -> None:
@@ -786,6 +916,7 @@ def _handle_sessions_command(
     session_store: JsonlSessionStore,
     current_session_id: str,
     target: str,
+    subagent_runtime=None,
 ) -> None:
     """Handle local /sessions management commands."""
 
@@ -811,6 +942,11 @@ def _handle_sessions_command(
             session_id = rest or current_session_id
             if session_id == current_session_id:
                 session_store.clear(current_session_id)
+                if subagent_runtime is not None:
+                    subagent_runtime.preferences.clear_force_once(
+                        subagent_runtime.context,
+                        current_session_id,
+                    )
                 print(f"{console.warning('session cleared:')} {console.command(current_session_id)}")
                 return
             session_store.delete(session_id)
@@ -994,6 +1130,23 @@ class _CliModelRuntime:
         self.context = context
 
 
+class _CliSubagentRuntime:
+    """Session metadata dependencies used by production CLI Subagent commands."""
+
+    def __init__(self, preferences, context, profiles, config=None, status=None):
+        self.preferences = preferences
+        self.context = context
+        self.profiles = profiles
+        self.config = config or SubagentConfig()
+        self.status = status or CapabilityStatus(
+            name="subagent",
+            state="disabled",
+            code="SUBAGENT_DISABLED",
+            message="Subagent is not enabled for this workspace.",
+            hint="Copy config/subagents.example.yml to the runtime config directory to enable it.",
+        )
+
+
 def _build_cli_model_runtime(llm, config, session_store) -> _CliModelRuntime | None:
     """Enable session-scoped model state for the configured production provider."""
 
@@ -1011,6 +1164,31 @@ def _build_cli_model_runtime(llm, config, session_store) -> _CliModelRuntime | N
         shared_readonly_dir=config.shared_readonly_dir,
     )
     return _CliModelRuntime(resolver, JsonSessionModelPreferenceStore(), context)
+
+
+def _build_cli_subagent_runtime(config, session_store) -> _CliSubagentRuntime:
+    """Bind session-scoped Subagent state and configured Profile summaries."""
+
+    context = SessionContext(
+        owner_user_id=None,
+        sessions_dir=config.sessions_dir,
+        sessions_meta_dir=session_store.metadata_dir,
+        files_dir=config.workspace,
+        shared_readonly_dir=config.shared_readonly_dir,
+    )
+    startup = check_subagent_startup(config.config_dir, PromptLoader(config.prompts_dir))
+    subagent_config = startup.config
+    return _CliSubagentRuntime(
+        JsonSessionSubagentPreferenceStore(),
+        context,
+        tuple(
+            (profile.name, profile.description)
+            for profile in subagent_config.list_profiles()
+            if profile.allow_model_invocation
+        ),
+        subagent_config,
+        startup.status,
+    )
 
 
 def _handle_session_model_command(
@@ -1075,11 +1253,94 @@ def _handle_session_model_command(
     )
 
 
+def _handle_session_subagent_command(
+    runtime: _CliSubagentRuntime,
+    session_id: str,
+    target: str,
+) -> str:
+    """Handle CLI /subagent using only the current session sidecar metadata."""
+
+    normalized = target.strip().lower()
+    if normalized not in {"", "auto", "off", "once"}:
+        return console.warning("Usage: /subagent")
+    if not runtime.status.available:
+        return console.warning(_format_cli_subagent_unavailable(runtime.status))
+    if normalized in {"auto", "off"}:
+        preference = runtime.preferences.set_mode(runtime.context, session_id, normalized)
+    elif normalized == "once":
+        preference = runtime.preferences.force_once(runtime.context, session_id)
+    else:
+        preference = runtime.preferences.get(runtime.context, session_id)
+    return _format_cli_subagent_status(preference, runtime.profiles)
+
+
+def _format_cli_subagent_unavailable(status: CapabilityStatus | None) -> str:
+    """Return the same human-facing capability guidance used by Web commands."""
+
+    return format_subagent_unavailable(status, include_details=True)
+
+
+def _format_cli_capability_status(status: CapabilityStatus) -> str:
+    """Format a generic optional-capability startup warning."""
+
+    return json.dumps(status.to_dict(), ensure_ascii=False, indent=2)
+
+
+def _format_cli_subagent_status(
+    preference: SessionSubagentPreference,
+    profiles: tuple[tuple[str, str], ...],
+) -> str:
+    lines = [
+        f"current subagent mode: {console.command(preference.mode)}",
+        f"force once: {'true' if preference.force_once else 'false'}",
+        "",
+        "available profiles:",
+    ]
+    if profiles:
+        lines.extend(f"  {name:<18} {description}" for name, description in profiles)
+    else:
+        lines.append("  (no model-callable profiles available)")
+    lines.extend(
+        [
+            "",
+            "Tip: use '/subagent auto' to allow automatic delegation, "
+            "'/subagent off' to disable it, or '/subagent once' to use Subagent "
+            "for the next message.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _load_subagent_profile_summaries(config_dir) -> tuple[tuple[str, str], ...]:
+    """Load enabled model-callable Profile summaries through the Part 13 loader."""
+
+    try:
+        from agent.subagents.config import load_subagent_config
+
+        config = load_subagent_config(config_dir / "subagents.yml")
+    except (ImportError, OSError, ValueError):
+        return ()
+    summaries: list[tuple[str, str]] = []
+    if not config.enabled:
+        return ()
+    for profile in config.list_profiles():
+        if not getattr(profile, "enabled", True):
+            continue
+        if not getattr(profile, "allow_model_invocation", True):
+            continue
+        name = str(profile.name).strip()
+        description = str(getattr(profile, "description", "")).strip()
+        if name:
+            summaries.append((name, description or "Available Subagent profile"))
+    return tuple(summaries)
+
+
 def _cli_turn_provider(runtime: _CliModelRuntime, session_id: str):
-    """Bind one independent provider from the current CLI session metadata."""
+    """Bind one independent provider and its failover-safe input budget."""
 
     preference = runtime.preferences.get(runtime.context, session_id)
-    return runtime.resolver.bind(runtime.resolver.resolve(preference))
+    selection = runtime.resolver.resolve(preference)
+    return runtime.resolver.bind(selection), selection.context_budget
 
 
 def _format_model_status(llm) -> str:
@@ -1156,6 +1417,7 @@ def _print_help() -> None:
         ("/tools", "list registered tools"),
         ("/skills", "list discovered local Skills"),
         ("/model", "show or switch the preferred LLM endpoint"),
+        ("/subagent", "show or control Subagent delegation"),
         ("/memory", "show current Memory"),
         ("/mcp", "show available MCP capabilities"),
         ("/exit", "leave the CLI"),

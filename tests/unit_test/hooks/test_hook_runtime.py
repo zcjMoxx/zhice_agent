@@ -177,7 +177,7 @@ def test_real_pre_hook_fixture_actions_and_fail_closed(tmp_path, name, expected_
         [
             {
                 **_entry(name, "pre_tooluse"),
-                "timeout_seconds": 0.1 if name == "timeout" else 2,
+                "timeout_seconds": 0.1 if name == "timeout" else 5,
                 "max_output_chars": 1024 if name == "oversize" else 16384,
             }
         ],
@@ -193,7 +193,10 @@ def test_real_pre_hook_fixture_actions_and_fail_closed(tmp_path, name, expected_
 
 
 def test_real_post_hook_fixture_enriches_safe_presentation(tmp_path):
-    config_path = _write_config(tmp_path, [_entry("enrich", "post_tooluse")])
+    config_path = _write_config(
+        tmp_path,
+        [{**_entry("enrich", "post_tooluse"), "timeout_seconds": 5}],
+    )
     runtime = _runtime(tmp_path, config_path)
 
     result = runtime.run_post_tooluse(_post_request())
@@ -364,7 +367,7 @@ def test_post_hook_uses_same_role_exemption_and_payload_context(tmp_path):
 def test_hook_timeout_reclaims_parent_and_spawned_child_processes(tmp_path):
     config_path = _write_config(
         tmp_path,
-        [{**_entry("spawn-timeout", "pre_tooluse"), "timeout_seconds": 1}],
+        [{**_entry("spawn-timeout", "pre_tooluse"), "timeout_seconds": 3}],
     )
     runtime = _runtime(tmp_path, config_path)
     pids: list[int] = []

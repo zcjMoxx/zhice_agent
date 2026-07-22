@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.auth.store import SQLiteAuthStore
+from agent.logging_utils import redact_value
 from agent.protocols.auth import ActorContext
 from agent.protocols.diagnostics import DiagnosticContext
 
@@ -23,6 +24,10 @@ _SAFE_TRACE_FIELDS = (
     "event",
     "session_id",
     "turn_id",
+    "root_session_id",
+    "root_turn_id",
+    "parent_session_id",
+    "parent_turn_id",
     "request_id",
     "channel",
     "route",
@@ -34,7 +39,15 @@ _SAFE_TRACE_FIELDS = (
     "reason_code",
     "error_code",
     "error_type",
+    "error_message",
     "code",
+    "status",
+    "stage",
+    "batch_id",
+    "task_id",
+    "subagent_id",
+    "profile",
+    "workspace_mode",
     "endpoint",
     "model",
     "input_preview",
@@ -118,13 +131,19 @@ class RecentActivityDiagnostics:
             session_id=context.session_id,
             turn_id=turn_id,
         )
-        return _diagnose_turn(
+        report = _diagnose_turn(
             selected,
             tools_by_turn.get(turn_id, []),
             trace_events,
             audit_events,
             focus=focus,
         )
+        report["trace_events"] = trace_events
+        report["diagnostic_instruction"] = (
+            "Analyze the chronological trace_events directly. Prefer a specific safe "
+            "error_message and the surrounding stage/code sequence over a generic wrapper code."
+        )
+        return report
 
     def _diagnose_trend(
         self,
@@ -159,6 +178,7 @@ class RecentActivityDiagnostics:
             }
         common_code, common_count = counts.most_common(1)[0]
         latest_turn = failures[0][0]
+        generic_subagent_failure = common_code == "SUBAGENT_FAILED"
         return {
             "status": "diagnosed",
             "focus": "trend",
@@ -179,7 +199,7 @@ class RecentActivityDiagnostics:
                 f"most_common_count={common_count}",
             ],
             "probable_cause": _cause_message(common_code),
-            "confidence": "high",
+            "confidence": "medium" if generic_subagent_failure else "high",
             "evidence": [
                 {
                     "turn_id": str(turn.get("turn_id") or ""),
@@ -189,7 +209,14 @@ class RecentActivityDiagnostics:
                 for turn, code in failures[:10]
             ],
             "next_actions": _next_actions(common_code),
-            "limitations": [],
+            "limitations": (
+                [
+                    "Trend records contain the parent SUBAGENT_FAILED code but do not identify "
+                    "a correlated child terminal cause."
+                ]
+                if generic_subagent_failure
+                else []
+            ),
         }
 
     def _trace_events(
@@ -209,12 +236,23 @@ class RecentActivityDiagnostics:
                 event_actor = str(event.get("actor_user_id") or "")
                 if event_actor and event_actor != actor_user_id:
                     continue
-                if str(event.get("session_id") or "") != session_id:
-                    continue
-                if str(event.get("turn_id") or "") != turn_id:
+                is_parent_event = (
+                    str(event.get("session_id") or "") == session_id
+                    and str(event.get("turn_id") or "") == turn_id
+                )
+                is_child_event = (
+                    str(event.get("root_session_id") or "") == session_id
+                    and str(event.get("root_turn_id") or "") == turn_id
+                )
+                if not is_parent_event and not is_child_event:
                     continue
                 event_request_id = str(event.get("request_id") or "")
-                if request_id and event_request_id and event_request_id != request_id:
+                if (
+                    is_parent_event
+                    and request_id
+                    and event_request_id
+                    and event_request_id != request_id
+                ):
                     continue
                 events.append(_safe_trace_event(event))
         events.sort(key=lambda item: str(item.get("ts") or ""))
@@ -278,9 +316,44 @@ def _diagnose_turn(
         ),
         None,
     )
-    failure = tool_failure or llm_error or save_error or denied
+    child_failures = [
+        event
+        for event in reversed(trace_events)
+        if str(event.get("event") or "")
+        in {
+            "subagent.task_failed",
+            "subagent.task_timed_out",
+            "subagent.task_cancelled",
+        }
+        and str(event.get("code") or "") not in {"", "OK"}
+    ]
+    child_failure = child_failures[0] if child_failures else None
+    failure = child_failure or tool_failure or llm_error or save_error or denied
     if failure is not None or str(turn.get("status") or "") == "error":
-        if tool_failure is not None:
+        limitations: list[str] = []
+        if child_failure is not None:
+            code_counts = Counter(
+                str(event.get("code") or "SUBAGENT_FAILED") for event in child_failures
+            )
+            code, common_count = code_counts.most_common(1)[0]
+            common_failures = [
+                event for event in child_failures if str(event.get("code") or "") == code
+            ]
+            representative = common_failures[0]
+            child_stage = str(representative.get("stage") or "child")
+            stage = f"subagent.{child_stage}"
+            facts = [
+                f"child_failure_count={len(child_failures)}",
+                f"common_child_failure_count={common_count}",
+                f"child_status={representative.get('status', '')}",
+                f"child_stage={child_stage}",
+                f"child_code={code}",
+            ]
+            for key in ("task_id", "subagent_id", "profile", "workspace_mode"):
+                if representative.get(key) not in {None, ""}:
+                    facts.append(f"{key}={representative[key]}")
+            evidence = common_failures[:5]
+        elif tool_failure is not None:
             tool_name = str(tool_failure.get("tool_name") or "tool")
             code = str(tool_failure.get("result_code") or "TOOL_EXECUTION_FAILED")
             stage = f"tool.{tool_name}"
@@ -290,6 +363,11 @@ def _diagnose_turn(
                 f"duration_ms={_tool_duration_ms(tool_failure)}",
             ]
             evidence = [_safe_tool_evidence(tool_failure)]
+            if code == "SUBAGENT_FAILED":
+                limitations.append(
+                    "The parent delegate_tasks call failed, but no correlated child terminal "
+                    "failure was present in the available trace."
+                )
         elif llm_error is not None:
             code = str(llm_error.get("error_code") or llm_error.get("error_type") or "LLM_ERROR")
             stage = "llm"
@@ -325,10 +403,10 @@ def _diagnose_turn(
             "cause_code": code,
             "confirmed_facts": facts,
             "probable_cause": _cause_message(code),
-            "confidence": "high" if code not in {"TURN_ERROR", "TOOL_EXECUTION_FAILED"} else "medium",
+            "confidence": _failure_confidence(code, child_terminal=child_failure is not None),
             "evidence": evidence,
             "next_actions": _next_actions(code),
-            "limitations": [],
+            "limitations": limitations,
         }
     return _latency_report(turn, tools, trace_events, target=target, focus=focus)
 
@@ -406,6 +484,16 @@ def _turn_failure_code(turn: dict[str, Any], tools: list[dict[str, Any]]) -> str
     if str(turn.get("status") or "") == "error":
         return str(turn.get("error_code") or "TURN_ERROR")
     return ""
+
+
+def _failure_confidence(code: str, *, child_terminal: bool) -> str:
+    """Keep generic parent Subagent failures below high confidence without a child cause."""
+
+    if code in {"TURN_ERROR", "TOOL_EXECUTION_FAILED"}:
+        return "medium"
+    if code == "SUBAGENT_FAILED" and not child_terminal:
+        return "medium"
+    return "high"
 
 
 def _safe_tool_evidence(row: dict[str, Any]) -> dict[str, Any]:
@@ -540,7 +628,11 @@ def _tail_json_objects(path: Path, max_lines: int) -> list[dict[str, Any]]:
 
 
 def _safe_trace_event(event: dict[str, Any]) -> dict[str, Any]:
-    return {key: event[key] for key in _SAFE_TRACE_FIELDS if key in event}
+    return {
+        key: redact_value(event[key])
+        for key in _SAFE_TRACE_FIELDS
+        if key in event
+    }
 
 
 def _event_in_range(event: dict[str, Any], since: datetime) -> bool:

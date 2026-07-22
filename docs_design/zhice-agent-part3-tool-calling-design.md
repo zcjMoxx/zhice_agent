@@ -1,5 +1,7 @@
 # 智策 Agent 第三部分详细设计文档：工具调用
 
+> 当前补充：2026-07-21 已在本协议之上增加 Turn-scoped `discover_tools` 与动态 schema 激活。`ToolRegistry` 仍生成完整 OpenAI-compatible definitions，但 CLI/Web/child 的 LLM-facing Provider 首轮只披露 discovery schema，下一模型步才披露已激活业务 Tool。AgentLoop 在每次初始/工具结果模型调用前重新读取当前 definitions，把 Tool schemas 纳入 failover-safe ContextBudget，并重新裁剪 messages；当前实现见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md` 和 `docs_design/2026-07-22-endpoint-context-budget-and-hybrid-turn-selection-design.md`。
+
 > 关联总设：`docs_design/zhice-agent-overall-design.md`
 >
 > 文档类型：阶段活文档。本文档始终按当前代码和当前阶段口径维护。
@@ -50,7 +52,7 @@ tests/
 
 第三部分完成后，应满足：
 
-1. `AgentLoop` 能把 `ToolProvider.definitions()` 返回的工具 schema 传给 `LLMProvider.chat`。
+1. `AgentLoop` 在每次 LLM 调用前读取 `ToolProvider.definitions()` 并传给 `LLMProvider.chat`，支持 Turn 内动态 schema。
 2. 当 LLM 返回 `tool_calls` 时，`AgentLoop` 能解析工具名和 JSON 参数，调用对应工具，并把工具结果作为 `tool` 消息回填。
 3. 工具执行完成后，`AgentLoop` 会再次调用 LLM，让模型基于工具结果生成最终 assistant 回复。
 4. session JSONL 中保存完整一轮轨迹：`user`、带 `tool_calls` 的 `assistant`、一个或多个 `tool`、最终 `assistant`。
@@ -110,7 +112,7 @@ tests/
 - MCP、Hooks、Subagent、Memory。
 - 多工具并行执行。
 - 自动审批流。
-- token 预算估算和复杂历史压缩。
+- 完整 Context Compaction、摘要 checkpoint 和复杂历史替换；基础 endpoint token 预算已进入当前实现。
 
 ---
 
@@ -629,6 +631,8 @@ Message(
 - `tool` 消息可保留 `name`。
 - `assistant` 消息如果带 `tool_calls`，要继续保留 `tool_calls`。
 - 所有历史消息仍受 `max_history_messages` 和 `max_message_chars` 限制。
+- CLI/Web 共用 60 message 兜底；每次 LLM 调用还要把当次实际 Tool schemas 纳入 endpoint `ContextBudget`。
+- 超限时先删除最旧历史 Turn、再截断 tool result；只剩当前 Turn 仍超限时，可以整体删除较早的已完成 Tool 块，但 assistant call 与对应 result 必须一起删除，并至少保留最新调用链。
 
 转换示例：
 
@@ -695,10 +699,11 @@ flowchart TD
 ```mermaid
 flowchart TD
     A["用户输入"] --> B["AgentLoop 加载 Session"]
-    B --> C["ContextBuilder 构建 messages"]
-    C --> D["ToolRegistry.definitions"]
-    D --> E["LLMProvider.chat(messages, tools)"]
-    E --> F{"LLM 是否返回 tool_calls"}
+    B --> C["ContextBuilder 构建混合 Turn messages"]
+    C --> D["每次循环读取当前 ToolRegistry.definitions"]
+    D --> E["messages + schemas 重新应用 ContextBudget"]
+    E --> Q["LLMProvider.chat(messages, tools)"]
+    Q --> F{"LLM 是否返回 tool_calls"}
     F -->|否| G["保存 user + assistant"]
     G --> H["返回 assistant 文本"]
     F -->|是| I["保存 assistant tool_calls 到待写入消息"]
@@ -707,7 +712,7 @@ flowchart TD
     K --> L["构造 tool 消息"]
     L --> M["回填 messages"]
     M --> N{"是否超过最大工具轮数"}
-    N -->|否| E
+    N -->|否| D
     N -->|是| O["保存错误 marker"]
     O --> P["返回工具轮数超限文案"]
 ```

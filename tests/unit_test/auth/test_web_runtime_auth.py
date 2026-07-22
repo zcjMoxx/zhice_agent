@@ -112,6 +112,14 @@ def test_owner_chat_uses_workspace_tools_while_viewer_stays_in_user_files(tmp_pa
     assert viewer_kwargs["workspace_override"] == (
         tmp_path / "contexts" / "users" / viewer.id / "files"
     )
+    for kwargs in (owner_kwargs, viewer_kwargs):
+        assert {
+            item["function"]["name"] for item in kwargs["tools_override"].definitions()
+        } == {"discover_tools"}
+        kwargs["tools_override"].execute(
+            "discover_tools",
+            {"query": "files and memory", "names": ["list_dir", "memory_read", "memory_write"]},
+        )
     assert "DIR  contexts" in owner_kwargs["tools_override"].execute("list_dir", {"path": "."}).output
     assert "DIR  contexts" not in viewer_kwargs["tools_override"].execute("list_dir", {"path": "."}).output
     owner_tool_names = {
@@ -120,8 +128,8 @@ def test_owner_chat_uses_workspace_tools_while_viewer_stays_in_user_files(tmp_pa
     viewer_tool_names = {
         item["function"]["name"] for item in viewer_kwargs["tools_override"].definitions()
     }
-    assert {"memory_read", "memory_write"} <= owner_tool_names
-    assert {"memory_read", "memory_write"} <= viewer_tool_names
+    assert {"discover_tools", "list_dir", "memory_read", "memory_write"} <= owner_tool_names
+    assert {"discover_tools", "list_dir", "memory_read", "memory_write"} <= viewer_tool_names
     owner_kwargs["tools_override"].execute("memory_read", {"mode": "list"})
     viewer_kwargs["tools_override"].execute("memory_read", {"mode": "list"})
     assert (tmp_path / "contexts" / "memory" / "MEMORY.md").is_file()
@@ -138,6 +146,7 @@ def _runtime(tmp_path, store):
         base_url="https://example.test/v1",
         model="model-a",
         api_key="secret",
+        context_window=32768,
         supported_models=("model-b",),
     )
     config = AppConfig(

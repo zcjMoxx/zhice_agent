@@ -7,6 +7,7 @@
 - 验证 MCP 结果归一化与 actor-scoped artifact 落盘。
 - 使用本地 fake stdio Server 验证 initialize、`tools/list`、`tools/call`、同步 Adapter 和关闭流程。
 - 验证无配置时 Runtime 保持禁用，不影响内置 Tool。
+- 验证 startup checker 将缺失/空配置标记为 disabled，将非法 JSON、placeholder 和安全配置标记为 unavailable，并返回空 specs。
 
 ## 关键检查点
 
@@ -15,6 +16,7 @@
 - 绝对 cwd、父目录 cwd、越界临时文件和超大 artifact 被拒绝。
 - 参数 schema 在远端调用前执行基础校验。
 - 当前调用 timeout/transport error 不自动重放。
+- startup warning 不记录 credential、环境变量名、原始配置错误或绝对路径。
 
 ## 执行分层
 

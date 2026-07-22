@@ -71,7 +71,7 @@ def _endpoint(name: str, model: str, *, supported=(), priority=1) -> LLMEndpoint
         base_url="https://example.test/v1",
         model=model,
         api_key="secret",
+        context_window=32768,
         priority=priority,
         supported_models=tuple(supported),
     )
-

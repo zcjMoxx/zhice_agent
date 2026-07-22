@@ -36,7 +36,7 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 
 - 输入：读取 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`。
 - 预期：解析为 `LLMEndpoint`。
-- 检查点：支持 `api_key` 明文和 `${ENV_VAR}` 占位；支持 keyed object 和顶层 `endpoints` 列表；支持 `default` 别名；支持 `priority`、`enabled`、`role`；缺失字段、非法 JSON、未知 endpoint、未定义环境变量都会给出配置错误。
+- 检查点：支持 `api_key` 明文和 `${ENV_VAR}` 占位；支持 keyed object 和顶层 `endpoints` 列表；支持 `default` 别名；支持 `priority`、`enabled`、`role`、`context_window` 和 `max_tokens`；缺少 `context_window` 时默认 `131072`；非法 JSON、未知 endpoint、未定义环境变量都会给出配置错误。
 
 ### Case 6: dotenv 读取
 
@@ -48,4 +48,4 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 
 - 输入：调用 `init_runtime_files()`。
 - 预期：生成本地 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`、`${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 和 prompts，可选生成 `${ZHICE_AGENT_WORKSPACE}/.env`。
-- 检查点：默认不覆盖已有文件但会补齐缺失文件；`--force` 语义由调用方显式开启。
+- 检查点：默认不覆盖已有文件但会补齐缺失文件；生成配置只写 `context_window` 和 `max_tokens` 两个预算字段；`--force` 语义由调用方显式开启。

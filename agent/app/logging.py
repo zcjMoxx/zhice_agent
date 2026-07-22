@@ -19,6 +19,8 @@ _COLORAMA_FIXED = False
 _COLOR_RESET = "\033[0m"
 _TIME_COLOR = "32"
 _TOOL_COLOR = "33"
+_WARNING_COLOR = "1;91"
+_ERROR_COLOR = "1;31"
 _COMPONENT_COLORS = {
     "agent": "36",
     "web": "35",
@@ -64,14 +66,24 @@ class TerminalLogFormatter(logging.Formatter):
             getattr(record, "fields", {}),
         )
         fields = _format_fields(terminal_fields)
+        level = record.levelname
+        severity_color = _severity_color(record.levelno) if self.color else ""
+        if severity_color:
+            fixed = f"{timestamp} | {level} | {action}"
+            if phase:
+                fixed = f"{fixed} | {phase}"
+            if fields:
+                fixed = f"{fixed} | {fields}"
+            return _style(fixed, severity_color)
         if self.color:
             timestamp = _style(timestamp, _TIME_COLOR)
-            action_color = _TOOL_COLOR if action.startswith("TOOL ") else _COMPONENT_COLORS.get(
-                component,
-                _COMPONENT_COLORS["zcagent"],
+            action_color = (
+                _TOOL_COLOR
+                if action.startswith("TOOL ")
+                else _COMPONENT_COLORS.get(component, _COMPONENT_COLORS["zcagent"])
             )
             action = _style(action, action_color)
-        fixed = f"{timestamp} | {record.levelname} | {action}"
+        fixed = f"{timestamp} | {level} | {action}"
         if phase:
             fixed = f"{fixed} | {phase}"
         if fields:
@@ -366,6 +378,16 @@ def _style(text: str, color_code: str) -> str:
     """Apply one ANSI color code to a terminal segment."""
 
     return f"\033[{color_code}m{text}{_COLOR_RESET}"
+
+
+def _severity_color(level: int) -> str:
+    """Return an attention color for warning and error terminal records."""
+
+    if level >= logging.ERROR:
+        return _ERROR_COLOR
+    if level >= logging.WARNING:
+        return _WARNING_COLOR
+    return ""
 
 
 def _component_for_logger(logger_name: str) -> str:

@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import unicodedata
 from collections import defaultdict
 from pathlib import Path
@@ -303,10 +304,23 @@ def _atomic_write(path: Path, text: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
             temporary_path = Path(handle.name)
-        os.replace(temporary_path, path)
+        _replace_with_retry(temporary_path, path)
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
+
+
+def _replace_with_retry(source: Path, target: Path) -> None:
+    """Tolerate short Windows scanner/indexer locks around atomic replacement."""
+
+    delays = (0.01, 0.03, 0.06)
+    for delay in delays:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    os.replace(source, target)
 
 
 def _normalize(value: str) -> str:

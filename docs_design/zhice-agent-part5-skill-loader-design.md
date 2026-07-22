@@ -192,7 +192,7 @@ sources:
 如果启动时缺少该配置，CLI 打印：
 
 ```text
-skills sync skipped: missing ... Run zcagent init to create it.
+缺少 `skill_sources.yml` 表示 Skill source 未启用，CLI/Gateway 静默使用空 SkillLoader；文件存在但非法或配置要求同步而失败时才输出结构化 warning。
 ```
 
 这表示当前没有配置 Skill source，自动同步被跳过。该缺失不阻断基础聊天，因为 Skill source 属于可选扩展能力；workspace、prompts、LLM endpoint 仍属于聊天必需配置，缺失或非法时直接报错。

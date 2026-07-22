@@ -229,10 +229,11 @@ I'm ZhiCe-Agent. How can I help?
 
 助手消息按 Markdown 正文渲染，但保持最小安全边界：
 
-- 支持标题、无序列表、有序列表、代码块、加粗、行内 code 和安全链接。
+- 支持标题、无序列表、有序列表、代码块、加粗、行内 code、安全链接，以及 KaTeX 行内/块级公式。
 - 用户消息仍按纯文本展示。
 - 链接只允许 `http(s)` 和 `mailto`，其它链接写法退回纯文本。
-- 不引入第三方 Markdown 包，不执行 HTML。
+- Markdown 结构继续使用本地安全 DOM renderer，不执行 HTML；数学公式异步加载固定版本 KaTeX，失败时保留原始文本，不阻断聊天。
+- 公式支持 `$...$`、`$$...$$`、`\\(...\\)`、`\\[...\\]`；`\\bm{...}` 通过 macro 映射为 `\\boldsymbol{...}`。代码块与行内 code 不参与公式渲染。
 - assistant 正在输出时显示 streaming cursor；尚未收到文本时显示 typing dots。
 
 ---
@@ -343,7 +344,7 @@ setModelPreference(value)
 8. 打开会话后能展示历史消息。
 9. 发送消息后能立即展示用户消息和 pending assistant 反馈。
 10. 收到 WebSocket 文本增量后，assistant 气泡流式更新。
-11. assistant Markdown 内容能渲染标题、列表、代码块、加粗和行内 code。
+11. assistant Markdown 内容能渲染标题、列表、代码块、加粗、行内 code 和常见 LaTeX 公式；KaTeX 不可用时页面仍可正常聊天。
 12. 会话行提供重命名和删除；删除当前会话后进入空界面。
 13. 停止按钮能发起 WebSocket stop frame，不把 `/stop` 当普通消息透传。
 14. 模型下拉框只显示模型名，不显示 endpoint、base_url 或 key。

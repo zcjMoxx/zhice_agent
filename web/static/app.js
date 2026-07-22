@@ -19,6 +19,10 @@ const state = {
   },
 };
 
+const KATEX_VERSION = "0.16.11";
+const KATEX_BASE_URL = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist`;
+let mathRendererPromise = null;
+
 const elements = {
   appShell: document.querySelector("#appShell"),
   loginView: document.querySelector("#loginView"),
@@ -683,12 +687,15 @@ function createMessageNode(message) {
     bubble.classList.add("runtime-status-bubble");
     if (message.runtimeStatus) {
       bubble.append(createRuntimeStatus(message.runtimeStatus));
+      appendSubagentTaskStatus(bubble, message.subagentTasks);
     }
   } else if (message.role === "assistant" && !message.isError) {
     bubble.classList.add("markdown");
     bubble.append(renderMarkdown(message.content || ""));
+    renderMath(bubble);
     if (message.isPending && message.runtimeStatus) {
       bubble.append(createRuntimeStatus(message.runtimeStatus));
+      appendSubagentTaskStatus(bubble, message.subagentTasks);
     }
   } else {
     bubble.textContent = message.content;
@@ -708,6 +715,22 @@ function createRuntimeStatus(title) {
   text.textContent = title;
   indicator.append(dot, text);
   return indicator;
+}
+
+function appendSubagentTaskStatus(container, tasks) {
+  const values = Object.values(tasks || {});
+  if (!values.length) {
+    return;
+  }
+  const list = document.createElement("ul");
+  list.className = "subagent-task-status";
+  for (const task of values) {
+    const item = document.createElement("li");
+    item.dataset.status = task.status;
+    item.textContent = `${task.taskId}: ${task.title}`;
+    list.append(item);
+  }
+  container.append(list);
 }
 
 function renderMarkdown(text) {
@@ -861,6 +884,92 @@ function createSafeLink(token) {
   link.rel = "noreferrer";
   link.target = "_blank";
   return link;
+}
+
+function renderMath(container) {
+  if (!container || typeof window.renderMathInElement !== "function") {
+    return;
+  }
+  try {
+    window.renderMathInElement(container, {
+      delimiters: [
+        { left: "$$", right: "$$", display: true },
+        { left: "\\[", right: "\\]", display: true },
+        { left: "\\(", right: "\\)", display: false },
+        { left: "$", right: "$", display: false },
+      ],
+      ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+      macros: { "\\bm": "\\boldsymbol{#1}" },
+      throwOnError: false,
+      trust: false,
+    });
+  } catch (_error) {
+    // Keep the original formula text when one expression cannot be rendered.
+  }
+}
+
+function loadMathRenderer() {
+  if (typeof window.renderMathInElement === "function") {
+    return Promise.resolve();
+  }
+  if (mathRendererPromise) {
+    return mathRendererPromise;
+  }
+  ensureExternalStylesheet(`${KATEX_BASE_URL}/katex.min.css`, "katex-style");
+  mathRendererPromise = loadExternalScript(
+    `${KATEX_BASE_URL}/katex.min.js`,
+    "katex-core",
+  )
+    .then(() =>
+      loadExternalScript(
+        `${KATEX_BASE_URL}/contrib/auto-render.min.js`,
+        "katex-auto-render",
+      ),
+    )
+    .then(() => renderMessages())
+    .catch(() => undefined);
+  return mathRendererPromise;
+}
+
+function ensureExternalStylesheet(href, id) {
+  if (document.getElementById(id)) {
+    return;
+  }
+  const link = document.createElement("link");
+  link.id = id;
+  link.rel = "stylesheet";
+  link.href = href;
+  link.crossOrigin = "anonymous";
+  document.head.append(link);
+}
+
+function loadExternalScript(src, id) {
+  const existing = document.getElementById(id);
+  if (existing) {
+    return existing.dataset.loaded === "true"
+      ? Promise.resolve()
+      : new Promise((resolve, reject) => {
+          existing.addEventListener("load", resolve, { once: true });
+          existing.addEventListener("error", reject, { once: true });
+        });
+  }
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.id = id;
+    script.src = src;
+    script.async = true;
+    script.crossOrigin = "anonymous";
+    script.addEventListener(
+      "load",
+      () => {
+        script.dataset.loaded = "true";
+        resolve();
+      },
+      { once: true },
+    );
+    script.addEventListener("error", reject, { once: true });
+    document.head.append(script);
+  });
 }
 
 async function refreshSessions({ openFirst = false } = {}) {
@@ -1726,3 +1835,4 @@ for (const button of document.querySelectorAll("[data-admin-tab]")) {
 
 initializePasswordToggles();
 bootstrapAuth();
+loadMathRenderer();

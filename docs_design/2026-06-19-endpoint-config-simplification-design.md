@@ -1,5 +1,7 @@
 # Endpoint 配置收敛设计
 
+> 说明：当前配置最终保留 `context_window` 与 `max_tokens` 两个预算字段，`context_window` 缺失时默认 `131072`，不再提供第三个输入上限字段。当前实现见 `2026-07-22-endpoint-budget-config-simplification-design.md`。
+
 ## 背景
 
 当前 endpoint 加载器支持了多种兼容字段名，包括把 `provider` 当作协议别名，以及 `openai_protocol`、`openai_base_url`、`litellm_protocol`、`llmlite_*` 等字段。这让第一阶段的配置入口比实际需要更复杂。

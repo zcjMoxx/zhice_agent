@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -10,6 +11,7 @@ from agent.app.logging import GatewayLoggingResult, GatewayLogOptions
 from agent.auth.store import SQLiteAuthStore
 from agent.cli import main
 from agent.config import AppConfig
+from agent.protocols.capability import CapabilityStatus
 
 REPOSITORY_STATIC_DIR = Path(__file__).resolve().parents[3] / "web" / "static"
 
@@ -89,6 +91,10 @@ def test_password_inputs_have_persistent_visibility_controls():
     assert 'id="confirmationEdit"' not in html
     assert 'id="confirmationContent"' not in html
     assert "editMemoryConfirmation" not in javascript
+    assert 'id="capabilityBanner"' not in html
+    assert "showStartupCapabilityStatus" not in javascript
+    assert 'fetch("/api/health")' not in javascript
+    assert ".capability-banner" not in css
 
 
 def test_web_brand_uses_selected_image_asset_and_a_distinct_user_icon():
@@ -185,6 +191,16 @@ def test_gateway_health_returns_workspace_and_model(tmp_path):
         "auth_required": "false",
         "auth_initialized": "false",
         "owner_initialized": "false",
+        "capabilities": {
+            "subagent": {
+                "name": "subagent",
+                "state": "available",
+                "code": "SUBAGENT_AVAILABLE",
+                "message": "subagent is available.",
+                "hint": "",
+                "details": {},
+            }
+        },
     }
 
 
@@ -198,7 +214,40 @@ def test_gateway_status_handles_missing_runtime(tmp_path):
         "auth_required": "false",
         "auth_initialized": "false",
         "owner_initialized": "false",
+        "capabilities": {
+            "subagent": {
+                "name": "subagent",
+                "state": "unavailable",
+                "code": "SUBAGENT_UNAVAILABLE",
+                "message": "subagent is temporarily unavailable.",
+                "hint": "Contact an administrator.",
+                "details": {},
+            }
+        },
     }
+
+
+def test_gateway_health_uses_generic_capability_provider(tmp_path):
+    runtime = _FakeRuntime()
+    runtime.capability_statuses = lambda: {
+        "subagent": runtime.subagent_status,
+        "mcp": CapabilityStatus(
+            name="mcp",
+            state="degraded",
+            code="MCP_PARTIAL",
+            message="One MCP server is unavailable.",
+            hint="Check config/mcp.json.",
+        ),
+    }
+
+    payload = gateway_status(_config(tmp_path), runtime=runtime)
+
+    assert payload["status"] == "ok"
+    assert payload["capabilities"]["mcp"]["state"] == "degraded"
+    assert payload["capabilities"]["mcp"]["code"] == "MCP_DEGRADED"
+    assert payload["capabilities"]["mcp"]["message"] == "mcp is temporarily limited."
+    assert payload["capabilities"]["mcp"]["hint"] == "Contact an administrator."
+    assert "mcp.json" not in json.dumps(payload["capabilities"]["mcp"])
 
 
 def test_gateway_check_formats_without_starting_server(tmp_path):
@@ -274,8 +323,9 @@ def test_cli_gateway_passes_split_log_options(tmp_path, capsys, monkeypatch):
         ]
     )
 
-    capsys.readouterr()
+    output = capsys.readouterr().out
     assert result == 0
+    assert "skills sync skipped" not in output
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 10086
     assert captured["log_options"] == GatewayLogOptions(
@@ -307,6 +357,12 @@ def _line_index(lines: list[str], prefix: str) -> int:
 class _FakeRuntime:
     def __init__(self, auth=None):
         self.auth = auth
+        self.subagent_status = CapabilityStatus(
+            name="subagent",
+            state="available",
+            code="SUBAGENT_AVAILABLE",
+            message="Subagent runtime is available.",
+        )
 
     def current_model_label(self) -> str:
         return "default/model-a"

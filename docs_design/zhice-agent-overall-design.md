@@ -83,7 +83,7 @@ memory_read   按需检索当前 actor 的长期 Memory
 memory_write  执行用户通过对话明确授权的 Memory 修改
 ```
 
-`write_file`、外部 API 和 Subagent 仍属于后续扩展；Skill 正文加载与同步、受控 Memory 读写和 MCP Tool 已经进入当前轻量工具主线。
+`write_file` 和领域外部 API 仍属于后续扩展；Skill 正文加载与同步、受控 Memory 读写、MCP Tool 和批量 `delegate_tasks` 已经进入当前轻量工具主线。Subagent Tool 只负责通用 fan-out/fan-in，业务拆分判断由 Prompt、Profile 和父 Agent 完成，不写入 AgentLoop。
 
 工具系统最值得学习的设计是：
 
@@ -206,7 +206,10 @@ prompts/
 +-- identity.md
 +-- tool_use_policy.md
 +-- skills_intro.md
-+-- summarize_session.md
++-- diagnostics.md
++-- exec.md
++-- memory_policy.md
++-- memory_extraction.md
 ```
 
 不要在 Python 里到处写长 prompt。
@@ -247,7 +250,7 @@ contexts/sessions/chat-YYYYMMDD.jsonl
 
 等后面需要会话搜索、会话标题、工具步骤表，再升级 SQLite。
 
-当前上下文治理已经进入 turn-based 阶段：`ContextBuilder` 先按最近 user turn 形成候选，再做本地相关性选择，并继续保持 tool-call block 合法，避免简单问候被很久以前的任务牵引。Part 10 已增加按需长期 Memory 和显式 session 摘要，但不把完整 Memory 固定注入每轮上下文；后续更复杂的自动压缩仍需单独设计。
+当前上下文治理已经进入 turn-based 与 endpoint-budget 阶段：`ContextBuilder` 默认从最近 50 个 user Turn 形成候选，正常预算下直接保留最近 3 个 Turn，再从更早历史选择最多 3 个相关 Turn，并继续保持 tool-call block 合法和 60 条消息硬上限。CLI/Web 每次初始或工具结果 LLM 调用前都会把当前 Tool schemas 纳入 failover-safe token 预算；child 使用新鲜独立 Session 上下文但继承父 Turn 预算。Part 10 提供按需长期 Memory 和后台高可信提取，不把完整 Memory 固定注入每轮上下文；后台 extraction 同样服从 ContextBudget。后续更复杂的自动压缩仍需单独设计。
 
 ---
 
@@ -266,13 +269,13 @@ contexts/sessions/chat-YYYYMMDD.jsonl
 能完成无工具聊天和工具调用循环，
 能把只读工具与安全 exec 暴露给 LLM，
 能通过 OpenAI-compatible 或 LiteLLM Provider 调用模型，
-能按 endpoint priority 做轻量 failover，
+能按 endpoint priority 做轻量 failover，并按所有 enabled 候选 endpoint 的最小有效输入上限控制上下文，
 能用 /model 查看和切换本进程内首选模型，
 能通过 `zcagent gateway` 启动本地 FastAPI gateway，
 能提供 REST/SSE 兼容 API、WebSocket 主聊天通道和静态 Web UI，
 能在 Web 端查看、重命名、删除会话并进行模型选择，
 能用稳定 `turn_id` / `turn_index` 串起一轮用户请求、WebSocket 事件和 JSONL 会话消息，
-能按最近 user turn 候选和本地相关性选择历史上下文，
+能优先保留最近 3 个 Turn，并从更早历史选择最多 3 个相关 Turn，
 能通过分层 Gateway / Agent 日志和 workspace `trace.log` 观察 turn、LLM、tool 和 session 保存轨迹，
 能通过本地 SQLite 用户、角色、特权和可撤销 cookie 登录态保护 Web API / WebSocket，
 能按内部 user_id 隔离用户上下文、session index 和 session 模型偏好，
@@ -280,6 +283,9 @@ contexts/sessions/chat-YYYYMMDD.jsonl
 能让 CLI 与 Owner 共用 workspace Memory、普通用户使用私有 Memory，
 能通过 memory_read 按需检索，通过用户对话授权后的 memory_write 修改长期 Memory，
 能用 `/memory` 展示长期 Memory，
+能通过 `delegate_tasks` 运行有界并行 child，并由父 Agent fan-in 归纳，
+能用 `/subagent` 管理当前 Session 的 auto/off/once 语义，
+能在 Web 中查看 child task 状态，并通过结构化终端日志、trace 和 health API 诊断可选能力，
 能通过 `zcagent init` 生成运行时文件。
 ```
 
@@ -287,16 +293,15 @@ contexts/sessions/chat-YYYYMMDD.jsonl
 
 ### 3.2 未来扩展方向
 
-Part 10 Memory、Part 11 MCP 和 Part 12 生命周期事件/Hook Runtime 已经完成；后续先完成当前代码尚不存在的能力，再进入分领域优化：
+Part 10 Memory、Part 11 MCP、Part 12 生命周期事件/Hook Runtime 和 Part 13 Subagent 已经完成；后续先完成当前代码尚不存在的能力，再进入分领域优化：
 
-1. Part 13 Subagent：复用同一个 AgentLoop 执行受限子任务并把摘要交回父 Agent。
-2. Part 14 外部渠道：接入 IM / 协作平台，并统一身份、命令、session 和 turn 语义。
-3. Part 15 生产部署与发布：补齐容器、反向代理、Secret 注入、健康检查和发布产物。
-4. Part 16 Agent 运行可靠性与上下文优化。
-5. Part 17 Web、会话与用户治理优化。
-6. Part 18 Skill Runtime、CLI 与本地运维优化：独立承接 SkillExecutor、`skill.*` 与 ProgressSink。
+1. Part 14 外部渠道：接入 IM / 协作平台，并统一身份、命令、session 和 turn 语义。
+2. Part 15 生产部署与发布：补齐容器、反向代理、Secret 注入、健康检查和发布产物。
+3. Part 16 Agent 运行可靠性与上下文优化。
+4. Part 17 Web、会话与用户治理优化。
+5. Part 18 Skill Runtime、CLI 与本地运维优化：独立承接 SkillExecutor、`skill.*` 与 ProgressSink。
 
-Part 13～15 继续补齐新能力；Part 16～18 再优化 Part 1～15 已经形成的运行链路。第十部分当前实现见 `docs_design/zhice-agent-part10-memory-design.md`；Part 11 当前实现见 `docs_design/zhice-agent-part11-mcp-design.md`，本次边界取舍见 `docs_design/2026-07-17-mcp-tool-runtime-boundary-design.md`；Part 12 当前实现见 `docs_design/zhice-agent-part12-hooks-design.md` 和 `docs_design/2026-07-20-hook-runtime-boundary-design.md`；排序背景见 `docs_design/2026-07-06-next-stage-sequencing-design.md`。
+Part 14～15 继续补齐新能力；Part 16～18 再优化 Part 1～15 已经形成的运行链路。第十部分当前实现见 `docs_design/zhice-agent-part10-memory-design.md`；Part 11 当前实现见 `docs_design/zhice-agent-part11-mcp-design.md`；Part 12 当前实现见 `docs_design/zhice-agent-part12-hooks-design.md`；Part 13 当前实现见 `docs_design/zhice-agent-part13-subagent-design.md`，边界取舍见 `docs_design/2026-07-21-subagent-runtime-boundary-design.md`。
 
 ### 3.3 推荐目录结构
 
@@ -308,11 +313,18 @@ zhice_agent/
 +-- config/
 |   +-- llm_endpoints.example.json
 |   +-- skill_sources.example.yml
+|   +-- subagents.example.yml
 +-- prompts/
 |   +-- identity.md
 |   +-- tool_use_policy.md
 |   +-- skills_intro.md
-|   +-- summarize_session.md
+|   +-- diagnostics.md
+|   +-- exec.md
+|   +-- memory_policy.md
+|   +-- memory_extraction.md
+|   +-- subagent.md
+|   +-- subagent_orchestration.md
+|   +-- subagent_once.md
 +-- agent/
 |   +-- __init__.py
 |   +-- cli.py
@@ -338,6 +350,9 @@ zhice_agent/
 |   |   +-- tool.py
 |   |   +-- skill.py
 |   |   +-- session.py
+|   |   +-- runtime_event.py
+|   |   +-- capability.py
+|   |   +-- subagent.py
 |   +-- llm/
 |   |   +-- openai_provider.py
 |   |   +-- litellm_provider.py
@@ -362,13 +377,26 @@ zhice_agent/
 |   |   +-- shell_policy.py
 |   |   +-- scoped.py
 |   |   +-- diagnostics.py
+|   |   +-- discovery.py
+|   |   +-- filtered.py
+|   |   +-- subagent.py
 |   +-- skills/
 |   |   +-- loader.py
 |   |   +-- markdown.py
 |   |   +-- sync.py
 |   +-- session/
-|       +-- jsonl_store.py
-|       +-- model_preferences.py
+|   |   +-- jsonl_store.py
+|   |   +-- model_preferences.py
+|   |   +-- subagent_preferences.py
+|   |   +-- sidecar_lock.py
+|   +-- subagents/
+|       +-- config.py
+|       +-- context.py
+|       +-- coordinator.py
+|       +-- factory.py
+|       +-- runtime.py
+|       +-- startup.py
+|       +-- workspace.py
 +-- skill_repo/
 |   +-- skills/
 |       +-- README.md
@@ -447,9 +475,9 @@ hello
 ```text
 1. CLI 收到用户输入
 2. AgentLoop 加载 session 历史
-3. ContextBuilder 构造 system prompt + history + 当前用户消息
-4. LLMProvider 调用模型一次
-5. 如果 LLM 返回 tool_calls，AgentLoop 串行执行工具并把 tool 消息回填
+3. ContextBuilder 构造 system prompt + 混合 Turn history + 当前用户消息，并先应用 60 message 与 endpoint token 预算
+4. LLMProvider 首次只看到 `discover_tools`；需要真实能力时先发现并激活最小 Tool 集合
+5. AgentLoop 每次模型调用前重读动态 schema，把 schema 纳入 ContextBudget 并重新裁剪 messages；如果 LLM 返回 tool_calls，串行执行工具并把 tool 消息回填
 6. 重复调用 LLM，直到得到无工具调用的最终 assistant 回复，或达到工具轮数上限
 7. 保存 user / assistant(tool_calls) / tool / assistant(final) 等本轮消息
 8. 如果 LLM 或保存失败，也把错误作为 assistant 消息保留
@@ -470,23 +498,26 @@ flowchart TD
     G --> H["ensure runtime dirs"]
     H --> I["PromptLoader + JsonlSessionStore + ContextBuilder"]
     I --> J["load_llm_endpoints + EndpointFailoverProvider"]
-    J --> T["create_default_tool_registry"]
-    T --> K["AgentLoop.run_turn(session_id, text)"]
+    J --> T["actor/Profile filtered ToolProvider"]
+    T --> U["Turn-scoped DiscoverableToolProvider"]
+    U --> K["AgentLoop.run_turn(session_id, text)"]
     K --> L{"assistant has tool_calls?"}
-    L -->|"yes"| N["ToolRegistry.execute"]
+    L -->|"discover"| V["activate matched Tool schemas"]
+    V --> K
+    L -->|"business tool"| N["guarded ToolProvider.execute"]
     N --> O["append tool result to messages"]
     O --> K
     L -->|"no"| P["append session messages"]
     P --> M["print assistant text or error message"]
 ```
 
-当前实现已经包含工具调用、多轮 tool loop、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、受控 Memory、MCP Tool、显式 session 摘要、FastAPI gateway、WebSocket 主聊天通道、静态 Web UI、RuntimeEvent 和受限 pre/post Tool Hook Runtime；Subagent 仍是后续实现。
+当前实现已经包含工具调用、多轮 tool loop、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、受控 Memory、MCP Tool、FastAPI gateway、WebSocket 主聊天通道、静态 Web UI、RuntimeEvent、受限 pre/post Tool Hook Runtime，以及有界并行 Subagent、独立 child Session/Event scope、Profile 能力交集和 workspace lease。
 
 ---
 
 ## 5. 数据结构设计
 
-下面第 5 节开始同时包含当前代码结构和长期路线图。当前已实现 CLI、配置、Prompt、Session、无工具聊天、工具调用、安全 exec、LiteLLM、endpoint failover、`/model`、FastAPI gateway、REST/SSE 兼容接口、WebSocket 主聊天通道、静态 Web UI、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、Memory、MCP、显式 session 摘要、RuntimeEvent 和受限 Tool Hook Runtime；Subagent 仍待设计与实现。
+下面第 5 节开始同时包含当前代码结构和长期路线图。当前已实现 CLI、配置、Prompt、Session、无工具聊天、工具调用、安全 exec、LiteLLM、endpoint failover、`/model`、FastAPI gateway、REST/SSE 兼容接口、WebSocket 主聊天通道、静态 Web UI、Skill source 同步、SkillLoader、`load_skills`、`sync_skills`、Memory、MCP、RuntimeEvent、受限 Tool Hook Runtime 和 Part 13 Subagent。
 
 ### 5.1 Message
 
@@ -549,6 +580,8 @@ class Tool(Protocol):
 
 - `name`、`description`、`parameters` 是 function calling 风格模型需要理解的核心信息。
 - `ToolRegistry.definitions()` 返回 `list[dict[str, Any]]`，也就是 OpenAI-compatible schema。
+- LLM-facing Provider 由 Turn-scoped `DiscoverableToolProvider` 包装：首次 definitions 只有 `discover_tools`，发现后才动态增加已激活业务 schema。
+- Catalog 在 actor/Profile 过滤之后生成，未激活 Tool dispatch 返回 `TOOL_NOT_ACTIVATED`。
 - 如果后续要支持更多模型供应商差异，再把中性 `ToolDefinition` 抽出来，让 provider adapter 负责格式转换。
 - `exclusive`、`category`、`read_only` 等元信息用于后续并发、确认流或 Skill 分类，当前代码暂不引入。
 
@@ -615,8 +648,9 @@ class LLMResponse:
 LLMProvider 内部负责把工具 schema 传给目标模型需要的请求格式：
 
 ```text
-ToolRegistry.definitions()
-  -> OpenAI-compatible tools
+actor/Profile-filtered ToolProvider
+  -> DiscoverableToolProvider
+  -> discover_tools + activated OpenAI-compatible schemas
   -> LiteLLM tools
   -> 其他供应商的工具调用格式
 ```
@@ -806,6 +840,7 @@ class AgentLoop:
         new_messages = [user_msg]
         final_text = ""
 
+        # 每次调用前重新读取，允许 discovery 在当前 Turn 动态激活 schema
         tool_definitions = self.tools.definitions() if self.tools else None
 
         for _ in range(self.max_tool_iterations):
@@ -922,16 +957,14 @@ session_id={session_id}
 
 第一版不要做复杂压缩。
 
-简单策略：
+当前策略：
 
-- 保留最近 30 条消息。
-- 如果工具结果太长，截断到固定长度。
+- 最近 50 个 user Turn 作为候选；最近 3 个直接进入高优先级分区，更早历史本地选择最多 3 个相关 Turn。
+- CLI/Web 共用 `max_history_messages=60` 兜底，并在每次 LLM 调用前应用 endpoint `ContextBudget`。
+- `estimate_llm_tokens()` 统计 messages 和实际 Tool schemas；超限时先删除最旧历史 Turn，再截断 tool result，必要时删除当前 Turn 中较早的完整已完成 Tool 块。
+- assistant tool call 与对应 tool result 一起保留或一起删除，不产生孤立 Tool 消息。
 
-后续再做：
-
-- token 估算。
-- 完整的 Context Compaction 与续接 checkpoint。
-- memory recall。
+后续再做完整的 Context Compaction、续接 checkpoint 和更复杂的 Memory recall。
 
 ---
 
@@ -984,6 +1017,14 @@ Skill 摘要只告诉你它大概能做什么。完整 SKILL.md 会告诉你参�
 
 加载 Skill 后，严格按 SKILL.md 的说明执行。
 ```
+
+### 9.4 `prompts/diagnostics.md`
+
+说明何时调用当前 Session 自助诊断、如何按时间分析安全 `trace_events`、如何区分具体异常与包装码，以及证据不足时必须怎样报告限制。该 Prompt 是可选运行策略：存在时由主 ContextBuilder 作为独立 `Diagnostics Policy` 加载，缺失时不阻断聊天；通用 Tool discovery 与调用安全规则继续只放在 `tool_use_policy.md`。
+
+### 9.5 `prompts/exec.md`
+
+说明何时使用 Exec、如何选择最小非交互命令、危险操作与确认边界、shell/路径限制以及如何解释 exit code/stdout/stderr。该 Prompt 只指导模型使用方式，属于可选 `Exec Policy`；真正的 workspace guard、RBAC、确认、Hook、危险命令拦截、timeout 和输出截断始终由运行时代码强制执行。
 
 ---
 
@@ -1282,6 +1323,7 @@ contexts/sessions/
     "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
     "model": "gpt-5.5",
     "supported_models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+    "context_window": 131072,
     "max_tokens": 16384,
     "temperature": 0.7,
     "priority": 1,
@@ -1294,6 +1336,7 @@ contexts/sessions/
     "api_key": "${ANTHROPIC_API_KEY}",
     "model": "claude-opus-4.8",
     "supported_models": ["claude-opus-4.8", "claude-opus-4.6"],
+    "context_window": 200000,
     "max_tokens": 16384,
     "temperature": 0.7,
     "priority": 1,
@@ -1303,7 +1346,7 @@ contexts/sessions/
 }
 ```
 
-`protocol="openai"` 表示 `base_url` 直接指向 OpenAI-compatible 模型网关。`protocol="litellm"` 表示在 ZhiCe-Agent 进程内调用 LiteLLM SDK；`base_url` 对 litellm 是可选字段，只在需要自定义 `api_base` 时填写。
+`protocol="openai"` 表示 `base_url` 直接指向 OpenAI-compatible 模型网关。`protocol="litellm"` 表示在 ZhiCe-Agent 进程内调用 LiteLLM SDK；`base_url` 对 litellm 是可选字段，只在需要自定义 `api_base` 时填写。预算配置只保留两个字段：`context_window` 是总窗口，缺失时默认 `131072`；`max_tokens` 是单次最大输出并直接传给当前 Provider。有效输入预算固定为 `context_window - max_tokens`。
 
 ### 13.2 为什么要包一层 Provider
 
@@ -1316,6 +1359,7 @@ contexts/sessions/
 - 后面可以换 OpenRouter。
 - 后面可以接本地模型。
 - 当前可以做轻量 endpoint failover：启动首选 endpoint 失败后，按 `priority` 尝试其它 enabled endpoint。
+- 当前会为所有 enabled failover 候选计算最小有效输入上限，使同一份 messages/tools 在切换 endpoint 后仍满足输入预算。
 - 当前 `/model` 可以查看和切换本进程内的首选 endpoint。
 - 用户系统实现后，所有入口把 `/model` 选择写入当前 session metadata。`/model reset` 清当前 session 偏好，`/new` 创建使用系统默认的新 session；不增加用户默认模型层。
 
@@ -1362,21 +1406,22 @@ ${ZHICE_AGENT_WORKSPACE}/
 - 不把模型 key 写进代码。
 - 仓库只提交 `config/llm_endpoints.example.json`，不提交真实 `llm_endpoints.json`。
 - 本地运行态 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 统一使用 `api_key` 字段，可写直接本地值，也可写 `${ENV_VAR}` 占位。
-- endpoint 支持 `priority`、`enabled`、`role`、`supported_models`，并支持 keyed object 与 `"endpoints": [...]` 两种配置形态。
+- endpoint 支持可选 `context_window`、输出侧 `max_tokens`、`priority`、`enabled`、`role`、`supported_models`，并支持 keyed object 与 `"endpoints": [...]` 两种配置形态；`context_window` 缺失时默认 `131072`。
 - 顶层 `"default": "endpoint_name"` 或 `"default": {"ref": "endpoint_name"}` 只作为别名，不是必须存在的真实 endpoint。
+- `zcagent init` 完成提示必须区分核心与可选配置：LLM endpoint 是聊天前置条件；预算字段已有默认值；Skill source、MCP、Subagent 和 Hook 只在显式启用时配置。已有非法 endpoint 文件应提示直接编辑，普通 `init` 不会覆盖现有文件。
 
 ---
 
 ## 15. Part 12 当前基线与后续部分设计
 
-本章记录已完成的 Part 12 当前边界和尚未实现的 Part 13～18。Part 10 Memory、Part 11 MCP 和 Part 12 RuntimeEvent/Hook Runtime 已进入当前代码基线，不再作为未来工作重复保留；其当前实现分别见对应 Part 活文档。
+本章记录已完成的 Part 12、Part 13 当前边界和尚未完整实现的 Part 14～18。Part 10 Memory、Part 11 MCP、Part 12 RuntimeEvent/Hook Runtime、Part 13 Subagent，以及原 Part 16 的 Capability Selection 子能力已进入当前代码基线；Part 16 其余可靠性优化仍保留。
 
 ```text
 Part 12 生命周期事件与 Hook Runtime（已完成）
-  -> Part 13 Subagent
+  -> Part 13 Subagent（已完成）
   -> Part 14 外部渠道
   -> Part 15 生产部署与发布
-  -> Part 16 Agent 运行可靠性与上下文优化
+  -> Part 16 Agent 运行可靠性与上下文优化（Capability Selection 已提前完成）
   -> Part 17 Web、会话与用户治理优化
   -> Part 18 Skill Runtime、CLI 与本地运维优化
 ```
@@ -1401,19 +1446,34 @@ Part 12 已按固定 Definition of Done 同批完成前端运行状态和真实 
 
 ### 15.2 Part 13：Subagent
 
-Memory、MCP 和 Hook Runtime 已经落地，Subagent 从当前统一 AgentLoop / RuntimeEvent 基线继续实现。
+Memory、MCP、Hook Runtime 和 Subagent 已经落地。Part 13 当前代码复用统一 AgentLoop / RuntimeEvent 基线实现有界并行 child 编排。
 
 关键原则：
 
 > 子代理也复用同一个 AgentLoop，不要另写一套 Loop。
 
-子代理本质是：
+第一阶段采用有界并行 fan-out/fan-in 和能力 Profile：
 
-- 新开一个 session。
-- 给它一个任务 prompt。
-- 限制工具。
-- 让它跑同一个 AgentLoop。
-- 把结果摘要交回父 Agent。
+- 主 Agent默认直接完成简单任务；只有并行、上下文隔离、专业能力或独立复核收益明确时才调用 Subagent，不增加额外 preflight LLM 请求。
+- 用户主入口统一为 `/subagent`；顶层帮助不展开子命令，裸命令按 `/model` 风格显示状态并在 Tip 中提示 `auto/off/once`。主动触发不改变 Profile 和权限。
+- 父 Agent 通过批量 `delegate_tasks` 一次提交多个互不依赖的子任务，默认最多 3 个 child 并行运行。
+- 父 Turn 等待 batch 内 child 全部进入终态，再获得按输入顺序排列的 completed/partial 结构化结果并统一归纳；这不是跨 Turn 后台 Job。
+- 每个 child 使用同一个 AgentLoop 类的独立实例、call-scoped LLMProvider、内部 Session、CancellationToken 和 RuntimeEvent scope。
+- child 有效 Tool/Skill/MCP 能力是父 Turn 当前可见能力与命名 Profile allow/deny 规则的交集，Profile 不能提升 actor 权限或绕过确认。
+- Skill、`exec` 和 MCP 不再一刀切禁用：explorer 可只读并行，developer 可在独立 worktree 使用 `exec` 和 Skill 脚本，MCP 只按 Profile 显式 server/tool pattern 开放。
+- 并行可写任务必须使用 worktree；无法隔离时进入 shared-exclusive lane，不能共享并行写同一 workspace。
+- child 内部 Tool 继续经过 RBAC、危险确认、Hook、workspace guard、timeout、脱敏、SSRF 和 MCP artifact 边界。
+- 一个 child 失败、超时或取消不丢失其它完成结果；父取消会广播全部 child。
+- 自动委派默认每个父 Turn 最多一个 batch，并使用 fast Profile、child timeout 和 batch deadline 控制额外响应时间。
+- 最大 depth 第一阶段仍为 1，child 不暴露 `delegate_tasks`；跨 Turn 后台 Job、Agent team 和 Part 18 SkillExecutor 不属于本阶段。
+- CLI/Web 启动按启用状态检查能力：未配置的 Skill source、Subagent、MCP 作为正常 disabled；显式配置的可选扩展依赖异常时只禁用对应能力并输出 warning/capability status。后台 Memory extraction 是系统内置能力，内置 Prompt 缺失或非法时局部降级并 warning；workspace、基础 Prompt、LLM、Gateway Auth 等核心依赖仍阻断对应入口。
+- 显式 Hook 配置代表已声明的安全策略，非法时继续 fail closed 并阻断启动，不作为普通可选插件静默跳过。
+- Web `/api/health` 只暴露通用 capability 状态供自动化检查，聊天前端不常驻展示启动告警；Gateway 将可选能力异常统一写入结构化终端 WARNING 和 trace。CLI、本地操作者、Owner 和具备 `audit.read` 的管理员可查看精确 cause；普通 Web 用户的 `/subagent`、force-once、unavailable Tool 和自助诊断只返回暂时不可用并联系管理员，不创建伪 child，也不暴露内部文件名、命令、路径或 cause code。
+- child terminal trace 保留 root/parent/batch/task/subagent、Profile、workspace mode、stage/code、error type 和脱敏截断的 error message；当前 Session 自助诊断可从父 `delegate_tasks` Turn 下钻，并把按时间排序的安全 `trace_events` 直接交给模型分析，而不是只依赖规则生成结论。
+- 历史 trace 若只剩父 `SUBAGENT_FAILED`，或没有 child terminal/error message，不能事后恢复真实根因；诊断会明确证据缺口，模型不得把包装码或 probable cause 当成确认结论。
+- Part 13 复用现有 workspace-shared MCP Runtime 和 server 状态，没有新增 Profile 可配置的 per-server semaphore；连接并发硬化继续属于 MCP Runtime 后续优化。
+
+当前实现依据：`docs_design/zhice-agent-part13-subagent-design.md`；边界取舍记录：`docs_design/2026-07-21-subagent-runtime-boundary-design.md`；启动分级与诊断闭环记录：`docs_design/2026-07-21-startup-capability-and-subagent-diagnostics-design.md`；按身份展示内部错误详情的边界见 `docs_design/2026-07-22-role-aware-capability-error-presentation-design.md`。
 
 ### 15.3 Part 14：外部渠道
 
@@ -1451,12 +1511,12 @@ Part 16 优化模型调用、工具运行、能力披露和 turn 控制，不引
 - trace 记录 endpoint 尝试、重试、跳过原因和最终实际模型，不记录 secret 或完整请求。
 - 扩展当前自助诊断引擎，增加全系统事故聚合、LLM/Tool/Session 完整耗时分解和 Provider retry/failover 诊断。
 - 继续收敛 Runtime Activity、trace 和 Security Audit 的事件边界，普通运行流水不回流安全审计账本。
-- 在 actor 权限过滤后增加 Capability Selection，根据当前请求和最近相关 turn 只披露本轮需要的 Tool/Skill，不把意图判断硬编码进 AgentLoop。
+- Capability Selection 已于 2026-07-21 提前完成：actor/Profile 过滤后由 `discover_tools` 按需激活 Tool schema，AgentLoop 只负责每次 LLM 调用前重读 definitions，不硬编码意图判断。
 - 为连续翻译、明确执行、模糊请求、权限拒绝和 Skill 相关性建立 Fake LLM 回归用例。
 - CLI `/stop` 复用 active turn registry 和 cancellation token，并增加 CLI/Web 共用的 stopped/error turn 查询。
 - 增强 MCP Runtime：处理 `tools/list_changed`、原子刷新 catalog、连接重建和活动调用 cancellation。
 - 增强 MCP artifact 的预览、版本、保留策略和大文件流式导入。
-- 评估 MCP Prompts/Resources 与 ContextBuilder、Capability Selection 的统一装配边界。
+- 评估 MCP Prompts/Resources 与 ContextBuilder、已落地 Capability Selection 的统一装配边界。
 
 ### 15.6 Part 17：Web、会话与用户治理优化
 
@@ -1509,7 +1569,7 @@ tests/unit_test/agent_loop/test_agent_loop_tools.py
 当前 LLM 错误相关单元测试至少要覆盖：
 
 - 缺少 `api_key` 和缺少 `${ENV_VAR}` 时返回明确配置提示。
-- CLI 启动时缺少或未正确填写 `llm_endpoints.json` 会阻断聊天入口，而缺少 `skill_sources.yml` 只提示 Skill 同步跳过。
+- CLI 启动时缺少或未正确填写 `llm_endpoints.json` 会阻断聊天入口，而缺少 `skill_sources.yml` 表示 Skill source 未启用，静默跳过同步。
 - AgentLoop 遇到 provider 错误时保存 `user -> assistant(error)`，如果错误发生在工具调用之后，也保留之前的 `assistant(tool_calls)` 和 `tool` 消息。
 
 后续 Provider 错误分类阶段再覆盖：
@@ -1676,6 +1736,7 @@ create_llm_provider_chain
 
 - `/model` 已按当前 session 持久化到 `sessions_meta/{session_id}.json`；CLI、Web、REST、SSE 和 WebSocket 每个 turn 都使用 call-scoped provider，不修改共享 provider 的进程级偏好。
 - failover 只在 endpoint 级别顺序尝试，不做同 endpoint 重试、错误分类、circuit breaker 或 cooldown。
+- call-scoped selection 同时携带所有 enabled endpoint 的 failover-safe `ContextBudget`；输入上限由每个 endpoint 的 `context_window - max_tokens` 推导并取最小值。
 - `supported_models` 只做轻量白名单与 glob 校验。
 
 ### Milestone 5：Skill 加载（已实现）
@@ -1738,7 +1799,7 @@ REST/SSE 兼容接口
 
 - 把一次用户请求定义为可持久化、可查询、可用于上下文裁剪的 turn。
 - Web accepted / done / stopped、AgentLoop 消息保存和历史恢复使用同一个 `turn_id`。
-- `ContextBuilder` 支持按最近 N 个 user turn 裁剪历史。
+- `ContextBuilder` 支持最近 3 个 Turn 与旧相关最多 3 个的混合选择，并受 60 message 与 endpoint token budget 双重约束。
 
 交付：
 
@@ -1747,10 +1808,10 @@ Message turn 字段
 JsonlSessionStore turn 读写
 AgentLoop.run_turn(turn_id=...)
 WebSocket turn_id 一致性
-ContextBuilder recent user turns + local relevance selection
+ContextBuilder recent 3 + older relevant 3 + endpoint ContextBudget
 ```
 
-设计依据：`docs_design/zhice-agent-part7-turn-context-design.md`。背景和后续扩展参考：`docs_design/2026-07-04-turn-runtime-and-context-design.md`、`docs_design/2026-07-06-context-relevance-selection-design.md`。
+设计依据：`docs_design/zhice-agent-part7-turn-context-design.md`。背景和后续扩展参考：`docs_design/2026-07-04-turn-runtime-and-context-design.md`、`docs_design/2026-07-06-context-relevance-selection-design.md`；当前 endpoint 预算与混合选择见 `docs_design/2026-07-22-endpoint-context-budget-and-hybrid-turn-selection-design.md`。
 
 ### Milestone 8：Gateway / Agent 运行日志优化（已落地）
 
@@ -1805,10 +1866,10 @@ session 模型偏好与 turn-local LLM 选择
 独立 Runtime Activity 索引与 Security Audit 账本
 ```
 
-### Milestone 12 当前基线与 13～18 后续部分
+### Milestone 13 当前基线与 14～18 后续部分
 
 - Part 12 生命周期事件与 Hook Runtime：已完成 RuntimeEvent、现有 WS/SSE/CLI、前端运行状态和真实受限 pre/post Tool Hook Runtime，DoD 已满足并关闭。
-- Part 13 Subagent：复用同一个 AgentLoop 创建受限子任务 Agent。
+- Part 13 Subagent：已完成有界并行 child 编排、独立 Session/Event scope、Profile 能力交集、workspace 隔离和 `/subagent` Session 语义，DoD 已满足并进入当前基线。
 - Part 14 外部渠道：接入真实 IM / 协作平台适配器。
 - Part 15 生产部署与发布：容器、反向代理、Secret 注入、健康检查和发布产物。
 - Part 16 Agent 运行可靠性与上下文优化。
@@ -2068,19 +2129,19 @@ Part 11 MCP 已实现并进入当前基线：支持 stdio、Streamable HTTP、SS
 能用 turn 串起 WebSocket、AgentLoop、Session 历史和上下文选择。
 ```
 
-当前代码已经完成 Part 10 Memory、Part 11 MCP 和 Part 12 生命周期事件/Hook Runtime。后续按剩余核心 Part 的依赖顺序逐步增加：
+当前代码已经完成 Part 10 Memory、Part 11 MCP、Part 12 生命周期事件/Hook Runtime、Part 13 Subagent，并提前完成 Part 16 的 Capability Selection。后续按剩余核心 Part 的依赖顺序逐步增加：
 
 ```text
 Part 12 生命周期事件与 Hook Runtime（已完成并关闭）
-Part 13 Subagent
+Part 13 Subagent（已完成并关闭）
 Part 14 外部渠道
 Part 15 生产部署与发布
-Part 16 Agent 运行可靠性与上下文优化
+Part 16 Agent 运行可靠性与上下文优化（Capability Selection 已完成，其余待实现）
 Part 17 Web、会话与用户治理优化
 Part 18 Skill Runtime、CLI 与本地运维优化
 ```
 
-新功能完成后再进入优化阶段，避免优化中的协议调整反复打断 Hooks、Subagent 和渠道接入主线。
+除已因真实缺陷提前完成的 Capability Selection 外，Part 16 其余优化仍在 Part 14、15 之后实施，避免协议调整反复打断渠道接入与部署主线。
 
 这样做的好处是：
 

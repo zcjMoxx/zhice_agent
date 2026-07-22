@@ -11,6 +11,7 @@ def test_tool_policy_maps_permissions_and_exec_risk():
     context = _context(developer)
 
     assert policy.decide("read_file", {"path": "notes.txt"}, context).action == "allow"
+    assert policy.decide("discover_tools", {"query": "read files"}, context).action == "allow"
     assert policy.decide("load_skills", {"name": "demo"}, context).action == "allow"
     assert policy.decide("sync_skills", {}, context).action == "deny"
     safe = policy.decide("exec", {"command": "python -m pytest"}, context)

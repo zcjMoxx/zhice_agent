@@ -37,6 +37,13 @@ class ToolExecutionContext:
     tool_name: str = ""
     tool_call_id: str = ""
     tool_call_record_id: str = ""
+    tool_started_event_id: str = ""
+    root_session_id: str = ""
+    root_turn_id: str = ""
+    parent_session_id: str = ""
+    parent_turn_id: str = ""
+    subagent_id: str = ""
+    task_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -99,6 +106,17 @@ class Tool(Protocol):
         """Execute the tool with decoded JSON object arguments."""
 
 
+class ContextualTool(Tool, Protocol):
+    """Optional Tool extension for dispatch that needs trusted turn context."""
+
+    def execute_with_context(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        """Execute with actor/session/turn context supplied by the runtime."""
+
+
 class ToolProvider(Protocol):
     """Registry contract consumed by AgentLoop."""
 
@@ -107,3 +125,15 @@ class ToolProvider(Protocol):
 
     def execute(self, name: str, args: dict[str, Any]) -> ToolResult:
         """Execute one registered tool by name."""
+
+
+class ContextualToolProvider(ToolProvider, Protocol):
+    """Optional provider extension for trusted per-call execution context."""
+
+    def execute_with_context(
+        self,
+        name: str,
+        args: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        """Execute a registered tool with trusted runtime context."""

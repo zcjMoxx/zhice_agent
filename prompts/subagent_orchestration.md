@@ -1,0 +1,5 @@
+Subagent delegation is optional. Complete simple questions, one-file reads, one-function lookups, and one explicit command directly. Do not create a child merely to imitate a multi-agent workflow.
+
+Use `delegate_tasks` only when it has a concrete benefit: at least two independent branches can run in parallel, a large temporary context should be isolated, a configured specialist capability is needed, an independent verification is useful, or the user explicitly requested subagents. When delegation is appropriate, use the required `discover_tools` step to activate `delegate_tasks`; do not add any other model call merely to decide whether to delegate.
+
+Tasks in one batch must be independently executable. Give each task the facts it needs because children do not inherit the full parent conversation. Select only a configured Profile; never ask a child to bypass permissions, confirmation, Hooks, workspace isolation, or tool limits. After fan-in, compare evidence, preserve partial failures, resolve conflicts where possible, and produce the final user-facing answer yourself.

@@ -2,14 +2,14 @@
 
 ## 测试目标
 
-验证 ContextBuilder 能把 prompt、运行环境、相关历史消息和当前用户消息组装成 OpenAI-compatible messages，并在第三部分保留工具调用历史。
+验证 ContextBuilder 能把 prompt、运行环境、混合 Turn 历史和当前用户消息组装成 OpenAI-compatible messages，按 endpoint 输入预算裁剪，并保留完整工具调用块。
 
 ## 用例覆盖
 
 ### Case 1: 构造 system prompt
 
 - 输入：workspace、session_id 和当前 user message。
-- 预期：第一条消息为 system，包含 identity、tool_use_policy、skills_intro 和运行环境。
+- 预期：第一条消息为 system，包含 identity、tool_use_policy、skills_intro 和运行环境；存在 `diagnostics.md` / `exec.md` 时分别追加独立 `Diagnostics Policy` / `Exec Policy`，缺失时不阻断主流程。
 - 检查点：workspace 与 session_id 进入 system prompt；当前 user message 追加到最后。
 
 ### Case 2: 历史消息顺序
@@ -51,11 +51,13 @@
 ## Part 7 Turn Coverage
 
 - Treat `max_history_turns` as the recent user-turn candidate count.
-- Default to 30 recent user-turn candidates and keep at most 5 relevant turns.
+- Default to 50 recent user-turn candidates and keep at most 5 relevant turns.
 - Select only locally relevant candidate turns before injecting history.
 - Omit unrelated prior turns, including greeting-only current inputs.
 - Keep direct follow-ups when the current input references terms from a previous full turn.
 - Keep short confirmations only when the immediately previous assistant message is asking for confirmation.
+- Keep the immediately previous Turn for short Chinese contextual follow-ups such as “为什么没调用，什么原因”, even when bigram overlap alone is below the relevance threshold.
+- Keep the immediately previous Turn for explicit meta-references such as “我刚刚问了什么”“上一轮我问的是什么” and “What did I just ask?”, without making latest-Turn inclusion unconditional.
 - Preserve the old message-count behavior when `max_history_turns=None`.
 - Drop old turns as whole units when the message hard cap is exceeded.
 - Ignore untagged history messages in recent user turn selection.

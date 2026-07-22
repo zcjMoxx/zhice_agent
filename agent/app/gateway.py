@@ -21,6 +21,7 @@ from agent.app.runtime import WebRuntime, build_web_runtime
 from agent.config import AppConfig
 from agent.console import console
 from agent.protocols.auth import AuditEvent
+from agent.protocols.capability import CapabilityStatus
 from agent.protocols.errors import ErrorCode
 
 
@@ -199,7 +200,7 @@ def gateway_status(
     config: AppConfig,
     *,
     runtime: WebRuntime | Any | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Return the status payload exposed by the health endpoint."""
 
     return {
@@ -219,6 +220,10 @@ def gateway_status(
             and runtime.auth.store.has_owner()
             else "false"
         ),
+        "capabilities": {
+            name: _public_capability_status(name, status)
+            for name, status in _capability_statuses(runtime).items()
+        },
     }
 
 
@@ -314,6 +319,62 @@ def _current_model(runtime: WebRuntime | Any | None) -> str:
         return str(runtime.current_model_label())
     except Exception:  # noqa: BLE001 - health should stay stable.
         return "unavailable"
+
+
+def _capability_statuses(runtime: WebRuntime | Any | None) -> dict[str, CapabilityStatus]:
+    """Return generic safe optional-capability statuses without failing health."""
+
+    if runtime is not None:
+        provider = getattr(runtime, "capability_statuses", None)
+        if callable(provider):
+            try:
+                statuses = provider()
+                if isinstance(statuses, dict) and all(
+                    isinstance(name, str) and isinstance(status, CapabilityStatus)
+                    for name, status in statuses.items()
+                ):
+                    return statuses
+            except Exception:  # noqa: BLE001 - health must remain available.
+                pass
+        discovered = {
+            name.removesuffix("_status"): status
+            for name, status in vars(runtime).items()
+            if name.endswith("_status") and isinstance(status, CapabilityStatus)
+        }
+        if discovered:
+            return discovered
+    return {
+        "subagent": CapabilityStatus(
+            name="subagent",
+            state="unavailable",
+            code="SUBAGENT_STATUS_UNAVAILABLE",
+            message="Subagent capability status is unavailable.",
+            hint="Start the Gateway runtime to evaluate optional capabilities.",
+        )
+    }
+
+
+def _public_capability_status(name: str, status: CapabilityStatus) -> dict[str, Any]:
+    """Return public health state without internal configuration or repair details."""
+
+    messages = {
+        "available": f"{name} is available.",
+        "disabled": f"{name} is not enabled.",
+        "degraded": f"{name} is temporarily limited.",
+        "unavailable": f"{name} is temporarily unavailable.",
+    }
+    return {
+        "name": name,
+        "state": status.state,
+        "code": f"{name.upper()}_{status.state.upper()}",
+        "message": messages[status.state],
+        "hint": (
+            "Contact an administrator."
+            if status.state in {"degraded", "unavailable"}
+            else ""
+        ),
+        "details": {},
+    }
 
 
 def _default_static_dir() -> Path:

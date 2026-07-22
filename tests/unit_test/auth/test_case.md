@@ -21,7 +21,9 @@
 - 所有角色的日常 session 列表只返回自己；`session.manage.any` 只用于显式管理动作。
 - Owner 是 CLI 本地操作者的 Web 身份：Web session 复用 CLI `contexts/sessions*`，工具文件根目录直接使用 workspace，解析时不创建 `contexts/users/{owner_id}`；普通用户继续使用独立用户目录。
 - `ensure_session` 只在首次创建时返回 `created=True`，本人创建和写入由认证身份与 ownership 直接允许。
-- `diagnose_my_recent_activity` 自动使用当前 Session，排除当前诊断 Turn，并从上一条 Turn、最近失败或近期趋势生成结构化诊断；Owner 普通聊天也不扩大到全系统。
+- `diagnose_my_recent_activity` 自动使用当前 Session，排除当前诊断 Turn，并从上一条 Turn、最近失败或近期趋势生成结构化诊断；同时返回按时间排序、字段白名单过滤的 `trace_events` 供模型直接归因，Owner 普通聊天也不扩大到全系统。
+- 普通用户诊断到 Subagent 内部失败时只返回暂时不可用并联系管理员，隐藏 cause/evidence/修复命令；Owner 和具备内部审计权限的管理员保留完整证据。
+- 父 `delegate_tasks` Turn 可沿同 actor 的 `root_session_id/root_turn_id` 下钻 child terminal trace，优先报告 child failure code/stage 和脱敏 `error_message`；安全证据只暴露白名单字段，不能跨 actor。缺少 child 终因的通用 `SUBAGENT_FAILED` 最多为中等置信度。
 - Runtime Activity 独立维护 `turn_runs` / `tool_call_records`，不会写入 `audit_events`；AuditSink 也不再隐式更新运行索引。
 - `turn_runs` 直接使用 `turn_id` 主键，不存在额外 `turn-run-*` id，也不保留旧表兼容结构。
 - safe exec、network/install、confirmable destructive、env dump 和 workspace 外破坏命令。

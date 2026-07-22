@@ -16,6 +16,7 @@ _SPLIT_ANCHOR_RE = re.compile(r"[./:\\-]+")
 _DEFAULT_MIN_SCORE = 0.24
 _RECENCY_BONUS = 0.04
 _CONFIRMATION_BONUS = 0.55
+_FOLLOWUP_BONUS = 0.55
 _MAX_TURN_TEXT_CHARS = 20000
 
 _SHORT_CONFIRMATIONS = {
@@ -46,6 +47,36 @@ _CONFIRMATION_PROMPT_MARKERS = (
     "你希望",
     "要我",
     "继续",
+)
+
+_CONTEXTUAL_FOLLOWUP_MARKERS = (
+    "为什么没",
+    "为什么没有",
+    "为什么不",
+    "什么原因",
+    "怎么回事",
+    "刚才",
+    "刚刚",
+    "我刚才问",
+    "我刚刚问",
+    "你刚刚说",
+    "刚刚问",
+    "刚刚说",
+    "上一条",
+    "上一轮",
+    "上轮",
+    "前一条",
+    "前一轮",
+    "上一个",
+    "没调用",
+    "没有调用",
+    "这个呢",
+    "那个呢",
+    "whatdidijustask",
+    "whatwasmylastquestion",
+    "whatdidyoujustsay",
+    "previousmessage",
+    "lastquestion",
 )
 
 
@@ -85,6 +116,8 @@ def select_relevant_turns(
             score += _RECENCY_BONUS * ((index + 1) / len(turns))
         if index == latest_index and _is_short_confirmation(query) and _latest_assistant_invites_reply(turn):
             score += _CONFIRMATION_BONUS
+        if index == latest_index and _is_contextual_followup(query):
+            score += _FOLLOWUP_BONUS
         if score >= min_score:
             scored.append(_ScoredTurn(index=index, score=score, turn=turn))
 
@@ -202,3 +235,10 @@ def _latest_assistant_invites_reply(turn: TurnGroup) -> bool:
             marker in content for marker in _CONFIRMATION_PROMPT_MARKERS
         )
     return False
+
+
+def _is_contextual_followup(query: str) -> bool:
+    """Identify short Chinese follow-ups whose referent lives in the latest Turn."""
+
+    compact = re.sub(r"[\s,，。.!！?？~～]+", "", query.casefold())
+    return len(compact) <= 32 and any(marker in compact for marker in _CONTEXTUAL_FOLLOWUP_MARKERS)

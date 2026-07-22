@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from agent.message import Message
-from agent.protocols.llm import LLMResponse
+from agent.protocols.llm import ContextBudget, LLMResponse
 from agent.protocols.session import SessionState
 from agent.protocols.tool import ToolResult
+from agent.tools.discovery import DiscoverableToolProvider
 
 
 def test_agent_loop_passes_tool_definitions_to_llm(tmp_path):
@@ -58,6 +59,79 @@ def test_single_tool_call_executes_and_triggers_second_llm_call(tmp_path):
         "assistant",
     ]
     _assert_single_turn(sessions.appended["default"], expected_index=1)
+
+
+def test_tool_loop_reapplies_context_budget_without_orphaning_tool_results(tmp_path):
+    from agent.core.context import estimate_llm_tokens
+
+    first_call = _openai_tool_call("call_1", "read_file", {"path": "one.txt"})
+    second_call = _openai_tool_call("call_2", "read_file", {"path": "two.txt"})
+    llm = ScriptedLLM(
+        [
+            LLMResponse(content="", tool_calls=[first_call]),
+            LLMResponse(content="", tool_calls=[second_call]),
+            LLMResponse(content="done"),
+        ]
+    )
+    tools = FakeTools(
+        results=[
+            ToolResult(output="a" * 6000),
+            ToolResult(output="b" * 6000),
+        ]
+    )
+    loop = _make_loop(tmp_path, llm=llm, tools=tools)
+    budget = ContextBudget(input_token_limit=700)
+
+    result = loop.run_turn("default", "inspect both files", context_budget=budget)
+
+    assert result == "done"
+    assert len(llm.calls) == 3
+    for call in llm.calls:
+        assert estimate_llm_tokens(call["messages"], tool_definitions=call["tools"]) <= 700
+        assistant_ids = {
+            tool_call["id"]
+            for message in call["messages"]
+            for tool_call in message.get("tool_calls") or []
+        }
+        assert all(
+            message.get("tool_call_id") in assistant_ids
+            for message in call["messages"]
+            if message.get("role") == "tool"
+        )
+    assert any(
+        "[truncated for context budget]" in str(message.get("content") or "")
+        for message in llm.calls[-1]["messages"]
+        if message.get("role") == "tool"
+    )
+
+
+def test_agent_loop_refreshes_dynamic_tool_definitions_after_discovery(tmp_path):
+    discover_call = _openai_tool_call(
+        "call_discover",
+        "discover_tools",
+        {"query": "read file", "max_results": 1},
+    )
+    read_call = _openai_tool_call("call_read", "read_file", {"path": "README.md"})
+    llm = ScriptedLLM(
+        [
+            LLMResponse(content="", tool_calls=[discover_call]),
+            LLMResponse(content="", tool_calls=[read_call]),
+            LLMResponse(content="done"),
+        ]
+    )
+    base = FakeTools(results=[ToolResult(output="README body")])
+    tools = DiscoverableToolProvider(base)
+    loop = _make_loop(tmp_path, llm=llm, tools=tools)
+
+    result = loop.run_turn("default", "read README")
+
+    assert result == "done"
+    assert [_tool_names(call["tools"]) for call in llm.calls] == [
+        ["discover_tools"],
+        ["discover_tools", "read_file"],
+        ["discover_tools", "read_file"],
+    ]
+    assert base.calls == [("read_file", {"path": "README.md"})]
 
 
 def test_tool_call_logs_lifecycle_with_safe_output_preview(tmp_path, caplog):
@@ -309,8 +383,20 @@ class FakeContextBuilder:
         user_message: Message,
         workspace: Path,
         session_id: str,
+        context_budget=None,
     ) -> list[dict[str, Any]]:
+        del history, workspace, session_id, context_budget
         return [{"role": user_message.role, "content": user_message.content}]
+
+    def fit_messages(self, messages, *, tool_definitions=None, context_budget=None):
+        from agent.core.context import ContextBuilder
+
+        return ContextBuilder.fit_messages(
+            self,
+            messages,
+            tool_definitions=tool_definitions,
+            context_budget=context_budget,
+        )
 
 
 class ScriptedLLM:
@@ -349,4 +435,8 @@ class FakeTools:
         if self.results:
             return self.results.pop(0)
         return ToolResult(output=f"{name}:{args}")
+
+
+def _tool_names(definitions):
+    return [item["function"]["name"] for item in definitions or []]
 

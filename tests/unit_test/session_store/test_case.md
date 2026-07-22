@@ -58,5 +58,6 @@
 ## Part 9 Session Model Preference Coverage
 
 - Session 模型偏好保存在 sidecar metadata，并保留已有 title 等字段。
+- Subagent `auto/off` 与 one-shot 状态保存在同一 sidecar 的独立字段；原子消费 `once` 时只允许一个并发调用成功，reset 只清 one-shot 并保留 mode/title/model 字段。
 - reset 只删除模型偏好字段，不删除消息或标题。
 - 不同 session 的 provider 绑定互不修改共享状态；失效偏好回退系统默认。

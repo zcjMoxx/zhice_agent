@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,9 +12,16 @@ from agent.core.context_relevance import select_relevant_turns
 from agent.core.turns import group_messages_by_turn
 from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
+from agent.protocols.llm import ContextBudget, LLMContextBudgetError
 from agent.protocols.skill import SkillProvider
 
 DEFAULT_CONTEXT_PROMPTS = ["identity", "tool_use_policy", "skills_intro"]
+DEFAULT_ALWAYS_INCLUDE_RECENT_TURNS = 3
+DEFAULT_MAX_RELEVANT_TURNS = 3
+
+_CJK_CHAR_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+_MESSAGE_TOKEN_OVERHEAD = 4
+_TOOL_CONTENT_MIN_CHARS = 128
 
 
 class ContextBuilder:
@@ -21,12 +31,14 @@ class ContextBuilder:
         self,
         prompt_loader: PromptLoader,
         skills: SkillProvider | None = None,
-        max_history_turns: int | None = 30,
-        max_relevant_turns: int = 5,
+        max_history_turns: int | None = 50,
+        max_relevant_turns: int = DEFAULT_MAX_RELEVANT_TURNS,
+        always_include_recent_turns: int = DEFAULT_ALWAYS_INCLUDE_RECENT_TURNS,
         max_history_messages: int = 60,
         max_message_chars: int = 8000,
         max_skill_summaries: int = 50,
         max_skill_summary_chars: int = 5000,
+        extra_system_prompts: tuple[str, ...] = (),
     ):
         """Configure prompt source and history/message size limits."""
 
@@ -34,6 +46,8 @@ class ContextBuilder:
             raise ValueError("max_history_turns must be non-negative or None")
         if max_relevant_turns < 0:
             raise ValueError("max_relevant_turns must be non-negative")
+        if always_include_recent_turns < 0:
+            raise ValueError("always_include_recent_turns must be non-negative")
         if max_history_messages < 0:
             raise ValueError("max_history_messages must be non-negative")
         if max_message_chars <= 0:
@@ -47,10 +61,12 @@ class ContextBuilder:
         self.skills = skills
         self.max_history_turns = max_history_turns
         self.max_relevant_turns = max_relevant_turns
+        self.always_include_recent_turns = always_include_recent_turns
         self.max_history_messages = max_history_messages
         self.max_message_chars = max_message_chars
         self.max_skill_summaries = max_skill_summaries
         self.max_skill_summary_chars = max_skill_summary_chars
+        self.extra_system_prompts = tuple(extra_system_prompts)
 
     def build(
         self,
@@ -58,6 +74,7 @@ class ContextBuilder:
         user_message: Message,
         workspace: Path,
         session_id: str,
+        context_budget: ContextBudget | None = None,
     ) -> list[dict[str, Any]]:
         """Return OpenAI-style messages for one chat turn."""
 
@@ -75,7 +92,42 @@ class ContextBuilder:
         if current_user is None or current_user["role"] != "user":
             raise ValueError("user_message must have role 'user'")
         messages.append(current_user)
-        return messages
+        return self.fit_messages(messages, context_budget=context_budget)
+
+    def fit_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tool_definitions: list[dict[str, Any]] | None = None,
+        context_budget: ContextBudget | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fit LLM input to the configured budget without splitting Turn/tool blocks."""
+
+        fitted = [dict(message) for message in messages]
+        if context_budget is None:
+            return fitted
+        available_tokens = max(
+            1,
+            context_budget.input_token_limit
+            - estimate_llm_tokens([], tool_definitions=tool_definitions),
+        )
+
+        while estimate_llm_tokens(fitted) > available_tokens:
+            turn_ranges = _conversation_turn_ranges(fitted)
+            if len(turn_ranges) <= 1:
+                break
+            start, end = turn_ranges[0]
+            del fitted[start:end]
+
+        fitted = _truncate_tool_results_to_budget(fitted, available_tokens)
+        fitted = _drop_old_completed_tool_blocks(fitted, available_tokens)
+        fitted = _truncate_tool_results_to_budget(fitted, available_tokens)
+        if estimate_llm_tokens(fitted) > available_tokens:
+            raise LLMContextBudgetError(
+                "Required system/current-turn content exceeds the failover-safe "
+                f"input budget ({context_budget.input_token_limit} tokens)."
+            )
+        return fitted
 
     def _select_recent_history(self, history: list[Message], *, query: str) -> list[Message]:
         """Return history selected by recent relevant user turns or message fallback."""
@@ -91,11 +143,19 @@ class ContextBuilder:
             if any(message.role == "user" for message in group.messages)
         ]
         candidate_turns = user_turns[-self.max_history_turns :]
-        selected_turns = select_relevant_turns(
+        recent_count = min(self.always_include_recent_turns, len(candidate_turns))
+        if recent_count:
+            recent_turns = candidate_turns[-recent_count:]
+            relevance_candidates = candidate_turns[:-recent_count]
+        else:
+            recent_turns = []
+            relevance_candidates = candidate_turns
+        relevant_turns = select_relevant_turns(
             query,
-            candidate_turns,
+            relevance_candidates,
             max_selected_turns=self.max_relevant_turns,
         )
+        selected_turns = [*relevant_turns, *recent_turns]
         while len(selected_turns) > 1 and _message_count(selected_turns) > self.max_history_messages:
             selected_turns = selected_turns[1:]
         return [message for group in selected_turns for message in group.messages]
@@ -118,6 +178,25 @@ class ContextBuilder:
             memory_policy = ""
         if memory_policy:
             parts.extend(["# Memory Policy", memory_policy])
+        try:
+            diagnostics_policy = self.prompt_loader.load("diagnostics").strip()
+        except PromptNotFoundError:
+            diagnostics_policy = ""
+        if diagnostics_policy:
+            parts.extend(["# Diagnostics Policy", diagnostics_policy])
+        try:
+            exec_policy = self.prompt_loader.load("exec").strip()
+        except PromptNotFoundError:
+            exec_policy = ""
+        if exec_policy:
+            parts.extend(["# Exec Policy", exec_policy])
+        for prompt_name in self.extra_system_prompts:
+            try:
+                prompt_text = self.prompt_loader.load(prompt_name).strip()
+            except PromptNotFoundError:
+                continue
+            if prompt_text:
+                parts.extend([f"# {prompt_name.replace('_', ' ').title()}", prompt_text])
         skill_summary = self._build_available_skills_prompt()
         if skill_summary:
             parts.extend(["# Available Skills", skill_summary])
@@ -235,3 +314,116 @@ def _message_count(groups) -> int:
     """Return total messages across a small list of TurnGroup-like objects."""
 
     return sum(len(group.messages) for group in groups)
+
+
+def estimate_llm_tokens(
+    messages: list[dict[str, Any]],
+    *,
+    tool_definitions: list[dict[str, Any]] | None = None,
+) -> int:
+    """Return a conservative provider-neutral token estimate for LLM input."""
+
+    total = 0
+    for message in messages:
+        total += _MESSAGE_TOKEN_OVERHEAD
+        total += _estimate_text_tokens(str(message.get("role") or ""))
+        total += _estimate_text_tokens(str(message.get("content") or ""))
+        for field in ("name", "tool_call_id"):
+            if message.get(field):
+                total += _estimate_text_tokens(str(message[field]))
+        if message.get("tool_calls"):
+            total += _estimate_text_tokens(_compact_json(message["tool_calls"]))
+    if tool_definitions:
+        total += _estimate_text_tokens(_compact_json(tool_definitions))
+    return total
+
+
+def _estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    cjk_chars = len(_CJK_CHAR_RE.findall(text))
+    non_cjk_chars = max(0, len(text) - cjk_chars)
+    return cjk_chars + math.ceil(non_cjk_chars / 4)
+
+
+def _compact_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _conversation_turn_ranges(messages: list[dict[str, Any]]) -> list[tuple[int, int]]:
+    starts = [index for index, message in enumerate(messages) if message.get("role") == "user"]
+    return [
+        (start, starts[index + 1] if index + 1 < len(starts) else len(messages))
+        for index, start in enumerate(starts)
+    ]
+
+
+def _drop_old_completed_tool_blocks(
+    messages: list[dict[str, Any]],
+    budget: int,
+) -> list[dict[str, Any]]:
+    fitted = list(messages)
+    while estimate_llm_tokens(fitted) > budget:
+        ranges = _conversation_turn_ranges(fitted)
+        if not ranges:
+            break
+        blocks = _complete_tool_block_ranges(fitted, *ranges[-1])
+        if len(blocks) <= 1:
+            break
+        start, end = blocks[0]
+        del fitted[start:end]
+    return fitted
+
+
+def _complete_tool_block_ranges(
+    messages: list[dict[str, Any]],
+    start: int,
+    end: int,
+) -> list[tuple[int, int]]:
+    blocks: list[tuple[int, int]] = []
+    index = start
+    while index < end:
+        message = messages[index]
+        if message.get("role") != "assistant" or not message.get("tool_calls"):
+            index += 1
+            continue
+        tool_call_ids = {
+            str(call.get("id") or "")
+            for call in message.get("tool_calls") or []
+            if isinstance(call, dict) and call.get("id")
+        }
+        cursor = index + 1
+        seen_ids: set[str] = set()
+        while cursor < end and messages[cursor].get("role") == "tool":
+            tool_call_id = str(messages[cursor].get("tool_call_id") or "")
+            if tool_call_id:
+                seen_ids.add(tool_call_id)
+            cursor += 1
+        if tool_call_ids and tool_call_ids == seen_ids:
+            blocks.append((index, cursor))
+        index = max(cursor, index + 1)
+    return blocks
+
+
+def _truncate_tool_results_to_budget(
+    messages: list[dict[str, Any]],
+    budget: int,
+) -> list[dict[str, Any]]:
+    fitted = [dict(message) for message in messages]
+    while estimate_llm_tokens(fitted) > budget:
+        candidates = [
+            (len(str(message.get("content") or "")), index)
+            for index, message in enumerate(fitted)
+            if message.get("role") == "tool"
+            and len(str(message.get("content") or "")) > _TOOL_CONTENT_MIN_CHARS
+        ]
+        if not candidates:
+            break
+        length, index = max(candidates)
+        content = str(fitted[index].get("content") or "")
+        keep = max(_TOOL_CONTENT_MIN_CHARS, length // 2)
+        fitted[index]["content"] = content[:keep] + "[truncated for context budget]"
+    return fitted

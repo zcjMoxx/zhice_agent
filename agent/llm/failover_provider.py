@@ -8,11 +8,13 @@ from dataclasses import replace
 from typing import Any
 
 from agent.protocols.llm import (
+    ContextBudget,
     LLMConfigurationError,
     LLMEndpoint,
     LLMProvider,
     LLMProviderError,
     LLMResponse,
+    effective_input_token_limit,
 )
 
 ProviderFactory = Callable[[LLMEndpoint], LLMProvider]
@@ -59,6 +61,17 @@ class EndpointFailoverProvider:
         """Return enabled endpoints in original configuration order."""
 
         return list(self._endpoints)
+
+    @property
+    def context_budget(self) -> ContextBudget:
+        """Return the input budget safe for every enabled failover endpoint."""
+
+        return ContextBudget(
+            input_token_limit=min(
+                effective_input_token_limit(endpoint) for endpoint in self._endpoints
+            ),
+            endpoint_names=tuple(endpoint.name for endpoint in self._endpoints),
+        )
 
     def current_endpoint(self) -> LLMEndpoint:
         """Return the effective endpoint that will be tried first."""
@@ -139,6 +152,7 @@ class EndpointFailoverProvider:
             metadata["endpoint_name"] = endpoint.name
             metadata["model"] = endpoint.model
             metadata["attempted_endpoints"] = attempted_names
+            metadata["input_token_limit"] = self.context_budget.input_token_limit
             return LLMResponse(
                 content=response.content,
                 tool_calls=list(response.tool_calls),

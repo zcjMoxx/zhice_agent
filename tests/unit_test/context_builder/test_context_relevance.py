@@ -84,6 +84,74 @@ def test_relevance_allows_short_confirmation_after_assistant_question():
     assert select_relevant_turns("好的", [turn]) == [turn]
 
 
+def test_relevance_keeps_latest_turn_for_chinese_reason_follow_up():
+    """A short reason question must retain the immediately preceding action context."""
+
+    from agent.core.context_relevance import select_relevant_turns
+
+    turn = _turn(
+        "turn-subagent",
+        3,
+        [
+            Message(role="user", content="你调用子代理了吗"),
+            Message(role="assistant", content="没有，这轮实际调用的是 exec。"),
+        ],
+    )
+
+    assert select_relevant_turns("为什么没调用，什么原因", [turn]) == [turn]
+
+
+def test_relevance_keeps_latest_turn_for_just_asked_reference():
+    """A meta-question about what was just asked must retain the latest Turn."""
+
+    from agent.core.context_relevance import select_relevant_turns
+
+    turn = _turn(
+        "turn-socrates",
+        6,
+        [
+            Message(role="user", content="苏格拉底是谁"),
+            Message(role="assistant", content="苏格拉底是古希腊哲学家。"),
+        ],
+    )
+
+    assert select_relevant_turns("我刚刚问了什么", [turn]) == [turn]
+
+
+def test_relevance_keeps_latest_turn_for_previous_round_reference():
+    """Common previous-round wording should resolve to the immediately preceding Turn."""
+
+    from agent.core.context_relevance import select_relevant_turns
+
+    turn = _turn(
+        "turn-python",
+        2,
+        [
+            Message(role="user", content="什么是 Python 装饰器"),
+            Message(role="assistant", content="装饰器用于包装函数行为。"),
+        ],
+    )
+
+    assert select_relevant_turns("上一轮我问的是什么", [turn]) == [turn]
+
+
+def test_relevance_keeps_latest_turn_for_english_immediate_reference():
+    """English immediate-reference questions should retain the latest Turn too."""
+
+    from agent.core.context_relevance import select_relevant_turns
+
+    turn = _turn(
+        "turn-api",
+        2,
+        [
+            Message(role="user", content="Explain the health API"),
+            Message(role="assistant", content="It reports runtime health."),
+        ],
+    )
+
+    assert select_relevant_turns("What did I just ask?", [turn]) == [turn]
+
+
 def test_relevance_preserves_chronological_order_after_scoring():
     """Selected turns should be returned in their original order for context replay."""
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from agent.app.runtime import (
@@ -8,16 +9,86 @@ from agent.app.runtime import (
     EXTERNAL_COMMAND_PROFILE,
     WEB_COMMAND_PROFILE,
     WebRuntime,
+    _create_skill_loader,
+    _sync_startup_skills,
 )
 from agent.config import AppConfig
 from agent.message import Message
 from agent.prompt_loader import PromptLoader
+from agent.protocols.auth import ActorContext
+from agent.protocols.capability import CapabilityStatus
 from agent.protocols.llm import LLMResponse
 from agent.protocols.session import SessionState, SessionSummary
+from agent.session import JsonSessionSubagentPreferenceStore
+from agent.skills import SkillSourceSync
+
+
+def test_missing_skill_source_config_is_silent_and_disabled(tmp_path, caplog):
+    skill_sync = SkillSourceSync(
+        workspace=tmp_path,
+        config_dir=tmp_path / "config",
+        extends_dir=tmp_path / "extends",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="zcagent.agent.skills"):
+        startup_error = _sync_startup_skills(skill_sync)
+        _create_skill_loader(skill_sync, startup_error=startup_error)
+
+    assert not [record for record in caplog.records if record.name == "zcagent.agent.skills"]
+
+
+def test_invalid_skill_source_config_logs_one_structured_gateway_warning(tmp_path, caplog):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "skill_sources.yml").write_text("sync: [", encoding="utf-8")
+    skill_sync = SkillSourceSync(
+        workspace=tmp_path,
+        config_dir=config_dir,
+        extends_dir=tmp_path / "extends",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="zcagent.agent.skills"):
+        startup_error = _sync_startup_skills(skill_sync)
+        _create_skill_loader(skill_sync, startup_error=startup_error)
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "zcagent.agent.skills"
+        and record.getMessage() == "skills.runtime_unavailable"
+    ]
+    assert len(records) == 1
+    assert records[0].fields["code"] == "SKILL_SOURCE_CONFIG_INVALID"
+    assert records[0].fields["config_file"] == "skill_sources.yml"
+    assert str(tmp_path) not in str(records[0].fields)
 
 
 def test_web_context_history_message_guard_matches_context_builder_default():
     assert DEFAULT_WEB_HISTORY_MESSAGES == 60
+
+
+def test_web_runtime_capability_statuses_are_generic(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.subagent_status = CapabilityStatus(
+        name="subagent",
+        state="disabled",
+        code="SUBAGENT_DISABLED",
+    )
+
+    statuses = runtime.capability_statuses()
+
+    assert statuses["subagent"].code == "SUBAGENT_DISABLED"
+    assert statuses["mcp"].code == "MCP_DISABLED"
+
+    runtime.memory_extraction_status = CapabilityStatus(
+        name="memory_extraction",
+        state="unavailable",
+        code="MEMORY_EXTRACTION_PROMPT_NOT_FOUND",
+    )
+    assert (
+        runtime.capability_statuses()["memory_extraction"].code
+        == "MEMORY_EXTRACTION_PROMPT_NOT_FOUND"
+    )
 
 
 def test_web_profile_rejects_history_command(tmp_path):
@@ -69,6 +140,8 @@ def test_web_help_hides_external_only_commands(tmp_path):
     assert "/exit" not in result
     assert "/stop" not in result
     assert "- `/model` - show or switch the preferred model" in result
+    assert "- `/subagent` - show or control Subagent delegation" in result
+    assert "/subagent auto" not in result
     assert "- `/memory` - show current Memory" in result
     assert "- `/mcp` - show available MCP capabilities" in result
     assert "/memory list" not in result
@@ -141,6 +214,181 @@ def test_sessions_delete_without_id_clears_current_session(tmp_path):
     assert runtime.sessions.deleted_sessions == []
 
 
+def test_subagent_command_uses_session_sidecar_and_compact_tip(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    initial = runtime.handle_command("alpha", "/subagent")
+    disabled = runtime.handle_command("alpha", "/subagent off")
+    once = runtime.handle_command("alpha", "/subagent once")
+
+    assert "Current subagent mode: `auto`" in initial
+    assert "`explorer` - Read and inspect" in initial
+    assert "Tip: use `/subagent auto`" in initial
+    assert "Current subagent mode: `off`" in disabled
+    assert "Force once: `true`" in once
+    assert runtime.consume_subagent_force_once("alpha") is True
+    assert runtime.consume_subagent_force_once("alpha") is False
+
+
+def test_reset_preserves_subagent_mode_and_clears_force_once(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.handle_command("alpha", "/subagent off")
+    runtime.handle_command("alpha", "/subagent once")
+
+    runtime.handle_command("alpha", "/reset")
+
+    preference = runtime.get_subagent_preference("alpha")
+    assert preference.mode == "off"
+    assert preference.force_once is False
+
+
+def test_unavailable_subagent_command_returns_precise_capability_error(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.subagent_status = CapabilityStatus(
+        name="subagent",
+        state="unavailable",
+        code="SUBAGENT_PROMPT_NOT_FOUND",
+        message="Required Subagent runtime prompt is missing: subagent.md",
+        hint="Run zcagent init, then restart the process.",
+    )
+
+    result = runtime.handle_command("alpha", "/subagent once")
+
+    assert result == (
+        "Subagent is currently unavailable: Required Subagent runtime prompt is missing: "
+        "subagent.md Run zcagent init, then restart the process."
+    )
+    assert "cause_code" not in result
+    assert not result.startswith("{")
+    assert runtime.get_subagent_preference("alpha").force_once is False
+
+
+def test_unavailable_subagent_command_hides_details_from_ordinary_user(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.subagent_status = CapabilityStatus(
+        name="subagent",
+        state="unavailable",
+        code="SUBAGENT_PROMPT_NOT_FOUND",
+        message="Required Subagent runtime prompt is missing: subagent.md",
+        hint="Run zcagent init, then restart the process.",
+    )
+    actor = ActorContext(
+        actor_type="user",
+        user_id="user-1",
+        username="member",
+        display_name="Member",
+        role_keys=frozenset({"viewer"}),
+        permission_keys=frozenset(),
+        channel="web",
+    )
+
+    result = runtime.handle_command(actor, "alpha", "/subagent once")
+
+    assert result == "Subagent is temporarily unavailable. Please contact an administrator."
+    assert "subagent.md" not in result
+    assert "zcagent init" not in result
+
+
+def test_unavailable_subagent_command_keeps_details_for_owner(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.subagent_status = CapabilityStatus(
+        name="subagent",
+        state="unavailable",
+        code="SUBAGENT_PROMPT_NOT_FOUND",
+        message="Required Subagent runtime prompt is missing: subagent.md",
+        hint="Run zcagent init, then restart the process.",
+    )
+    actor = ActorContext(
+        actor_type="user",
+        user_id="owner-1",
+        username="owner",
+        display_name="Owner",
+        role_keys=frozenset({"owner"}),
+        permission_keys=frozenset(),
+        channel="web",
+    )
+
+    result = runtime.handle_command(actor, "alpha", "/subagent")
+
+    assert "subagent.md" in result
+    assert "Run zcagent init" in result
+
+
+def test_unavailable_subagent_force_once_hides_details_from_ordinary_user(tmp_path):
+    runtime = _runtime(tmp_path, agent_loop=_RecordingAgentLoop())
+    actor = ActorContext(
+        actor_type="user",
+        user_id="user-1",
+        username="member",
+        display_name="Member",
+        role_keys=frozenset({"viewer"}),
+        permission_keys=frozenset(),
+        channel="web",
+    )
+    runtime.handle_command(actor, "alpha", "/subagent once")
+    runtime.subagent_status = CapabilityStatus(
+        name="subagent",
+        state="unavailable",
+        code="SUBAGENT_CONFIG_INVALID",
+        message="Subagent configuration is invalid.",
+        hint="Fix config/subagents.yml, then restart the process.",
+    )
+
+    result = runtime.run_chat_events(actor, "alpha", "use a child")
+
+    assert result.content == (
+        "Subagent is temporarily unavailable. Please contact an administrator."
+    )
+    assert "subagents.yml" not in result.content
+
+
+def test_force_once_is_consumed_once_when_capability_becomes_unavailable(tmp_path):
+    runtime = _runtime(tmp_path, agent_loop=_RecordingAgentLoop())
+    runtime.handle_command("alpha", "/subagent once")
+    runtime.subagent_status = CapabilityStatus(
+        name="subagent",
+        state="unavailable",
+        code="SUBAGENT_CONFIG_INVALID",
+        message="Subagent configuration is invalid.",
+        hint="Fix config/subagents.yml, then restart the process.",
+    )
+
+    first = runtime.run_chat_events("alpha", "first")
+    second = runtime.run_chat_events("alpha", "second")
+
+    assert first.content == (
+        "Subagent is currently unavailable: Subagent configuration is invalid. "
+        "Fix config/subagents.yml, then restart the process."
+    )
+    assert second.content == "ok"
+
+
+def test_unavailable_subagent_auto_turn_exposes_error_facade_tool(tmp_path):
+    loop = _RecordingAgentLoop()
+    runtime = _runtime(tmp_path, agent_loop=loop)
+    runtime.subagent_status = CapabilityStatus(
+        name="subagent",
+        state="unavailable",
+        code="SUBAGENT_PROMPT_NOT_FOUND",
+        message="Required Subagent runtime prompt is missing: subagent.md",
+        hint="Run zcagent init, then restart the process.",
+    )
+
+    result = runtime.run_chat_events("alpha", "请必须使用子代理")
+
+    assert result.content == "ok"
+    provider = loop.calls[0]["tools_override"]
+    assert [item["function"]["name"] for item in provider.definitions()] == ["discover_tools"]
+    provider.execute(
+        "discover_tools",
+        {"query": "subagent delegation", "names": ["delegate_tasks"]},
+    )
+    assert [item["function"]["name"] for item in provider.definitions()] == [
+        "discover_tools",
+        "delegate_tasks",
+    ]
+
+
 def test_sessions_invalid_subcommand_returns_usage(tmp_path):
     runtime = _runtime(tmp_path)
 
@@ -210,14 +458,16 @@ def test_run_chat_events_passes_external_turn_id_to_agent_loop(tmp_path):
 
     assert result.turn_id == "turn-web"
     assert result.content == "ok"
-    assert agent_loop.calls == [
-        {
-            "session_id": "alpha",
-            "message": "hello",
-            "turn_id": "turn-web",
-            "has_token": True,
-        }
-    ]
+    assert len(agent_loop.calls) == 1
+    assert {
+        key: agent_loop.calls[0][key]
+        for key in ("session_id", "message", "turn_id", "has_token")
+    } == {
+        "session_id": "alpha",
+        "message": "hello",
+        "turn_id": "turn-web",
+        "has_token": True,
+    }
 
 
 def test_run_chat_events_logs_web_runtime_lifecycle(tmp_path, caplog):
@@ -266,6 +516,8 @@ def _runtime(tmp_path: Path, *, agent_loop=None, sessions=None, llm=None) -> Web
         agent_loop=agent_loop or _AgentLoop(),
         llm=llm or _Llm(),
         prompt_loader=PromptLoader(prompts_dir),
+        subagent_preferences=JsonSessionSubagentPreferenceStore(),
+        subagent_profiles=(("explorer", "Read and inspect"),),
     )
 
 
@@ -348,6 +600,7 @@ class _AgentLoop:
 class _RecordingAgentLoop:
     def __init__(self) -> None:
         self.calls = []
+        self.tools = _EmptyToolProvider()
 
     def run_turn(
         self,
@@ -357,6 +610,7 @@ class _RecordingAgentLoop:
         turn_id=None,
         on_event=None,
         cancellation_token=None,
+        tools_override=None,
     ) -> str:
         self.calls.append(
             {
@@ -364,11 +618,20 @@ class _RecordingAgentLoop:
                 "message": message,
                 "turn_id": turn_id,
                 "has_token": cancellation_token is not None,
+                "tools_override": tools_override,
             }
         )
         if on_event is not None:
             on_event({"type": "text_delta", "content": "ok"})
         return "ok"
+
+
+class _EmptyToolProvider:
+    def definitions(self):
+        return []
+
+    def execute(self, name, args):
+        raise AssertionError((name, args))
 
 
 class _RecordingMemoryScheduler:

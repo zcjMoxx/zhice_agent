@@ -83,7 +83,32 @@ def test_runtime_identity_prompt_matches_current_tool_capable_agent():
 def test_runtime_tool_policy_requires_verified_real_state_and_explicit_tool_use():
     policy = PromptLoader(REPOSITORY_PROMPTS_DIR).load("tool_use_policy")
 
-    assert "用户明确要求调用" in policy
+    assert "默认只提供 `discover_tools`" in policy
+    assert "用户明确要求使用某类工具或能力" in policy
     assert "真实系统状态" in policy
     assert "不能根据 `session_id`" in policy
-    assert "未经实际调用" in policy
+    assert "未经发现和实际调用" in policy
+    assert "不要用近似 Tool 冒充指定能力" in policy
+    assert "diagnose_my_recent_activity" not in policy
+    assert "trace_events" not in policy
+    assert "## exec 使用规则" not in policy
+    assert "环境变量整表导出" not in policy
+
+
+def test_runtime_diagnostics_policy_owns_trace_diagnosis_rules():
+    policy = PromptLoader(REPOSITORY_PROMPTS_DIR).load("diagnostics")
+
+    assert "diagnose_my_recent_activity" in policy
+    assert "`trace_events` 时间序列" in policy
+    assert "`SUBAGENT_INTERNAL_ERROR`" in policy
+    assert "不要把 `probable_cause` 当成确认事实" in policy
+
+
+def test_runtime_exec_policy_owns_exec_specific_rules():
+    policy = PromptLoader(REPOSITORY_PROMPTS_DIR).load("exec")
+
+    assert "需要真实运行测试" in policy
+    assert "最小、非交互、单一目的" in policy
+    assert "环境变量整表导出" in policy
+    assert "RBAC、Hook、workspace guard" in policy
+    assert "exit code、stdout 和 stderr" in policy
