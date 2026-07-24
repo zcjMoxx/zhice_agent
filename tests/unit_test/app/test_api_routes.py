@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -13,6 +14,28 @@ from agent.message import Message
 from agent.protocols.llm import LLMConfigurationError, LLMProviderError
 from agent.protocols.session import SessionState, SessionSummary
 from agent.session.jsonl_store import InvalidSessionIdError
+
+
+def test_weixin_binding_attempt_is_no_store_and_does_not_accept_user_id(tmp_path):
+    runtime = _FakeRuntime()
+    runtime.channel_weixin_binding = _FakeWeixinBinding()
+    client = _client(tmp_path, runtime)
+
+    response = client.post(
+        "/api/channels/weixin/binding-attempts",
+        json={"user_id": "attacker-selected"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json() == {
+        "attempt_id": "wxbind-safe",
+        "status": "waiting_scan",
+        "expires_at": "2026-07-24T10:00:00+00:00",
+        "qr_data": "data:image/png;base64,safe",
+        "error_code": "",
+    }
+    assert runtime.channel_weixin_binding.actor_user_ids == [None]
 
 
 def test_sessions_api_returns_summaries(tmp_path):
@@ -565,6 +588,21 @@ class _FakeRuntime:
             updated_at=1.0,
             message_count=2,
             channel="web",
+        )
+
+
+class _FakeWeixinBinding:
+    def __init__(self):
+        self.actor_user_ids = []
+
+    def start(self, actor):
+        self.actor_user_ids.append(actor.user_id)
+        return SimpleNamespace(
+            attempt_id="wxbind-safe",
+            status="waiting_scan",
+            expires_at="2026-07-24T10:00:00+00:00",
+            qr_data="data:image/png;base64,safe",
+            error_code="",
         )
 
 

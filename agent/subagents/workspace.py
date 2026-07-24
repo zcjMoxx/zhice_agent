@@ -238,11 +238,19 @@ class WorkspaceManager:
         return resolved
 
     def _create_worktree(self, batch_id: str, task_id: str) -> Path:
-        repo_root = self._git_output(
-            self.workspace,
-            "rev-parse",
-            "--show-toplevel",
-        ).strip()
+        try:
+            repo_root = self._git_output(
+                self.workspace,
+                "rev-parse",
+                "--show-toplevel",
+            ).strip()
+        except WorkspaceIsolationError as exc:
+            if exc.code != "GIT_COMMAND_FAILED" or exc.__cause__ is not None:
+                raise
+            raise WorkspaceIsolationError(
+                "Workspace must be the Git repository root before creating a child worktree.",
+                code="WORKSPACE_NOT_GIT_ROOT",
+            ) from exc
         if not repo_root:
             raise WorkspaceIsolationError(
                 "Git did not return a repository root for the workspace.",

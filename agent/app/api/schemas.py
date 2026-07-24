@@ -200,6 +200,23 @@ class ChannelBindingsResponse(BaseModel):
     bindings: list[ChannelBindingResponse]
 
 
+class WeixinChannelStatusResponse(BaseModel):
+    """Current user's Weixin account state without platform identifiers."""
+
+    status: str
+    linked_at: str = ""
+
+
+class WeixinBindingAttemptResponse(BaseModel):
+    """Short-lived QR binding state; responses must use no-store caching."""
+
+    attempt_id: str
+    status: str
+    expires_at: str
+    qr_data: str = ""
+    error_code: str = ""
+
+
 class AdminUsersResponse(BaseModel):
     """Admin user list response."""
 

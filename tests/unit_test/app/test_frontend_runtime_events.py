@@ -25,8 +25,8 @@ def test_frontend_math_renderer_supports_common_latex_and_safe_fallback():
     assert "trust: false" in script
     assert ".bubble.markdown .katex-display" in styles
     assert "overflow-x: auto" in styles
-    assert "/static/app.js?v=20260723-cross-channel" in index
-    assert "/static/styles.css?v=20260723-cross-channel" in index
+    assert "/static/app.js?v=20260724-weixin" in index
+    assert "/static/styles.css?v=20260724-weixin" in index
     assert "sessionAccessNotice" in index
     assert "channelBindingList" in index
     assert "continuation_mode" in script

@@ -23,7 +23,7 @@
 - `zhice-agent-part11-mcp-design.md`：Part 11，已实现并进入当前代码基线，包含 stdio / Streamable HTTP / SSE、常见 `mcpServers` 直贴、自动 Tool 发现、共享 Runtime、ArtifactGateway、Elicitation 与 `/mcp`；Windows OS 级 stdio 读取隔离仍待硬化。
 - `zhice-agent-part12-hooks-design.md`：Part 12，已实现并关闭；当前基线包含 Agent 生命周期 RuntimeEvent、现有 WS/SSE/CLI、前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime。
 - `zhice-agent-part13-subagent-design.md`：Part 13，已实现并进入当前代码基线；包含有界并行 `delegate_tasks`、独立 child AgentLoop/Session/RuntimeEvent scope、能力 Profile 与 shared-readonly/worktree/shared-exclusive 隔离。
-- `zhice-agent-part14-external-channel-design.md`：Part 14，第一版已实现并进入当前代码基线；包含中性 Channel 协议、外部身份绑定、conversation route、跨渠道 Session 可见/续写边界、QQ 私聊/群聊能力、持久去重、限流、附件 guard、Markdown 出站和后续微信/飞书兼容边界。
+- `zhice-agent-part14-external-channel-design.md`：Part 14 唯一活文档；QQ 实现一和微信 ClawBot 实现二已进入当前代码基线。包含中性 Channel 协议、身份绑定、conversation route、跨渠道 Session、QQ 私聊/群聊，以及微信一名 Web 用户一个 AI 账号、Node Transport sidecar、扫码绑定和私聊文本实现。
 
 第九部分用户、登录与权限执行边界已经落地：登录用户的账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 是基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。基础能力收敛见 `2026-07-16-authenticated-user-baseline-capabilities-design.md`；当前自助诊断和 Runtime Activity / Security Audit 拆分见 `2026-07-16-self-diagnostics-activity-audit-separation-design.md`。
 
@@ -35,7 +35,9 @@
 
 第十三部分并行 Subagent 编排已经实现并进入当前代码基线。当前实现口径以 `zhice-agent-part13-subagent-design.md` 为准，边界取舍记录见 `2026-07-21-subagent-runtime-boundary-design.md`，启动能力分级与诊断证据闭环见 `2026-07-21-startup-capability-and-subagent-diagnostics-design.md`，可选能力告警出口收敛见 `2026-07-22-optional-capability-warning-surface-design.md`，内置能力与可选扩展启用状态见 `2026-07-22-built-in-capability-enable-state-design.md`，人类命令与机器错误载荷分层见 `2026-07-22-human-command-error-presentation-design.md`，按身份展示内部详情的边界见 `2026-07-22-role-aware-capability-error-presentation-design.md`。主 Agent默认直接完成简单任务；只有并行、上下文隔离、专业能力或独立复核收益明确时，才通过批量 `delegate_tasks` 在同一 Turn 内并行运行 child，再 fan-in 返回稳定、有界且允许 partial 的结果供父 Agent归纳。`/subagent` 的 `auto/off/once` 使用 Session sidecar 真值和原子 one-shot 消费；child 使用独立 AgentLoop、内部 Session、RuntimeEvent scope 和取消 token，以新鲜 child Session 开始任务，但继承父 Turn 的 failover-safe ContextBudget。Tool/Skill/MCP 能力经过父可见集合、Profile allow/deny 与内核 deny 三重收窄；可写任务进入独立 worktree，共享状态任务进入进程级 shared-exclusive lane。现有 RBAC、确认、Hook、workspace guard、MCP artifact 与审计链保持不变。核心启动依赖继续阻断；未配置的 Skill source、Subagent、MCP 作为正常 disabled，不报警；显式启用的可选扩展依赖异常和内置 Memory extraction Prompt 异常只局部禁用并通过结构化终端 WARNING 与 trace 告警；显式 Hook 安全策略非法时仍阻断。`/api/health` 只保留通用 capability 状态，聊天 Web 不常驻展示启动告警。CLI、本地操作者、Owner 和具备 `audit.read` 的管理员可查看真实原因；普通 Web 用户的 `/subagent`、force-once、unavailable Tool 和自助诊断只返回暂时不可用并联系管理员，真实 cause 继续保留在终端、trace 和有权限的诊断出口。当前上下文统一采用最近 3 个 Turn 加旧相关最多 3 个，并受 60 message 与 endpoint token budget 双重约束；详细设计见 `2026-07-22-endpoint-context-budget-and-hybrid-turn-selection-design.md`。自助诊断可沿父 Turn 的 root 关联读取安全 child terminal trace，旧 trace 若没有 child 终态证据则不能事后恢复具体根因。
 
-第十四部分外部渠道第一版已经实现并进入当前代码基线。当前方案以 `zhice-agent-part14-external-channel-design.md` 为准，初始边界取舍记录见 `2026-07-23-qq-external-channel-boundary-design.md`，跨渠道 Session、用户自助解绑和 QQ Markdown 收敛见 `2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`，群聊手动一次性码边界见 `2026-07-24-qq-group-manual-binding-design.md`，群聊回复归属见 `2026-07-24-qq-group-reply-attribution-design.md`，真实客户端的 Markdown 引用兼容修复见 `2026-07-24-qq-group-markdown-reference-compatibility-fix.md`，共享纯文本展示与 QQ 回复序号见 `2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`，Session 清空命令统一改名见 `2026-07-24-clear-session-command-rename-design.md`。第一条真实渠道选择 QQ：运行态使用官方 Python SDK 的 WebSocket 连接；渠道层已经建立中性事件、能力声明、外部身份绑定、conversation route、持久去重、per-conversation 串行、附件 guard 和 RuntimeEvent 出站渲染。Web/CLI 作为私有控制面可见本人跨渠道历史，QQ 私聊可跨端继续，QQ群聊在 Web 只读并通过派生新 Web Session 继续；外部入口不能反向管理其它渠道 Session。QQ 群聊 Runtime 回答经共享 renderer 转为可读纯文本并使用递增 `msg_seq`，CLI 复用同一 renderer；QQ 私聊继续按内容选择 Markdown。CLI、Web、external WebSocket 与 QQ 当前统一使用 `/clear` 清空当前 Session，旧 `/reset` 不再执行清空。后续微信、飞书只新增 Adapter 和平台策略，不复制核心运行链。
+第十四部分外部渠道第一版已经实现并进入当前代码基线。当前方案以 `zhice-agent-part14-external-channel-design.md` 为准，初始边界取舍记录见 `2026-07-23-qq-external-channel-boundary-design.md`，跨渠道 Session、用户自助解绑和 QQ Markdown 收敛见 `2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`，群聊手动一次性码边界见 `2026-07-24-qq-group-manual-binding-design.md`，群聊回复归属见 `2026-07-24-qq-group-reply-attribution-design.md`，真实客户端的 Markdown 引用兼容修复见 `2026-07-24-qq-group-markdown-reference-compatibility-fix.md`，共享纯文本展示与 QQ 回复序号见 `2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`，出站投递确认见 `2026-07-24-qq-outbound-delivery-confirmation-design.md`，Session 清空命令统一改名见 `2026-07-24-clear-session-command-rename-design.md`。第一条真实渠道选择 QQ：运行态使用官方 Python SDK 的 WebSocket 连接；渠道层已经建立中性事件、能力声明、外部身份绑定、conversation route、持久去重、per-conversation 串行、附件 guard 和 RuntimeEvent 出站渲染。Web/CLI 作为私有控制面可见本人跨渠道历史，QQ 私聊可跨端继续，QQ群聊在 Web 只读并通过派生新 Web Session 继续；外部入口不能反向管理其它渠道 Session。QQ 群聊 Runtime 回答经共享 renderer 转为可读纯文本并使用递增 `msg_seq`，CLI 复用同一 renderer；QQ 私聊继续按内容选择 Markdown。QQ Transport 只有在平台返回有效响应时才确认发送成功，botpy 返回 `None` 时记录 `send_unconfirmed` 并将 receipt 标记为 error，且不盲目重试同一 `msg_id + msg_seq`。CLI、Web、external WebSocket 与 QQ 当前统一使用 `/clear` 清空当前 Session，旧 `/reset` 不再执行清空。
+
+第十四部分实现二微信 ClawBot 已落地。当前口径已经合并进 `zhice-agent-part14-external-channel-design.md`，完整取舍和真实 POC 证据见 `2026-07-24-weixin-clawbot-channel-design.md`。一个已登录 Web 用户最多连接一个微信 AI 账号；多个账号由同一个微信专用 Node Transport sidecar 维护，Agent、Session、Memory、Tool 和权限仍只运行在 ZhiCe-Agent。2026-07-24 已验证真实 AI 标识、扫码、direct text 收发、游标/context token 恢复与 notifyStop；双真实账号并发仍需第二名用户验收。Part 15 保持生产部署与发布的原阶段定位。
 
 原 Part 16 的 Capability Selection 子能力已提前完成，设计记录见 `2026-07-21-on-demand-tool-discovery-design.md`。当前 CLI/Web/child Turn 首轮只暴露 `discover_tools`，发现后下一 LLM 步只增加已激活 Tool schema；Catalog 先经过 actor/Profile 过滤，未激活 dispatch fail closed。Part 16 其它 Provider retry、系统级诊断和 MCP reload 仍按原路线保留。
 
@@ -76,46 +78,51 @@
 14. `zhice-agent-part12-hooks-design.md`
 15. `zhice-agent-part13-subagent-design.md`
 16. `zhice-agent-part14-external-channel-design.md`
-17. `2026-07-24-qq-group-reply-attribution-design.md`
-18. `2026-07-24-qq-group-manual-binding-design.md`
-19. `2026-07-24-qq-binding-keyboard-rendering-fix.md`
-20. `2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`
-21. `2026-07-23-qq-external-channel-boundary-design.md`
-22. `2026-07-22-endpoint-context-budget-and-hybrid-turn-selection-design.md`
-23. `2026-07-22-endpoint-budget-config-simplification-design.md`
-24. `2026-07-22-immediate-turn-reference-retention-design.md`
-25. `2026-07-22-human-command-error-presentation-design.md`
-26. `2026-07-22-built-in-capability-enable-state-design.md`
-27. `2026-07-22-optional-capability-warning-surface-design.md`
-28. `2026-07-21-startup-capability-and-subagent-diagnostics-design.md`
-29. `2026-07-21-subagent-runtime-boundary-design.md`
-30. `2026-07-21-hook-role-scope-design.md`
-31. `2026-07-21-on-demand-tool-discovery-design.md`
-32. `2026-07-20-hook-runtime-boundary-design.md`
-33. `2026-07-17-mcp-tool-runtime-boundary-design.md`
-34. `2026-07-16-memory-extraction-concurrency-design.md`
-35. `2026-07-16-prompt-language-convergence-design.md`
-36. `2026-07-16-minimal-memory-content-protocol-design.md`
-37. `2026-07-16-turn-done-output-preview-design.md`
-38. `2026-07-16-terminal-adaptive-duration-design.md`
-39. `2026-07-16-remove-unclosed-session-summary-design.md`
-40. `2026-07-16-memory-command-display-and-session-summary-design.md`
-41. `2026-07-16-memory-command-semantics-design.md`
-42. `2026-07-16-background-memory-extraction-and-trace-convergence-design.md`
-43. `2026-07-16-memory-read-runtime-id-terminal-log-convergence-design.md`
-44. `2026-07-16-conversational-memory-consent-design.md`
-45. `2026-07-15-memory-boundary-design.md`
-46. `2026-07-10-session-model-preference-scope-design.md`
-47. `2026-07-08-user-auth-permission-boundary-design.md`
-48. `2026-07-06-context-relevance-selection-design.md`
-49. `2026-07-06-next-stage-sequencing-design.md`
-50. `2026-07-04-turn-runtime-and-context-design.md`
-51. `2026-07-02-gateway-runtime-logging-design.md`
-52. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
+17. `2026-07-24-weixin-clawbot-channel-design.md`
+18. `2026-07-24-qq-group-reply-attribution-design.md`
+19. `2026-07-24-qq-group-manual-binding-design.md`
+20. `2026-07-24-qq-binding-keyboard-rendering-fix.md`
+21. `2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`
+22. `2026-07-23-qq-external-channel-boundary-design.md`
+23. `2026-07-22-endpoint-context-budget-and-hybrid-turn-selection-design.md`
+24. `2026-07-22-endpoint-budget-config-simplification-design.md`
+25. `2026-07-22-immediate-turn-reference-retention-design.md`
+26. `2026-07-22-human-command-error-presentation-design.md`
+27. `2026-07-22-built-in-capability-enable-state-design.md`
+28. `2026-07-22-optional-capability-warning-surface-design.md`
+29. `2026-07-21-startup-capability-and-subagent-diagnostics-design.md`
+30. `2026-07-21-subagent-runtime-boundary-design.md`
+31. `2026-07-21-hook-role-scope-design.md`
+32. `2026-07-21-on-demand-tool-discovery-design.md`
+33. `2026-07-20-hook-runtime-boundary-design.md`
+34. `2026-07-17-mcp-tool-runtime-boundary-design.md`
+35. `2026-07-16-memory-extraction-concurrency-design.md`
+36. `2026-07-16-prompt-language-convergence-design.md`
+37. `2026-07-16-minimal-memory-content-protocol-design.md`
+38. `2026-07-16-turn-done-output-preview-design.md`
+39. `2026-07-16-terminal-adaptive-duration-design.md`
+40. `2026-07-16-remove-unclosed-session-summary-design.md`
+41. `2026-07-16-memory-command-display-and-session-summary-design.md`
+42. `2026-07-16-memory-command-semantics-design.md`
+43. `2026-07-16-background-memory-extraction-and-trace-convergence-design.md`
+44. `2026-07-16-memory-read-runtime-id-terminal-log-convergence-design.md`
+45. `2026-07-16-conversational-memory-consent-design.md`
+46. `2026-07-15-memory-boundary-design.md`
+47. `2026-07-10-session-model-preference-scope-design.md`
+48. `2026-07-08-user-auth-permission-boundary-design.md`
+49. `2026-07-06-context-relevance-selection-design.md`
+50. `2026-07-06-next-stage-sequencing-design.md`
+51. `2026-07-04-turn-runtime-and-context-design.md`
+52. `2026-07-02-gateway-runtime-logging-design.md`
+53. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
 
 ## 日期设计记录清单
 
+- `2026-07-25-channel-lifecycle-startup-logging-design.md`
+- `2026-07-25-weixin-qr-rendering-and-cancel-fix.md`
+- `2026-07-24-weixin-clawbot-channel-design.md`
 - `2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`
+- `2026-07-24-qq-outbound-delivery-confirmation-design.md`
 - `2026-07-24-qq-group-markdown-reference-compatibility-fix.md`
 - `2026-07-24-qq-group-reply-attribution-design.md`
 - `2026-07-24-clear-session-command-rename-design.md`

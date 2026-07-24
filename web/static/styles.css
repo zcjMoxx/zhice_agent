@@ -504,6 +504,27 @@
   gap: 8px;
 }
 
+.channel-binding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.weixin-binding-state {
+  font-weight: 600;
+}
+
+.weixin-qr {
+  width: min(260px, 100%);
+  aspect-ratio: 1;
+  object-fit: contain;
+  align-self: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px;
+}
+
 .channel-binding-row,
 .session-access-notice {
   display: flex;

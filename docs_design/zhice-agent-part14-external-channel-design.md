@@ -1,8 +1,8 @@
 # 智策 Agent 第十四部分详细设计文档：外部渠道与 QQ 机器人接入
 
-> 状态：第一版已实现并进入当前代码基线；第一条真实外部渠道选择 QQ，后续微信、飞书等渠道复用同一中性协议与运行边界
+> 状态：QQ 实现一与微信 ClawBot 实现二已进入当前代码基线；微信单账号真实 POC 已通过，双真实账号并发待验收
 >
-> 日期设计记录：`docs_design/2026-07-23-qq-external-channel-boundary-design.md`、`docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`、`docs_design/2026-07-24-qq-binding-keyboard-rendering-fix.md`、`docs_design/2026-07-24-qq-group-manual-binding-design.md`、`docs_design/2026-07-24-clear-session-command-rename-design.md`、`docs_design/2026-07-24-qq-group-reply-attribution-design.md`、`docs_design/2026-07-24-qq-group-markdown-reference-compatibility-fix.md`、`docs_design/2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`
+> 日期设计记录：`docs_design/2026-07-23-qq-external-channel-boundary-design.md`、`docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`、`docs_design/2026-07-24-qq-binding-keyboard-rendering-fix.md`、`docs_design/2026-07-24-qq-group-manual-binding-design.md`、`docs_design/2026-07-24-clear-session-command-rename-design.md`、`docs_design/2026-07-24-qq-group-reply-attribution-design.md`、`docs_design/2026-07-24-qq-group-markdown-reference-compatibility-fix.md`、`docs_design/2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`、`docs_design/2026-07-24-qq-outbound-delivery-confirmation-design.md`、`docs_design/2026-07-24-weixin-clawbot-channel-design.md`、`docs_design/2026-07-25-weixin-qr-rendering-and-cancel-fix.md`
 >
 > 承接文档：`docs_design/zhice-agent-part13-subagent-design.md`
 >
@@ -17,7 +17,7 @@ Part 14 选择 QQ 机器人作为第一条真实外部渠道，原因是：
 - QQ 官方已提供 Agent 接入、扫码连接器、Python Bot SDK 和较完整的 Node.js 协议 SDK；
 - QQ 同时覆盖私聊、群聊、引用、文件、图片、按钮交互和私聊流式回复，能够检验渠道抽象是否足够完整；
 - QQ 官方运行 SDK已经体现 WebSocket / Webhook 双传输、中间件、去重、限流、并发保护、引用解析和出站分块等成熟做法；
-- 后续微信、飞书虽然事件格式和授权方式不同，但都需要身份映射、会话路由、命令能力裁剪、附件处理、回复目标、限流、重试和审计。
+- 微信 ClawBot 实现二的事件格式和授权方式不同，但仍需要身份映射、会话路由、命令能力裁剪、回复目标、限流、重试和审计。
 
 Part 14 的重点不是把 QQ SDK 直接塞进现有 Web 代码，而是先建立一个轻量、可复用、与 AgentLoop 解耦的外部渠道边界，再实现 QQ Adapter。
 
@@ -55,7 +55,7 @@ Part 14 完成后，应满足：
 6. 文本、引用、图片和文件先转换为中性消息，再进入运行链；平台原始 payload 不进入 AgentLoop。
 7. 未绑定身份、重复事件、回声消息、超限消息和无权限消息不会触发 LLM 或 Tool。
 8. QQ SDK、凭证、重连、限流和平台错误全部留在 app shell / channel adapter 层。
-9. 后续新增微信、飞书时，不修改 AgentLoop，不复制身份、Session、命令和 Tool 安全系统。
+9. 微信 ClawBot 实现二不修改 AgentLoop，不复制身份、Session、命令和 Tool 安全系统。
 
 ## 4. 范围边界
 
@@ -72,9 +72,9 @@ Part 14 完成后，应满足：
 - 私聊 Tool 确认交互；
 - 去重、限流、并发保护、trace、Runtime Activity、Security Audit 和测试。
 
-### 4.2 本阶段不包含
+### 4.2 QQ 实现一不包含
 
-- 微信、飞书的具体 SDK 和业务实现；
+- 微信 ClawBot 的具体 Transport、扫码和账号所有权实现；这些归入本 Part 的实现二；
 - 把 QQ 群变成多个内部用户共同拥有的共享 Session；
 - 未绑定 QQ 用户自动注册内部账号；
 - QQ 频道 API 的任意模型直通 Tool；
@@ -144,7 +144,7 @@ FeishuAdapter ─┼─> ChannelManager -> ChannelChatRuntime -> AgentLoop
 QQAdapter ─────┘
 ```
 
-AgentLoop 只看到内部用户消息、actor、session、turn 和 ToolExecutionContext，不 import QQ、微信或飞书 SDK。
+AgentLoop 只看到内部用户消息、actor、session、turn 和 ToolExecutionContext，不 import QQ 或微信 SDK。
 
 ## 7. 依赖方向
 
@@ -776,6 +776,15 @@ duration_ms
 
 不记录完整用户消息、完整附件 URL、secret、token 或签名。
 
+QQ 出站发送额外区分：
+
+- `channel.qq.send_start`：已经构造安全 payload，准备调用平台 API；
+- `channel.qq.send_done`：QQ API 返回有效消息响应，只表示服务端确认接受；
+- `channel.qq.send_failed`：SDK 或平台明确抛出错误；
+- `channel.qq.send_unconfirmed`：botpy 返回 `None`，投递结果未知，receipt 必须为 error。
+
+出站 trace 只记录平台 ID 的短 hash、消息类型、`msg_seq`、字符数、引用/Keyboard 标志和耗时。`send_unconfirmed` 不自动重试同一 `msg_id + msg_seq`，避免状态未知时重复发送。
+
 ### 20.3 Runtime Activity 与 Security Audit
 
 - 正常收到消息、开始 Turn、发送完成进入 Runtime Activity / trace；
@@ -980,11 +989,11 @@ Part 14 第一版当前验收结果：
 15. 新增测试主题目录有 `test_case.md`，正常、异常和边界路径完整。
 16. Fake transport 测试稳定，真实 QQ E2E 只在显式环境变量下运行。
 17. 总体设计、文档索引、配置示例和 README 使用方式同步更新。
-18. 后续新增微信或飞书 Adapter 时，不需要修改 AgentLoop、身份表的核心含义或 SessionStore。
+18. 微信 ClawBot 实现二不需要修改 AgentLoop、现有身份解析核心含义或 SessionStore。
 
-## 26. 后续渠道兼容原则
+## 26. 微信 ClawBot 实现二复用原则
 
-后续微信、飞书接入时复用：
+微信 ClawBot 实现二复用：
 
 - `InboundChannelEvent`；
 - `ChannelReplyTarget`；
@@ -1006,11 +1015,216 @@ Part 14 第一版当前验收结果：
 - 平台限流码和 retry-after；
 - 平台特有发送 API。
 
-如果未来某个平台需要改变 AgentLoop、Session ownership 或 Tool policy 的核心含义，必须先写新的日期设计记录，不能把平台例外直接写进通用循环。
+如果微信实现需要改变 AgentLoop、Session ownership 或 Tool policy 的核心含义，必须先写新的日期设计记录，不能把平台例外直接写进通用循环。
 
-## 27. 参考资料
+## 27. 微信 ClawBot 实现二阶段定位
+
+微信 ClawBot 是 Part 14 的第二个真实渠道实现。产品形态固定为一个 ZhiCe-Agent Web 用户连接一个微信 AI 账号：每个人首次都从本人已登录的 Web 设置页单独扫码；所有微信账号共享同一个 ZhiCe-Agent 服务，但不共享 Actor、Session、Memory、权限或凭证。
+
+```text
+ZhiCe Web 本人设置页
+  -> 发起本人 binding attempt
+  -> 微信专用 Node Transport sidecar 生成二维码
+  -> 用户微信扫码确认
+  -> channel account ownership + external identity + credential
+  -> 每账号独立 getUpdates 长轮询
+  -> WeixinClawAdapter
+  -> ChannelChatRuntime
+  -> ZhiCe-Agent AgentLoop
+  -> sidecar sendMessage
+  -> 微信 AI 私聊
+```
+
+sidecar 是 Transport，不是第二套 Agent。二维码、bot token、context token、长轮询、同步游标和发送 API 只存在于微信模块；AgentLoop、Tool、Memory、Session 和权限继续由 ZhiCe-Agent 负责。
+
+## 28. 微信上游边界
+
+2026-07-24 核对版本：
+
+- `@tencent-weixin/openclaw-weixin 2.4.6`；
+- `@tencent-weixin/openclaw-weixin-cli 2.1.4`；
+- Node.js `>=22`；
+- 代码许可证 MIT。
+
+官方插件根入口只提供 OpenClaw Channel 注册，并把消息交给 OpenClaw 的 Agent Runtime，不是独立 Transport SDK。因此实现二不运行 OpenClaw AgentLoop，也不依赖不稳定的 npm 深路径。第一版 sidecar 从官方 MIT tarball 提取并审计最小 Transport 来源，保存版本、integrity、LICENSE 和补丁清单；如果官方发布稳定 Transport API，再切换到公开 API。
+
+代码许可证与微信在线服务使用权分开判断。Transport POC 必须先验证真实扫码、AI 标识、私聊、收发和服务条款；失败时停止，不改用个人微信自动化。
+
+## 29. 微信账号所有权与身份
+
+现有 `external_identities` 表达外部发送者映射，但不能完整表达内部用户拥有一个带 token 的微信 AI 账号。实现二新增 `channel_accounts`：
+
+```text
+内部 user_id
+  -> channel_accounts(channel=weixin, account_key, external_account_id, credential_ref)
+  -> external_identities(channel=weixin, tenant=account_key, external_user_id)
+  -> ActorContext
+```
+
+固定约束：
+
+- 一个内部用户最多一个 active 微信账号；
+- 一个微信用户和一个 AI account 不能绑定到两个内部用户；
+- `account_key` 使用内部 opaque key，不直接暴露微信 ID；
+- token 不进入数据库；
+- 未绑定或发送者不匹配的消息在 LLM 前拒绝；
+- 不自动创建内部用户，不产生新角色或 tenant。
+
+## 30. 微信凭证与运行状态
+
+```text
+${ZHICE_AGENT_WORKSPACE}/config/channels/weixin/accounts/{account_key}.json
+${ZHICE_AGENT_WORKSPACE}/state/channels/weixin/{account_key}/sync.json
+```
+
+credential 原子写入并使用本机严格文件权限；同步游标独立保存。二维码、bot token、context token 和完整微信 ID 不得进入普通日志、trace、audit、Session 或浏览器 URL。Web 二维码接口必须返回 `Cache-Control: no-store`。
+
+第一版本地运行不伪装通用 Secret 加密。远程部署时必须在 Part 15 另接平台 Secret/KMS。
+
+## 31. 微信 sidecar 协议与生命周期
+
+Gateway 启动一个共享 Node 子进程，使用 stdio NDJSON 双向通信。stdout 只允许协议 frame，stderr 只允许脱敏日志。
+
+```text
+Python -> Node:
+  hello / binding.start / binding.cancel / account.start / account.stop
+  message.send / typing.set / health.get / shutdown
+
+Node -> Python:
+  hello.ok / binding.qr / binding.status / binding.connected / binding.failed
+  message.received / message.send_result / account.status / health.status
+```
+
+每个账号有独立长轮询、AbortController、同步游标和退避状态。单账号失败只影响本人；sidecar 失败只影响微信 capability。Gateway stop 先停止轮询并通知上游，再回收子进程。同一个 workspace 只允许一个 Gateway 持有微信 sidecar lease。
+
+## 32. 微信 Web 绑定
+
+本人接口：
+
+```text
+GET    /api/channels/weixin
+POST   /api/channels/weixin/binding-attempts
+GET    /api/channels/weixin/binding-attempts/{attempt_id}
+DELETE /api/channels/weixin/binding-attempts/{attempt_id}
+DELETE /api/channels/weixin/binding
+POST   /api/channels/weixin/reconnect
+```
+
+attempt 只从当前登录 Actor 得到 owner，不接收 URL/body user id。一个用户同一时刻最多一个 attempt；已有 active binding 时必须先解绑。二维码过期后由用户重新发起，不无限刷新。
+
+绑定 finalize 同时写账号所有权、external identity 和 credential。唯一约束冲突必须失败，不能覆盖原绑定。解绑先禁用账号，再停止轮询、删除 identity/ownership/credential/cursor；历史 Session 和 Memory 保留。
+
+## 33. 微信消息运行链
+
+```text
+getUpdates
+  -> sidecar allowlist normalize
+  -> account active + sender match
+  -> persistent receipt claim
+  -> rate limit
+  -> ExternalIdentityService.resolve
+  -> ChannelConversationService.resolve
+  -> per-conversation serialization
+  -> ChannelRuntimeAdapter.dispatch
+  -> RuntimeEvent aggregate
+  -> shared plain-text renderer
+  -> <= 4000 chars chunks
+  -> sidecar sendMessage with context token
+```
+
+sidecar 在 Python 对批次消息给出 accepted/duplicate/rejected ACK 后原子保存新游标。崩溃重投由现有 receipt 去重。当前 claim 后、Turn 完成前崩溃的 `processing` 窗口不在微信 Adapter 内另建队列解决。
+
+## 34. 微信第一版 Capability
+
+```text
+ChannelCapabilities(
+    text=True,
+    markdown=False,
+    text_streaming=False,
+    message_edit=False,
+    reply_quote=False,
+    inbound_media=frozenset(),
+    outbound_media=frozenset(),
+    interactions=False,
+    typing_indicator=True,
+    can_close_conversation=False,
+    command_profile="weixin_c2c",
+)
+```
+
+第一版只做 direct text。RuntimeEvent 聚合为最终文本，Markdown 转共享纯文本，按 4000 字符安全分块。typing 失败只降级；发送失败不重新执行 Agent Turn；不发送密集 tool progress 消息。
+
+## 35. 微信 Session、Memory 与命令
+
+- 每个微信 direct route 使用独立 `weixin_<uuid>` Session；
+- Web 与微信共享内部 user 和用户级 Memory；
+- Web Session 与微信 Session 不合并；
+- Web 可以查看并继续本人微信私聊 Session；
+- `/new`、`/clear`、`/model`、`/memory`、`/stop`、文本 `/confirm` 复用共享命令语义；
+- Tool、Skill、MCP、Subagent 继续走 Actor RBAC、确认、Hook、workspace guard 和审计。
+
+## 36. 微信配置
+
+```yaml
+channels:
+  weixin:
+    enabled: false
+    transport: sidecar_stdio
+    node_path: node
+    sidecar_entry: integrations/weixin_sidecar/dist/main.js
+    binding_timeout_seconds: 480
+    max_parallel_conversations: 8
+    text_chunk_limit: 4000
+```
+
+Gateway 不在启动时联网安装依赖。未启用微信时不检查 Node 或 sidecar，不改变现有运行行为。
+
+## 37. 微信实现顺序
+
+1. 先完成独立 Transport POC，验证真实 AI 标识、扫码、收发、重启和服务条款。
+2. 再做单用户 sidecar -> WeixinClawAdapter -> ChannelChatRuntime 闭环。
+3. 再做 Web binding attempt、channel account schema、唯一约束和解绑。
+4. 最后用两个 Web 用户、两个微信号验证并发隔离，并完成日志/trace/audit 脱敏。
+
+代码实施不得跳过 POC，且不得在 AgentLoop 中加入微信分支。
+
+## 38. 微信测试方案
+
+- Fake sidecar 覆盖启动、超时、协议损坏、崩溃和退避；
+- 未绑定、账号 disabled、发送者不匹配均在 LLM 前拒绝；
+- account/user/external id 唯一约束和并发 finalize；
+- 两用户 Actor、Session、Memory 路径和模型偏好隔离；
+- receipt ACK、重投、重复消息和游标边界；
+- 文本渲染、4000 字符分块、部分发送失败不重跑 Turn；
+- QR/token/context token/完整外部 ID 不进入日志和 API；
+- Node 侧覆盖 QR 状态、多账号 long-poll、cursor、token stale、网络退避、stop/start 和 stdout/stderr 边界；
+- Python/Node 使用 golden fixtures 做协议契约测试；
+- 真实微信 E2E 只在 `ZHICE_AGENT_WEIXIN_E2E=1` 且显式提供隔离 workspace 时运行。
+
+新增 `tests/unit_test/weixin_channel` 时必须维护同目录 `test_case.md`。
+
+## 39. 微信实现二 Definition of Done
+
+当前代码已完成 stdio NDJSON 协议、共享 sidecar 生命周期、`channel_accounts`、本人绑定 API/UI、凭证边界、direct-text Adapter、receipt ACK、限流、身份/路由/Runtime 复用、纯文本分块和双用户唯一约束测试。2026-07-24 已用真实微信完成 AI 标识、扫码、direct text 入站/出站、context token、游标恢复和 notifyStop POC；实现只 vendoring 腾讯 `2.4.6` 的审计 Transport 来源，不加载 OpenClaw Channel 或 Agent Runtime，也没有改用个人微信自动化。以下双真实账号条目仍需第二名用户验收：
+
+- 两个 Web 用户分别扫码得到各自微信 AI direct 会话；
+- 双账号同时在线并正确映射 Actor、Session、Memory 和权限；
+- 未绑定、发送者不符、重复事件、disabled account 不触发 Agent；
+- Web/微信共享用户级 Memory 但不共写 Session；
+- token、二维码、context token、完整微信 ID 无泄漏；
+- sidecar 和单账号失败局部降级；
+- 重启恢复、workspace 单实例 lease、解绑清理和历史保留正确；
+- 不存在第二套 AgentLoop；
+- 上游来源、integrity、LICENSE、补丁和服务条款可追溯；
+- Python、Node、契约与显式真实 E2E 测试完整。
+
+完整变更文件、状态机、异常码和验收细节见日期设计记录 `docs_design/2026-07-24-weixin-clawbot-channel-design.md`。
+
+## 40. 参考资料
 
 - QQ 机器人官方文档，[Agent 接入与安全使用须知](https://bot.q.qq.com/wiki/agent-qqbot/#%E5%AE%89%E5%85%A8%E4%BD%BF%E7%94%A8%E9%A1%BB%E7%9F%A5)，访问日期：2026-07-23。
 - QQ 官方扫码连接器，[`@tencent-connect/qqbot-connector`](https://www.npmjs.com/package/@tencent-connect/qqbot-connector)，设计核对版本：1.2.0。
 - QQ 官方 Node.js 协议 SDK，[`@tencent-connect/qqbot-nodejs`](https://www.npmjs.com/package/@tencent-connect/qqbot-nodejs)，设计核对版本：1.0.4。
 - QQ Bot Python SDK，[`tencent-connect/botpy`](https://github.com/tencent-connect/botpy)，设计核对 PyPI 版本：`qq-botpy 1.2.1`。
+- 微信 OpenClaw Channel，[`@tencent-weixin/openclaw-weixin`](https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin)，设计核对版本：`2.4.6`。
+- 微信 OpenClaw 安装器，[`@tencent-weixin/openclaw-weixin-cli`](https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin-cli)，设计核对版本：`2.1.4`。

@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到第十四部分 QQ 外部渠道接入。主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到第十四部分 QQ 与微信 ClawBot 外部渠道接入。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -14,7 +14,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - Skill source 同步、SkillLoader、`load_skills` 和 `sync_skills`
 - CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道，以及支持安全 Markdown 与 KaTeX 公式的静态 Web UI
 - `turn_id` / `turn_index` 持久化、WebSocket turn 对齐、最近 3 个 Turn 与旧相关 Turn 混合选择，以及 endpoint token 预算
-- Gateway / Agent 分层运行日志、终端时间戳格式和 workspace `logs/YYYY-MM-DD/trace.log`
+- Gateway / Agent 分层运行日志、Web/QQ/微信渠道启动结果、终端时间戳格式和 workspace `logs/YYYY-MM-DD/trace.log`
 - SQLite 本地用户、角色、特权权限、可撤销登录态、唯一永久 Owner、Owner 管理权委派、普通用户自助注册和个人设置
 - 用户上下文目录、session owner/index、session 级模型偏好和 call-scoped provider
 - 登录用户基础能力、跨用户/管理/审计特权、高风险 `exec` 明确确认、独立 Runtime Activity/Security Audit 和当前 Session 自助诊断
@@ -24,6 +24,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - 有界并行 `delegate_tasks`、独立 child AgentLoop/Session/RuntimeEvent、能力 Profile 和 shared-readonly/worktree/shared-exclusive workspace 隔离
 - `/subagent` 的 `auto/off/once` Session 语义、Web child task 状态和可选能力结构化启动告警
 - 中性 Channel 协议、外部身份绑定、持久 conversation route/event receipt，以及 QQ 私聊/群聊 `@` WebSocket adapter
+- 微信 `channel_accounts` 所有权、本人扫码 API/UI、stdio NDJSON Node sidecar、基于腾讯 `2.4.6` 审计来源的 direct-text Transport 和多用户隔离
 
 当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge 或市集。MCP Runtime 直接读取常见 `mcpServers` 配置，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Part 12 已完成 turn/context/LLM/tool RuntimeEvent、WebSocket/SSE/CLI 与前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime；Hook 只能增加业务阻断、修改后重新走核心校验或补充安全 display/ui_metadata，不能降低 RBAC、危险确认、workspace guard、timeout、脱敏或 SSRF。Part 13 在此基线上增加同步 Provider 下的有界线程并行、父能力交集、独立 child 运行态和 workspace lease。SkillExecutor、`skill.*` 和 ProgressSink 属于未来 Skill Runtime / Part 18。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
 
@@ -42,6 +43,7 @@ Tool capability selection 已从原 Part 16 路线提前进入当前基线。每
 - 第十二部分生命周期事件与 Hook Runtime 当前实现入口是 `docs_design/zhice-agent-part12-hooks-design.md`，最终边界与取舍记录见 `docs_design/2026-07-20-hook-runtime-boundary-design.md`；RuntimeEvent、渠道/前端状态、真实 pre/post Hook Runtime 和测试均已完成，Part 12 已关闭。
 - 第十三部分并行 Subagent 编排已经实现并进入当前代码基线，入口是 `docs_design/zhice-agent-part13-subagent-design.md`，边界取舍记录见 `docs_design/2026-07-21-subagent-runtime-boundary-design.md`，启动降级与诊断证据闭环见 `docs_design/2026-07-21-startup-capability-and-subagent-diagnostics-design.md`。主 Agent默认直接完成简单任务，只有委派收益明确时才通过批量 `delegate_tasks` 做有界并行 fan-out/fan-in；`/subagent` 提供 `auto/off/once` Session 语义；child 使用独立 AgentLoop、Session、RuntimeEvent scope 和 workspace lease，Skill、`exec`、MCP 通过 Profile、父能力交集、确认与 Hook 受控开放。
 - 第十四部分外部渠道已实现第一版 QQ 闭环，入口是 `docs_design/zhice-agent-part14-external-channel-design.md`，初始边界见 `docs_design/2026-07-23-qq-external-channel-boundary-design.md`，跨渠道 Session、用户解绑和 QQ Markdown 收敛见 `docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`。QQ SDK 仅位于 transport 层；未知身份在 LLM 前拒绝，群聊按触发用户隔离 Session，高风险确认转私聊或 Web。
+- 第十四部分实现二微信 ClawBot 已落地，当前口径见 `docs_design/zhice-agent-part14-external-channel-design.md`，完整取舍和真实 POC 证据见 `docs_design/2026-07-24-weixin-clawbot-channel-design.md`。一个 Web 用户独立拥有一个微信 AI 账号，共享 Node Transport sidecar 接入现有 Channel Runtime，不引入第二套 AgentLoop。2026-07-24 已用真实微信验证 AI 标识、扫码、direct text 收发、context token、游标恢复和 notifyStop；双真实账号并发仍需第二名用户验收。Part 15 仍为生产部署与发布。
 - 按需 Tool 发现与动态 Capability Selection 已提前落地，设计记录见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md`；它是通用运行时能力，不归入 Part 13 的业务委派判断。
 
 Subagent 运行配置位于 `${ZHICE_AGENT_WORKSPACE}/config/subagents.yml`，仓库模板为 `config/subagents.example.yml`。缺少配置时功能默认关闭；启用后可用裸 `/subagent` 查看当前模式和 Profile，详细切换形式由输出中的 Tip 提示。能力不可用时，CLI、本地操作者和 Owner 会看到真实原因与修复建议；普通 Web 用户只会看到能力暂时不可用并联系管理员，不暴露 Prompt 文件名、内部错误码、配置路径或初始化命令。真实 cause 继续保留在终端、trace 和有权限的诊断结果中。
@@ -121,6 +123,33 @@ zcagent channels link-code qq --user alice --account main
 ```
 
 未绑定 QQ 用户会看到“绑定”按钮；裸 `/bind` 返回一次性 Web Markdown 登录链接和 URL 按钮，登录成功后自动绑定当前 Web 用户，也可以在 Web“个人设置”生成一次性绑定码后发送 `/bind <code>`。个人设置会显示当前用户自己的 QQ 绑定并允许解绑，解绑保留历史 Session。Web/CLI 可以查看本人跨渠道历史，QQ 私聊 Session 可跨端继续；QQ 群 Session 在 Web/CLI 只读，只能派生新的 Web Session。QQ 不提供跨渠道 `/sessions` 管理。QQ 私聊的普通结构化回复在安全长度内使用 Markdown；QQ 群聊和 CLI 通过共享 renderer 把 Markdown 转为可读纯文本。QQ 被动回复分块使用递增 `msg_seq`，群聊最多 5 块、单聊最多 4 块。当前 `qq-botpy 1.2.1` 未使用不稳定的原生 token stream。
+
+## 微信 ClawBot 外部渠道
+
+微信默认关闭。运行机器需要 Node.js 22 或更高版本；配置位于 `${ZHICE_AGENT_WORKSPACE}/config/channels.yml`：
+
+```yaml
+channels:
+  weixin:
+    enabled: true
+    transport: sidecar_stdio
+    node_path: node
+    sidecar_entry: integrations/weixin_sidecar/dist/main.js
+    binding_timeout_seconds: 480
+    max_parallel_conversations: 8
+    text_chunk_limit: 4000
+```
+
+启用后运行 `zcagent gateway`，登录 Web，在 Account settings 的 Weixin ClawBot 区域发起扫码。绑定只取当前登录用户，不接受 URL/body `user_id`；二维码响应使用 `Cache-Control: no-store`。账号凭证写入 `${ZHICE_AGENT_WORKSPACE}/config/channels/weixin/accounts/{account_key}.json`，同步游标属于 `${ZHICE_AGENT_WORKSPACE}/state/channels/weixin/{account_key}/sync.json`，均不进入仓库配置。
+
+当前仓库已经具备本人状态/扫码/取消/解绑 API、Web UI、账号唯一约束、身份解析、receipt ACK、限流、Conversation Route、direct-text Turn、纯文本 4000 字符分块和局部降级。官方 `@tencent-weixin/openclaw-weixin@2.4.6` 的版本、integrity、MIT LICENSE、vendored 文件、补丁清单和真实 POC 结果记录在 `integrations/weixin_sidecar/vendor/upstream-manifest.json`。sidecar 只复用审计后的扫码/API/文本 Transport，不加载 OpenClaw Channel 或 Agent Runtime；不得改用个人微信自动化。
+
+Node 测试：
+
+```bash
+cd integrations/weixin_sidecar
+npm test
+```
 
 ## LLM 配置
 
@@ -280,6 +309,8 @@ zcagent gateway
 API 失败响应使用统一错误结构：真实 HTTP 状态码保持数字语义，body 的 `error` 包含 `status`、稳定领域 `code`、可读 `message`、关联日志的 `request_id` 和安全动态上下文 `details`。前端不解析 message，并会在 401/403 后重新获取当前登录态和权限。
 
 默认启动时会打印简短 Agent lifecycle log，并写入 workspace trace；`turn.done` 在终端和 trace 中保留最终回答第一条非空行、最多 80 字符的 `output_preview`。`llm.call`、`llm.done` 等调用细节默认不刷终端，需要时用 `--agent-log-level debug` 或查看 trace。重复的 `llm.direct`、成功 `session.save`、`web.chat.accepted/done` 和每 Turn 模型选择事件不再写入：
+
+Gateway lifespan 会为 Web、QQ、微信分别记录结构化渠道结果：可用时为 `gateway.channel.start`，未启用时为 `gateway.channel.skip`，显式启用但不可用或启动失败时为 WARNING `gateway.channel.start_failed`，关闭时为 `gateway.channel.stop`。这些日志直接复用 `/health` 的聚合状态与稳定 code，不输出渠道 credential 或外部账号标识。
 
 终端中的实际耗时会自动显示为 `500ms`、`1.25s`、`3m20s` 或 `1h5m5s`；trace 仍保留原始 `duration_ms` 数值。
 

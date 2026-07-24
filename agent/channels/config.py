@@ -41,8 +41,20 @@ class QQChannelConfig:
 
 
 @dataclass(frozen=True)
+class WeixinChannelConfig:
+    enabled: bool = False
+    transport: str = "sidecar_stdio"
+    node_path: str = "node"
+    sidecar_entry: str = "integrations/weixin_sidecar/dist/main.js"
+    binding_timeout_seconds: int = 480
+    max_parallel_conversations: int = 8
+    text_chunk_limit: int = 4000
+
+
+@dataclass(frozen=True)
 class ChannelConfiguration:
     qq: QQChannelConfig = QQChannelConfig()
+    weixin: WeixinChannelConfig = WeixinChannelConfig()
 
 
 def load_channel_configuration(config_dir: Path) -> ChannelConfiguration:
@@ -96,8 +108,34 @@ def load_channel_configuration(config_dir: Path) -> ChannelConfiguration:
                 ),
             )
         )
+    weixin_raw = raw.get("channels", {}).get("weixin", {}) or {}
+    if not isinstance(weixin_raw, dict):
+        raise ChannelConfigurationError("channels.weixin must be a mapping")
+    weixin_transport = str(weixin_raw.get("transport", "sidecar_stdio")).strip().lower()
+    if weixin_transport != "sidecar_stdio":
+        raise ChannelConfigurationError("channels.weixin.transport must be sidecar_stdio")
     return ChannelConfiguration(
-        qq=QQChannelConfig(enabled=enabled, transport=transport, accounts=tuple(accounts))
+        qq=QQChannelConfig(enabled=enabled, transport=transport, accounts=tuple(accounts)),
+        weixin=WeixinChannelConfig(
+            enabled=_bool(weixin_raw.get("enabled", False), "channels.weixin.enabled"),
+            transport=weixin_transport,
+            node_path=str(weixin_raw.get("node_path", "node")).strip() or "node",
+            sidecar_entry=str(
+                weixin_raw.get("sidecar_entry", "integrations/weixin_sidecar/dist/main.js")
+            ).strip(),
+            binding_timeout_seconds=_positive_int(
+                weixin_raw.get("binding_timeout_seconds", 480),
+                "channels.weixin.binding_timeout_seconds",
+            ),
+            max_parallel_conversations=_positive_int(
+                weixin_raw.get("max_parallel_conversations", 8),
+                "channels.weixin.max_parallel_conversations",
+            ),
+            text_chunk_limit=_positive_int(
+                weixin_raw.get("text_chunk_limit", 4000),
+                "channels.weixin.text_chunk_limit",
+            ),
+        ),
     )
 
 

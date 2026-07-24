@@ -295,13 +295,13 @@ contexts/sessions/chat-YYYYMMDD.jsonl
 
 Part 10 Memory、Part 11 MCP、Part 12 生命周期事件/Hook Runtime 和 Part 13 Subagent 已经完成；后续先完成当前代码尚不存在的能力，再进入分领域优化：
 
-1. Part 14 外部渠道：第一版已实现，包含中性 Channel 协议、QQ 私聊/群聊、身份绑定与用户解绑、conversation route、跨渠道 Session 可见/续写边界、Markdown 出站、去重与安全边界。
+1. Part 14 外部渠道：QQ 实现一与微信 ClawBot 实现二已落地；一个 Web 用户独立拥有一个微信 AI 账号，由共享 Node Transport sidecar 接入现有 Channel Runtime，微信单账号真实 POC 已通过。
 2. Part 15 生产部署与发布：补齐容器、反向代理、Secret 注入、健康检查和发布产物。
 3. Part 16 Agent 运行可靠性与上下文优化。
 4. Part 17 Web、会话与用户治理优化。
 5. Part 18 Skill Runtime、CLI 与本地运维优化：独立承接 SkillExecutor、`skill.*` 与 ProgressSink。
 
-Part 14～15 继续补齐新能力；Part 16～18 再优化 Part 1～15 已经形成的运行链路。第十部分当前实现见 `docs_design/zhice-agent-part10-memory-design.md`；Part 11 当前实现见 `docs_design/zhice-agent-part11-mcp-design.md`；Part 12 当前实现见 `docs_design/zhice-agent-part12-hooks-design.md`；Part 13 当前实现见 `docs_design/zhice-agent-part13-subagent-design.md`，边界取舍见 `docs_design/2026-07-21-subagent-runtime-boundary-design.md`；Part 14 当前开发设计见 `docs_design/zhice-agent-part14-external-channel-design.md`，QQ 初始边界见 `docs_design/2026-07-23-qq-external-channel-boundary-design.md`，跨渠道 Session、解绑和 Markdown 收敛见 `docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`。
+Part 14 继续完成微信双真实账号并发验收，Part 15 补齐生产部署与发布；Part 16～18 再优化 Part 1～15 已经形成的运行链路。第十部分当前实现见 `docs_design/zhice-agent-part10-memory-design.md`；Part 11 当前实现见 `docs_design/zhice-agent-part11-mcp-design.md`；Part 12 当前实现见 `docs_design/zhice-agent-part12-hooks-design.md`；Part 13 当前实现见 `docs_design/zhice-agent-part13-subagent-design.md`，边界取舍见 `docs_design/2026-07-21-subagent-runtime-boundary-design.md`；Part 14 QQ 实现一和微信实现二统一以 `docs_design/zhice-agent-part14-external-channel-design.md` 为当前口径，微信完整取舍与 POC 证据见 `docs_design/2026-07-24-weixin-clawbot-channel-design.md`。
 
 ### 3.3 推荐目录结构
 
@@ -430,7 +430,7 @@ protocols       -> LLMProvider / ToolProvider / SkillProvider / SessionStore 等
 - `agent/cli.py` 属于入口层；gateway 实现直接位于 `agent/app/gateway.py`，不再保留顶层 re-export 文件。
 - `agent/protocols/` 已经承担协议层职责，应该保持只放接口和数据结构。
 
-后续如果继续演进 OAuth/SSO、远程部署、多渠道或完整前端工程，可以在现有边界上扩展，但仍保持分层方向：
+后续如果继续演进 OAuth/SSO、远程部署、微信渠道或完整前端工程，可以在现有边界上扩展，但仍保持分层方向：
 
 ```text
 agent/
@@ -1414,7 +1414,7 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 ## 15. Part 12 当前基线与后续部分设计
 
-本章记录已完成的 Part 12、Part 13、Part 14 第一版当前边界和尚未完整实现的 Part 15～18。Part 10 Memory、Part 11 MCP、Part 12 RuntimeEvent/Hook Runtime、Part 13 Subagent、Part 14 QQ 外部渠道第一版，以及原 Part 16 的 Capability Selection 子能力已进入当前代码基线；Part 16 其余可靠性优化仍保留。
+本章记录已完成的 Part 12、Part 13、Part 14 QQ 实现一与微信实现二当前边界，以及尚未完整实现的 Part 15～18。Part 10 Memory、Part 11 MCP、Part 12 RuntimeEvent/Hook Runtime、Part 13 Subagent、Part 14 两个外部渠道实现，以及原 Part 16 的 Capability Selection 子能力已进入当前代码基线；微信单账号真实 Transport POC 已通过，Part 15 仍为生产部署与发布。
 
 ```text
 Part 12 生命周期事件与 Hook Runtime（已完成）
@@ -1477,7 +1477,7 @@ Memory、MCP、Hook Runtime 和 Subagent 已经落地。Part 13 当前代码复�
 
 ### 15.3 Part 14：外部渠道
 
-Part 14 第一版已实现并进入当前代码基线。第一条真实外部渠道选择 QQ，后续微信、飞书复用同一协议。
+Part 14 的 QQ 实现一和微信 ClawBot 实现二已复用同一协议进入当前代码基线。
 
 关键设计：
 
@@ -1487,12 +1487,14 @@ Part 14 第一版已实现并进入当前代码基线。第一条真实外部渠
 - QQ 群聊默认只有 `@机器人` 才触发，并按触发用户隔离 Session；Web/CLI 可查看本人跨渠道历史，QQ 私聊可跨端继续，QQ群聊 Session 在 Web/CLI 只读并通过派生新 Web Session 继续。
 - 命令、模型偏好、stop、Memory、Tool、Hook、MCP 和 Subagent 继续复用当前 runtime，仅按 `qq_c2c` / `qq_group` capabilities 裁剪展示和支持范围。
 - 入站先做回声过滤、持久去重、限流、身份、会话和附件 guard，再进入 Agent；同一 conversation route 串行，不同会话有界并行。
-- QQ 运行态优先使用 `qq-botpy` 可选依赖和 WebSocket。官方 Node connector 只作为可选扫码配网能力；Webhook 等 Part 15 具备公网部署条件后接入。
+- QQ 运行态优先使用 `qq-botpy` 可选依赖和 WebSocket。官方 Node connector 只作为可选扫码配网能力；Webhook 等未来具备公网部署条件后接入。
 - 当前 SDK 不启用未验证的 C2C stream；QQ 私聊普通回复按结构选择 Markdown，QQ 群聊与 CLI 复用共享 Markdown-to-plain renderer。QQ 文本分块使用递增 `msg_seq`，群聊最多 5 块、单聊最多 4 块；发送失败不能重新执行 Agent Turn。
 - 凭证、token、绑定码、签名和完整外部 ID 全链路脱敏；附件继续经过 SSRF、大小、类型和用户目录边界。
 - QQ 断线或依赖不可用只局部降级，不阻断 Web/CLI；health、trace、Runtime Activity 和 Security Audit 使用现有结构化出口。
 
 当前设计依据：`docs_design/zhice-agent-part14-external-channel-design.md`；初始边界记录：`docs_design/2026-07-23-qq-external-channel-boundary-design.md`；跨渠道 Session、解绑和 Markdown 收敛：`docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`；纯文本展示与回复序号：`docs_design/2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`。
+
+微信实现二已经增加一个 Web 用户一个微信 AI 账号、扫码 attempt、channel account ownership、共享 Node Transport sidecar 和 direct text 闭环。官方 npm 插件根入口会进入 OpenClaw 自己的 Agent Runtime，因此实现二只 vendoring 审计后的扫码/API/文本 Transport，不运行第二套 AgentLoop；2026-07-24 已通过单账号真实 POC。当前依据统一为 `docs_design/zhice-agent-part14-external-channel-design.md`；完整取舍与 POC 记录：`docs_design/2026-07-24-weixin-clawbot-channel-design.md`。
 
 ### 15.4 Part 15：生产部署与发布
 

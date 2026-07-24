@@ -23,6 +23,7 @@ from agent.auth.tool_policy import RbacToolExecutionPolicy
 from agent.channels.config import ChannelConfigurationError, load_channel_configuration
 from agent.channels.identity import ExternalIdentityService
 from agent.channels.qq.startup import check_qq_startup
+from agent.channels.weixin.startup import check_weixin_startup
 from agent.config import (
     DotenvConfigurationError,
     InitConfigurationError,
@@ -194,11 +195,15 @@ def _run_channels(argv: Sequence[str]) -> int:
         config = load_config(args.workspace)
         channel_config = load_channel_configuration(config.config_dir)
         if args.channels_command in {None, "status"}:
-            status = check_qq_startup(channel_config.qq)
-            print(f"channel.qq: {status.state} code={status.code}")
-            if status.message:
-                print(status.message)
-            return 0 if status.state != "unavailable" else 1
+            statuses = (
+                check_qq_startup(channel_config.qq),
+                check_weixin_startup(channel_config.weixin, config.workspace),
+            )
+            for status in statuses:
+                print(f"{status.name}: {status.state} code={status.code}")
+                if status.message:
+                    print(status.message)
+            return 0 if all(status.state != "unavailable" for status in statuses) else 1
         store = SQLiteAuthStore(config.auth_db_path)
         if not store.is_initialized():
             raise AuthSetupError("auth database is not initialized")

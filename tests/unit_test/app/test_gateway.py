@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -27,6 +28,77 @@ def test_gateway_serves_static_index(tmp_path):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Chat UI" in response.text
+
+
+def test_gateway_logs_web_and_external_channel_lifecycle(tmp_path, caplog):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    static_dir.joinpath("index.html").write_text("<html></html>", encoding="utf-8")
+    runtime = _LifecycleRuntime(
+        {
+            "channel.qq": CapabilityStatus(
+                "channel.qq", "available", "CHANNEL_QQ_AVAILABLE"
+            ),
+            "channel.weixin": CapabilityStatus(
+                "channel.weixin", "available", "CHANNEL_WEIXIN_AVAILABLE"
+            ),
+        }
+    )
+
+    with caplog.at_level(logging.INFO, logger="zcagent.gateway"):
+        with TestClient(create_app(config=_config(tmp_path), runtime=runtime, static_dir=static_dir)):
+            pass
+
+    lifecycle = [
+        (getattr(record, "event", ""), getattr(record, "fields", {}))
+        for record in caplog.records
+        if getattr(record, "event", "").startswith("channel.")
+    ]
+    assert [(event, fields["channel"], fields["state"]) for event, fields in lifecycle] == [
+        ("channel.start", "web", "available"),
+        ("channel.start", "qq", "available"),
+        ("channel.start", "weixin", "available"),
+        ("channel.stop", "weixin", "stopped"),
+        ("channel.stop", "qq", "stopped"),
+        ("channel.stop", "web", "stopped"),
+    ]
+    assert runtime.manager.started is True
+    assert runtime.manager.stopped is True
+
+
+def test_gateway_logs_disabled_and_failed_channels_without_blocking_web(tmp_path, caplog):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    static_dir.joinpath("index.html").write_text("<html></html>", encoding="utf-8")
+    runtime = _LifecycleRuntime(
+        {
+            "channel.qq": CapabilityStatus(
+                "channel.qq", "disabled", "CHANNEL_QQ_DISABLED"
+            ),
+            "channel.weixin": CapabilityStatus(
+                "channel.weixin",
+                "unavailable",
+                "CHANNEL_START_FAILED",
+                details={"error_type": "WeixinSidecarError"},
+            ),
+        },
+        adapter_keys=(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="zcagent.gateway"):
+        with TestClient(create_app(config=_config(tmp_path), runtime=runtime, static_dir=static_dir)) as client:
+            assert client.get("/health").status_code == 200
+
+    records = {
+        getattr(record, "fields", {}).get("channel"): record
+        for record in caplog.records
+        if getattr(record, "event", "") in {"channel.skip", "channel.start_failed"}
+    }
+    assert getattr(records["qq"], "event") == "channel.skip"
+    assert getattr(records["weixin"], "event") == "channel.start_failed"
+    assert records["weixin"].levelno == logging.WARNING
+    assert records["weixin"].fields["code"] == "CHANNEL_START_FAILED"
+    assert records["weixin"].fields["error_type"] == "WeixinSidecarError"
 
 
 def test_gateway_serves_admin_route_from_static_application(tmp_path):
@@ -366,3 +438,30 @@ class _FakeRuntime:
 
     def current_model_label(self) -> str:
         return "default/model-a"
+
+
+class _LifecycleManager:
+    def __init__(self, adapter_keys):
+        self.adapters = {key: object() for key in adapter_keys}
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+
+class _LifecycleRuntime(_FakeRuntime):
+    def __init__(self, statuses, adapter_keys=("channel.qq", "channel.weixin")):
+        super().__init__()
+        self._statuses = statuses
+        self.manager = _LifecycleManager(adapter_keys)
+        self.channel_manager = self.manager
+
+    def capability_statuses(self):
+        return dict(self._statuses)
+
+    def shutdown(self):
+        self.manager.stop()

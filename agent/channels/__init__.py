@@ -1,6 +1,11 @@
 """External channel application-shell services."""
 
-from agent.channels.config import ChannelConfiguration, QQAccountConfig, load_channel_configuration
+from agent.channels.config import (
+    ChannelConfiguration,
+    QQAccountConfig,
+    WeixinChannelConfig,
+    load_channel_configuration,
+)
 from agent.channels.conversation import ChannelConversationService
 from agent.channels.dedup import ChannelDedupService
 from agent.channels.identity import ExternalIdentityService
@@ -15,5 +20,6 @@ __all__ = [
     "ChannelRuntimeAdapter",
     "ExternalIdentityService",
     "QQAccountConfig",
+    "WeixinChannelConfig",
     "load_channel_configuration",
 ]

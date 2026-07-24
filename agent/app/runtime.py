@@ -144,8 +144,10 @@ class WebRuntime:
     mcp_runtime: McpRuntime | None = None
     channel_manager: Any | None = None
     channel_status: CapabilityStatus | None = None
+    channel_statuses: dict[str, CapabilityStatus] | None = None
     channel_identity: Any | None = None
     channel_config: Any | None = None
+    channel_weixin_binding: Any | None = None
 
     def __post_init__(self) -> None:
         self._active_turns: dict[tuple[str, str], ActiveTurn] = {}
@@ -171,6 +173,8 @@ class WebRuntime:
             statuses["memory_extraction"] = self.memory_extraction_status
         if self.channel_status is not None:
             statuses["channel.qq"] = self.channel_status
+        if self.channel_statuses is not None:
+            statuses.update(self.channel_statuses)
         if self.channel_manager is not None:
             statuses.update(self.channel_manager.statuses())
         return statuses
@@ -1314,6 +1318,7 @@ def build_web_runtime(
         load_channel_configuration,
     )
     from agent.channels.qq import build_qq_adapters
+    from agent.channels.weixin import build_weixin_adapter
 
     channel_config = load_channel_configuration(config.config_dir)
     identity = ExternalIdentityService(auth_store)
@@ -1327,10 +1332,21 @@ def build_web_runtime(
         dedup,
         channel_runtime,
     )
-    runtime.channel_manager = ChannelManager(adapters)
+    weixin_adapter, weixin_binding, weixin_status = build_weixin_adapter(
+        channel_config.weixin,
+        config.workspace,
+        identity,
+        conversations,
+        dedup,
+        channel_runtime,
+    )
+    all_adapters = tuple(adapters) + ((weixin_adapter,) if weixin_adapter is not None else ())
+    runtime.channel_manager = ChannelManager(all_adapters)
     runtime.channel_status = channel_status
+    runtime.channel_statuses = {"channel.weixin": weixin_status}
     runtime.channel_identity = identity
     runtime.channel_config = channel_config
+    runtime.channel_weixin_binding = weixin_binding
     return runtime
 
 

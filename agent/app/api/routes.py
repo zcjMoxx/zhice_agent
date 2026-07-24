@@ -46,6 +46,8 @@ from agent.app.api.schemas import (
     SessionSummaryResponse,
     ToolConfirmationResponse,
     ToolConfirmationsResponse,
+    WeixinBindingAttemptResponse,
+    WeixinChannelStatusResponse,
 )
 from agent.app.auth import AuthHttpError, local_operator_actor
 from agent.app.runtime import ChatTurnResult, ModelState
@@ -338,6 +340,80 @@ def unlink_channel_binding(binding_id: str, request: Request) -> AuthMutationRes
             )
         )
     return AuthMutationResponse(status="unbound")
+
+
+@router.get("/channels/weixin", response_model=WeixinChannelStatusResponse)
+def get_weixin_status(request: Request) -> WeixinChannelStatusResponse:
+    actor = _actor(request, channel="rest")
+    binding = _weixin_binding(_runtime(request))
+    return WeixinChannelStatusResponse(**binding.status(actor))
+
+
+@router.post(
+    "/channels/weixin/binding-attempts",
+    response_model=WeixinBindingAttemptResponse,
+)
+def create_weixin_binding_attempt(
+    request: Request, response: Response
+) -> WeixinBindingAttemptResponse:
+    actor = _actor(request, channel="rest")
+    binding = _weixin_binding(_runtime(request))
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return _weixin_attempt_response(binding.start(actor))
+    except AuthStoreError as exc:
+        raise ApiError("WEIXIN_ALREADY_BOUND", str(exc), status_code=409) from exc
+
+
+@router.get(
+    "/channels/weixin/binding-attempts/{attempt_id}",
+    response_model=WeixinBindingAttemptResponse,
+)
+def get_weixin_binding_attempt(
+    attempt_id: str, request: Request, response: Response
+) -> WeixinBindingAttemptResponse:
+    actor = _actor(request, channel="rest")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return _weixin_attempt_response(_weixin_binding(_runtime(request)).get(actor, attempt_id))
+    except KeyError as exc:
+        raise ApiError("WEIXIN_BINDING_ATTEMPT_NOT_FOUND", "Binding attempt not found", status_code=404) from exc
+
+
+@router.delete(
+    "/channels/weixin/binding-attempts/{attempt_id}",
+    response_model=WeixinBindingAttemptResponse,
+)
+def cancel_weixin_binding_attempt(
+    attempt_id: str, request: Request, response: Response
+) -> WeixinBindingAttemptResponse:
+    actor = _actor(request, channel="rest")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        attempt = _weixin_binding(_runtime(request)).cancel(actor, attempt_id)
+    except KeyError as exc:
+        raise ApiError("WEIXIN_BINDING_ATTEMPT_NOT_FOUND", "Binding attempt not found", status_code=404) from exc
+    return _weixin_attempt_response(attempt)
+
+
+@router.delete("/channels/weixin/binding", response_model=AuthMutationResponse)
+def unlink_weixin_binding(request: Request) -> AuthMutationResponse:
+    actor = _actor(request, channel="rest")
+    try:
+        status = _weixin_binding(_runtime(request)).unlink(actor)
+    except KeyError as exc:
+        raise ApiError("WEIXIN_BINDING_NOT_FOUND", "Weixin binding not found", status_code=404) from exc
+    return AuthMutationResponse(status=status)
+
+
+@router.post("/channels/weixin/reconnect", response_model=AuthMutationResponse)
+def reconnect_weixin_binding(request: Request) -> AuthMutationResponse:
+    actor = _actor(request, channel="rest")
+    try:
+        status = _weixin_binding(_runtime(request)).reconnect(actor)
+    except KeyError as exc:
+        raise ApiError("WEIXIN_BINDING_NOT_FOUND", "Weixin binding not found", status_code=404) from exc
+    return AuthMutationResponse(status=status)
 
 
 @router.get("/sessions", response_model=SessionsResponse)
@@ -913,6 +989,27 @@ def _channel_identity(runtime):
             status_code=503,
         )
     return identity
+
+
+def _weixin_binding(runtime):
+    binding = getattr(runtime, "channel_weixin_binding", None)
+    if binding is None:
+        raise ApiError(
+            "CHANNEL_WEIXIN_UNAVAILABLE",
+            "Weixin channel is disabled or unavailable",
+            status_code=503,
+        )
+    return binding
+
+
+def _weixin_attempt_response(attempt) -> WeixinBindingAttemptResponse:
+    return WeixinBindingAttemptResponse(
+        attempt_id=attempt.attempt_id,
+        status=attempt.status,
+        expires_at=attempt.expires_at,
+        qr_data=attempt.qr_data,
+        error_code=attempt.error_code,
+    )
 
 
 def _qq_account_key(runtime) -> str:

@@ -1,0 +1,53 @@
+{
+  "package": "@tencent-weixin/openclaw-weixin",
+  "version": "2.4.6",
+  "tarball": "https://registry.npmjs.org/@tencent-weixin/openclaw-weixin/-/openclaw-weixin-2.4.6.tgz",
+  "integrity": "sha512-qw9k3PLTiMWGNjjsknHgcTManH1w4j+Ji1ArWIaYLKCq3aFRsVwcqnPi127bvOoVMJGW4dbyJ8NECEMgoO+iRw==",
+  "shasum": "c7744c5b2d0232703c886b2f4e71681b0170695d",
+  "license": "MIT",
+  "node": ">=22",
+  "audited_at": "2026-07-24",
+  "audited_files": [
+    "package.json",
+    "src/auth/login-qr.ts",
+    "src/api/api.ts",
+    "src/api/types.ts",
+    "src/monitor/monitor.ts",
+    "src/storage/sync-buf.ts",
+    "src/messaging/process-message.ts",
+    "src/channel.ts"
+  ],
+  "vendored_files": [
+    "api/api.js",
+    "api/types.js",
+    "util/redact.js",
+    "util/random.js"
+  ],
+  "patches": [
+    "Replace OpenClaw config/account imports with a transport-only metadata shim.",
+    "Replace the OpenClaw logger with stderr-only aggressive redaction; stdout remains NDJSON-only.",
+    "Wire the existing external AbortSignal contract into the vendored QR-status GET wrapper so binding cancellation interrupts long-poll immediately.",
+    "Adapt official QR status, getUpdates, sendMessage, typing and notify APIs behind the ZhiCe sidecar driver contract.",
+    "Commit get_updates_buf only after accepted/duplicate/rejected ACKs and persist opaque context-token references per account."
+  ],
+  "transport_poc": {
+    "status": "passed_human_validation",
+    "validated_at": "2026-07-24",
+    "checks": {
+      "weixin_ai_badge": "passed",
+      "qr_login": "passed",
+      "direct_text_inbound": "passed",
+      "direct_text_outbound_with_context_token": "passed",
+      "sync_cursor_restore": "passed",
+      "context_token_restore": "passed",
+      "notify_stop": "passed",
+      "two_real_accounts": "pending"
+    },
+    "observations": [
+      "Transient getUpdates TCP connect timeouts recovered and a later poll delivered the message.",
+      "The upstream OpenClaw logger prints full platform account identifiers; the ZhiCe vendored logger removes them.",
+      "The package README documents phone authorization but does not link separate online-service terms."
+    ],
+    "fallback_forbidden": "personal_weixin_automation"
+  }
+}

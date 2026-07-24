@@ -87,6 +87,24 @@ CREATE TABLE IF NOT EXISTS external_identities (
   UNIQUE(channel, external_tenant_id, external_user_id)
 );
 
+CREATE TABLE IF NOT EXISTS channel_accounts (
+  id TEXT PRIMARY KEY,
+  channel TEXT NOT NULL,
+  account_key TEXT NOT NULL,
+  owner_user_id TEXT NOT NULL REFERENCES users(id),
+  external_account_id TEXT NOT NULL,
+  external_user_id TEXT NOT NULL,
+  credential_ref TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  linked_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_seen_at TEXT,
+  UNIQUE(channel, account_key),
+  UNIQUE(channel, owner_user_id),
+  UNIQUE(channel, external_account_id),
+  UNIQUE(channel, external_user_id)
+);
+
 CREATE TABLE IF NOT EXISTS external_identity_link_tokens (
   id TEXT PRIMARY KEY,
   token_hash TEXT NOT NULL UNIQUE,
@@ -278,6 +296,8 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_user_permissions_user ON user_permissions(user_id);
 CREATE INDEX IF NOT EXISTS idx_external_identities_user ON external_identities(user_id, channel);
+CREATE INDEX IF NOT EXISTS idx_channel_accounts_owner
+  ON channel_accounts(owner_user_id, channel, status);
 CREATE INDEX IF NOT EXISTS idx_external_link_tokens_user
   ON external_identity_link_tokens(user_id, channel, status);
 CREATE INDEX IF NOT EXISTS idx_external_authorization_status

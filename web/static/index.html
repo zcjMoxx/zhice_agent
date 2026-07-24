@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ZhiCe-Agent</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260723-cross-channel" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260724-weixin" />
   </head>
   <body>
     <section class="auth-view" id="loginView">
@@ -171,6 +171,19 @@
           <pre class="binding-code-output" id="qqLinkCodeOutput" hidden></pre>
           <div class="form-status" id="qqBindStatus" role="status"></div>
         </section>
+        <section class="account-form">
+          <h3>Weixin ClawBot</h3>
+          <div class="weixin-binding-state" id="weixinBindingState">Checking connection…</div>
+          <p class="muted">Connect one private Weixin AI account to this Web user. Direct text only.</p>
+          <img class="weixin-qr" id="weixinQr" alt="Weixin binding QR code" hidden />
+          <div class="channel-binding-actions">
+            <button class="secondary-button" id="weixinBindButton" type="button">Scan to connect</button>
+            <button class="secondary-button" id="weixinCancelButton" type="button" hidden>Cancel scan</button>
+            <button class="secondary-button" id="weixinReconnectButton" type="button" hidden>Reconnect</button>
+            <button class="secondary-button" id="weixinUnbindButton" type="button" hidden>Unbind</button>
+          </div>
+          <div class="form-status" id="weixinBindStatus" role="status"></div>
+        </section>
         <form class="account-form" id="passwordForm">
           <h3>Change password</h3>
           <label>
@@ -295,6 +308,6 @@
     </dialog>
 
     <script src="/static/runtime-event-state.js?v=20260720-runtime-hooks"></script>
-    <script src="/static/app.js?v=20260723-cross-channel"></script>
+    <script src="/static/app.js?v=20260724-weixin"></script>
   </body>
 </html>

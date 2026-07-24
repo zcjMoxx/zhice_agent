@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,9 +21,12 @@ from agent.app.logging import GatewayLogOptions, configure_gateway_logging
 from agent.app.runtime import WebRuntime, build_web_runtime
 from agent.config import AppConfig
 from agent.console import console
+from agent.logging_utils import log_event
 from agent.protocols.auth import AuditEvent
 from agent.protocols.capability import CapabilityStatus
 from agent.protocols.errors import ErrorCode
+
+gateway_logger = logging.getLogger("zcagent.gateway")
 
 
 def run_gateway(
@@ -81,13 +85,25 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        log_event(
+            gateway_logger,
+            logging.INFO,
+            "channel.start",
+            channel="web",
+            state="available",
+            code="WEB_GATEWAY_AVAILABLE",
+        )
         manager = getattr(runtime, "channel_manager", None)
         if manager is not None:
             manager.start()
-        yield
-        shutdown = getattr(runtime, "shutdown", None)
-        if callable(shutdown):
-            shutdown()
+        _log_external_channel_startup(runtime)
+        try:
+            yield
+        finally:
+            shutdown = getattr(runtime, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+            _log_channel_shutdown(runtime)
 
     app = FastAPI(
         title="ZhiCe-Agent Gateway",
@@ -197,6 +213,58 @@ def create_app(
         return Response(status_code=204)
 
     return app
+
+
+def _log_external_channel_startup(runtime: object) -> None:
+    statuses_method = getattr(runtime, "capability_statuses", None)
+    if not callable(statuses_method):
+        return
+    statuses = statuses_method()
+    for key in sorted(statuses):
+        if not str(key).startswith("channel."):
+            continue
+        status = statuses[key]
+        state = str(getattr(status, "state", "unavailable"))
+        code = str(getattr(status, "code", "CHANNEL_STATUS_UNKNOWN"))
+        if state == "available":
+            level = logging.INFO
+            event = "channel.start"
+        elif state == "disabled":
+            level = logging.INFO
+            event = "channel.skip"
+        else:
+            level = logging.WARNING
+            event = "channel.start_failed"
+        fields: dict[str, object] = {
+            "channel": str(key).removeprefix("channel."),
+            "state": state,
+            "code": code,
+        }
+        details = getattr(status, "details", {})
+        if isinstance(details, dict) and details.get("error_type"):
+            fields["error_type"] = details["error_type"]
+        log_event(gateway_logger, level, event, **fields)
+
+
+def _log_channel_shutdown(runtime: object) -> None:
+    manager = getattr(runtime, "channel_manager", None)
+    adapters = getattr(manager, "adapters", {}) if manager is not None else {}
+    if isinstance(adapters, dict):
+        for key in reversed(tuple(adapters)):
+            log_event(
+                gateway_logger,
+                logging.INFO,
+                "channel.stop",
+                channel=str(key).removeprefix("channel."),
+                state="stopped",
+            )
+    log_event(
+        gateway_logger,
+        logging.INFO,
+        "channel.stop",
+        channel="web",
+        state="stopped",
+    )
 
 
 def gateway_status(

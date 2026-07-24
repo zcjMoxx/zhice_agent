@@ -13,6 +13,8 @@ const state = {
   pendingConfirmation: null,
   pendingChannelBindToken: new URLSearchParams(window.location.search).get("channel_bind") || "",
   channelBindings: [],
+  weixinAttemptId: "",
+  weixinPollTimer: null,
   adminTab: "users",
   model: {
     endpoint: "",
@@ -84,6 +86,13 @@ const elements = {
   qqLinkCodeOutput: document.querySelector("#qqLinkCodeOutput"),
   qqBindStatus: document.querySelector("#qqBindStatus"),
   channelBindingList: document.querySelector("#channelBindingList"),
+  weixinBindingState: document.querySelector("#weixinBindingState"),
+  weixinQr: document.querySelector("#weixinQr"),
+  weixinBindButton: document.querySelector("#weixinBindButton"),
+  weixinCancelButton: document.querySelector("#weixinCancelButton"),
+  weixinReconnectButton: document.querySelector("#weixinReconnectButton"),
+  weixinUnbindButton: document.querySelector("#weixinUnbindButton"),
+  weixinBindStatus: document.querySelector("#weixinBindStatus"),
   sessionAccessNotice: document.querySelector("#sessionAccessNotice"),
   forkSessionButton: document.querySelector("#forkSessionButton"),
   passwordForm: document.querySelector("#passwordForm"),
@@ -198,6 +207,39 @@ async function unlinkChannelBinding(bindingId) {
     `/api/channels/bindings/${encodeURIComponent(bindingId)}`,
     { method: "DELETE" }
   ));
+}
+
+async function fetchWeixinStatus() {
+  return readJson(await fetch("/api/channels/weixin", { cache: "no-store" }));
+}
+
+async function createWeixinBindingAttempt() {
+  return readJson(await fetch("/api/channels/weixin/binding-attempts", {
+    method: "POST",
+    cache: "no-store",
+  }));
+}
+
+async function fetchWeixinBindingAttempt(attemptId) {
+  return readJson(await fetch(
+    `/api/channels/weixin/binding-attempts/${encodeURIComponent(attemptId)}`,
+    { cache: "no-store" },
+  ));
+}
+
+async function cancelWeixinBindingAttempt(attemptId) {
+  return readJson(await fetch(
+    `/api/channels/weixin/binding-attempts/${encodeURIComponent(attemptId)}`,
+    { method: "DELETE", cache: "no-store" },
+  ));
+}
+
+async function unlinkWeixinBinding() {
+  return readJson(await fetch("/api/channels/weixin/binding", { method: "DELETE" }));
+}
+
+async function reconnectWeixinBinding() {
+  return readJson(await fetch("/api/channels/weixin/reconnect", { method: "POST" }));
 }
 
 async function fetchSession(sessionId) {
@@ -712,6 +754,9 @@ function sessionSourceLabel(session) {
   }
   if (session.channel === "qq") {
     return "QQ direct";
+  }
+  if (session.channel === "weixin") {
+    return "Weixin direct";
   }
   if (["cli", "cli_legacy"].includes(session.channel)) {
     return "CLI";
@@ -1577,10 +1622,120 @@ function openAccountSettings() {
   setFormStatus(elements.profileStatus);
   setFormStatus(elements.passwordStatus);
   setFormStatus(elements.qqBindStatus);
+  setFormStatus(elements.weixinBindStatus);
   elements.qqLinkCodeOutput.hidden = true;
   elements.qqLinkCodeOutput.textContent = "";
   elements.accountDialog.showModal();
   refreshChannelBindings();
+  refreshWeixinStatus();
+}
+
+function stopWeixinPolling() {
+  if (state.weixinPollTimer) window.clearTimeout(state.weixinPollTimer);
+  state.weixinPollTimer = null;
+}
+
+async function refreshWeixinStatus() {
+  try {
+    const payload = await fetchWeixinStatus();
+    const connected = ["active", "reconnect_required", "cleanup_pending"].includes(payload.status);
+    elements.weixinBindingState.textContent = connected
+      ? `Connection status: ${payload.status}`
+      : "Weixin is not connected.";
+    elements.weixinBindButton.hidden = connected;
+    elements.weixinUnbindButton.hidden = !connected;
+    elements.weixinReconnectButton.hidden = payload.status !== "reconnect_required";
+    if (payload.status === "reconnect_required") {
+      setFormStatus(elements.weixinBindStatus, "Reconnect is required. Retry the saved account; if the token is stale, unbind and scan again.", "error");
+    }
+  } catch (error) {
+    elements.weixinBindingState.textContent = "Weixin capability is unavailable.";
+    elements.weixinBindButton.hidden = true;
+    setFormStatus(elements.weixinBindStatus, error.message, "error");
+  }
+}
+
+function renderWeixinAttempt(attempt) {
+  state.weixinAttemptId = attempt.attempt_id;
+  elements.weixinBindingState.textContent = `Binding status: ${attempt.status}`;
+  elements.weixinCancelButton.hidden = [
+    "connected", "expired", "cancelled", "upstream_unavailable", "persist_failed",
+  ].includes(attempt.status);
+  elements.weixinQr.hidden = !attempt.qr_data;
+  if (attempt.qr_data) elements.weixinQr.src = attempt.qr_data;
+  if (attempt.error_code) setFormStatus(elements.weixinBindStatus, attempt.error_code, "error");
+  if (attempt.status === "connected") {
+    stopWeixinPolling();
+    elements.weixinQr.removeAttribute("src");
+    elements.weixinQr.hidden = true;
+    setFormStatus(elements.weixinBindStatus, "Weixin AI account connected.", "success");
+    refreshWeixinStatus();
+  }
+}
+
+async function pollWeixinAttempt() {
+  if (!state.weixinAttemptId) return;
+  try {
+    const attempt = await fetchWeixinBindingAttempt(state.weixinAttemptId);
+    renderWeixinAttempt(attempt);
+    if (!["connected", "expired", "cancelled", "upstream_unavailable", "persist_failed"].includes(attempt.status)) {
+      state.weixinPollTimer = window.setTimeout(pollWeixinAttempt, 2000);
+    }
+  } catch (error) {
+    stopWeixinPolling();
+    setFormStatus(elements.weixinBindStatus, error.message, "error");
+  }
+}
+
+async function handleWeixinBind() {
+  stopWeixinPolling();
+  elements.weixinBindButton.disabled = true;
+  setFormStatus(elements.weixinBindStatus);
+  try {
+    const attempt = await createWeixinBindingAttempt();
+    renderWeixinAttempt(attempt);
+    if (!["upstream_unavailable", "persist_failed"].includes(attempt.status)) {
+      state.weixinPollTimer = window.setTimeout(pollWeixinAttempt, 2000);
+    }
+  } catch (error) {
+    setFormStatus(elements.weixinBindStatus, error.message, "error");
+  } finally {
+    elements.weixinBindButton.disabled = false;
+  }
+}
+
+async function handleWeixinCancel() {
+  if (!state.weixinAttemptId) return;
+  stopWeixinPolling();
+  try {
+    renderWeixinAttempt(await cancelWeixinBindingAttempt(state.weixinAttemptId));
+  } catch (error) {
+    setFormStatus(elements.weixinBindStatus, error.message, "error");
+  }
+}
+
+async function handleWeixinUnbind() {
+  if (!window.confirm("Unbind this Weixin AI account? Chat history and memory will be kept.")) return;
+  try {
+    const payload = await unlinkWeixinBinding();
+    setFormStatus(elements.weixinBindStatus, `Weixin status: ${payload.status}. History was kept.`, "success");
+    await refreshWeixinStatus();
+  } catch (error) {
+    setFormStatus(elements.weixinBindStatus, error.message, "error");
+  }
+}
+
+async function handleWeixinReconnect() {
+  elements.weixinReconnectButton.disabled = true;
+  try {
+    const payload = await reconnectWeixinBinding();
+    setFormStatus(elements.weixinBindStatus, `Reconnect status: ${payload.status}.`, payload.status === "active" ? "success" : "error");
+    await refreshWeixinStatus();
+  } catch (error) {
+    setFormStatus(elements.weixinBindStatus, error.message, "error");
+  } finally {
+    elements.weixinReconnectButton.disabled = false;
+  }
 }
 
 async function refreshChannelBindings() {
@@ -2028,9 +2183,16 @@ elements.adminButton.addEventListener("click", () => {
 });
 elements.managementClose.addEventListener("click", () => window.location.assign("/"));
 elements.adminLogoutButton.addEventListener("click", handleLogout);
-elements.accountClose.addEventListener("click", () => elements.accountDialog.close());
+elements.accountClose.addEventListener("click", () => {
+  stopWeixinPolling();
+  elements.accountDialog.close();
+});
 elements.profileForm.addEventListener("submit", handleProfileUpdate);
 elements.qqLinkCodeButton.addEventListener("click", handleQQLinkCode);
+elements.weixinBindButton.addEventListener("click", handleWeixinBind);
+elements.weixinCancelButton.addEventListener("click", handleWeixinCancel);
+elements.weixinReconnectButton.addEventListener("click", handleWeixinReconnect);
+elements.weixinUnbindButton.addEventListener("click", handleWeixinUnbind);
 elements.passwordForm.addEventListener("submit", handlePasswordChange);
 elements.confirmationApprove.addEventListener("click", () => handleConfirmation(true));
 elements.confirmationDeny.addEventListener("click", () => handleConfirmation(false));

@@ -688,6 +688,138 @@ class SQLiteAuthStore:
                 ),
             )
 
+    def create_channel_account(
+        self,
+        *,
+        channel: str,
+        account_key: str,
+        owner_user_id: str,
+        external_account_id: str,
+        external_user_id: str,
+        credential_ref: str,
+        external_display_name: str = "",
+    ) -> dict[str, Any]:
+        """Atomically create account ownership and its external identity mapping."""
+
+        now = _utc_now()
+        account_id = "channel-account-" + uuid.uuid4().hex
+        identity_id = "external-" + uuid.uuid4().hex
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO channel_accounts(
+                      id, channel, account_key, owner_user_id, external_account_id,
+                      external_user_id, credential_ref, status, linked_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                    """,
+                    (
+                        account_id,
+                        channel,
+                        account_key,
+                        owner_user_id,
+                        external_account_id,
+                        external_user_id,
+                        credential_ref,
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO external_identities(
+                      id, user_id, channel, external_tenant_id, external_user_id,
+                      external_display_name, linked_at, last_seen_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')
+                    """,
+                    (
+                        identity_id,
+                        owner_user_id,
+                        channel,
+                        account_key,
+                        external_user_id,
+                        external_display_name[:120],
+                        now,
+                        now,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise AuthStoreError("channel account conflicts with an existing binding") from exc
+        return self.get_channel_account(channel=channel, account_key=account_key) or {}
+
+    def get_channel_account(
+        self, *, channel: str, account_key: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM channel_accounts WHERE channel=? AND account_key=?",
+                (channel, account_key),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_channel_account_for_user(
+        self, *, channel: str, owner_user_id: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM channel_accounts WHERE channel=? AND owner_user_id=?",
+                (channel, owner_user_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_active_channel_accounts(self, channel: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM channel_accounts
+                WHERE channel=? AND status IN ('active', 'reconnect_required')
+                ORDER BY linked_at
+                """,
+                (channel,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_channel_account_status(
+        self, *, channel: str, account_key: str, status: str
+    ) -> bool:
+        if status not in {"active", "reconnect_required", "disabled", "cleanup_pending"}:
+            raise AuthStoreError("invalid channel account status")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE channel_accounts SET status=?, updated_at=?
+                WHERE channel=? AND account_key=?
+                """,
+                (status, _utc_now(), channel, account_key),
+            )
+        return cursor.rowcount == 1
+
+    def delete_channel_account_for_user(
+        self, *, channel: str, owner_user_id: str
+    ) -> dict[str, Any] | None:
+        """Delete live ownership and identity; callers retain Session and Memory history."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM channel_accounts WHERE channel=? AND owner_user_id=?",
+                (channel, owner_user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE channel_accounts SET status='disabled', updated_at=? WHERE id=?",
+                (_utc_now(), str(row["id"])),
+            )
+            connection.execute(
+                """
+                DELETE FROM external_identities
+                WHERE channel=? AND external_tenant_id=? AND user_id=?
+                """,
+                (channel, str(row["account_key"]), owner_user_id),
+            )
+            connection.execute("DELETE FROM channel_accounts WHERE id=?", (str(row["id"]),))
+        return dict(row)
+
     def resolve_external_identity(
         self,
         *,

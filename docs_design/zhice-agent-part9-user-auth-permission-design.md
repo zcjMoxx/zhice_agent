@@ -222,7 +222,7 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 > 当前实现：`FilesystemUserContextResolver.resolve(..., use_workspace_context=True)` 直接返回 workspace 根目录和全局 `contexts/sessions*`，不会创建或使用 `contexts/users/{owner_id}`。参数名明确表达这是完整 workspace operator 上下文，而不只是切换 session 路径。历史残留目录不自动删除，避免误删既有文件。
 
-未来接入飞书、QQ 等渠道时，不在 `contexts/users/{user_id}` 下按渠道再拆权限边界。外部渠道身份通过数据库映射到内部 `user_id`；如果确实需要保存渠道文件，可在 `files/channels/{channel}/` 下组织，但权限边界仍然是内部用户。
+QQ、微信接入时，不在 `contexts/users/{user_id}` 下按渠道再拆权限边界。外部渠道身份通过数据库映射到内部 `user_id`；如果确实需要保存渠道文件，可在 `files/channels/{channel}/` 下组织，但权限边界仍然是内部用户。
 
 ### 4.3 Tool 边界
 
@@ -467,8 +467,8 @@ CREATE INDEX idx_external_identities_user ON external_identities(user_id, channe
 规则：
 
 - `user_id` 是 ZhiCe-Agent 内部主身份。
-- `channel` 可以是 `web | cli | feishu | qq | ...`。
-- 飞书、QQ 等外部 user id 只作为映射，不进入用户目录路径。
+- `channel` 当前可以是 `web | cli | qq | weixin`。
+- QQ、微信外部 user id 只作为映射，不进入用户目录路径。
 - 同一个内部用户可以绑定多个外部渠道身份。
 
 ### 6.4 roles / permissions
@@ -920,17 +920,17 @@ CLI 当前已经存在的全局 JSONL session 不属于普通 DB 用户目录。
 
 ### 10.5 外部渠道 session
 
-飞书、QQ 等渠道不改变用户目录结构。渠道身份先通过 `external_identities` 解析到内部 `user_id`，再将 session 写入该用户目录。
+QQ、微信渠道不改变用户目录结构。渠道身份先通过 `external_identities` 解析到内部 `user_id`，再将 session 写入该用户目录。
 
 `session_index` 记录渠道元数据：
 
 ```text
-channel = feishu | qq | web | ...
-external_chat_id = 飞书群 / 私聊 / QQ 群等外部会话 id
+channel = qq | weixin | web
+external_chat_id = QQ 私聊 / 群聊或微信私聊等外部会话 id
 external_thread_id = 外部 thread / topic id，可为空
 ```
 
-这样同一个内部用户从 Web、飞书、QQ 进入时仍共用同一套权限和用户上下文边界；渠道 id 变更、解绑、重绑不影响文件路径。
+这样同一个内部用户从 Web、QQ、微信进入时仍共用同一套权限和用户上下文边界；渠道 id 变更、解绑、重绑不影响文件路径。
 
 ---
 
@@ -1837,7 +1837,7 @@ tests/unit_test/tools/*
 | disabled user | disabled | 403 AUTH_ACCOUNT_DISABLED |
 | logout | valid token | auth session revoked |
 | expired token | expires_at 过去 | actor 解析失败 |
-| external identity | 飞书/QQ 外部 id | 解析到内部 user_id |
+| external identity | QQ/微信外部 id | 解析到内部 user_id |
 
 ### 18.2 Permission
 
@@ -1871,7 +1871,7 @@ tests/unit_test/tools/*
 | explicit manage | 有 `session.manage.any` 且执行显式管理动作 | 可按既有授权解析目标 session |
 | owner storage | Owner Web chat | 写入 CLI `contexts/sessions*` 并保留 owner index |
 | owner CLI index | Owner 列出未索引全局 CLI JSONL | 同路径只补 session_index，不复制、不移动 |
-| channel session | 飞书/QQ session | 通过 external identity 写入内部用户目录 |
+| channel session | QQ/微信 session | 通过 external identity 写入内部用户目录 |
 
 ### 18.4 Session model preference
 
@@ -1881,7 +1881,7 @@ tests/unit_test/tools/*
 | switch session | 登录用户切换自己的 session A | 只写 session A metadata |
 | isolate sessions | 同一用户 session A/B | A 切换不影响 B |
 | isolate users | 不同用户使用相同 session 名称 | 按用户目录隔离 metadata |
-| external session | 飞书 chat/thread 映射到内部 session | 使用该 session 偏好 |
+| external session | QQ/微信外部会话映射到内部 session | 使用该 session 偏好 |
 | model reset | 当前 session 执行 `/model reset` | 清偏好字段并恢复系统默认 |
 | new session | 当前 session 有偏好后执行 `/new` | 新 session 使用系统默认，不继承旧偏好 |
 | reopen session | 切回已有 session | 恢复该 session 保存的偏好 |
