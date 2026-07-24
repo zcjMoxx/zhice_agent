@@ -8,6 +8,34 @@ import pytest
 from agent.auth.store import AuthSetupError, AuthStoreError, SQLiteAuthStore
 
 
+def test_initialize_schema_adds_session_conversation_type_to_legacy_database(tmp_path):
+    path = tmp_path / "auth.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE session_index (
+              session_id TEXT PRIMARY KEY,
+              owner_user_id TEXT NOT NULL,
+              channel TEXT NOT NULL DEFAULT 'web',
+              external_chat_id TEXT NOT NULL DEFAULT '',
+              external_thread_id TEXT NOT NULL DEFAULT '',
+              title TEXT NOT NULL DEFAULT '',
+              preview TEXT NOT NULL DEFAULT '',
+              message_count INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              archived_at TEXT
+            )
+            """
+        )
+
+    SQLiteAuthStore(path).initialize_schema()
+
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(session_index)")}
+    assert "conversation_type" in columns
+
+
 def test_init_owner_seeds_roles_permissions_and_authenticates(tmp_path):
     store = SQLiteAuthStore(tmp_path / "state" / "auth.sqlite3")
 

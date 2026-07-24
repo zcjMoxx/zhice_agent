@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到第十三部分并行 Subagent 编排。主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到第十四部分 QQ 外部渠道接入。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -23,6 +23,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - workspace 共享 MCP Runtime、stdio / Streamable HTTP / SSE、自动 Tool 发现、OAuth 刷新、Elicitation 和 actor-scoped artifact 导入
 - 有界并行 `delegate_tasks`、独立 child AgentLoop/Session/RuntimeEvent、能力 Profile 和 shared-readonly/worktree/shared-exclusive workspace 隔离
 - `/subagent` 的 `auto/off/once` Session 语义、Web child task 状态和可选能力结构化启动告警
+- 中性 Channel 协议、外部身份绑定、持久 conversation route/event receipt，以及 QQ 私聊/群聊 `@` WebSocket adapter
 
 当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge 或市集。MCP Runtime 直接读取常见 `mcpServers` 配置，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Part 12 已完成 turn/context/LLM/tool RuntimeEvent、WebSocket/SSE/CLI 与前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime；Hook 只能增加业务阻断、修改后重新走核心校验或补充安全 display/ui_metadata，不能降低 RBAC、危险确认、workspace guard、timeout、脱敏或 SSRF。Part 13 在此基线上增加同步 Provider 下的有界线程并行、父能力交集、独立 child 运行态和 workspace lease。SkillExecutor、`skill.*` 和 ProgressSink 属于未来 Skill Runtime / Part 18。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
 
@@ -40,6 +41,7 @@ Tool capability selection 已从原 Part 16 路线提前进入当前基线。每
 - 第十一部分 MCP 当前实现入口是 `docs_design/zhice-agent-part11-mcp-design.md`，本次边界与取舍记录见 `docs_design/2026-07-17-mcp-tool-runtime-boundary-design.md`。
 - 第十二部分生命周期事件与 Hook Runtime 当前实现入口是 `docs_design/zhice-agent-part12-hooks-design.md`，最终边界与取舍记录见 `docs_design/2026-07-20-hook-runtime-boundary-design.md`；RuntimeEvent、渠道/前端状态、真实 pre/post Hook Runtime 和测试均已完成，Part 12 已关闭。
 - 第十三部分并行 Subagent 编排已经实现并进入当前代码基线，入口是 `docs_design/zhice-agent-part13-subagent-design.md`，边界取舍记录见 `docs_design/2026-07-21-subagent-runtime-boundary-design.md`，启动降级与诊断证据闭环见 `docs_design/2026-07-21-startup-capability-and-subagent-diagnostics-design.md`。主 Agent默认直接完成简单任务，只有委派收益明确时才通过批量 `delegate_tasks` 做有界并行 fan-out/fan-in；`/subagent` 提供 `auto/off/once` Session 语义；child 使用独立 AgentLoop、Session、RuntimeEvent scope 和 workspace lease，Skill、`exec`、MCP 通过 Profile、父能力交集、确认与 Hook 受控开放。
+- 第十四部分外部渠道已实现第一版 QQ 闭环，入口是 `docs_design/zhice-agent-part14-external-channel-design.md`，初始边界见 `docs_design/2026-07-23-qq-external-channel-boundary-design.md`，跨渠道 Session、用户解绑和 QQ Markdown 收敛见 `docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`。QQ SDK 仅位于 transport 层；未知身份在 LLM 前拒绝，群聊按触发用户隔离 Session，高风险确认转私聊或 Web。
 - 按需 Tool 发现与动态 Capability Selection 已提前落地，设计记录见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md`；它是通用运行时能力，不归入 Part 13 的业务委派判断。
 
 Subagent 运行配置位于 `${ZHICE_AGENT_WORKSPACE}/config/subagents.yml`，仓库模板为 `config/subagents.example.yml`。缺少配置时功能默认关闭；启用后可用裸 `/subagent` 查看当前模式和 Profile，详细切换形式由输出中的 Tip 提示。能力不可用时，CLI、本地操作者和 Owner 会看到真实原因与修复建议；普通 Web 用户只会看到能力暂时不可用并联系管理员，不暴露 Prompt 文件名、内部错误码、配置路径或初始化命令。真实 cause 继续保留在终端、trace 和有权限的诊断结果中。
@@ -92,6 +94,7 @@ ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
 
 - `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`
 - `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`
+- `${ZHICE_AGENT_WORKSPACE}/config/channels.yml`
 - `${ZHICE_AGENT_WORKSPACE}/prompts/*.md`
 
 `zcagent init` 可以重复执行：已有文件默认保留，缺失文件会自动补齐；确实要刷新覆盖已有模板时再加 `--force`。
@@ -99,6 +102,25 @@ ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
 如果启动 `zcagent` 时缺少 `llm_endpoints.json`，CLI 会阻断聊天并引导运行 `zcagent init`；文件已经存在但内容非法时，CLI 会优先引导编辑现有文件，不会误导普通 `init` 可以覆盖修复。聊天至少需要一个 enabled endpoint，并配置与真实服务一致的 protocol、base URL/provider、model 和 api_key。`context_window` 缺失时默认 `131072`，`max_tokens` 缺失时使用兼容默认值；二者已有默认值，但应按实际模型限制校准。没有可用 LLM 时聊天无法继续。
 
 Skill source、MCP 和 Subagent 都是可选扩展：未配置时作为 disabled 静默关闭，不影响基础聊天；只有显式配置后内容非法或依赖失败时才记录 WARNING。Hook 未配置时同样 disabled，但显式配置代表已声明安全策略，非法时会阻断启动。
+
+## QQ 外部渠道
+
+安装可选 SDK：
+
+```bash
+python -m pip install -e ".[qq]"
+```
+
+运行配置位于 `${ZHICE_AGENT_WORKSPACE}/config/channels.yml`，模板为 `config/channels.example.yml`。本地项目 `config/.env` 提供 `QQBOT_APP_ID` 和 `QQBOT_APP_SECRET`，`channels.yml` 只保留 `${QQBOT_APP_ID}` / `${QQBOT_APP_SECRET}` 引用。配置 `enabled: true` 后，`zcagent gateway` 在同一生命周期启动 QQ WebSocket adapter；QQ 不可用只局部降级，不阻断 Web/CLI。
+
+查看状态；CLI 绑定码命令保留为管理/故障恢复入口：
+
+```bash
+zcagent channels status
+zcagent channels link-code qq --user alice --account main
+```
+
+未绑定 QQ 用户会看到“绑定”按钮；裸 `/bind` 返回一次性 Web Markdown 登录链接和 URL 按钮，登录成功后自动绑定当前 Web 用户，也可以在 Web“个人设置”生成一次性绑定码后发送 `/bind <code>`。个人设置会显示当前用户自己的 QQ 绑定并允许解绑，解绑保留历史 Session。Web/CLI 可以查看本人跨渠道历史，QQ 私聊 Session 可跨端继续；QQ 群 Session 在 Web/CLI 只读，只能派生新的 Web Session。QQ 不提供跨渠道 `/sessions` 管理。普通结构化回复在安全长度内使用 Markdown，短句、超长内容和富消息失败时使用文本。当前 `qq-botpy 1.2.1` 未使用不稳定的原生 token stream。
 
 ## LLM 配置
 
@@ -231,7 +253,7 @@ zcagent --session your-session-id
 CLI 内可用命令：
 
 - `/new`：新建一个 session，并切换过去
-- `/reset`：清空当前 session 历史
+- `/clear`：清空当前 session 历史
 - `/sessions`：查看已有 session 列表和简短预览
 - `/history`：打印当前 session 最近消息
 - `/prompts`：列出已加载的 prompt 文件
@@ -294,7 +316,7 @@ zcagent auth reset-password admin
 ```
 
 - `init-owner` 创建唯一 Owner；默认 `--username owner --display-name Owner`，两者均可覆盖。无 Owner 时先安全读取并校验 `ZHICE_AGENT_SETUP_TOKEN`，再安全读取一次 Owner 密码；两者都不接受明文命令参数。已有 Owner 时直接失败，不读取任何输入。
-- Owner 是 CLI 本地操作者在 Web 端的登录身份，两者共用全局 workspace、`contexts/sessions` 和 `contexts/sessions_meta`，不创建 Owner 专属的 `contexts/users/{owner_id}`；其他 Web / 外部渠道用户位于 `${ZHICE_AGENT_WORKSPACE}/contexts/users/{user_id}`。聊天侧栏始终只展示当前账号自己的已索引会话。
+- Owner 是 CLI 本地操作者在 Web 端的登录身份，两者共用全局 workspace、`contexts/sessions` 和 `contexts/sessions_meta`，不创建 Owner 专属的 `contexts/users/{owner_id}`；其他 Web / 外部渠道用户位于 `${ZHICE_AGENT_WORKSPACE}/contexts/users/{user_id}`。聊天侧栏展示当前账号自己的全部已索引会话并标明 Web、CLI、QQ 私聊或 QQ 群来源；QQ 群历史只读，避免私有 Web/CLI 上下文随后进入公开群回复。
 
 ### `/model`
 

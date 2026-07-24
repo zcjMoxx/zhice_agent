@@ -4,6 +4,8 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 from agent.app.runtime import (
     DEFAULT_WEB_HISTORY_MESSAGES,
     EXTERNAL_COMMAND_PROFILE,
@@ -12,6 +14,9 @@ from agent.app.runtime import (
     _create_skill_loader,
     _sync_startup_skills,
 )
+from agent.auth.session_access import SessionAccessError, SessionAccessService
+from agent.auth.store import SQLiteAuthStore
+from agent.auth.user_context import FilesystemUserContextResolver
 from agent.config import AppConfig
 from agent.message import Message
 from agent.prompt_loader import PromptLoader
@@ -144,6 +149,8 @@ def test_web_help_hides_external_only_commands(tmp_path):
     assert "/subagent auto" not in result
     assert "- `/memory` - show current Memory" in result
     assert "- `/mcp` - show available MCP capabilities" in result
+    assert "- `/clear` - clear this session history" in result
+    assert "/reset" not in result
     assert "/memory list" not in result
     assert "/memory summarize" not in result
     assert "- `/model list`" not in result
@@ -165,6 +172,55 @@ def test_external_help_lists_external_commands(tmp_path):
     assert "Tip:" not in result
 
 
+def test_qq_direct_cannot_list_or_manage_cross_channel_sessions(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    help_text = runtime.handle_command("alpha", "/help", command_profile="qq_c2c")
+    result = runtime.handle_command("alpha", "/sessions", command_profile="qq_c2c")
+
+    assert "/sessions" not in help_text
+    assert result == (
+        "Session management is available in Web or CLI. "
+        "Use `/new` here for a fresh QQ session."
+    )
+    assert runtime.sessions.deleted_sessions == []
+
+
+def test_qq_group_help_lists_clear_command(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    result = runtime.handle_command("alpha", "/help", command_profile="qq_group")
+
+    assert "- `/clear` - clear your current session history" in result
+    assert "/reset" not in result
+
+
+def test_web_cannot_append_to_qq_group_session(tmp_path):
+    loop = _RecordingAgentLoop()
+    runtime = _runtime(tmp_path, agent_loop=loop)
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("owner", "Owner", "password-123")
+    runtime.session_access = SessionAccessService(
+        store,
+        FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path),
+    )
+    actor = store.actor_for_user(user.id, channel="web")
+    runtime.session_access.ensure_session(
+        actor,
+        "qq-group",
+        channel="qq",
+        conversation_type="group",
+        external_chat_id="group-openid",
+        write=True,
+    )
+
+    with pytest.raises(SessionAccessError) as exc_info:
+        runtime.run_chat_events(actor, "qq-group", "private Web context")
+
+    assert exc_info.value.code == "SESSION_CHANNEL_READ_ONLY"
+    assert loop.calls == []
+
+
 def test_sessions_list_shows_subcommand_tip(tmp_path):
     runtime = _runtime(tmp_path)
 
@@ -174,7 +230,7 @@ def test_sessions_list_shows_subcommand_tip(tmp_path):
     assert "Recent sessions:" in result
     assert "Tip: use `/sessions rename <id> <title>`" in result
     assert "`/sessions delete [id]`" in result
-    assert "omitting id clears the current session like `/reset`" in result
+    assert "omitting id clears the current session like `/clear`" in result
 
 
 def test_quit_is_not_a_supported_command(tmp_path):
@@ -230,16 +286,24 @@ def test_subagent_command_uses_session_sidecar_and_compact_tip(tmp_path):
     assert runtime.consume_subagent_force_once("alpha") is False
 
 
-def test_reset_preserves_subagent_mode_and_clears_force_once(tmp_path):
+def test_clear_preserves_subagent_mode_and_clears_force_once(tmp_path):
     runtime = _runtime(tmp_path)
     runtime.handle_command("alpha", "/subagent off")
     runtime.handle_command("alpha", "/subagent once")
 
-    runtime.handle_command("alpha", "/reset")
+    runtime.handle_command("alpha", "/clear")
 
     preference = runtime.get_subagent_preference("alpha")
     assert preference.mode == "off"
     assert preference.force_once is False
+
+
+def test_reset_is_no_longer_a_supported_runtime_command(tmp_path):
+    runtime = _runtime(tmp_path)
+
+    result = runtime.handle_command("alpha", "/reset", command_profile="qq_group")
+
+    assert result == "Unsupported command: `/reset`.\n\nUse `/help` to see available commands."
 
 
 def test_unavailable_subagent_command_returns_precise_capability_error(tmp_path):

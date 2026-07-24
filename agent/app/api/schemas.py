@@ -28,6 +28,9 @@ class SessionSummaryResponse(BaseModel):
     updated_at: str
     message_count: int
     title: str = ""
+    channel: str = ""
+    conversation_type: str = ""
+    continuation_mode: str = "writable"
 
 
 class SessionsResponse(BaseModel):
@@ -159,6 +162,42 @@ class AuthMutationResponse(BaseModel):
 
     status: str
     user: PublicUserResponse | None = None
+
+
+class ChannelLinkCodeResponse(BaseModel):
+    """One short-lived manual external identity binding code."""
+
+    code: str
+    expires_at: str
+    command: str
+
+
+class ChannelAuthorizationRequest(BaseModel):
+    """Opaque token returned by a channel-initiated Web authorization link."""
+
+    token: str
+
+
+class ChannelAuthorizationResponse(BaseModel):
+    """Result of binding the external identity to the current Web user."""
+
+    status: str
+    channel: str
+
+
+class ChannelBindingResponse(BaseModel):
+    """One current user's safely presented external channel binding."""
+
+    binding_id: str
+    channel: str
+    display_name: str = ""
+    linked_at: str = ""
+
+
+class ChannelBindingsResponse(BaseModel):
+    """Current user's active external channel bindings."""
+
+    bindings: list[ChannelBindingResponse]
 
 
 class AdminUsersResponse(BaseModel):

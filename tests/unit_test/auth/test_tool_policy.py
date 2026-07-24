@@ -53,6 +53,24 @@ def test_absolute_destructive_command_is_rejected_as_workspace_escape():
     assert decision.code == "PATH_OUTSIDE_WORKSPACE"
 
 
+def test_group_channel_denies_confirmation_required_exec():
+    policy = RbacToolExecutionPolicy()
+    admin = _actor("tool.exec.dangerous")
+    context = ToolExecutionContext(
+        actor=admin,
+        session_id="session-1",
+        turn_id="turn-1",
+        turn_index=1,
+        channel="qq",
+        conversation_type="group",
+    )
+
+    decision = policy.decide("exec", {"command": "pip install demo"}, context)
+
+    assert decision.action == "deny"
+    assert decision.code == "CHANNEL_GROUP_CONFIRMATION_UNAVAILABLE"
+
+
 def test_memory_tools_are_baseline_but_writes_still_require_user_authorization():
     policy = RbacToolExecutionPolicy()
     actor = _actor()

@@ -32,6 +32,7 @@ class ToolExecutionContext:
     turn_id: str
     turn_index: int | None
     channel: str
+    conversation_type: str = ""
     source: str = "llm"
     request_id: str = ""
     tool_name: str = ""

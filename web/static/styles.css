@@ -489,6 +489,58 @@
   color: #b42318;
 }
 
+.binding-code-output {
+  margin: 0;
+  padding: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-muted);
+}
+
+.channel-binding-list {
+  display: grid;
+  gap: 8px;
+}
+
+.channel-binding-row,
+.session-access-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.channel-binding-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fbfcfd;
+}
+
+.session-access-notice {
+  width: min(840px, calc(100% - 48px));
+  margin: 0 auto 10px;
+  border: 1px solid #d7b86b;
+  border-radius: 8px;
+  background: #fff9e8;
+  color: #6d5316;
+  padding: 10px 12px;
+}
+
+.session-source-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border-radius: 999px;
+  background: #e9eef5;
+  color: #52606d;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 7px;
+}
+
 .dialog-tabs {
   display: flex;
   gap: 8px;
@@ -1237,6 +1289,10 @@ button {
   }
 
   .composer {
+    width: min(840px, calc(100% - 28px));
+  }
+
+  .session-access-notice {
     width: min(840px, calc(100% - 28px));
   }
 

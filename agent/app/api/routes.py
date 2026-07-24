@@ -20,6 +20,11 @@ from agent.app.api.schemas import (
     AuthMeResponse,
     AuthMutationResponse,
     BootstrapOwnerRequest,
+    ChannelAuthorizationRequest,
+    ChannelAuthorizationResponse,
+    ChannelBindingResponse,
+    ChannelBindingsResponse,
+    ChannelLinkCodeResponse,
     ChatMessageResponse,
     ChatRequest,
     ChatResponse,
@@ -224,6 +229,117 @@ def change_current_user_password(
     return AuthMutationResponse(status="reauthentication_required")
 
 
+@router.post("/channels/qq/link-code", response_model=ChannelLinkCodeResponse)
+def create_qq_link_code(request: Request) -> ChannelLinkCodeResponse:
+    """Create a manual QQ binding code for the current authenticated user."""
+
+    actor = _actor(request, channel="rest")
+    runtime = _runtime(request)
+    identity = _channel_identity(runtime)
+    account_key = _qq_account_key(runtime)
+    link = identity.create_link_code(str(actor.user_id), "qq", account_key)
+    auth = _auth_service(request, required=True)
+    if auth.audit_sink is not None:
+        auth.audit_sink.record(
+            AuditEvent(
+                action="external_identity.link_code_created",
+                resource_type="external_identity",
+                actor=actor,
+                request_id=_request_id(request),
+                channel="rest",
+                route=request.url.path,
+                decision="allow",
+                metadata={"target_channel": "qq"},
+            )
+        )
+    return ChannelLinkCodeResponse(
+        code=link.code,
+        expires_at=link.expires_at,
+        command=f"/bind {link.code}",
+    )
+
+
+@router.post("/channels/qq/authorize", response_model=ChannelAuthorizationResponse)
+def authorize_qq_identity(
+    request_body: ChannelAuthorizationRequest,
+    request: Request,
+) -> ChannelAuthorizationResponse:
+    """Consume a QQ-initiated authorization token for the current Web user."""
+
+    actor = _actor(request, channel="rest")
+    runtime = _runtime(request)
+    identity = _channel_identity(runtime)
+    if not identity.authorize(request_body.token, actor):
+        raise ApiError(
+            "CHANNEL_BIND_TOKEN_INVALID",
+            "QQ binding link is invalid, expired, or already used",
+            status_code=400,
+        )
+    auth = _auth_service(request, required=True)
+    if auth.audit_sink is not None:
+        auth.audit_sink.record(
+            AuditEvent(
+                action="external_identity.linked",
+                resource_type="external_identity",
+                actor=actor,
+                request_id=_request_id(request),
+                channel="rest",
+                route=request.url.path,
+                decision="allow",
+                metadata={"target_channel": "qq", "method": "web_authorization"},
+            )
+        )
+    return ChannelAuthorizationResponse(status="bound", channel="qq")
+
+
+@router.get("/channels/bindings", response_model=ChannelBindingsResponse)
+def list_channel_bindings(request: Request) -> ChannelBindingsResponse:
+    """Return the current user's active channel bindings without raw platform ids."""
+
+    actor = _actor(request, channel="rest")
+    identity = _channel_identity(_runtime(request))
+    return ChannelBindingsResponse(
+        bindings=[
+            ChannelBindingResponse(
+                binding_id=item.binding_id,
+                channel=item.channel,
+                display_name=item.display_name,
+                linked_at=item.linked_at,
+            )
+            for item in identity.list_bindings(actor)
+        ]
+    )
+
+
+@router.delete("/channels/bindings/{binding_id}", response_model=AuthMutationResponse)
+def unlink_channel_binding(binding_id: str, request: Request) -> AuthMutationResponse:
+    """Disable one binding only when it belongs to the current user."""
+
+    actor = _actor(request, channel="rest")
+    identity = _channel_identity(_runtime(request))
+    if not identity.unlink(actor, binding_id):
+        raise ApiError(
+            "CHANNEL_BINDING_NOT_FOUND",
+            "Channel binding not found",
+            status_code=404,
+        )
+    auth = _auth_service(request, required=True)
+    if auth.audit_sink is not None:
+        auth.audit_sink.record(
+            AuditEvent(
+                action="external_identity.unlinked",
+                resource_type="external_identity",
+                resource_id=binding_id,
+                actor=actor,
+                request_id=_request_id(request),
+                channel="rest",
+                route=request.url.path,
+                decision="allow",
+            )
+        )
+    return AuthMutationResponse(status="unbound")
+
+
 @router.get("/sessions", response_model=SessionsResponse)
 def list_sessions(request: Request) -> SessionsResponse:
     """Return workspace sessions ordered by recent activity."""
@@ -247,9 +363,40 @@ def list_sessions(request: Request) -> SessionsResponse:
                 updated_at=_format_timestamp(summary.updated_at),
                 message_count=summary.message_count,
                 title=summary.title,
+                channel=summary.channel,
+                conversation_type=summary.conversation_type,
+                continuation_mode=summary.continuation_mode,
             )
             for summary in summaries
         ]
+    )
+
+
+@router.post("/sessions/{session_id}/fork", response_model=SessionSummaryResponse)
+def fork_session_to_web(session_id: str, request: Request) -> SessionSummaryResponse:
+    """Copy one read-only external group session into a private Web session."""
+
+    runtime = _runtime(request)
+    actor = _actor(request, channel="rest")
+    try:
+        summary = _runtime_call(
+            runtime,
+            "fork_session_to_web",
+            actor,
+            session_id,
+            request_id=_request_id(request),
+        )
+    except Exception as exc:
+        raise _api_error_from_exception(exc) from exc
+    return SessionSummaryResponse(
+        session_id=summary.session_id,
+        preview=summary.preview,
+        updated_at=_format_timestamp(summary.updated_at),
+        message_count=summary.message_count,
+        title=summary.title,
+        channel=summary.channel,
+        conversation_type=summary.conversation_type,
+        continuation_mode=summary.continuation_mode,
     )
 
 
@@ -755,6 +902,29 @@ def _auth_service(request: Request, *, required: bool = False):
             status_code=503,
         )
     return auth
+
+
+def _channel_identity(runtime):
+    identity = getattr(runtime, "channel_identity", None)
+    if identity is None:
+        raise ApiError(
+            ErrorCode.CONFIG_INVALID,
+            "External channel identity service is unavailable",
+            status_code=503,
+        )
+    return identity
+
+
+def _qq_account_key(runtime) -> str:
+    config = getattr(runtime, "channel_config", None)
+    accounts = tuple(getattr(getattr(config, "qq", None), "accounts", ()) or ())
+    if not accounts:
+        raise ApiError(
+            ErrorCode.CONFIG_INVALID,
+            "QQ channel account is not configured",
+            status_code=503,
+        )
+    return "main" if any(account.key == "main" for account in accounts) else str(accounts[0].key)
 
 
 def _actor(request: Request, permission_key: str | None = None, *, channel: str):

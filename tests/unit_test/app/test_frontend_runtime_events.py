@@ -25,8 +25,26 @@ def test_frontend_math_renderer_supports_common_latex_and_safe_fallback():
     assert "trust: false" in script
     assert ".bubble.markdown .katex-display" in styles
     assert "overflow-x: auto" in styles
-    assert "/static/app.js?v=20260722-math-rendering" in index
-    assert "/static/styles.css?v=20260722-math-rendering" in index
+    assert "/static/app.js?v=20260723-cross-channel" in index
+    assert "/static/styles.css?v=20260723-cross-channel" in index
+    assert "sessionAccessNotice" in index
+    assert "channelBindingList" in index
+    assert "continuation_mode" in script
+    assert "/api/channels/bindings" in script
+    assert "/fork" in script
+
+
+def test_frontend_supports_qq_link_code_and_login_authorization():
+    script = Path("web/static/app.js").read_text(encoding="utf-8")
+    index = Path("web/static/index.html").read_text(encoding="utf-8")
+
+    assert 'get("channel_bind")' in script
+    assert 'fetch("/api/channels/qq/link-code"' in script
+    assert 'fetch("/api/channels/qq/authorize"' in script
+    assert "completePendingChannelBind" in script
+    assert 'id="qqLinkCodeButton"' in index
+    assert "Bind with /bind &lt;binding-code&gt;." in index
+    assert 'id="qqLinkCodeOutput"' in index
 
 
 def test_frontend_runtime_event_reducer_orders_and_clears_status():

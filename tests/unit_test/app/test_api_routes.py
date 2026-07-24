@@ -39,8 +39,24 @@ def test_sessions_api_returns_summaries(tmp_path):
                 "updated_at": "2026-08-01T07:00:00+00:00",
                 "message_count": 2,
                 "title": "",
+                "channel": "",
+                "conversation_type": "",
+                "continuation_mode": "writable",
             }
         ]
+
+
+def test_fork_session_api_returns_private_web_summary(tmp_path):
+    runtime = _FakeRuntime()
+    client = _client(tmp_path, runtime)
+
+    response = client.post("/api/sessions/qq-group/fork")
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == "session-forked"
+    assert response.json()["channel"] == "web"
+    assert response.json()["continuation_mode"] == "writable"
+    assert runtime.forked_sessions == ["qq-group"]
 
 
 def test_session_api_returns_messages(tmp_path):
@@ -466,6 +482,7 @@ class _FakeRuntime:
         self.selected_models: list[str] = []
         self.renamed_sessions: list[tuple[str, str]] = []
         self.deleted_sessions: list[str] = []
+        self.forked_sessions: list[str] = []
 
     def list_sessions(self) -> list[SessionSummary]:
         return self.summaries or []
@@ -539,6 +556,16 @@ class _FakeRuntime:
 
     def delete_session(self, session_id: str) -> None:
         self.deleted_sessions.append(session_id)
+
+    def fork_session_to_web(self, source_session_id: str):
+        self.forked_sessions.append(source_session_id)
+        return SessionSummary(
+            session_id="session-forked",
+            preview="group context",
+            updated_at=1.0,
+            message_count=2,
+            channel="web",
+        )
 
 
 def _runtime_event(event_type: str, sequence: int) -> dict:

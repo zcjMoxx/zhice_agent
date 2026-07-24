@@ -173,3 +173,58 @@ def test_ensure_session_uses_authenticated_ownership_without_own_permission_keys
     assert resolved.created is True
     assert resolved.owner_user_id == user.id
     assert store.session_index_get("session-created")["owner_user_id"] == user.id
+
+
+def test_group_channel_session_is_visible_read_only_and_forkable_to_web(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("owner", "Owner", "password-123")
+    service = SessionAccessService(
+        store,
+        FilesystemUserContextResolver(tmp_path / "contexts"),
+    )
+    actor = store.actor_for_user(user.id, channel="web")
+    source = service.ensure_session(
+        actor,
+        "qq-group-session",
+        channel="qq",
+        conversation_type="group",
+        external_chat_id="group-openid",
+        write=True,
+    )
+    source.store.append(
+        "qq-group-session",
+        [Message(role="user", content="public group context")],
+    )
+    service.refresh_index(actor, "qq-group-session")
+
+    summary = service.list_sessions(actor)[0]
+
+    assert summary.channel == "qq"
+    assert summary.conversation_type == "group"
+    assert summary.continuation_mode == "fork_only"
+    service.assert_chat_continuation_allowed(
+        actor,
+        "qq-group-session",
+        request_channel="qq",
+    )
+    with pytest.raises(SessionAccessError) as exc_info:
+        service.assert_chat_continuation_allowed(
+            actor,
+            "qq-group-session",
+            request_channel="web",
+        )
+    assert exc_info.value.code == "SESSION_CHANNEL_READ_ONLY"
+
+    forked = service.fork_to_web(actor, "qq-group-session")
+
+    assert forked.channel == "web"
+    assert forked.continuation_mode == "writable"
+    assert service.load_session(actor, forked.session_id).messages[0].content == (
+        "public group context"
+    )
+    assert service.load_session(actor, "qq-group-session").messages[0].content == (
+        "public group context"
+    )
+    with pytest.raises(SessionAccessError) as delete_error:
+        service.delete_session(actor, "qq-group-session")
+    assert delete_error.value.code == "SESSION_CHANNEL_READ_ONLY"

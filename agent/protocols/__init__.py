@@ -25,3 +25,22 @@ __all__ = [
     "McpServerStatus",
     "McpToolDescriptor",
 ]
+from agent.protocols.channel import (
+    ChannelAttachment,
+    ChannelCapabilities,
+    ChannelChatRuntime,
+    ChannelExecutionContext,
+    ChannelQuote,
+    ChannelReplyTarget,
+    InboundChannelEvent,
+)
+
+__all__ = [
+    "ChannelAttachment",
+    "ChannelCapabilities",
+    "ChannelChatRuntime",
+    "ChannelExecutionContext",
+    "ChannelQuote",
+    "ChannelReplyTarget",
+    "InboundChannelEvent",
+]

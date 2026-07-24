@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ZhiCe-Agent</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260722-math-rendering" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260723-cross-channel" />
   </head>
   <body>
     <section class="auth-view" id="loginView">
@@ -93,6 +93,11 @@
           <div class="message-list" id="messageList"></div>
         </section>
 
+        <div class="session-access-notice" id="sessionAccessNotice" hidden>
+          <span>This QQ group session is read-only in Web.</span>
+          <button class="secondary-button" id="forkSessionButton" type="button">Continue in Web</button>
+        </div>
+
         <form class="composer" id="composer">
           <textarea
             id="messageInput"
@@ -158,6 +163,14 @@
           <button class="primary-button" type="submit">Save profile</button>
           <div class="form-status" id="profileStatus" role="status"></div>
         </form>
+        <section class="account-form">
+          <h3>QQ binding</h3>
+          <div class="channel-binding-list" id="channelBindingList"></div>
+          <p class="muted">Generate a 10-minute, single-use code, then send it to the QQ bot. Bind with /bind &lt;binding-code&gt;.</p>
+          <button class="secondary-button" id="qqLinkCodeButton" type="button">Generate QQ binding code</button>
+          <pre class="binding-code-output" id="qqLinkCodeOutput" hidden></pre>
+          <div class="form-status" id="qqBindStatus" role="status"></div>
+        </section>
         <form class="account-form" id="passwordForm">
           <h3>Change password</h3>
           <label>
@@ -282,6 +295,6 @@
     </dialog>
 
     <script src="/static/runtime-event-state.js?v=20260720-runtime-hooks"></script>
-    <script src="/static/app.js?v=20260722-math-rendering"></script>
+    <script src="/static/app.js?v=20260723-cross-channel"></script>
   </body>
 </html>

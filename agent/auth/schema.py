@@ -87,6 +87,32 @@ CREATE TABLE IF NOT EXISTS external_identities (
   UNIQUE(channel, external_tenant_id, external_user_id)
 );
 
+CREATE TABLE IF NOT EXISTS external_identity_link_tokens (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  channel TEXT NOT NULL,
+  account_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS external_identity_authorization_requests (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  channel TEXT NOT NULL,
+  account_key TEXT NOT NULL,
+  external_user_id TEXT NOT NULL,
+  external_display_name TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  user_id TEXT REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS roles (
   id TEXT PRIMARY KEY,
   key TEXT NOT NULL UNIQUE,
@@ -126,6 +152,7 @@ CREATE TABLE IF NOT EXISTS session_index (
   session_id TEXT PRIMARY KEY,
   owner_user_id TEXT NOT NULL REFERENCES users(id),
   channel TEXT NOT NULL DEFAULT 'web',
+  conversation_type TEXT NOT NULL DEFAULT '',
   external_chat_id TEXT NOT NULL DEFAULT '',
   external_thread_id TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL DEFAULT '',
@@ -134,6 +161,35 @@ CREATE TABLE IF NOT EXISTS session_index (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   archived_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS channel_conversations (
+  id TEXT PRIMARY KEY,
+  channel TEXT NOT NULL,
+  account_key TEXT NOT NULL,
+  conversation_type TEXT NOT NULL,
+  external_conversation_id TEXT NOT NULL,
+  external_thread_id TEXT NOT NULL DEFAULT '',
+  owner_user_id TEXT NOT NULL REFERENCES users(id),
+  current_session_id TEXT NOT NULL REFERENCES session_index(session_id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(
+    channel, account_key, conversation_type, external_conversation_id,
+    external_thread_id, owner_user_id
+  )
+);
+
+CREATE TABLE IF NOT EXISTS channel_event_receipts (
+  channel TEXT NOT NULL,
+  account_key TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  message_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  finished_at TEXT,
+  error_code TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(channel, account_key, event_id)
 );
 
 CREATE TABLE IF NOT EXISTS turn_runs (
@@ -222,8 +278,16 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_user_permissions_user ON user_permissions(user_id);
 CREATE INDEX IF NOT EXISTS idx_external_identities_user ON external_identities(user_id, channel);
+CREATE INDEX IF NOT EXISTS idx_external_link_tokens_user
+  ON external_identity_link_tokens(user_id, channel, status);
+CREATE INDEX IF NOT EXISTS idx_external_authorization_status
+  ON external_identity_authorization_requests(channel, account_key, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_session_index_owner ON session_index(owner_user_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_session_index_channel ON session_index(channel, external_chat_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_channel_conversations_owner
+  ON channel_conversations(owner_user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_channel_receipts_seen
+  ON channel_event_receipts(channel, account_key, first_seen_at);
 CREATE INDEX IF NOT EXISTS idx_turn_runs_session ON turn_runs(session_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_turn_runs_actor ON turn_runs(actor_user_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_turn ON tool_call_records(session_id, turn_id);

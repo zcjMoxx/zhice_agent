@@ -50,6 +50,7 @@ def test_cli_init_generates_runtime_files(tmp_path, capsys, monkeypatch):
     assert endpoint["max_tokens"] == 8192
     assert "max_input_tokens" not in endpoint
     assert (tmp_path / "config" / "skill_sources.yml").is_file()
+    assert (tmp_path / "config" / "channels.yml").is_file()
     assert (tmp_path / "prompts" / "identity.md").is_file()
     assert (tmp_path / "prompts" / "diagnostics.md").is_file()
     assert (tmp_path / "prompts" / "exec.md").is_file()
@@ -70,6 +71,7 @@ def test_cli_init_preserves_existing_files_and_fills_missing(tmp_path, capsys, m
     assert (tmp_path / ".env").read_text(encoding="utf-8") == "EXISTING=1\n"
     assert (tmp_path / "config" / "llm_endpoints.json").is_file()
     assert (tmp_path / "config" / "skill_sources.yml").is_file()
+    assert (tmp_path / "config" / "channels.yml").is_file()
     assert (tmp_path / "prompts" / "identity.md").is_file()
 
 
@@ -107,6 +109,7 @@ def test_cli_init_uses_explicit_env_file_workspace(tmp_path, capsys, monkeypatch
     assert "created:" in output
     assert not (workspace / ".env").exists()
     assert (workspace / "config" / "llm_endpoints.json").is_file()
+    assert (workspace / "config" / "channels.yml").is_file()
 
 
 def test_cli_reports_missing_workspace_when_no_env_exists(tmp_path, capsys, monkeypatch):
@@ -432,15 +435,15 @@ def test_cli_new_switches_to_a_new_session(tmp_path, capsys, monkeypatch):
     assert (tmp_path / "contexts" / "sessions" / "session-test-new.jsonl").exists()
 
 
-def test_cli_reset_clears_current_session(tmp_path, capsys, monkeypatch):
-    """The /reset command should clear the persisted current session."""
+def test_cli_clear_clears_current_session(tmp_path, capsys, monkeypatch):
+    """The /clear command should clear the persisted current session."""
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
     _write_runtime_prompts(tmp_path)
-    monkeypatch.setattr("agent.cli._default_session_id", lambda: "chat-reset-day")
+    monkeypatch.setattr("agent.cli._default_session_id", lambda: "chat-clear-day")
     monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
-    inputs = iter(["hello", "/reset", "/history", "/exit"])
+    inputs = iter(["hello", "/clear", "/history", "/exit"])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
 
     result = main([])
@@ -449,7 +452,26 @@ def test_cli_reset_clears_current_session(tmp_path, capsys, monkeypatch):
     assert result == 0
     assert "session cleared:" in output
     assert "(empty history)" in output
-    assert not (tmp_path / "contexts" / "sessions" / "chat-reset-day.jsonl").exists()
+    assert not (tmp_path / "contexts" / "sessions" / "chat-clear-day.jsonl").exists()
+
+
+def test_cli_reset_is_rejected_without_calling_the_llm(tmp_path, capsys, monkeypatch):
+    """The retired /reset command should point to /clear without entering the Agent."""
+
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    echo = _EchoLLM()
+    monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: echo)
+    inputs = iter(["/reset", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "Unsupported command: /reset. Use /clear." in output
+    assert echo.chat_calls == 0
 
 
 def test_cli_sessions_lists_previews(tmp_path, capsys, monkeypatch):
@@ -512,7 +534,7 @@ def test_cli_sessions_rename_updates_title(tmp_path, capsys, monkeypatch):
 
 
 def test_cli_sessions_delete_without_id_clears_current_session(tmp_path, capsys, monkeypatch):
-    """Deleting without an id should behave like /reset for the current session."""
+    """Deleting without an id should behave like /clear for the current session."""
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))

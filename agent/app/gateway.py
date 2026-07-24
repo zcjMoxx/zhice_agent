@@ -81,6 +81,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        manager = getattr(runtime, "channel_manager", None)
+        if manager is not None:
+            manager.start()
         yield
         shutdown = getattr(runtime, "shutdown", None)
         if callable(shutdown):

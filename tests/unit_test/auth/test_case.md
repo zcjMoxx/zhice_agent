@@ -2,6 +2,10 @@
 
 ## 测试目标
 
+- Session index 保留来源 channel、conversation type 和跨端续写模式。
+- QQ 群 Session 对 Web/CLI 只读，并可安全派生为新的 Web Session。
+- 当前用户只能查询和解绑自己的 external identity，解绑保留历史。
+
 - 验证 SQLite auth schema、唯一 Owner 初始化、密码校验和可撤销登录态。
 - 验证 Owner 不可降级、Admin 管理边界和 `auth.admin.manage` 直接委派不传播。
 - 验证角色权限聚合、外部身份映射和 token 只保存 hash。

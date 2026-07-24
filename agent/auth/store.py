@@ -84,6 +84,25 @@ class SQLiteAuthStore:
             }
             if "duration_ms" not in turn_columns:
                 connection.execute("ALTER TABLE turn_runs ADD COLUMN duration_ms INTEGER")
+            session_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(session_index)").fetchall()
+            }
+            if "conversation_type" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE session_index "
+                    "ADD COLUMN conversation_type TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execute(
+                    """
+                    UPDATE session_index
+                    SET conversation_type=COALESCE((
+                      SELECT conversation_type FROM channel_conversations c
+                      WHERE c.current_session_id=session_index.session_id
+                      LIMIT 1
+                    ), '')
+                    """
+                )
             for key, (description, category) in PERMISSIONS.items():
                 connection.execute(
                     """
@@ -701,6 +720,351 @@ class SQLiteAuthStore:
             )
             return self._actor_from_user_row(connection, row, channel=channel)
 
+    def unlink_external_identity(
+        self,
+        *,
+        channel: str,
+        external_tenant_id: str,
+        external_user_id: str,
+    ) -> bool:
+        """Disable one external identity without deleting its audit history."""
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE external_identities SET status='disabled'
+                WHERE channel=? AND external_tenant_id=? AND external_user_id=?
+                  AND status='active'
+                """,
+                (channel, external_tenant_id, external_user_id),
+            )
+        return cursor.rowcount > 0
+
+    def list_external_identities_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        """Return active external identities owned by one internal user."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, channel, external_display_name, linked_at
+                FROM external_identities
+                WHERE user_id=? AND status='active'
+                ORDER BY linked_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def unlink_external_identity_for_user(self, *, identity_id: str, user_id: str) -> bool:
+        """Disable one identity only when it belongs to the requesting user."""
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE external_identities SET status='disabled'
+                WHERE id=? AND user_id=? AND status='active'
+                """,
+                (identity_id, user_id),
+            )
+        return cursor.rowcount > 0
+
+    def create_external_link_token(
+        self,
+        *,
+        token_hash: str,
+        user_id: str,
+        channel: str,
+        account_key: str,
+        expires_at: str,
+    ) -> str:
+        """Persist one hashed, account-scoped, single-use link token."""
+
+        token_id = "link-" + uuid.uuid4().hex
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO external_identity_link_tokens(
+                  id, token_hash, user_id, channel, account_key, status,
+                  created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (token_id, token_hash, user_id, channel, account_key, _utc_now(), expires_at),
+            )
+        return token_id
+
+    def consume_external_link_token(
+        self,
+        *,
+        token_hash: str,
+        channel: str,
+        account_key: str,
+        consumed_at: str,
+    ) -> str | None:
+        """Atomically consume a valid link token and return its internal user id."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, user_id, expires_at FROM external_identity_link_tokens
+                WHERE token_hash=? AND channel=? AND account_key=? AND status='pending'
+                """,
+                (token_hash, channel, account_key),
+            ).fetchone()
+            if row is None or str(row["expires_at"]) <= consumed_at:
+                return None
+            cursor = connection.execute(
+                """
+                UPDATE external_identity_link_tokens
+                SET status='consumed', consumed_at=?
+                WHERE id=? AND status='pending'
+                """,
+                (consumed_at, str(row["id"])),
+            )
+            return str(row["user_id"]) if cursor.rowcount == 1 else None
+
+    def create_external_authorization_request(
+        self,
+        *,
+        token_hash: str,
+        channel: str,
+        account_key: str,
+        external_user_id: str,
+        external_display_name: str,
+        expires_at: str,
+    ) -> str:
+        """Persist one external-identity-bound Web authorization request."""
+
+        request_id = "channel-auth-" + uuid.uuid4().hex
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO external_identity_authorization_requests(
+                  id, token_hash, channel, account_key, external_user_id,
+                  external_display_name, status, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    request_id,
+                    token_hash,
+                    channel,
+                    account_key,
+                    external_user_id,
+                    external_display_name[:120],
+                    _utc_now(),
+                    expires_at,
+                ),
+            )
+        return request_id
+
+    def consume_external_authorization_request(
+        self,
+        *,
+        token_hash: str,
+        user_id: str,
+        consumed_at: str,
+    ) -> dict[str, Any] | None:
+        """Atomically bind one pending Web authorization request to a DB user."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM external_identity_authorization_requests
+                WHERE token_hash=? AND status='pending'
+                """,
+                (token_hash,),
+            ).fetchone()
+            if row is None or str(row["expires_at"]) <= consumed_at:
+                return None
+            existing = connection.execute(
+                """
+                SELECT user_id FROM external_identities
+                WHERE channel=? AND external_tenant_id=? AND external_user_id=?
+                  AND status='active'
+                """,
+                (str(row["channel"]), str(row["account_key"]), str(row["external_user_id"])),
+            ).fetchone()
+            if existing is not None and str(existing["user_id"]) != user_id:
+                connection.execute(
+                    """
+                    UPDATE external_identity_authorization_requests
+                    SET status='conflict', consumed_at=? WHERE id=? AND status='pending'
+                    """,
+                    (consumed_at, str(row["id"])),
+                )
+                return None
+            identity_id = "external-" + uuid.uuid4().hex
+            connection.execute(
+                """
+                INSERT INTO external_identities(
+                  id, user_id, channel, external_tenant_id, external_user_id,
+                  external_display_name, linked_at, last_seen_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')
+                ON CONFLICT(channel, external_tenant_id, external_user_id) DO UPDATE SET
+                  user_id=excluded.user_id,
+                  external_display_name=excluded.external_display_name,
+                  status='active',
+                  last_seen_at=excluded.last_seen_at
+                """,
+                (
+                    identity_id,
+                    user_id,
+                    str(row["channel"]),
+                    str(row["account_key"]),
+                    str(row["external_user_id"]),
+                    str(row["external_display_name"]),
+                    consumed_at,
+                    consumed_at,
+                ),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE external_identity_authorization_requests
+                SET status='consumed', consumed_at=?, user_id=?
+                WHERE id=? AND status='pending'
+                """,
+                (consumed_at, user_id, str(row["id"])),
+            )
+            if cursor.rowcount != 1:
+                return None
+            result = dict(row)
+            result["user_id"] = user_id
+            result["status"] = "consumed"
+            return result
+
+    def channel_conversation_get(
+        self,
+        *,
+        channel: str,
+        account_key: str,
+        conversation_type: str,
+        external_conversation_id: str,
+        external_thread_id: str,
+        owner_user_id: str,
+    ) -> dict[str, Any] | None:
+        """Return one persistent external-conversation route."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM channel_conversations
+                WHERE channel=? AND account_key=? AND conversation_type=?
+                  AND external_conversation_id=? AND external_thread_id=?
+                  AND owner_user_id=?
+                """,
+                (
+                    channel,
+                    account_key,
+                    conversation_type,
+                    external_conversation_id,
+                    external_thread_id,
+                    owner_user_id,
+                ),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def channel_conversation_upsert(
+        self,
+        *,
+        channel: str,
+        account_key: str,
+        conversation_type: str,
+        external_conversation_id: str,
+        external_thread_id: str,
+        owner_user_id: str,
+        current_session_id: str,
+    ) -> dict[str, Any]:
+        """Create a route or atomically replace its current session."""
+
+        now = _utc_now()
+        route_id = "route-" + uuid.uuid4().hex
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO channel_conversations(
+                  id, channel, account_key, conversation_type,
+                  external_conversation_id, external_thread_id, owner_user_id,
+                  current_session_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(
+                  channel, account_key, conversation_type, external_conversation_id,
+                  external_thread_id, owner_user_id
+                ) DO UPDATE SET
+                  current_session_id=excluded.current_session_id,
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    route_id,
+                    channel,
+                    account_key,
+                    conversation_type,
+                    external_conversation_id,
+                    external_thread_id,
+                    owner_user_id,
+                    current_session_id,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM channel_conversations
+                WHERE channel=? AND account_key=? AND conversation_type=?
+                  AND external_conversation_id=? AND external_thread_id=?
+                  AND owner_user_id=?
+                """,
+                (
+                    channel,
+                    account_key,
+                    conversation_type,
+                    external_conversation_id,
+                    external_thread_id,
+                    owner_user_id,
+                ),
+            ).fetchone()
+        return dict(row)
+
+    def claim_channel_event(
+        self,
+        *,
+        channel: str,
+        account_key: str,
+        event_id: str,
+        message_id: str = "",
+    ) -> bool:
+        """Atomically claim an inbound event before any Agent work begins."""
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO channel_event_receipts(
+                  channel, account_key, event_id, message_id, status, first_seen_at
+                ) VALUES (?, ?, ?, ?, 'processing', ?)
+                """,
+                (channel, account_key, event_id, message_id, _utc_now()),
+            )
+        return cursor.rowcount == 1
+
+    def finish_channel_event(
+        self,
+        *,
+        channel: str,
+        account_key: str,
+        event_id: str,
+        status: str,
+        error_code: str = "",
+    ) -> None:
+        """Finish a previously claimed event without permitting replay."""
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE channel_event_receipts
+                SET status=?, finished_at=?, error_code=?
+                WHERE channel=? AND account_key=? AND event_id=?
+                """,
+                (status, _utc_now(), error_code, channel, account_key, event_id),
+            )
+
     def session_index_get(self, session_id: str) -> dict[str, Any] | None:
         """Return one session index row as a plain dict."""
 
@@ -730,6 +1094,7 @@ class SQLiteAuthStore:
         session_id: str,
         owner_user_id: str,
         channel: str,
+        conversation_type: str = "",
         external_chat_id: str = "",
         external_thread_id: str = "",
     ) -> None:
@@ -741,14 +1106,15 @@ class SQLiteAuthStore:
                 connection.execute(
                     """
                     INSERT INTO session_index(
-                      session_id, owner_user_id, channel, external_chat_id,
+                      session_id, owner_user_id, channel, conversation_type, external_chat_id,
                       external_thread_id, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         session_id,
                         owner_user_id,
                         channel,
+                        conversation_type,
                         external_chat_id,
                         external_thread_id,
                         now,

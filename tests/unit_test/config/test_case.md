@@ -47,5 +47,5 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 ### Case 7: 初始化运行时文件
 
 - 输入：调用 `init_runtime_files()`。
-- 预期：生成本地 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`、`${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 和 prompts，可选生成 `${ZHICE_AGENT_WORKSPACE}/.env`。
-- 检查点：默认不覆盖已有文件但会补齐缺失文件；生成配置只写 `context_window` 和 `max_tokens` 两个预算字段；`--force` 语义由调用方显式开启。
+- 预期：生成本地 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`、`${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`、`${ZHICE_AGENT_WORKSPACE}/config/channels.yml` 和 prompts，可选生成 `${ZHICE_AGENT_WORKSPACE}/.env`。
+- 检查点：`channels.yml` 从仓库 `config/channels.example.yml` 复制；默认不覆盖已有文件但会补齐缺失文件；`force=True` 会刷新模板；模板缺失返回稳定配置错误；生成 LLM 配置只写 `context_window` 和 `max_tokens` 两个预算字段。

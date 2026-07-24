@@ -20,6 +20,9 @@ from agent.auth.audit import SqliteAuditSink
 from agent.auth.confirmation import ConsoleConfirmationBroker
 from agent.auth.store import AuthSetupError, AuthStoreError, SQLiteAuthStore
 from agent.auth.tool_policy import RbacToolExecutionPolicy
+from agent.channels.config import ChannelConfigurationError, load_channel_configuration
+from agent.channels.identity import ExternalIdentityService
+from agent.channels.qq.startup import check_qq_startup
 from agent.config import (
     DotenvConfigurationError,
     InitConfigurationError,
@@ -93,6 +96,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_gateway(argv_list[1:])
     if argv_list and argv_list[0] == "auth":
         return _run_auth(argv_list[1:])
+    if argv_list and argv_list[0] == "channels":
+        return _run_channels(argv_list[1:])
     return _run_chat(argv_list)
 
 
@@ -170,6 +175,55 @@ def _read_confirmed_password(prompt: str) -> str:
     if password != confirmation:
         raise ValueError("password confirmation does not match")
     return password
+
+
+def _run_channels(argv: Sequence[str]) -> int:
+    """Inspect channel status and create account-scoped user link codes."""
+
+    parser = argparse.ArgumentParser(prog="zcagent channels")
+    parser.add_argument("--workspace", default=None, help="Workspace root override.")
+    subparsers = parser.add_subparsers(dest="channels_command")
+    subparsers.add_parser("status", help="Show configured channel capability status.")
+    link_code = subparsers.add_parser("link-code", help="Create a one-time identity link code.")
+    link_code.add_argument("channel", choices=["qq"])
+    link_code.add_argument("--user", required=True, help="Internal username receiving the link.")
+    link_code.add_argument("--account", default="main", help="Configured channel account key.")
+    args = parser.parse_args(argv)
+    try:
+        config = load_config(args.workspace)
+        channel_config = load_channel_configuration(config.config_dir)
+        if args.channels_command in {None, "status"}:
+            status = check_qq_startup(channel_config.qq)
+            print(f"channel.qq: {status.state} code={status.code}")
+            if status.message:
+                print(status.message)
+            return 0 if status.state != "unavailable" else 1
+        store = SQLiteAuthStore(config.auth_db_path)
+        if not store.is_initialized():
+            raise AuthSetupError("auth database is not initialized")
+        account_keys = {account.key for account in channel_config.qq.accounts}
+        if args.account not in account_keys:
+            raise ChannelConfigurationError(f"QQ account is not configured: {args.account}")
+        user = next((item for item in store.list_users() if item.username == args.user), None)
+        if user is None:
+            raise AuthStoreError("user not found")
+        link = ExternalIdentityService(store).create_link_code(
+            user.id,
+            args.channel,
+            args.account,
+        )
+        print(f"link code: {console.command(link.code)}")
+        print(f"expires_at: {link.expires_at}")
+        return 0
+    except (
+        MissingWorkspaceError,
+        ChannelConfigurationError,
+        AuthSetupError,
+        AuthStoreError,
+        OSError,
+    ) as exc:
+        print(console.error(str(exc)))
+        return 1
 
 
 def _run_chat(argv: Sequence[str]) -> int:
@@ -306,10 +360,23 @@ def _run_chat(argv: Sequence[str]) -> int:
             session_id = _new_session_id()
             print(f"{console.success('new session:')} {console.command(session_id)}")
             continue
-        if user_text == "/reset":
+        if _cli_session_is_read_only(auth_store, session_id) and not (
+            user_text == "/history" or user_text == "/sessions" or user_text.startswith("/sessions ")
+        ):
+            print(
+                console.warning(
+                    "This QQ group session is read-only in CLI. "
+                    "Use '/new' to continue privately."
+                )
+            )
+            continue
+        if user_text == "/clear":
             session_store.clear(session_id)
             subagent_runtime.preferences.clear_force_once(subagent_runtime.context, session_id)
             print(f"{console.warning('session cleared:')} {console.command(session_id)}")
+            continue
+        if user_text == "/reset":
+            print(console.warning("Unsupported command: /reset. Use /clear."))
             continue
         if user_text == "/sessions" or user_text.startswith("/sessions "):
             _handle_sessions_command(
@@ -317,6 +384,7 @@ def _run_chat(argv: Sequence[str]) -> int:
                 session_id,
                 user_text.removeprefix("/sessions").strip(),
                 subagent_runtime,
+                auth_store,
             )
             continue
         if user_text == "/history":
@@ -873,7 +941,11 @@ def _print_history(session_store: JsonlSessionStore, session_id: str) -> None:
         print(f"{console.command(message.role)}: {message.content}")
 
 
-def _print_sessions(session_store: JsonlSessionStore, current_session_id: str) -> None:
+def _print_sessions(
+    session_store: JsonlSessionStore,
+    current_session_id: str,
+    auth_store: SQLiteAuthStore | None = None,
+) -> None:
     """Print stored sessions with a short preview of the first user message."""
 
     from agent.protocols.session import SessionSummary
@@ -898,9 +970,10 @@ def _print_sessions(session_store: JsonlSessionStore, current_session_id: str) -
         marker = "*" if summary.session_id == current_session_id else " "
         updated_at = _format_session_time(summary.updated_at)
         title = summary.title or summary.preview
+        source = _cli_session_source_label(auth_store, summary.session_id)
         print(
             f"{marker} {console.command(summary.session_id)}"
-            f"  [{summary.message_count}]  {updated_at}"
+            f"  [{summary.message_count}]  {updated_at}  {source}"
         )
         print(f"    {title}")
     print()
@@ -917,11 +990,12 @@ def _handle_sessions_command(
     current_session_id: str,
     target: str,
     subagent_runtime=None,
+    auth_store: SQLiteAuthStore | None = None,
 ) -> None:
     """Handle local /sessions management commands."""
 
     if not target:
-        _print_sessions(session_store, current_session_id)
+        _print_sessions(session_store, current_session_id, auth_store)
         return
 
     command, _, rest = target.partition(" ")
@@ -940,6 +1014,14 @@ def _handle_sessions_command(
             return
         if command == "delete":
             session_id = rest or current_session_id
+            if _cli_session_is_external(auth_store, session_id):
+                print(
+                    console.warning(
+                        "External-channel sessions cannot be deleted from CLI; "
+                        "their conversation route must be preserved."
+                    )
+                )
+                return
             if session_id == current_session_id:
                 session_store.clear(current_session_id)
                 if subagent_runtime is not None:
@@ -961,6 +1043,53 @@ def _handle_sessions_command(
             "'/sessions delete (<id>)' to delete."
         )
     )
+
+
+def _cli_session_is_read_only(
+    auth_store: SQLiteAuthStore | None,
+    session_id: str,
+) -> bool:
+    row = _cli_session_index_row(auth_store, session_id)
+    return bool(
+        row
+        and str(row.get("channel") or "") == "qq"
+        and str(row.get("conversation_type") or "") == "group"
+    )
+
+
+def _cli_session_is_external(
+    auth_store: SQLiteAuthStore | None,
+    session_id: str,
+) -> bool:
+    row = _cli_session_index_row(auth_store, session_id)
+    return bool(row and str(row.get("channel") or "") not in {"", "web", "cli", "cli_legacy"})
+
+
+def _cli_session_source_label(
+    auth_store: SQLiteAuthStore | None,
+    session_id: str,
+) -> str:
+    row = _cli_session_index_row(auth_store, session_id)
+    if row is None:
+        return "CLI"
+    channel = str(row.get("channel") or "")
+    conversation_type = str(row.get("conversation_type") or "")
+    if channel == "qq" and conversation_type == "group":
+        return "QQ group (read-only)"
+    if channel == "qq":
+        return "QQ direct"
+    if channel in {"cli", "cli_legacy"}:
+        return "CLI"
+    return "Web" if channel == "web" else channel or "CLI"
+
+
+def _cli_session_index_row(
+    auth_store: SQLiteAuthStore | None,
+    session_id: str,
+):
+    if auth_store is None or not auth_store.is_initialized():
+        return None
+    return auth_store.session_index_get(session_id)
 
 
 def _print_prompts(prompt_loader: PromptLoader) -> None:
@@ -1410,7 +1539,7 @@ def _print_help() -> None:
     commands = [
         ("/help", "show available commands"),
         ("/new", "create and switch to a new session"),
-        ("/reset", "clear the current session history"),
+        ("/clear", "clear the current session history"),
         ("/sessions", "list stored sessions and previews"),
         ("/history", "print recent messages from the current session"),
         ("/prompts", "list loaded prompt files"),

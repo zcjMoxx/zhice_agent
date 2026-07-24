@@ -745,7 +745,7 @@ Tip 中提供详细用法，不在 `/help` 中逐项展开：
 - 默认 mode 是 `auto`。
 - `once` 是 one-shot flag，下一条非命令消息开始执行时原子消费。
 - Turn 启动失败时不自动恢复 force-once，避免同一请求重试时重复创建 batch；用户可再次显式设置。
-- `/reset` 清理 Session 消息时是否保留 mode 与现有 Session preference 规则一致；`force-once` 必须清除。
+- `/clear` 清理 Session 消息时是否保留 mode 与现有 Session preference 规则一致；`force-once` 必须清除。
 - Web 可增加“自动 / 关闭”和“下轮使用子代理”控件，最终写入同一 Session metadata。
 - REST/WS 可增加向后兼容的可选 `subagent_mode` 请求字段，但不能形成区别于 Session 真值的第二套长期状态。
 

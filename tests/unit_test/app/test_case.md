@@ -43,7 +43,7 @@
 - WS 使用 `runtime_event` 信封转发 RuntimeEvent；SSE 使用 `event: runtime`，均保持旧 text/status/interaction 兼容。
 - 浏览器 RuntimeEvent reducer 按 turn_id + sequence 忽略旧状态，并在 terminal turn Event 清理运行状态。
 - Subagent child RuntimeEvent 按 root session/turn 归并，并按 agent/task 维护独立 sequence 与并行任务状态，不能跨 child 用同一 sequence 覆盖。
-- Web `/help` 只新增顶层 `/subagent`；裸命令显示 mode、force-once、可用 Profile，并在 Tip 中提示 `auto/off/once`。`/reset` 与清空当前 Session 只清 one-shot、保留 mode。
+- Web `/help` 只新增顶层 `/subagent`；裸命令显示 mode、force-once、可用 Profile，并在 Tip 中提示 `auto/off/once`。`/clear` 与清空当前 Session 只清 one-shot、保留 mode；旧 `/reset` 不再支持。QQ群帮助展示 `/clear`。
 - Subagent unavailable 时，Owner 的 `/subagent` 与 force-once 返回真实 message/hint；普通用户只看到暂时不可用并联系管理员，不直接展示 JSON、Prompt 文件名、初始化命令、`code` 或 `cause_code`；one-shot 仍只消费一次。公共 health 同样只返回通用 capability 状态。
 - Subagent unavailable 且 Session 为 auto 时，普通 Web Turn 注入只返回通用不可用文案的 `delegate_tasks` facade，内部 cause 仅写日志与 trace；它不创建 child，防止模型用其它 Tool 冒充明确的子代理请求。
 - Web LLM-facing ToolProvider 首轮只暴露 `discover_tools`；发现后才按当前 actor 可见集合动态增加 schema，未激活业务 Tool 不能执行。
@@ -81,6 +81,11 @@
 - Owner 和其他角色的聊天侧栏默认只列当前用户自己的 session；前端账号切换会清空上一账号的 active session 和 messages。
 - Recent diagnostics 不出现在常驻 Web UI，也不保留 REST 表单入口；普通聊天通过 `diagnose_my_recent_activity` 自动诊断当前 Session 的上一轮或最近失败。
 - 普通成功 HTTP 请求不写 Security Audit；认证失败、特权拒绝和安全相关操作继续审计。
+- Web 个人设置只提供“生成 QQ 一次性绑定码”，返回 10 分钟单次使用的 `/bind <code>`；不增加渠道列表或管理员绑定管理。
+- Web 个人设置显示当前用户自己的极简 QQ 绑定状态并支持解绑；不暴露完整 OpenID、account key 或其他用户绑定。
+- QQ 裸 `/bind` 返回的 `channel_bind` 授权 token 在未登录时保留到登录完成，登录成功后自动调用授权 API；token 过期、重放或冲突返回稳定错误且不写入 identity。
+- Web Session 列表标明 Web、CLI、QQ 私聊、QQ群聊来源；QQ群聊在 Web 只读并可派生新的 Web Session。
+- 服务端拒绝 Web 直接向 QQ 群 Session 发送普通消息或 slash command，不能只依赖前端禁用输入框。
 
 ## Part 10 Memory Coverage
 

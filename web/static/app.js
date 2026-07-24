@@ -11,6 +11,8 @@ const state = {
   currentUser: null,
   permissions: [],
   pendingConfirmation: null,
+  pendingChannelBindToken: new URLSearchParams(window.location.search).get("channel_bind") || "",
+  channelBindings: [],
   adminTab: "users",
   model: {
     endpoint: "",
@@ -78,6 +80,12 @@ const elements = {
   accountUsername: document.querySelector("#accountUsername"),
   accountDisplayName: document.querySelector("#accountDisplayName"),
   profileStatus: document.querySelector("#profileStatus"),
+  qqLinkCodeButton: document.querySelector("#qqLinkCodeButton"),
+  qqLinkCodeOutput: document.querySelector("#qqLinkCodeOutput"),
+  qqBindStatus: document.querySelector("#qqBindStatus"),
+  channelBindingList: document.querySelector("#channelBindingList"),
+  sessionAccessNotice: document.querySelector("#sessionAccessNotice"),
+  forkSessionButton: document.querySelector("#forkSessionButton"),
   passwordForm: document.querySelector("#passwordForm"),
   currentPassword: document.querySelector("#currentPassword"),
   newPassword: document.querySelector("#newPassword"),
@@ -167,9 +175,41 @@ async function changeCurrentPassword(currentPassword, newPassword) {
   return readJson(response);
 }
 
+async function createQQLinkCode() {
+  const response = await fetch("/api/channels/qq/link-code", { method: "POST" });
+  return readJson(response);
+}
+
+async function authorizeQQIdentity(token) {
+  const response = await fetch("/api/channels/qq/authorize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  return readJson(response);
+}
+
+async function fetchChannelBindings() {
+  return readJson(await fetch("/api/channels/bindings"));
+}
+
+async function unlinkChannelBinding(bindingId) {
+  return readJson(await fetch(
+    `/api/channels/bindings/${encodeURIComponent(bindingId)}`,
+    { method: "DELETE" }
+  ));
+}
+
 async function fetchSession(sessionId) {
   const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
   return readJson(response);
+}
+
+async function forkSessionToWeb(sessionId) {
+  return readJson(await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
+    { method: "POST" }
+  ));
 }
 
 async function sendMessageStream(sessionId, message, model, handlers = {}) {
@@ -586,7 +626,7 @@ function renderModelSelect() {
     elements.modelSelect.append(option);
   }
   elements.modelSelect.value = state.model.currentModel;
-  elements.modelSelect.disabled = state.sending;
+  elements.modelSelect.disabled = state.sending || !isActiveSessionWritable();
 }
 
 function renderSessions() {
@@ -625,9 +665,13 @@ function renderSessions() {
 
     const meta = document.createElement("span");
     meta.className = "recent-meta";
-    meta.textContent = `${session.message_count} messages`;
+    meta.textContent = `${sessionSourceLabel(session)} · ${session.message_count} messages`;
 
-    item.append(title, meta);
+    const source = document.createElement("span");
+    source.className = "session-source-badge";
+    source.textContent = sessionSourceLabel(session);
+
+    item.append(title, source, meta);
 
     const actions = document.createElement("span");
     actions.className = "recent-actions";
@@ -645,7 +689,13 @@ function renderSessions() {
     deleteButton.className = "recent-action";
     deleteButton.title = "Delete";
     deleteButton.textContent = "D";
-    deleteButton.disabled = state.sending && session.session_id === state.activeSessionId;
+    deleteButton.disabled = (
+      (state.sending && session.session_id === state.activeSessionId)
+      || !["", "web", "cli", "cli_legacy"].includes(session.channel || "")
+    );
+    if (deleteButton.disabled && session.channel === "qq") {
+      deleteButton.title = "External-channel history is retained";
+    }
     deleteButton.addEventListener("click", (event) => {
       event.stopPropagation();
       confirmDeleteSession(session.session_id);
@@ -654,6 +704,40 @@ function renderSessions() {
     row.append(item, actions);
     elements.recentList.append(row);
   }
+}
+
+function sessionSourceLabel(session) {
+  if (session.channel === "qq" && session.conversation_type === "group") {
+    return "QQ group · read-only";
+  }
+  if (session.channel === "qq") {
+    return "QQ direct";
+  }
+  if (["cli", "cli_legacy"].includes(session.channel)) {
+    return "CLI";
+  }
+  if (session.channel === "external_ws") {
+    return "WebSocket";
+  }
+  return "Web";
+}
+
+function activeSessionSummary() {
+  return state.sessions.find((session) => session.session_id === state.activeSessionId) || null;
+}
+
+function isActiveSessionWritable() {
+  return activeSessionSummary()?.continuation_mode !== "fork_only";
+}
+
+function renderSessionAccess() {
+  const readOnly = !isActiveSessionWritable();
+  elements.sessionAccessNotice.hidden = !readOnly;
+  elements.messageInput.disabled = readOnly;
+  elements.messageInput.placeholder = readOnly
+    ? "This QQ group session is read-only in Web"
+    : "Message ZhiCe-Agent";
+  updateComposerState();
 }
 
 function renderMessages() {
@@ -981,6 +1065,7 @@ async function refreshSessions({ openFirst = false } = {}) {
       return;
     }
     renderSessions();
+    renderSessionAccess();
   } catch (error) {
     showTransientError(error.message);
   }
@@ -1021,6 +1106,7 @@ async function openSession(sessionId) {
   }
   renderSessions();
   renderMessages();
+  renderSessionAccess();
   await refreshModels({ showError: false });
 }
 
@@ -1066,6 +1152,7 @@ async function newSession() {
   elements.messageInput.focus();
   renderSessions();
   renderMessages();
+  renderSessionAccess();
   await refreshModels({ showError: false });
 }
 
@@ -1080,6 +1167,10 @@ function isModelCommand(text) {
 async function handleSubmit(event) {
   event.preventDefault();
   if (state.sending) {
+    return;
+  }
+  if (!isActiveSessionWritable()) {
+    renderSessionAccess();
     return;
   }
 
@@ -1165,9 +1256,10 @@ async function handleModelChange() {
 
 function updateComposerState() {
   const hasText = elements.messageInput.value.trim().length > 0;
-  elements.sendButton.disabled = state.sending || !hasText;
+  const writable = isActiveSessionWritable();
+  elements.sendButton.disabled = state.sending || !hasText || !writable;
   elements.stopButton.disabled = !state.sending;
-  elements.modelSelect.disabled = state.sending || state.model.models.length === 0;
+  elements.modelSelect.disabled = state.sending || state.model.models.length === 0 || !writable;
   elements.sendButton.setAttribute("aria-busy", state.sending ? "true" : "false");
   elements.stopButton.setAttribute("aria-busy", state.sending ? "true" : "false");
 }
@@ -1308,6 +1400,7 @@ async function showApp(mePayload) {
   await refreshSessions({ openFirst: true });
   await refreshModels({ showError: false });
   updateComposerState();
+  await completePendingChannelBind();
 }
 
 async function bootstrapAuth() {
@@ -1321,7 +1414,11 @@ async function bootstrapAuth() {
     const me = await fetchCurrentUser();
     await showApp(me);
   } catch (error) {
-    showLogin("Use your local ZhiCe-Agent account.");
+    showLogin(
+      state.pendingChannelBindToken
+        ? "Sign in to complete QQ binding."
+        : "Use your local ZhiCe-Agent account."
+    );
   }
 }
 
@@ -1479,7 +1576,113 @@ function openAccountSettings() {
   resetPasswordVisibility(elements.passwordForm);
   setFormStatus(elements.profileStatus);
   setFormStatus(elements.passwordStatus);
+  setFormStatus(elements.qqBindStatus);
+  elements.qqLinkCodeOutput.hidden = true;
+  elements.qqLinkCodeOutput.textContent = "";
   elements.accountDialog.showModal();
+  refreshChannelBindings();
+}
+
+async function refreshChannelBindings() {
+  elements.channelBindingList.replaceChildren();
+  try {
+    const payload = await fetchChannelBindings();
+    state.channelBindings = payload.bindings || [];
+    renderChannelBindings();
+  } catch (error) {
+    setFormStatus(elements.qqBindStatus, error.message, "error");
+  }
+}
+
+function renderChannelBindings() {
+  elements.channelBindingList.replaceChildren();
+  const qqBindings = state.channelBindings.filter((binding) => binding.channel === "qq");
+  elements.qqLinkCodeButton.hidden = qqBindings.length > 0;
+  for (const binding of qqBindings) {
+    const row = document.createElement("div");
+    row.className = "channel-binding-row";
+    const label = document.createElement("span");
+    label.textContent = binding.display_name ? `QQ: ${binding.display_name}` : "QQ: Bound";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button";
+    button.textContent = "Unbind";
+    button.addEventListener("click", () => handleChannelUnlink(binding.binding_id));
+    row.append(label, button);
+    elements.channelBindingList.append(row);
+  }
+  if (!qqBindings.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.textContent = "QQ is not bound.";
+    elements.channelBindingList.append(empty);
+  }
+}
+
+async function handleChannelUnlink(bindingId) {
+  if (!window.confirm("Unbind this QQ identity? Chat history will be kept.")) {
+    return;
+  }
+  try {
+    await unlinkChannelBinding(bindingId);
+    setFormStatus(elements.qqBindStatus, "QQ identity unbound. Chat history was kept.", "success");
+    await refreshChannelBindings();
+  } catch (error) {
+    setFormStatus(elements.qqBindStatus, error.message, "error");
+  }
+}
+
+async function completePendingChannelBind() {
+  const token = state.pendingChannelBindToken;
+  if (!token) {
+    return;
+  }
+  state.pendingChannelBindToken = "";
+  const url = new URL(window.location.href);
+  url.searchParams.delete("channel_bind");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  openAccountSettings();
+  try {
+    await authorizeQQIdentity(token);
+    setFormStatus(elements.qqBindStatus, "QQ identity bound successfully.", "success");
+    await refreshChannelBindings();
+  } catch (error) {
+    setFormStatus(elements.qqBindStatus, error.message, "error");
+  }
+}
+
+async function handleQQLinkCode() {
+  elements.qqLinkCodeButton.disabled = true;
+  elements.qqLinkCodeOutput.hidden = true;
+  setFormStatus(elements.qqBindStatus);
+  try {
+    const payload = await createQQLinkCode();
+    elements.qqLinkCodeOutput.textContent = `${payload.command}\nExpires at: ${payload.expires_at}`;
+    elements.qqLinkCodeOutput.hidden = false;
+    setFormStatus(elements.qqBindStatus, "Send this command in QQ private chat.", "success");
+  } catch (error) {
+    setFormStatus(elements.qqBindStatus, error.message, "error");
+  } finally {
+    elements.qqLinkCodeButton.disabled = false;
+  }
+}
+
+async function handleForkSession() {
+  const summary = activeSessionSummary();
+  if (!summary || summary.continuation_mode !== "fork_only") {
+    return;
+  }
+  elements.forkSessionButton.disabled = true;
+  try {
+    const created = await forkSessionToWeb(summary.session_id);
+    await refreshSessions();
+    await openSession(created.session_id);
+    elements.messageInput.focus();
+  } catch (error) {
+    showTransientError(error.message);
+  } finally {
+    elements.forkSessionButton.disabled = false;
+  }
 }
 
 async function handleProfileUpdate(event) {
@@ -1803,6 +2006,7 @@ elements.modelSelect.addEventListener("pointerdown", () => {
 });
 
 elements.stopButton.addEventListener("click", stopActiveTurn);
+elements.forkSessionButton.addEventListener("click", handleForkSession);
 
 elements.composer.addEventListener("submit", handleSubmit);
 
@@ -1826,6 +2030,7 @@ elements.managementClose.addEventListener("click", () => window.location.assign(
 elements.adminLogoutButton.addEventListener("click", handleLogout);
 elements.accountClose.addEventListener("click", () => elements.accountDialog.close());
 elements.profileForm.addEventListener("submit", handleProfileUpdate);
+elements.qqLinkCodeButton.addEventListener("click", handleQQLinkCode);
 elements.passwordForm.addEventListener("submit", handlePasswordChange);
 elements.confirmationApprove.addEventListener("click", () => handleConfirmation(true));
 elements.confirmationDeny.addEventListener("click", () => handleConfirmation(false));

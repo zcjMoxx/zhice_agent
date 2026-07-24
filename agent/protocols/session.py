@@ -31,6 +31,9 @@ class SessionSummary:
     updated_at: float
     message_count: int
     title: str = ""
+    channel: str = ""
+    conversation_type: str = ""
+    continuation_mode: str = "writable"
 
 
 @dataclass

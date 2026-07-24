@@ -77,6 +77,12 @@ class AppConfig:
         return self.config_dir / "hooks.yml"
 
     @property
+    def channels_config_path(self) -> Path:
+        """Workspace runtime external-channel configuration path."""
+
+        return self.config_dir / "channels.yml"
+
+    @property
     def mcp_runtime_dir(self) -> Path:
         """Workspace-shared MCP process and temporary state root."""
 
@@ -230,6 +236,7 @@ def init_runtime_files(
     create_env: bool = False,
     create_llm_config: bool = True,
     create_skill_sources_config: bool = True,
+    create_channels_config: bool = True,
     create_prompts: bool = True,
     endpoint_name: str = "default",
     protocol: str = "openai",
@@ -290,6 +297,13 @@ def init_runtime_files(
         if not source.is_file():
             raise InitConfigurationError(f"Source Skill config template is missing: {source}")
         target = config.config_dir / "skill_sources.yml"
+        if _write_text_once(target, source.read_text(encoding="utf-8"), force=force):
+            written.append(target)
+    if create_channels_config:
+        source = _default_workspace() / "config" / "channels.example.yml"
+        if not source.is_file():
+            raise InitConfigurationError(f"Source Channel config template is missing: {source}")
+        target = config.channels_config_path
         if _write_text_once(target, source.read_text(encoding="utf-8"), force=force):
             written.append(target)
     if create_prompts:

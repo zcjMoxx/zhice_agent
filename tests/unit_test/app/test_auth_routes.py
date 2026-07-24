@@ -10,6 +10,8 @@ from agent.app.gateway import create_app
 from agent.app.runtime import ModelState
 from agent.auth.audit import SqliteAuditSink
 from agent.auth.store import SQLiteAuthStore
+from agent.channels.config import ChannelConfiguration, QQAccountConfig, QQChannelConfig
+from agent.channels.identity import ExternalIdentityService
 from agent.config import AppConfig
 from agent.protocols.session import SessionState
 
@@ -408,6 +410,100 @@ def test_current_user_password_change_revokes_all_sessions_and_requires_login(tm
         and event["route"] == "/api/auth/password"
         for event in store.list_audit_events(limit=20)
     )
+
+
+def test_current_user_can_generate_qq_code_and_consume_web_authorization(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("admin", "Admin", "password-123")
+    auth = AuthService(store, audit_sink=SqliteAuditSink(store))
+    runtime = _AuthRuntime(auth)
+    runtime.channel_identity = ExternalIdentityService(store)
+    runtime.channel_config = ChannelConfiguration(
+        qq=QQChannelConfig(
+            enabled=True,
+            accounts=(QQAccountConfig("main", "app", "secret"),),
+        )
+    )
+    client = _client(tmp_path, runtime)
+    client.post("/api/auth/login", json={"username": "admin", "password": "password-123"})
+
+    code_response = client.post("/api/channels/qq/link-code")
+    authorization = runtime.channel_identity.create_authorization_request(
+        channel="qq",
+        account_key="main",
+        external_user_id="openid-web",
+    )
+    bound = client.post(
+        "/api/channels/qq/authorize",
+        json={"token": authorization.token},
+    )
+    replay = client.post(
+        "/api/channels/qq/authorize",
+        json={"token": authorization.token},
+    )
+
+    assert code_response.status_code == 200
+    assert code_response.json()["command"].startswith("/bind ")
+    assert bound.status_code == 200
+    assert bound.json() == {"status": "bound", "channel": "qq"}
+    assert replay.status_code == 400
+    assert replay.json()["error"]["code"] == "CHANNEL_BIND_TOKEN_INVALID"
+    assert store.resolve_external_identity(
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="openid-web",
+    ).user_id == user.id
+    actions = {event["action"] for event in store.list_audit_events(limit=20)}
+    assert "external_identity.link_code_created" in actions
+    assert "external_identity.linked" in actions
+
+
+def test_current_user_can_list_and_unlink_only_own_qq_binding(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    owner = store.initialize_owner("admin", "Admin", "password-123")
+    other = store.create_user("other", "Other", "other-password")
+    store.link_external_identity(
+        user_id=owner.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="owner-openid",
+        external_display_name="Owner QQ",
+    )
+    store.link_external_identity(
+        user_id=other.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="other-openid",
+    )
+    auth = AuthService(store, audit_sink=SqliteAuditSink(store))
+    runtime = _AuthRuntime(auth)
+    runtime.channel_identity = ExternalIdentityService(store)
+    client = _client(tmp_path, runtime)
+    client.post("/api/auth/login", json={"username": "admin", "password": "password-123"})
+
+    listed = client.get("/api/channels/bindings")
+    binding = listed.json()["bindings"][0]
+    other_binding = store.list_external_identities_for_user(other.id)[0]
+    denied = client.delete(f"/api/channels/bindings/{other_binding['id']}")
+    removed = client.delete(f"/api/channels/bindings/{binding['binding_id']}")
+
+    assert listed.status_code == 200
+    assert binding["channel"] == "qq"
+    assert binding["display_name"] == "Owner QQ"
+    assert "external_user_id" not in binding
+    assert denied.status_code == 404
+    assert removed.status_code == 200
+    assert removed.json()["status"] == "unbound"
+    assert store.resolve_external_identity(
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="owner-openid",
+    ) is None
+    assert store.resolve_external_identity(
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="other-openid",
+    ).user_id == other.id
 
 
 def test_wrong_current_password_does_not_change_password_or_revoke_session(tmp_path):

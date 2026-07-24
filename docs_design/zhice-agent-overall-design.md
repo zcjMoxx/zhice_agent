@@ -295,13 +295,13 @@ contexts/sessions/chat-YYYYMMDD.jsonl
 
 Part 10 Memory、Part 11 MCP、Part 12 生命周期事件/Hook Runtime 和 Part 13 Subagent 已经完成；后续先完成当前代码尚不存在的能力，再进入分领域优化：
 
-1. Part 14 外部渠道：接入 IM / 协作平台，并统一身份、命令、session 和 turn 语义。
+1. Part 14 外部渠道：第一版已实现，包含中性 Channel 协议、QQ 私聊/群聊、身份绑定与用户解绑、conversation route、跨渠道 Session 可见/续写边界、Markdown 出站、去重与安全边界。
 2. Part 15 生产部署与发布：补齐容器、反向代理、Secret 注入、健康检查和发布产物。
 3. Part 16 Agent 运行可靠性与上下文优化。
 4. Part 17 Web、会话与用户治理优化。
 5. Part 18 Skill Runtime、CLI 与本地运维优化：独立承接 SkillExecutor、`skill.*` 与 ProgressSink。
 
-Part 14～15 继续补齐新能力；Part 16～18 再优化 Part 1～15 已经形成的运行链路。第十部分当前实现见 `docs_design/zhice-agent-part10-memory-design.md`；Part 11 当前实现见 `docs_design/zhice-agent-part11-mcp-design.md`；Part 12 当前实现见 `docs_design/zhice-agent-part12-hooks-design.md`；Part 13 当前实现见 `docs_design/zhice-agent-part13-subagent-design.md`，边界取舍见 `docs_design/2026-07-21-subagent-runtime-boundary-design.md`。
+Part 14～15 继续补齐新能力；Part 16～18 再优化 Part 1～15 已经形成的运行链路。第十部分当前实现见 `docs_design/zhice-agent-part10-memory-design.md`；Part 11 当前实现见 `docs_design/zhice-agent-part11-mcp-design.md`；Part 12 当前实现见 `docs_design/zhice-agent-part12-hooks-design.md`；Part 13 当前实现见 `docs_design/zhice-agent-part13-subagent-design.md`，边界取舍见 `docs_design/2026-07-21-subagent-runtime-boundary-design.md`；Part 14 当前开发设计见 `docs_design/zhice-agent-part14-external-channel-design.md`，QQ 初始边界见 `docs_design/2026-07-23-qq-external-channel-boundary-design.md`，跨渠道 Session、解绑和 Markdown 收敛见 `docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`。
 
 ### 3.3 推荐目录结构
 
@@ -1414,7 +1414,7 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 ## 15. Part 12 当前基线与后续部分设计
 
-本章记录已完成的 Part 12、Part 13 当前边界和尚未完整实现的 Part 14～18。Part 10 Memory、Part 11 MCP、Part 12 RuntimeEvent/Hook Runtime、Part 13 Subagent，以及原 Part 16 的 Capability Selection 子能力已进入当前代码基线；Part 16 其余可靠性优化仍保留。
+本章记录已完成的 Part 12、Part 13、Part 14 第一版当前边界和尚未完整实现的 Part 15～18。Part 10 Memory、Part 11 MCP、Part 12 RuntimeEvent/Hook Runtime、Part 13 Subagent、Part 14 QQ 外部渠道第一版，以及原 Part 16 的 Capability Selection 子能力已进入当前代码基线；Part 16 其余可靠性优化仍保留。
 
 ```text
 Part 12 生命周期事件与 Hook Runtime（已完成）
@@ -1477,15 +1477,22 @@ Memory、MCP、Hook Runtime 和 Subagent 已经落地。Part 13 当前代码复�
 
 ### 15.3 Part 14：外部渠道
 
-Part 14 在现有 Web/WS runtime、渠道身份映射、用户权限、session 和 turn 边界上增加真实外部渠道适配器：
+Part 14 第一版已实现并进入当前代码基线。第一条真实外部渠道选择 QQ，后续微信、飞书复用同一协议。
 
-- 接入一个外部 IM / 协作平台作为第一条真实渠道。
-- 将渠道用户解析为内部 `user_id`，不按渠道复制权限系统。
-- 复用统一 slash command、session、turn、stop 和模型偏好语义，仅按渠道能力声明裁剪表现。
-- 把文本、文件、回复目标和渠道 metadata 转换成内部中性事件。
-- 渠道发送失败、权限拒绝和重试写入现有 trace/audit 关联链。
+关键设计：
 
-渠道适配属于 app shell，不能把平台 SDK 或渠道业务分支写入 AgentLoop。
+- 新增 `ChannelCapabilities`、`InboundChannelEvent`、`ChannelReplyTarget`、`ChannelExecutionContext` 和窄 `ChannelChatRuntime` Protocol；当前 application runtime 先适配该协议，不为了名称同时大范围重命名 `WebRuntime`。
+- 渠道用户通过 `external_identities` 解析为内部 `user_id`，未知 QQ 用户只能在私聊绑定，不能自动注册、创建 Session 或触发 LLM；当前用户可在个人设置查看并解除自己的绑定，解绑保留历史。
+- 新增持久 conversation route，把 `(channel, account, conversation, owner)` 映射到当前内部 Session；QQ 私聊连续复用，`/new` 原子切换。
+- QQ 群聊默认只有 `@机器人` 才触发，并按触发用户隔离 Session；Web/CLI 可查看本人跨渠道历史，QQ 私聊可跨端继续，QQ群聊 Session 在 Web/CLI 只读并通过派生新 Web Session 继续。
+- 命令、模型偏好、stop、Memory、Tool、Hook、MCP 和 Subagent 继续复用当前 runtime，仅按 `qq_c2c` / `qq_group` capabilities 裁剪展示和支持范围。
+- 入站先做回声过滤、持久去重、限流、身份、会话和附件 guard，再进入 Agent；同一 conversation route 串行，不同会话有界并行。
+- QQ 运行态优先使用 `qq-botpy` 可选依赖和 WebSocket。官方 Node connector 只作为可选扫码配网能力；Webhook 等 Part 15 具备公网部署条件后接入。
+- 当前 SDK 不启用未验证的 C2C stream；普通回复按结构选择 Markdown，短句和超长内容使用文本，发送失败不能重新执行 Agent Turn。
+- 凭证、token、绑定码、签名和完整外部 ID 全链路脱敏；附件继续经过 SSRF、大小、类型和用户目录边界。
+- QQ 断线或依赖不可用只局部降级，不阻断 Web/CLI；health、trace、Runtime Activity 和 Security Audit 使用现有结构化出口。
+
+当前设计依据：`docs_design/zhice-agent-part14-external-channel-design.md`；初始边界记录：`docs_design/2026-07-23-qq-external-channel-boundary-design.md`；跨渠道 Session、解绑和 Markdown 收敛：`docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`。
 
 ### 15.4 Part 15：生产部署与发布
 
@@ -1870,7 +1877,7 @@ session 模型偏好与 turn-local LLM 选择
 
 - Part 12 生命周期事件与 Hook Runtime：已完成 RuntimeEvent、现有 WS/SSE/CLI、前端运行状态和真实受限 pre/post Tool Hook Runtime，DoD 已满足并关闭。
 - Part 13 Subagent：已完成有界并行 child 编排、独立 Session/Event scope、Profile 能力交集、workspace 隔离和 `/subagent` Session 语义，DoD 已满足并进入当前基线。
-- Part 14 外部渠道：接入真实 IM / 协作平台适配器。
+- Part 14 外部渠道：第一版已实现；中性 Channel 协议与 QQ 私聊/群聊闭环已进入当前基线。
 - Part 15 生产部署与发布：容器、反向代理、Secret 注入、健康检查和发布产物。
 - Part 16 Agent 运行可靠性与上下文优化。
 - Part 17 Web、会话与用户治理优化。
@@ -2134,7 +2141,7 @@ Part 11 MCP 已实现并进入当前基线：支持 stdio、Streamable HTTP、SS
 ```text
 Part 12 生命周期事件与 Hook Runtime（已完成并关闭）
 Part 13 Subagent（已完成并关闭）
-Part 14 外部渠道
+Part 14 外部渠道（QQ 第一版已实现）
 Part 15 生产部署与发布
 Part 16 Agent 运行可靠性与上下文优化（Capability Selection 已完成，其余待实现）
 Part 17 Web、会话与用户治理优化

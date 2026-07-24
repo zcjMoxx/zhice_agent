@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -568,8 +569,12 @@ def test_init_runtime_files_generates_local_env_and_llm_config(tmp_path, monkeyp
     assert tmp_path / ".env" in written
     assert tmp_path / "config" / "llm_endpoints.json" in written
     assert tmp_path / "config" / "skill_sources.yml" in written
+    assert tmp_path / "config" / "channels.yml" in written
     assert (tmp_path / "prompts" / "identity.md").is_file()
     assert (tmp_path / "config" / "skill_sources.yml").is_file()
+    assert (tmp_path / "config" / "channels.yml").read_text(encoding="utf-8") == (
+        Path("config/channels.example.yml").resolve().read_text(encoding="utf-8")
+    )
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert env_text == f"ZHICE_AGENT_WORKSPACE={tmp_path.resolve()}\n"
 
@@ -609,12 +614,16 @@ def test_init_runtime_files_preserves_existing_files_without_force(tmp_path, mon
     _clear_zhice_env(monkeypatch)
     config = load_config(tmp_path)
     (tmp_path / ".env").write_text("EXISTING=1\n", encoding="utf-8")
+    config.config_dir.mkdir(parents=True, exist_ok=True)
+    config.channels_config_path.write_text("channels: existing\n", encoding="utf-8")
 
     written = init_runtime_files(config, create_env=True)
 
     assert (tmp_path / ".env").read_text(encoding="utf-8") == "EXISTING=1\n"
     assert tmp_path / ".env" not in written
     assert tmp_path / "config" / "llm_endpoints.json" in written
+    assert config.channels_config_path.read_text(encoding="utf-8") == "channels: existing\n"
+    assert config.channels_config_path not in written
 
 
 def test_init_runtime_files_fills_missing_files_when_config_exists(tmp_path, monkeypatch):
@@ -631,6 +640,7 @@ def test_init_runtime_files_fills_missing_files_when_config_exists(tmp_path, mon
     assert tmp_path / ".env" in written
     assert (tmp_path / ".env").exists()
     assert config.config_dir / "skill_sources.yml" in written
+    assert config.channels_config_path in written
 
 
 def test_init_runtime_files_can_skip_skill_source_config(tmp_path, monkeypatch):
@@ -644,6 +654,35 @@ def test_init_runtime_files_can_skip_skill_source_config(tmp_path, monkeypatch):
     assert tmp_path / "config" / "llm_endpoints.json" in written
     assert tmp_path / "config" / "skill_sources.yml" not in written
     assert not (tmp_path / "config" / "skill_sources.yml").exists()
+
+
+def test_init_runtime_files_force_replaces_existing_channel_config(tmp_path, monkeypatch):
+    _clear_zhice_env(monkeypatch)
+    config = load_config(tmp_path)
+    config.config_dir.mkdir(parents=True)
+    config.channels_config_path.write_text("channels: existing\n", encoding="utf-8")
+
+    written = init_runtime_files(config, force=True)
+
+    assert config.channels_config_path in written
+    assert config.channels_config_path.read_text(encoding="utf-8") == (
+        Path("config/channels.example.yml").resolve().read_text(encoding="utf-8")
+    )
+
+
+def test_init_runtime_files_reports_missing_channel_template(tmp_path, monkeypatch):
+    _clear_zhice_env(monkeypatch)
+    config = load_config(tmp_path / "runtime")
+    source_root = tmp_path / "source"
+    monkeypatch.setattr("agent.config._default_workspace", lambda: source_root)
+
+    with pytest.raises(InitConfigurationError, match="Channel config template is missing"):
+        init_runtime_files(
+            config,
+            create_llm_config=False,
+            create_skill_sources_config=False,
+            create_prompts=False,
+        )
 
 
 def _clear_zhice_env(monkeypatch) -> None:

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from agent.auth.store import AuthStoreError, SQLiteAuthStore
@@ -65,6 +66,7 @@ class SessionAccessService:
         session_id: str,
         *,
         channel: str,
+        conversation_type: str = "",
         external_chat_id: str = "",
         external_thread_id: str = "",
         write: bool = False,
@@ -81,6 +83,7 @@ class SessionAccessService:
                     session_id=session_id,
                     owner_user_id=str(actor.user_id),
                     channel=channel,
+                    conversation_type=conversation_type,
                     external_chat_id=external_chat_id,
                     external_thread_id=external_thread_id,
                 )
@@ -129,8 +132,64 @@ class SessionAccessService:
                     message_count=int(row["message_count"]),
                     title=str(row["title"]),
                 )
-            summaries.append(summary)
+            summaries.append(
+                replace(
+                    summary,
+                    channel=str(row["channel"]),
+                    conversation_type=str(row.get("conversation_type") or ""),
+                    continuation_mode=_continuation_mode(row),
+                )
+            )
         return sorted(summaries, key=lambda item: item.updated_at, reverse=True)
+
+    def assert_chat_continuation_allowed(
+        self,
+        actor: ActorContext,
+        session_id: str,
+        *,
+        request_channel: str,
+    ) -> None:
+        """Reject private-control writes into public external conversation history."""
+
+        self._require_user(actor)
+        row = self.store.session_index_get(session_id)
+        if row is None:
+            return
+        if not self._can_access(actor, str(row["owner_user_id"])):
+            raise self._not_found()
+        if _continuation_mode(row) == "fork_only" and request_channel != str(row["channel"]):
+            raise SessionAccessError(
+                ErrorCode.SESSION_CHANNEL_READ_ONLY,
+                "This group-channel session is read-only here. Continue from a Web copy instead.",
+                status_code=409,
+                details={"continuation_mode": "fork_only"},
+            )
+
+    def fork_to_web(self, actor: ActorContext, source_session_id: str) -> SessionSummary:
+        """Copy one public-channel history into a new private Web session."""
+
+        source = self.resolve_session(actor, source_session_id)
+        row = self.store.session_index_get(source_session_id)
+        if row is None or _continuation_mode(row) != "fork_only":
+            raise SessionAccessError(
+                ErrorCode.SESSION_CHANNEL_READ_ONLY,
+                "Only read-only group-channel sessions need a Web copy.",
+                status_code=409,
+            )
+        target_session_id = "session-fork-" + uuid.uuid4().hex
+        target = self.ensure_session(actor, target_session_id, channel="web", write=True)
+        source_state = source.store.load(source_session_id)
+        if source_state.messages:
+            target.store.append(target_session_id, list(source_state.messages))
+        source_title = str(row.get("title") or "").strip()
+        if source_title:
+            target.store.rename(target_session_id, f"{source_title} (Web copy)")
+        self.refresh_index(actor, target_session_id)
+        return next(
+            summary
+            for summary in self.list_sessions(actor)
+            if summary.session_id == target_session_id
+        )
 
     def _reconcile_owner_cli_sessions(self, actor: ActorContext) -> None:
         """Index unowned global CLI sessions for Owner without copying their files."""
@@ -190,6 +249,18 @@ class SessionAccessService:
         """Delete JSONL, metadata, and the owner index row."""
 
         resolved = self.resolve_session(actor, session_id, delete=True)
+        row = self.store.session_index_get(session_id)
+        if row is not None and str(row.get("channel") or "") not in {
+            "",
+            "web",
+            "cli",
+            "cli_legacy",
+        }:
+            raise SessionAccessError(
+                ErrorCode.SESSION_CHANNEL_READ_ONLY,
+                "External-channel session history cannot be deleted while its route is retained.",
+                status_code=409,
+            )
         resolved.store.delete(session_id)
         self.store.session_index_delete(session_id)
 
@@ -263,3 +334,11 @@ def _parse_timestamp(value: str) -> float:
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=UTC)
     return timestamp.timestamp()
+
+
+def _continuation_mode(row: dict[str, object]) -> str:
+    if str(row.get("channel") or "") == "qq" and str(
+        row.get("conversation_type") or ""
+    ) == "group":
+        return "fork_only"
+    return "writable"

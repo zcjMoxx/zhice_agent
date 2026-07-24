@@ -12,7 +12,7 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 - 输入：显式 workspace、endpoint、base_url、api_key、model 等参数。
 - 预期：在 workspace 下生成运行时配置和 prompts。
-- 检查点：默认不生成 `.env`；已有文件默认保留，缺失文件会补齐，包括可选 `prompts/diagnostics.md` 和 `prompts/exec.md`；显式 env file 可提供 workspace。完成提示明确 LLM endpoint 是聊天必需配置，`context_window/max_tokens` 已有默认值，Skill source 与其它扩展能力仅在启用时配置。
+- 检查点：默认不生成 `.env`；已有文件默认保留，缺失文件会补齐，包括 `config/channels.yml`、可选 `prompts/diagnostics.md` 和 `prompts/exec.md`；显式 env file 可提供 workspace。完成提示明确 LLM endpoint 是聊天必需配置，`context_window/max_tokens` 已有默认值，Channel、Skill source 与其它扩展能力仅在启用时配置。
 
 ### Case 2: 缺少 workspace
 
@@ -47,7 +47,7 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 ### Case 6: 会话 slash commands
 
-- 输入：`/help`、`/new`、`/reset`、`/sessions`、`/history`、`/prompts`、`/model`、`/memory`、`/exit` 等命令。
+- 输入：`/help`、`/new`、`/clear`、`/sessions`、`/history`、`/prompts`、`/model`、`/memory`、`/exit` 等命令；旧 `/reset` 只提示改用 `/clear`，不进入 Agent。
 - 预期：命令在 CLI 层处理，不进入 AgentLoop 普通对话路径。
 - 检查点：新 session 可写入文件；reset 后 history 为空；sessions 能显示 preview；`/help` 只列顶层命令，`/skills sync` 放在 `/skills` 的 tip 中；`/model` 能紧凑显示当前模型，`/model list` 能列出 endpoint/model，`/model list endpoint` 能列出单个 endpoint 的 supported_models，且能切换、临时覆盖模型并重置当前首选 endpoint；`/subagent` 只在裸命令 Tip 中提示 `auto/off/once`，状态按 Session sidecar 隔离。
 - Subagent 显式配置非法或必需 Prompt 缺失时，CLI 主聊天仍可启动，并输出包含真实 message/hint 的人类可读说明，不直接打印结构化 JSON；one-shot 只消费一次。

@@ -20,6 +20,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+qq = [
+    "qq-botpy>=1.2.1,<2",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-xdist>=3.6.0",

@@ -14,7 +14,7 @@ from agent.auth.activity import SqliteRuntimeActivitySink
 from agent.auth.audit import SqliteAuditSink
 from agent.auth.confirmation import SQLiteToolConfirmationBroker
 from agent.auth.diagnostics import RecentActivityDiagnostics
-from agent.auth.session_access import SessionAccessService
+from agent.auth.session_access import SessionAccessError, SessionAccessService
 from agent.auth.store import SQLiteAuthStore
 from agent.auth.tool_policy import RbacToolExecutionPolicy
 from agent.auth.user_context import FilesystemUserContextResolver
@@ -38,7 +38,9 @@ from agent.memory.startup import check_memory_extraction_startup
 from agent.prompt_loader import PromptLoader
 from agent.protocols.auth import ActorContext, AuditEvent
 from agent.protocols.capability import CapabilityStatus
+from agent.protocols.channel import ChannelExecutionContext
 from agent.protocols.diagnostics import DiagnosticContext
+from agent.protocols.errors import ErrorCode
 from agent.protocols.llm import LLMEndpoint, LLMProvider
 from agent.protocols.mcp import McpInteractionResponse
 from agent.protocols.session import (
@@ -74,6 +76,11 @@ memory_logger = logging.getLogger("zcagent.agent.memory")
 skill_logger = logging.getLogger("zcagent.agent.skills")
 WEB_COMMAND_PROFILE = "web"
 EXTERNAL_COMMAND_PROFILE = "external"
+QQ_C2C_COMMAND_PROFILE = "qq_c2c"
+QQ_GROUP_COMMAND_PROFILE = "qq_group"
+EXTERNAL_STOP_PROFILES = frozenset(
+    {EXTERNAL_COMMAND_PROFILE, QQ_C2C_COMMAND_PROFILE, QQ_GROUP_COMMAND_PROFILE}
+)
 
 
 @dataclass
@@ -135,6 +142,10 @@ class WebRuntime:
     memory_extraction_max_pending_jobs: int = 1000
     memory_scheduler: MemoryExtractionScheduler | None = None
     mcp_runtime: McpRuntime | None = None
+    channel_manager: Any | None = None
+    channel_status: CapabilityStatus | None = None
+    channel_identity: Any | None = None
+    channel_config: Any | None = None
 
     def __post_init__(self) -> None:
         self._active_turns: dict[tuple[str, str], ActiveTurn] = {}
@@ -158,6 +169,10 @@ class WebRuntime:
         )
         if self.memory_extraction_status is not None:
             statuses["memory_extraction"] = self.memory_extraction_status
+        if self.channel_status is not None:
+            statuses["channel.qq"] = self.channel_status
+        if self.channel_manager is not None:
+            statuses.update(self.channel_manager.statuses())
         return statuses
 
     def list_sessions(
@@ -202,6 +217,23 @@ class WebRuntime:
                     session_id=session_id,
                 )
 
+    def fork_session_to_web(
+        self,
+        actor: ActorContext,
+        source_session_id: str,
+        *,
+        request_id: str = "",
+    ) -> SessionSummary:
+        """Create a private Web copy of one read-only external group session."""
+
+        if self.session_access is None or actor.user_id is None:
+            raise SessionAccessError(
+                ErrorCode.AUTH_ACCOUNT_REQUIRED,
+                "Database user is required",
+                status_code=403,
+            )
+        return self.session_access.fork_to_web(actor, source_session_id)
+
     def run_chat_events(
         self,
         actor: ActorContext | str,
@@ -212,21 +244,32 @@ class WebRuntime:
         on_event: RuntimeEventCallback | None = None,
         command_profile: str = WEB_COMMAND_PROFILE,
         request_id: str = "",
+        channel_context: ChannelExecutionContext | None = None,
     ) -> ChatTurnResult:
         """Run one command-aware turn and emit text_delta events as they arrive."""
 
         actor, session_id, message = _normalize_actor_session_message(actor, session_id, message)
+        resolved_channel = channel_context.channel if channel_context is not None else (
+            "external_ws" if command_profile == EXTERNAL_COMMAND_PROFILE else "web"
+        )
+        if self.session_access is not None and actor.user_id is not None:
+            self.session_access.assert_chat_continuation_allowed(
+                actor,
+                session_id,
+                request_channel=resolved_channel,
+            )
         command_text = self.handle_command(
             actor,
             session_id,
             message,
             command_profile=command_profile,
             request_id=request_id,
+            channel_context=channel_context,
         )
         if command_text is not None:
             _emit_runtime_event(on_event, {"type": "text_delta", "content": command_text})
             command_name = message.strip().split(maxsplit=1)[0].lower()
-            stopped = command_profile == EXTERNAL_COMMAND_PROFILE and command_name == "/stop"
+            stopped = command_profile in EXTERNAL_STOP_PROFILES and command_name == "/stop"
             return ChatTurnResult(content=command_text, stopped=stopped, turn_id=turn_id or "")
 
         subagent_preference = self.get_subagent_preference(actor, session_id)
@@ -263,7 +306,16 @@ class WebRuntime:
             resolved = self.session_access.ensure_session(
                 actor,
                 session_id,
-                channel=("external_ws" if command_profile == EXTERNAL_COMMAND_PROFILE else "web"),
+                channel=resolved_channel,
+                conversation_type=(
+                    channel_context.conversation_type if channel_context is not None else ""
+                ),
+                external_chat_id=(
+                    channel_context.external_conversation_id if channel_context is not None else ""
+                ),
+                external_thread_id=(
+                    channel_context.external_thread_id if channel_context is not None else ""
+                ),
                 write=True,
             )
             if resolved.created:
@@ -426,6 +478,9 @@ class WebRuntime:
                 activity_sink=self.activity_sink,
                 audit_sink=self.audit_sink,
                 channel=actor.channel,
+                conversation_type=(
+                    channel_context.conversation_type if channel_context is not None else ""
+                ),
                 request_id=request_id,
                 system_prompt_addendum=(
                     self.prompt_loader.load("subagent_once")
@@ -463,6 +518,7 @@ class WebRuntime:
         *,
         command_profile: str = WEB_COMMAND_PROFILE,
         request_id: str = "",
+        channel_context: ChannelExecutionContext | None = None,
     ) -> str | None:
         """Return a Web command response, or None for ordinary chat text."""
 
@@ -476,6 +532,17 @@ class WebRuntime:
         target = target.strip()
         if command == "help":
             return _web_help_text(command_profile)
+        if command_profile in {QQ_C2C_COMMAND_PROFILE, QQ_GROUP_COMMAND_PROFILE} and command == (
+            "sessions"
+        ):
+            return "Session management is available in Web or CLI. Use `/new` here for a fresh QQ session."
+        if command_profile == QQ_GROUP_COMMAND_PROFILE and command in {
+            "model",
+            "sessions",
+            "history",
+            "memory",
+        }:
+            return "This command is private. Please use QQ direct chat or Web."
         if command == "model":
             return self._handle_model_command(actor, session_id, target, request_id=request_id)
         if command == "subagent":
@@ -491,11 +558,11 @@ class WebRuntime:
                 else "当前没有可用的 MCP Server。"
             )
         if command == "stop":
-            if command_profile != EXTERNAL_COMMAND_PROFILE:
+            if command_profile not in EXTERNAL_STOP_PROFILES:
                 return _command_not_supported_for_client(stripped)
             result = self.cancel_session(actor, session_id)
             return f"Stopped current turn. Cancelled: `{result['cancelled']}`"
-        if command == "reset":
+        if command == "clear":
             self._cancel_memory_extraction(actor, session_id)
             self._clear_subagent_force_once(actor, session_id)
             if self.session_access is not None and actor.user_id is not None:
@@ -512,7 +579,11 @@ class WebRuntime:
                 return _command_not_supported_for_client(stripped)
             return _format_session_history(self.load_session(actor, session_id).messages)
         if command == "exit":
-            if command_profile != EXTERNAL_COMMAND_PROFILE:
+            if (
+                command_profile != EXTERNAL_COMMAND_PROFILE
+                or channel_context is not None
+                and not channel_context.capabilities.can_close_conversation
+            ):
                 return _command_not_supported_for_client(stripped)
             return "Closing WebSocket connection."
 
@@ -1026,6 +1097,8 @@ class WebRuntime:
     def shutdown(self) -> None:
         """Cancel pending background work before the Gateway exits."""
 
+        if self.channel_manager is not None:
+            self.channel_manager.stop()
         if self.memory_scheduler is not None:
             self.memory_scheduler.shutdown()
         if self.mcp_runtime is not None:
@@ -1206,7 +1279,7 @@ def build_web_runtime(
         audit_sink=audit_sink,
         hook_runtime=hook_runtime,
     )
-    return WebRuntime(
+    runtime = WebRuntime(
         config=config,
         sessions=session_store,
         agent_loop=agent_loop,
@@ -1232,6 +1305,33 @@ def build_web_runtime(
         memory_extraction_enabled=memory_extraction_startup.enabled,
         mcp_runtime=mcp_runtime,
     )
+    from agent.channels import (
+        ChannelConversationService,
+        ChannelDedupService,
+        ChannelManager,
+        ChannelRuntimeAdapter,
+        ExternalIdentityService,
+        load_channel_configuration,
+    )
+    from agent.channels.qq import build_qq_adapters
+
+    channel_config = load_channel_configuration(config.config_dir)
+    identity = ExternalIdentityService(auth_store)
+    conversations = ChannelConversationService(auth_store, session_access)
+    dedup = ChannelDedupService(auth_store)
+    channel_runtime = ChannelRuntimeAdapter(runtime, conversations)
+    adapters, channel_status = build_qq_adapters(
+        channel_config.qq,
+        identity,
+        conversations,
+        dedup,
+        channel_runtime,
+    )
+    runtime.channel_manager = ChannelManager(adapters)
+    runtime.channel_status = channel_status
+    runtime.channel_identity = identity
+    runtime.channel_config = channel_config
+    return runtime
 
 
 def _sync_startup_skills(skill_sync: SkillSourceSync) -> SkillSyncError | None:
@@ -1425,25 +1525,35 @@ def _endpoint_model_names(endpoint: LLMEndpoint) -> list[str]:
 def _web_help_text(command_profile: str = WEB_COMMAND_PROFILE) -> str:
     """Return compact Web slash-command help."""
 
+    if command_profile == QQ_GROUP_COMMAND_PROFILE:
+        return "\n".join(
+            [
+                "Available QQ group commands:",
+                "",
+                "- `/help` - show commands",
+                "- `/new` - start a new private agent session for you in this group",
+                "- `/clear` - clear your current session history",
+                "- `/stop` - stop your active turn",
+            ]
+        )
+    title = "Available QQ commands:" if command_profile == QQ_C2C_COMMAND_PROFILE else "Available Web commands:"
     lines = [
-        "Available Web commands:",
+        title,
         "",
         "- `/help` - show commands",
         "- `/model` - show or switch the preferred model",
         "- `/subagent` - show or control Subagent delegation",
         "- `/memory` - show current Memory",
         "- `/mcp` - show available MCP capabilities",
-        "- `/reset` - clear this session history",
-        "- `/sessions` - list or manage recent sessions",
+        "- `/clear` - clear this session history",
     ]
+    if command_profile != QQ_C2C_COMMAND_PROFILE:
+        lines.append("- `/sessions` - list or manage recent sessions")
+    if command_profile in EXTERNAL_STOP_PROFILES:
+        lines.append("- `/stop` - stop the active turn")
     if command_profile == EXTERNAL_COMMAND_PROFILE:
-        lines.extend(
-            [
-                "- `/stop` - stop the active turn",
-                "- `/history` - show recent messages",
-                "- `/exit` - close this WebSocket connection",
-            ]
-        )
+        lines.append("- `/history` - show recent messages")
+        lines.append("- `/exit` - close this WebSocket connection")
     return "\n".join(lines)
 
 
@@ -1541,7 +1651,7 @@ def _sessions_tip_text() -> str:
 
     return (
         "Tip: use `/sessions rename <id> <title>` to rename, or "
-        "`/sessions delete [id]` to delete; omitting id clears the current session like `/reset`."
+        "`/sessions delete [id]` to delete; omitting id clears the current session like `/clear`."
     )
 
 

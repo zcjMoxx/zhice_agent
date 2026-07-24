@@ -56,6 +56,15 @@ class RbacToolExecutionPolicy:
                 risk_level=result.risk_level,
                 risk_category=result.risk_category,
             )
+        if context.conversation_type == "group" and result.requires_confirmation:
+            return ToolExecutionDecision(
+                action="deny",
+                code="CHANNEL_GROUP_CONFIRMATION_UNAVAILABLE",
+                message="High-risk tools must be completed in direct chat or Web.",
+                permission_key=permission_key,
+                risk_level=result.risk_level,
+                risk_category=result.risk_category,
+            )
         return ToolExecutionDecision(
             action="confirm" if result.requires_confirmation else "allow",
             code=result.code,
