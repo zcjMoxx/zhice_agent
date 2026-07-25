@@ -172,6 +172,133 @@ test("official driver ACKs before cursor commit and sends with saved context", a
   }
 });
 
+test("official driver rejects an explicitly stale token during account start", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalState = process.env.ZHICE_WEIXIN_STATE_DIR;
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zhice-weixin-stale-"));
+  process.env.ZHICE_WEIXIN_STATE_DIR = stateRoot;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("notifystart")) return jsonResponse({ ret: -14 });
+    throw new Error("unexpected fetch");
+  };
+  try {
+    await assert.rejects(
+      officialDriver.startAccount({
+        accountKey: "opaque-stale",
+        credential: accountCredential(),
+        emit: () => {},
+      }),
+      (error) => error?.code === "WEIXIN_TOKEN_STALE",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalState === undefined) delete process.env.ZHICE_WEIXIN_STATE_DIR;
+    else process.env.ZHICE_WEIXIN_STATE_DIR = originalState;
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("official driver keeps a transient start failure degraded until polling recovers", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalState = process.env.ZHICE_WEIXIN_STATE_DIR;
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zhice-weixin-recover-"));
+  process.env.ZHICE_WEIXIN_STATE_DIR = stateRoot;
+  const events = [];
+  let releasePoll;
+  let pollCount = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    if (text.includes("notifystart")) throw new Error("temporary network failure");
+    if (text.includes("getupdates")) {
+      pollCount += 1;
+      if (pollCount > 1) return abortableResponse(options.signal);
+      return new Promise((resolve) => {
+        releasePoll = () => resolve(jsonResponse({ ret: 0, msgs: [] }));
+      });
+    }
+    if (text.includes("notifystop")) return jsonResponse({ ret: 0 });
+    throw new Error("unexpected fetch");
+  };
+  let account;
+  try {
+    account = await officialDriver.startAccount({
+      accountKey: "opaque-recover",
+      credential: accountCredential(),
+      emit: (frame) => events.push(frame),
+    });
+    assert.equal(account.status, "degraded");
+    await waitFor(() => typeof releasePoll === "function");
+    releasePoll();
+    await waitFor(() => events.some((frame) => frame.status === "active"));
+    assert.equal(account.status, "active");
+  } finally {
+    await account?.stop();
+    globalThis.fetch = originalFetch;
+    if (originalState === undefined) delete process.env.ZHICE_WEIXIN_STATE_DIR;
+    else process.env.ZHICE_WEIXIN_STATE_DIR = originalState;
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("official driver stop releases an inbound message waiting for ACK", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalState = process.env.ZHICE_WEIXIN_STATE_DIR;
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zhice-weixin-stop-"));
+  process.env.ZHICE_WEIXIN_STATE_DIR = stateRoot;
+  const events = [];
+  let delivered = false;
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    if (text.includes("notifystart") || text.includes("notifystop")) {
+      return jsonResponse({ ret: 0 });
+    }
+    if (text.includes("getupdates")) {
+      if (!delivered) {
+        delivered = true;
+        return jsonResponse({
+          ret: 0,
+          msgs: [{
+            message_id: 99,
+            from_user_id: "user@im.wechat",
+            context_token: "context-secret",
+            item_list: [{ type: 1, text_item: { text: "hello" } }],
+          }],
+        });
+      }
+      return abortableResponse(options.signal);
+    }
+    throw new Error("unexpected fetch");
+  };
+  let account;
+  try {
+    account = await officialDriver.startAccount({
+      accountKey: "opaque-stop",
+      credential: accountCredential(),
+      emit: (frame) => events.push(frame),
+    });
+    await waitFor(() => events.some((frame) => frame.type === "message.received"));
+    const startedAt = Date.now();
+    await account.stop();
+    assert.ok(Date.now() - startedAt < 250, "stop should release pending ACK waits");
+    account = null;
+  } finally {
+    await account?.stop();
+    globalThis.fetch = originalFetch;
+    if (originalState === undefined) delete process.env.ZHICE_WEIXIN_STATE_DIR;
+    else process.env.ZHICE_WEIXIN_STATE_DIR = originalState;
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+function accountCredential() {
+  return {
+    bot_token: "bot-token-secret",
+    base_url: "https://ilinkai.weixin.qq.com",
+    external_account_id: "bot@im.bot",
+    external_user_id: "user@im.wechat",
+  };
+}
+
 function jsonResponse(value) {
   return new Response(JSON.stringify(value), {
     status: 200,

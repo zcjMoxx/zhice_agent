@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import agent.channels.weixin.adapter as weixin_adapter_module
 from agent.auth.session_access import SessionAccessService
 from agent.auth.store import AuthStoreError, SQLiteAuthStore
 from agent.auth.user_context import FilesystemUserContextResolver
@@ -17,6 +19,7 @@ from agent.channels.identity import ExternalIdentityService
 from agent.channels.weixin.adapter import WeixinClawAdapter
 from agent.channels.weixin.binding import WeixinBindingService
 from agent.channels.weixin.outbound import render_chunks
+from agent.channels.weixin.sidecar import WeixinSidecarError
 
 
 def test_channel_account_uniqueness_keeps_two_users_isolated(tmp_path):
@@ -120,8 +123,9 @@ def test_binding_finalize_does_not_block_sidecar_reader_on_account_start(tmp_pat
         handler.join(timeout=1)
 
 
-def test_duplicate_and_wrong_sender_do_not_call_runtime(tmp_path):
+def test_duplicate_and_wrong_sender_do_not_call_runtime(tmp_path, monkeypatch):
     adapter, runtime, sidecar, store = _adapter(tmp_path)
+    events = _capture_adapter_events(monkeypatch)
     wrong = _frame(event_id="wrong", sender="wx-other")
     asyncio.run(adapter.handle_frame(wrong))
     valid = _frame(event_id="same", sender="wx-a")
@@ -134,16 +138,188 @@ def test_duplicate_and_wrong_sender_do_not_call_runtime(tmp_path):
     assert store.resolve_external_identity(
         channel="weixin", external_tenant_id="opaque-a", external_user_id="wx-a"
     ) is not None
+    reasons = {
+        fields.get("reason_code")
+        for event, fields in events
+        if event in {"channel.weixin.message_rejected", "channel.weixin.message_duplicate"}
+    }
+    assert reasons == {"WEIXIN_SENDER_MISMATCH", "WEIXIN_MESSAGE_DUPLICATE"}
+    assert [event for event, _fields in events].count("channel.weixin.message_accepted") == 1
+    assert [event for event, _fields in events].count("channel.weixin.message_done") == 1
 
 
-def test_disabled_account_does_not_call_runtime(tmp_path):
+def test_disabled_account_does_not_call_runtime(tmp_path, monkeypatch):
     adapter, runtime, sidecar, store = _adapter(tmp_path)
+    events = _capture_adapter_events(monkeypatch)
     store.update_channel_account_status(
         channel="weixin", account_key="opaque-a", status="disabled"
     )
     asyncio.run(adapter.handle_frame(_frame(event_id="disabled", sender="wx-a")))
     assert runtime.calls == []
     assert sidecar.calls[-1][1]["disposition"] == "rejected"
+    rejected = next(
+        fields for event, fields in events if event == "channel.weixin.message_rejected"
+    )
+    assert rejected["reason_code"] == "WEIXIN_ACCOUNT_INACTIVE"
+
+
+def test_invalid_and_unknown_account_messages_log_rejection_reasons(tmp_path, monkeypatch):
+    adapter, runtime, sidecar, _store = _adapter(tmp_path)
+    events = _capture_adapter_events(monkeypatch)
+    invalid = _frame(event_id="invalid", sender="wx-a")
+    invalid["text"] = ""
+
+    asyncio.run(adapter.handle_frame(invalid))
+    asyncio.run(
+        adapter.handle_frame(
+            _frame(event_id="unknown", sender="wx-a", account_key="opaque-unknown")
+        )
+    )
+
+    assert runtime.calls == []
+    dispositions = [
+        payload["disposition"] for kind, payload in sidecar.calls if kind == "message.ack"
+    ]
+    assert dispositions == ["rejected", "rejected"]
+    reasons = {
+        fields["reason_code"]
+        for event, fields in events
+        if event == "channel.weixin.message_rejected"
+    }
+    assert reasons == {"WEIXIN_EVENT_INVALID", "WEIXIN_ACCOUNT_NOT_FOUND"}
+
+
+def test_identity_resolution_failure_closes_receipt_with_safe_reason(tmp_path, monkeypatch):
+    adapter, runtime, _sidecar, _store = _adapter(tmp_path)
+    events = _capture_adapter_events(monkeypatch)
+    monkeypatch.setattr(adapter.identity, "resolve", lambda *_args, **_kwargs: None)
+
+    asyncio.run(adapter.handle_frame(_frame(event_id="identity-missing", sender="wx-a")))
+
+    assert runtime.calls == []
+    rejected = next(
+        fields for event, fields in events if event == "channel.weixin.message_rejected"
+    )
+    assert rejected["reason_code"] == "WEIXIN_IDENTITY_UNRESOLVED"
+
+
+def test_inbound_activity_automatically_recovers_reconnect_required_account(
+    tmp_path, monkeypatch
+):
+    adapter, runtime, sidecar, store = _adapter(tmp_path)
+    events = _capture_adapter_events(monkeypatch)
+    store.update_channel_account_status(
+        channel="weixin", account_key="opaque-a", status="reconnect_required"
+    )
+
+    asyncio.run(adapter.handle_frame(_frame(event_id="recovered", sender="wx-a")))
+
+    account = store.get_channel_account(channel="weixin", account_key="opaque-a")
+    assert account["status"] == "active"
+    assert len(runtime.calls) == 1
+    dispositions = [payload["disposition"] for kind, payload in sidecar.calls if kind == "message.ack"]
+    assert dispositions == ["accepted"]
+    reconnected = next(fields for event, fields in events if event == "channel.weixin.reconnected")
+    assert reconnected["trigger"] == "inbound_activity"
+    assert "channel.weixin.message_accepted" in [event for event, _fields in events]
+    assert "channel.weixin.message_done" in [event for event, _fields in events]
+
+
+def test_send_failure_logs_safe_sidecar_error_code(tmp_path, monkeypatch):
+    sidecar = _FailingSendSidecar()
+    adapter, _runtime, _sidecar, _store = _adapter(tmp_path, sidecar=sidecar)
+    events = _capture_adapter_events(monkeypatch)
+
+    adapter._run_inbound_frame(_frame(event_id="send-failed", sender="wx-a"))
+
+    failed = next(fields for event, fields in events if event == "channel.weixin.send_failed")
+    assert failed["error_code"] == "CONTEXT_TOKEN_REFERENCE_INVALID"
+    assert failed["error_type"] == "WeixinSidecarError"
+    event_names = [event for event, _fields in events]
+    assert "channel.weixin.message_failed" in event_names
+    assert "channel.weixin.inbound_failed" in event_names
+
+
+def test_ack_failure_is_logged_without_dropping_the_turn(tmp_path, monkeypatch):
+    sidecar = _AckFailingSidecar()
+    adapter, runtime, _sidecar, _store = _adapter(tmp_path, sidecar=sidecar)
+    events = _capture_adapter_events(monkeypatch)
+
+    asyncio.run(adapter.handle_frame(_frame(event_id="ack-failed", sender="wx-a")))
+
+    assert len(runtime.calls) == 1
+    failed = next(fields for event, fields in events if event == "channel.weixin.ack_failed")
+    assert failed["disposition"] == "accepted"
+    assert failed["error_code"] == "SIDECAR_REQUEST_TIMEOUT"
+    assert "channel.weixin.message_done" in [event for event, _fields in events]
+
+
+def test_transient_account_start_failure_keeps_binding_active(tmp_path, monkeypatch):
+    sidecar = _AccountStartFailingSidecar("SIDECAR_REQUEST_TIMEOUT")
+    adapter, _runtime, _sidecar, store = _adapter(tmp_path, sidecar=sidecar)
+    events = _capture_adapter_events(monkeypatch)
+
+    status = adapter.start_account(
+        "opaque-a", {"bot_token": "secret"}, schedule_retry=False
+    )
+
+    account = store.get_channel_account(channel="weixin", account_key="opaque-a")
+    assert status == "retry_pending"
+    assert account["status"] == "active"
+    assert adapter.status().state == "degraded"
+    reconnecting = next(fields for event, fields in events if event == "channel.weixin.reconnecting")
+    assert reconnecting["reason_code"] == "SIDECAR_REQUEST_TIMEOUT"
+
+
+def test_only_explicit_stale_token_requires_reauthentication(tmp_path, monkeypatch):
+    sidecar = _AccountStartFailingSidecar("WEIXIN_TOKEN_STALE")
+    adapter, _runtime, _sidecar, store = _adapter(tmp_path, sidecar=sidecar)
+    events = _capture_adapter_events(monkeypatch)
+
+    status = adapter.start_account(
+        "opaque-a", {"bot_token": "secret"}, schedule_retry=False
+    )
+
+    account = store.get_channel_account(channel="weixin", account_key="opaque-a")
+    assert status == "reconnect_required"
+    assert account["status"] == "reconnect_required"
+    assert adapter.status().state == "degraded"
+    required = next(
+        fields for event, fields in events if event == "channel.weixin.reconnect_required"
+    )
+    assert required["reason_code"] == "WEIXIN_TOKEN_STALE"
+
+
+def test_transient_account_start_failure_retries_automatically(tmp_path):
+    sidecar = _RecoveringAccountStartSidecar()
+    adapter, _runtime, _sidecar, store = _adapter(tmp_path, sidecar=sidecar)
+
+    status = adapter.start_account("opaque-a", {"bot_token": "secret"})
+
+    assert status == "retry_pending"
+    assert sidecar.recovered.wait(timeout=2.5)
+    assert _wait_for(lambda: adapter.status().state == "available", timeout=1.0)
+    account = store.get_channel_account(channel="weixin", account_key="opaque-a")
+    assert account["status"] == "active"
+    assert sidecar.start_attempts == 2
+    assert adapter.status().state == "available"
+
+
+def test_gateway_start_stays_degraded_until_account_polling_is_ready(tmp_path):
+    sidecar = _DegradedAccountStartSidecar()
+    adapter, _runtime, _sidecar, store = _adapter(tmp_path, sidecar=sidecar)
+    staged = adapter.binding.credentials.stage(
+        "opaque-a", {"bot_token": "secret", "external_user_id": "wx-a"}
+    )
+    adapter.binding.credentials.promote(staged, "opaque-a")
+
+    adapter.start()
+    try:
+        account = store.get_channel_account(channel="weixin", account_key="opaque-a")
+        assert account["status"] == "active"
+        assert adapter.status().state == "degraded"
+    finally:
+        adapter.stop()
 
 
 def test_two_accounts_dispatch_as_two_internal_actors(tmp_path):
@@ -222,7 +398,7 @@ def _services(tmp_path):
     return store, user, sessions
 
 
-def _adapter(tmp_path):
+def _adapter(tmp_path, *, sidecar=None):
     store, user, sessions = _services(tmp_path)
     store.create_channel_account(
         channel="weixin",
@@ -232,7 +408,7 @@ def _adapter(tmp_path):
         external_user_id="wx-a",
         credential_ref="channels/weixin/accounts/opaque-a.json",
     )
-    sidecar = _Sidecar()
+    sidecar = sidecar or _Sidecar()
     runtime = _Runtime()
     binding = WeixinBindingService(store, sidecar, tmp_path)
     adapter = WeixinClawAdapter(
@@ -278,6 +454,63 @@ class _Sidecar:
         pass
 
 
+class _FailingSendSidecar(_Sidecar):
+    def request(self, frame_type, **payload):
+        if frame_type == "message.send":
+            raise WeixinSidecarError("CONTEXT_TOKEN_REFERENCE_INVALID")
+        return super().request(frame_type, **payload)
+
+
+class _AckFailingSidecar(_Sidecar):
+    def request(self, frame_type, **payload):
+        if frame_type == "message.ack":
+            raise WeixinSidecarError("SIDECAR_REQUEST_TIMEOUT")
+        return super().request(frame_type, **payload)
+
+
+class _AccountStartFailingSidecar(_Sidecar):
+    def __init__(self, code):
+        super().__init__()
+        self.code = code
+
+    def request(self, frame_type, **payload):
+        if frame_type == "account.start":
+            raise WeixinSidecarError(self.code)
+        return super().request(frame_type, **payload)
+
+
+class _RecoveringAccountStartSidecar(_Sidecar):
+    def __init__(self):
+        super().__init__()
+        self.start_attempts = 0
+        self.recovered = threading.Event()
+
+    def request(self, frame_type, **payload):
+        if frame_type == "account.start":
+            self.start_attempts += 1
+            if self.start_attempts == 1:
+                raise WeixinSidecarError("SIDECAR_REQUEST_TIMEOUT")
+            self.recovered.set()
+            return {"type": "account.status", "status": "active", "code": "OK"}
+        return super().request(frame_type, **payload)
+
+
+class _DegradedAccountStartSidecar(_Sidecar):
+    def start(self):
+        pass
+
+    def request(self, frame_type, **payload):
+        if frame_type == "account.start":
+            return {
+                "type": "account.status",
+                "status": "degraded",
+                "code": "WEIXIN_NOTIFY_START_FAILED",
+            }
+        if frame_type == "health.get":
+            return {"type": "health.status", "status": "available", "code": "OK"}
+        return super().request(frame_type, **payload)
+
+
 class _BindingSidecar(_Sidecar):
     def __init__(self):
         super().__init__()
@@ -318,3 +551,22 @@ class _Runtime:
     def dispatch(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return SimpleNamespace(content="**reply**")
+
+
+def _capture_adapter_events(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        weixin_adapter_module,
+        "log_event",
+        lambda _logger, _level, event, **fields: events.append((event, fields)),
+    )
+    return events
+
+
+def _wait_for(predicate, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()

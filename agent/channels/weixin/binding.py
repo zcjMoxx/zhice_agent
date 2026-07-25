@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import threading
+import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 from agent.auth.store import AuthStoreError, SQLiteAuthStore
+from agent.channels.weixin.sidecar import WEIXIN_TOKEN_STALE, safe_weixin_error_code
+from agent.logging_utils import log_event
 from agent.protocols.auth import ActorContext
+
+binding_logger = logging.getLogger("zcagent.agent.channel.weixin")
 
 
 @dataclass(frozen=True)
@@ -62,6 +69,12 @@ class WeixinBindingService:
         self.credentials = WeixinCredentialStore(workspace)
         self._attempts: dict[str, BindingAttempt] = {}
         self._lock = threading.Lock()
+        self._account_starter: Callable[[str, dict[str, object]], str] | None = None
+
+    def set_account_starter(
+        self, starter: Callable[[str, dict[str, object]], str]
+    ) -> None:
+        self._account_starter = starter
 
     def status(self, actor: ActorContext) -> dict[str, object]:
         row = self.store.get_channel_account_for_user(
@@ -156,22 +169,39 @@ class WeixinBindingService:
         if row is None:
             raise KeyError(str(actor.user_id or ""))
         account_key = str(row["account_key"])
+        credential = self.credentials.read(account_key)
+        if self._account_starter is not None:
+            status = self._account_starter(account_key, credential)
+            return "reconnecting" if status == "retry_pending" else status
         try:
             response = self.sidecar.request(
                 "account.start",
                 account_key=account_key,
-                credential=self.credentials.read(account_key),
+                credential=credential,
             )
-        except Exception:
+        except Exception as exc:
+            code = safe_weixin_error_code(exc)
+            if code == WEIXIN_TOKEN_STALE:
+                self.store.update_channel_account_status(
+                    channel="weixin", account_key=account_key, status="reconnect_required"
+                )
+                return "reconnect_required"
+            _log_binding_reconnecting(account_key, code)
+            return "reconnecting"
+        status = str(response.get("status") or "degraded")
+        code = safe_weixin_error_code(response.get("code"), "WEIXIN_ACCOUNT_START_FAILED")
+        if status == "active":
+            self.store.update_channel_account_status(
+                channel="weixin", account_key=account_key, status="active"
+            )
+            return "active"
+        if status == "reconnect_required" and code == WEIXIN_TOKEN_STALE:
             self.store.update_channel_account_status(
                 channel="weixin", account_key=account_key, status="reconnect_required"
             )
             return "reconnect_required"
-        status = "active" if response.get("status") == "active" else "reconnect_required"
-        self.store.update_channel_account_status(
-            channel="weixin", account_key=account_key, status=status
-        )
-        return status
+        _log_binding_reconnecting(account_key, code)
+        return "reconnecting"
 
     def handle_frame(self, frame: dict[str, object]) -> None:
         frame_type = str(frame.get("type") or "")
@@ -235,17 +265,33 @@ class WeixinBindingService:
         ).start()
 
     def _start_bound_account(self, account_key: str, credential: dict[str, object]) -> None:
+        if self._account_starter is not None:
+            self._account_starter(account_key, credential)
+            return
         try:
             response = self.sidecar.request(
                 "account.start", account_key=account_key, credential=credential
             )
-            if response.get("status") == "active":
+            status = str(response.get("status") or "degraded")
+            code = safe_weixin_error_code(
+                response.get("code"), "WEIXIN_ACCOUNT_START_FAILED"
+            )
+            if status in {"active", "degraded"}:
                 return
-        except Exception:  # noqa: BLE001 - persisted binding remains reconnectable.
-            pass
-        self.store.update_channel_account_status(
-            channel="weixin", account_key=account_key, status="reconnect_required"
-        )
+            if status == "reconnect_required" and code == WEIXIN_TOKEN_STALE:
+                self.store.update_channel_account_status(
+                    channel="weixin", account_key=account_key, status="reconnect_required"
+                )
+                return
+            _log_binding_reconnecting(account_key, code)
+        except Exception as exc:  # noqa: BLE001 - persisted binding remains retryable.
+            code = safe_weixin_error_code(exc)
+            if code == WEIXIN_TOKEN_STALE:
+                self.store.update_channel_account_status(
+                    channel="weixin", account_key=account_key, status="reconnect_required"
+                )
+                return
+            _log_binding_reconnecting(account_key, code)
 
     def _expire(self, attempt: BindingAttempt) -> BindingAttempt:
         if attempt.status in _TERMINAL:
@@ -265,3 +311,13 @@ _TERMINAL = {
     "upstream_unavailable",
     "persist_failed",
 }
+
+
+def _log_binding_reconnecting(account_key: str, code: str) -> None:
+    log_event(
+        binding_logger,
+        logging.WARNING,
+        "channel.weixin.reconnecting",
+        account_ref="wx-" + uuid.uuid5(uuid.NAMESPACE_URL, account_key).hex[:8],
+        reason_code=code,
+    )

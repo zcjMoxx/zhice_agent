@@ -7,6 +7,7 @@ const MAX_FRAME_BYTES = 256 * 1024;
 
 export function createSidecar({ input = process.stdin, output = process.stdout, driver }) {
   const accounts = new Map();
+  const accountOperations = new Map();
   const attempts = new Map();
 
   function emit(frame) {
@@ -60,19 +61,34 @@ export function createSidecar({ input = process.stdin, output = process.stdout, 
           reply({ type: "account.status", account_key: accountKey, status: "reconnect_required" });
           return;
         }
-        const account = await driver.startAccount({
-          accountKey,
-          credential: frame.credential,
-          emit,
+        const account = await runAccountOperation(accountOperations, accountKey, async () => {
+          const previous = accounts.get(accountKey);
+          if (previous) {
+            await previous.stop?.();
+            accounts.delete(accountKey);
+          }
+          const started = await driver.startAccount({
+            accountKey,
+            credential: frame.credential,
+            emit,
+          });
+          accounts.set(accountKey, started);
+          return started;
         });
-        accounts.set(accountKey, account);
-        reply({ type: "account.status", account_key: accountKey, status: "active" });
+        reply({
+          type: "account.status",
+          account_key: accountKey,
+          status: account.status || "active",
+          code: account.statusCode || "OK",
+        });
         return;
       }
       case "account.stop": {
         const accountKey = String(frame.account_key || "");
-        await accounts.get(accountKey)?.stop?.();
-        accounts.delete(accountKey);
+        await runAccountOperation(accountOperations, accountKey, async () => {
+          await accounts.get(accountKey)?.stop?.();
+          accounts.delete(accountKey);
+        });
         reply({ type: "account.status", account_key: accountKey, status: "disabled" });
         return;
       }
@@ -81,6 +97,7 @@ export function createSidecar({ input = process.stdin, output = process.stdout, 
         reply({ type: "message.ack_result", disposition: frame.disposition });
         return;
       case "message.send":
+        await waitForAccountOperation(accountOperations, String(frame.account_key || ""));
         await requireAccount(accounts, frame).send(frame);
         reply({ type: "message.send_result", status: "sent" });
         return;
@@ -89,6 +106,7 @@ export function createSidecar({ input = process.stdin, output = process.stdout, 
         reply({ type: "typing.result", status: "ok" });
         return;
       case "shutdown":
+        await Promise.allSettled(accountOperations.values());
         for (const account of accounts.values()) await account.stop?.();
         accounts.clear();
         reply({ type: "shutdown.ok" });
@@ -127,6 +145,21 @@ function requireAccount(accounts, frame) {
   const account = accounts.get(String(frame.account_key || ""));
   if (!account) throw Object.assign(new Error("account unavailable"), { code: "ACCOUNT_UNAVAILABLE" });
   return account;
+}
+
+async function runAccountOperation(operations, accountKey, operation) {
+  const previous = operations.get(accountKey) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  operations.set(accountKey, current);
+  try {
+    return await current;
+  } finally {
+    if (operations.get(accountKey) === current) operations.delete(accountKey);
+  }
+}
+
+async function waitForAccountOperation(operations, accountKey) {
+  await operations.get(accountKey)?.catch(() => {});
 }
 
 function safeErrorCode(error) {

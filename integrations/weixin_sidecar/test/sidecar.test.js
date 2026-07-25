@@ -55,3 +55,29 @@ test("injected driver keeps accounts isolated", async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(sent, [["b", "hello"]]);
 });
+
+test("restarting one account stops the previous poller before replacement", async () => {
+  const stopped = [];
+  const sent = [];
+  let nextId = 0;
+  const driver = {
+    available: true,
+    async startAccount() {
+      const id = ++nextId;
+      return {
+        async stop() { stopped.push(id); },
+        async send() { sent.push(id); },
+      };
+    },
+  };
+  const h = harness(driver);
+  h.send({ type: "account.start", request_id: "1", account_key: "a", credential: {} });
+  h.send({ type: "account.start", request_id: "2", account_key: "a", credential: {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  h.send({ type: "message.send", request_id: "3", account_key: "a", text: "hello" });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(stopped, [1]);
+  assert.deepEqual(sent, [2]);
+});

@@ -160,16 +160,29 @@ class OfficialAccount {
 
   async start() {
     fs.mkdirSync(this.stateDir, { recursive: true });
+    this.status = "degraded";
+    this.statusCode = "WEIXIN_START_PENDING";
     try {
-      await notifyStart(this.apiOptions(10_000));
-    } catch {
-      // Upstream start notification is advisory; long-poll remains authoritative.
+      const response = await notifyStart(this.apiOptions(10_000));
+      const code = Number(response.errcode ?? response.ret ?? 0);
+      if (code === STALE_TOKEN_CODE) throw transportError("WEIXIN_TOKEN_STALE");
+      if (code === 0) {
+        this.status = "active";
+        this.statusCode = "OK";
+      } else {
+        this.statusCode = "WEIXIN_NOTIFY_START_FAILED";
+      }
+    } catch (error) {
+      if (safeCode(error, "") === "WEIXIN_TOKEN_STALE") throw error;
+      this.statusCode = safeCode(error, "WEIXIN_NOTIFY_START_FAILED");
     }
     this.task = this.pollLoop();
   }
 
   async stop() {
     this.controller.abort();
+    for (const resolve of [...this.pendingAcks.values()]) resolve("rejected");
+    this.pendingAcks.clear();
     await this.task?.catch(() => {});
     try {
       await notifyStop(this.apiOptions(10_000));
@@ -243,13 +256,14 @@ class OfficialAccount {
           abortSignal: this.controller.signal,
         });
         if (this.controller.signal.aborted) return;
-        const code = response.errcode ?? response.ret ?? 0;
+        const code = Number(response.errcode ?? response.ret ?? 0);
         if (code === STALE_TOKEN_CODE) {
-          this.emit({ type: "account.status", account_key: this.accountKey, status: "reconnect_required", code: "WEIXIN_TOKEN_STALE" });
+          this.updateStatus("reconnect_required", "WEIXIN_TOKEN_STALE");
           return;
         }
         if (code !== 0) throw transportError("WEIXIN_GET_UPDATES_FAILED");
         failures = 0;
+        this.updateStatus("active", "OK");
         const messages = (response.msgs || []).filter((message) => this.isAllowedText(message));
         const dispositions = await Promise.all(messages.map((message) => this.deliver(message)));
         if (dispositions.every((value) => ["accepted", "duplicate", "rejected"].includes(value))) {
@@ -262,10 +276,17 @@ class OfficialAccount {
         if (this.controller.signal.aborted) return;
         failures += 1;
         const delay = Math.min(30_000, 1000 * 2 ** Math.min(failures, 5));
-        this.emit({ type: "account.status", account_key: this.accountKey, status: "degraded", code: safeCode(error, "WEIXIN_POLL_FAILED") });
+        this.updateStatus("degraded", safeCode(error, "WEIXIN_POLL_FAILED"));
         await sleep(delay, this.controller.signal);
       }
     }
+  }
+
+  updateStatus(status, code) {
+    if (this.status === status && this.statusCode === code) return;
+    this.status = status;
+    this.statusCode = code;
+    this.emit({ type: "account.status", account_key: this.accountKey, status, code });
   }
 
   isAllowedText(message) {

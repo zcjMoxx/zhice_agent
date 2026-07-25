@@ -10,6 +10,7 @@ import uuid
 from agent.channels.limits import SlidingWindowRateLimiter
 from agent.channels.weixin.normalize import WeixinEventError, normalize_message
 from agent.channels.weixin.outbound import render_chunks
+from agent.channels.weixin.sidecar import WEIXIN_TOKEN_STALE, safe_weixin_error_code
 from agent.logging_utils import log_event
 from agent.protocols.capability import CapabilityStatus
 from agent.protocols.channel import ChannelCapabilities, ChannelExecutionContext
@@ -45,7 +46,12 @@ class WeixinClawAdapter:
         self._sender_limit = SlidingWindowRateLimiter(limit=12, window_seconds=60)
         self._conversation_limit = SlidingWindowRateLimiter(limit=30, window_seconds=60)
         self._account_limit = SlidingWindowRateLimiter(limit=120, window_seconds=60)
+        self._retry_stop = threading.Event()
+        self._retry_lock = threading.Lock()
+        self._retry_threads: dict[str, threading.Thread] = {}
+        self._reauth_accounts: set[str] = set()
         self.sidecar.set_event_handler(self._on_frame)
+        self.binding.set_account_starter(self.start_account)
 
     @property
     def key(self) -> str:
@@ -53,24 +59,61 @@ class WeixinClawAdapter:
 
     def start(self) -> None:
         self._state = "degraded"
+        self._retry_stop.clear()
         self.sidecar.start()
+        account_states: list[str] = []
         for account in self.identity.store.list_active_channel_accounts("weixin"):
             account_key = str(account["account_key"])
-            try:
-                credential = self.binding.credentials.read(account_key)
-                self.sidecar.request(
-                    "account.start", account_key=account_key, credential=credential
-                )
-            except Exception:  # noqa: BLE001 - one account must not stop other channels.
-                self.identity.store.update_channel_account_status(
-                    channel="weixin", account_key=account_key, status="reconnect_required"
-                )
+            account_states.append(
+                self.start_account(account_key, self.binding.credentials.read(account_key))
+            )
         health = self.sidecar.request("health.get")
-        self._state = "available" if health.get("status") == "available" else "degraded"
+        self._state = (
+            "available"
+            if health.get("status") == "available"
+            and all(status == "active" for status in account_states)
+            else "degraded"
+        )
 
     def stop(self) -> None:
+        self._retry_stop.set()
         self.sidecar.stop()
         self._state = "disabled"
+
+    def start_account(
+        self,
+        account_key: str,
+        credential: dict[str, object],
+        *,
+        schedule_retry: bool = True,
+    ) -> str:
+        try:
+            response = self.sidecar.request(
+                "account.start", account_key=account_key, credential=credential
+            )
+        except Exception as exc:  # noqa: BLE001 - classify before retrying.
+            code = _safe_error_code(exc)
+            if code == WEIXIN_TOKEN_STALE:
+                self._mark_reconnect_required(account_key, code)
+                return "reconnect_required"
+            self._state = "degraded"
+            self._log_reconnecting(account_key, code)
+            if schedule_retry:
+                self._schedule_account_retry(account_key, credential)
+            return "retry_pending"
+
+        status = str(response.get("status") or "degraded")
+        code = safe_weixin_error_code(response.get("code"), "WEIXIN_ACCOUNT_START_FAILED")
+        if status == "active":
+            self._mark_active(account_key, trigger="account_start")
+            return "active"
+        if status == "reconnect_required" and code == WEIXIN_TOKEN_STALE:
+            self._mark_reconnect_required(account_key, code)
+            return "reconnect_required"
+        self._set_binding_active(account_key)
+        self._state = "degraded"
+        self._log_reconnecting(account_key, code)
+        return "reconnecting"
 
     def status(self) -> CapabilityStatus:
         code = f"CHANNEL_WEIXIN_{self._state.upper()}"
@@ -95,51 +138,93 @@ class WeixinClawAdapter:
             return
         if frame_type == "message.received":
             threading.Thread(
-                target=lambda: asyncio.run(self.handle_frame(frame)),
+                target=self._run_inbound_frame,
+                args=(frame,),
                 name="weixin-inbound",
                 daemon=True,
             ).start()
 
-    def _handle_account_status(self, frame: dict[str, object]) -> None:
-        account_key = str(frame.get("account_key") or "")
-        status = str(frame.get("status") or "")
-        if account_key and status == "reconnect_required":
-            self.identity.store.update_channel_account_status(
-                channel="weixin", account_key=account_key, status=status
-            )
+    def _run_inbound_frame(self, frame: dict[str, object]) -> None:
+        try:
+            asyncio.run(self.handle_frame(frame))
+        except Exception as exc:  # noqa: BLE001 - isolate one inbound worker.
             log_event(
                 weixin_logger,
                 logging.WARNING,
-                "channel.weixin.reconnect_required",
-                account_ref=_safe_account_ref(account_key),
+                "channel.weixin.inbound_failed",
+                account_ref=_safe_account_ref(str(frame.get("account_key") or "")),
+                error_type=type(exc).__name__,
+                error_code=_safe_error_code(exc),
             )
+
+    def _handle_account_status(self, frame: dict[str, object]) -> None:
+        account_key = str(frame.get("account_key") or "")
+        status = str(frame.get("status") or "")
+        code = safe_weixin_error_code(frame.get("code"), "WEIXIN_ACCOUNT_STATUS_UNKNOWN")
+        if not account_key:
+            return
+        if status == "reconnect_required" and code == WEIXIN_TOKEN_STALE:
+            self._mark_reconnect_required(account_key, code)
         elif status == "degraded":
             self._state = "degraded"
+            self._log_reconnecting(account_key, code)
         elif status == "active":
-            self._state = "available"
+            self._mark_active(account_key, trigger="poll_recovered")
+        elif status == "reconnect_required":
+            self._state = "degraded"
+            self._log_reconnecting(account_key, code)
 
     async def handle_frame(self, frame: dict[str, object]) -> None:
         log_event(weixin_logger, logging.DEBUG, "channel.weixin.message_received")
         try:
             event = normalize_message(frame)
         except WeixinEventError:
-            log_event(weixin_logger, logging.DEBUG, "channel.weixin.message_rejected")
+            _log_message_rejected("WEIXIN_EVENT_INVALID")
             await self._ack(frame, "rejected")
             return
         account = self.identity.store.get_channel_account(
             channel="weixin", account_key=event.account_key
         )
-        if (
-            account is None
-            or str(account["status"]) != "active"
-            or str(account["external_user_id"]) != event.external_user_id
-        ):
+        if account is None:
+            _log_message_rejected(
+                "WEIXIN_ACCOUNT_NOT_FOUND", account_key=event.account_key
+            )
+            await self._ack(frame, "rejected")
+            return
+        if str(account["external_user_id"]) != event.external_user_id:
+            _log_message_rejected(
+                "WEIXIN_SENDER_MISMATCH",
+                account_key=event.account_key,
+                level=logging.WARNING,
+            )
+            await self._ack(frame, "rejected")
+            return
+        account_status = str(account["status"])
+        if account_status == "reconnect_required":
+            self._mark_active(event.account_key, trigger="inbound_activity")
+        elif account_status != "active":
+            _log_message_rejected(
+                "WEIXIN_ACCOUNT_INACTIVE", account_key=event.account_key
+            )
             await self._ack(frame, "rejected")
             return
         if not self.dedup.claim("weixin", event.account_key, event.event_id, event.message_id):
+            log_event(
+                weixin_logger,
+                logging.DEBUG,
+                "channel.weixin.message_duplicate",
+                account_ref=_safe_account_ref(event.account_key),
+                reason_code="WEIXIN_MESSAGE_DUPLICATE",
+            )
             await self._ack(frame, "duplicate")
             return
         await self._ack(frame, "accepted")
+        log_event(
+            weixin_logger,
+            logging.DEBUG,
+            "channel.weixin.message_accepted",
+            account_ref=_safe_account_ref(event.account_key),
+        )
         terminal_status = "done"
         terminal_error = ""
         try:
@@ -148,10 +233,24 @@ class WeixinClawAdapter:
                 and self._conversation_limit.allow(event.external_conversation_id)
                 and self._account_limit.allow(event.account_key)
             ):
+                log_event(
+                    weixin_logger,
+                    logging.WARNING,
+                    "channel.weixin.message_rate_limited",
+                    account_ref=_safe_account_ref(event.account_key),
+                    reason_code="WEIXIN_RATE_LIMITED",
+                )
                 await self._send(event, "消息过于频繁，请稍后再试。")
                 return
             actor = self.identity.resolve("weixin", event.account_key, event.external_user_id)
             if actor is None:
+                terminal_status = "error"
+                terminal_error = "WEIXIN_IDENTITY_UNRESOLVED"
+                _log_message_rejected(
+                    terminal_error,
+                    account_key=event.account_key,
+                    level=logging.WARNING,
+                )
                 return
             context = ChannelExecutionContext(
                 channel="weixin",
@@ -184,13 +283,14 @@ class WeixinClawAdapter:
                 self._parallel.release()
         except Exception as exc:
             terminal_status = "error"
-            terminal_error = type(exc).__name__
+            terminal_error = _safe_error_code(exc)
             log_event(
                 weixin_logger,
                 logging.DEBUG,
                 "channel.weixin.message_failed",
                 account_ref=_safe_account_ref(event.account_key),
-                error_type=terminal_error,
+                error_type=type(exc).__name__,
+                error_code=terminal_error,
             )
             raise
         finally:
@@ -202,15 +302,36 @@ class WeixinClawAdapter:
                 status=terminal_status,
                 error_code=terminal_error,
             )
+            if terminal_status == "done":
+                log_event(
+                    weixin_logger,
+                    logging.DEBUG,
+                    "channel.weixin.message_done",
+                    account_ref=_safe_account_ref(event.account_key),
+                )
 
-    async def _ack(self, frame: dict[str, object], disposition: str) -> None:
-        await asyncio.to_thread(
-            self.sidecar.request,
-            "message.ack",
-            account_key=str(frame.get("account_key") or ""),
-            event_id=str(frame.get("event_id") or ""),
-            disposition=disposition,
-        )
+    async def _ack(self, frame: dict[str, object], disposition: str) -> bool:
+        account_key = str(frame.get("account_key") or "")
+        try:
+            await asyncio.to_thread(
+                self.sidecar.request,
+                "message.ack",
+                account_key=account_key,
+                event_id=str(frame.get("event_id") or ""),
+                disposition=disposition,
+            )
+            return True
+        except Exception as exc:
+            log_event(
+                weixin_logger,
+                logging.WARNING,
+                "channel.weixin.ack_failed",
+                account_ref=_safe_account_ref(account_key),
+                disposition=disposition,
+                error_type=type(exc).__name__,
+                error_code=_safe_error_code(exc),
+            )
+            return False
 
     async def _typing(self, event, active: bool) -> None:
         try:
@@ -245,9 +366,107 @@ class WeixinClawAdapter:
                     "channel.weixin.send_failed",
                     **fields,
                     error_type=type(exc).__name__,
+                    error_code=_safe_error_code(exc),
                 )
                 raise
             log_event(weixin_logger, logging.DEBUG, "channel.weixin.send_done", **fields)
+
+    def _mark_active(self, account_key: str, *, trigger: str) -> None:
+        changed = self._set_binding_active(account_key)
+        if changed is None:
+            return
+        self._reauth_accounts.discard(account_key)
+        self._state = "available"
+        if changed or trigger != "account_start":
+            log_event(
+                weixin_logger,
+                logging.INFO,
+                "channel.weixin.reconnected",
+                account_ref=_safe_account_ref(account_key),
+                trigger=trigger,
+            )
+
+    def _set_binding_active(self, account_key: str) -> bool | None:
+        account = self.identity.store.get_channel_account(
+            channel="weixin", account_key=account_key
+        )
+        if account is None:
+            return None
+        changed = str(account["status"]) != "active"
+        if changed:
+            self.identity.store.update_channel_account_status(
+                channel="weixin", account_key=account_key, status="active"
+            )
+        return changed
+
+    def _mark_reconnect_required(self, account_key: str, code: str) -> None:
+        account = self.identity.store.get_channel_account(
+            channel="weixin", account_key=account_key
+        )
+        if account is not None:
+            self.identity.store.update_channel_account_status(
+                channel="weixin", account_key=account_key, status="reconnect_required"
+            )
+        self._reauth_accounts.add(account_key)
+        self._state = "degraded"
+        log_event(
+            weixin_logger,
+            logging.WARNING,
+            "channel.weixin.reconnect_required",
+            account_ref=_safe_account_ref(account_key),
+            reason_code=code,
+        )
+
+    def _log_reconnecting(self, account_key: str, code: str) -> None:
+        log_event(
+            weixin_logger,
+            logging.WARNING,
+            "channel.weixin.reconnecting",
+            account_ref=_safe_account_ref(account_key),
+            reason_code=code,
+        )
+
+    def _schedule_account_retry(
+        self, account_key: str, credential: dict[str, object]
+    ) -> None:
+        with self._retry_lock:
+            current = self._retry_threads.get(account_key)
+            if current is not None and current.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._retry_account_start,
+                args=(account_key, credential),
+                name=f"weixin-reconnect-{account_key[-8:]}",
+                daemon=True,
+            )
+            self._retry_threads[account_key] = thread
+            thread.start()
+
+    def _retry_account_start(
+        self, account_key: str, credential: dict[str, object]
+    ) -> None:
+        delay = 1.0
+        try:
+            while not self._retry_stop.wait(delay):
+                if account_key in self._reauth_accounts:
+                    return
+                account = self.identity.store.get_channel_account(
+                    channel="weixin", account_key=account_key
+                )
+                if account is None or str(account["status"]) in {
+                    "disabled",
+                    "cleanup_pending",
+                }:
+                    return
+                result = self.start_account(
+                    account_key, credential, schedule_retry=False
+                )
+                if result != "retry_pending":
+                    return
+                delay = min(30.0, delay * 2)
+        finally:
+            with self._retry_lock:
+                self._retry_threads.pop(account_key, None)
 
 
 def _capture_text(payload: dict[str, object], target: list[str]) -> None:
@@ -257,3 +476,24 @@ def _capture_text(payload: dict[str, object], target: list[str]) -> None:
 
 def _safe_account_ref(account_key: str) -> str:
     return "wx-" + uuid.uuid5(uuid.NAMESPACE_URL, account_key).hex[:8]
+
+
+def _safe_error_code(exc: Exception) -> str:
+    return safe_weixin_error_code(exc, type(exc).__name__)
+
+
+def _log_message_rejected(
+    reason_code: str,
+    *,
+    account_key: str = "",
+    level: int = logging.DEBUG,
+) -> None:
+    fields: dict[str, object] = {"reason_code": reason_code}
+    if account_key:
+        fields["account_ref"] = _safe_account_ref(account_key)
+    log_event(
+        weixin_logger,
+        level,
+        "channel.weixin.message_rejected",
+        **fields,
+    )

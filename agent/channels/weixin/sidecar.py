@@ -16,11 +16,26 @@ from agent.logging_utils import log_event
 
 PROTOCOL_VERSION = "1"
 MAX_FRAME_BYTES = 256 * 1024
+WEIXIN_TOKEN_STALE = "WEIXIN_TOKEN_STALE"
 sidecar_logger = logging.getLogger("zcagent.agent.channel.weixin")
 
 
 class WeixinSidecarError(RuntimeError):
     pass
+
+
+def safe_weixin_error_code(value: object, fallback: str = "WEIXIN_TRANSPORT_ERROR") -> str:
+    candidate = str(value).strip()
+    if (
+        candidate.isascii()
+        and 1 <= len(candidate) <= 64
+        and all(
+            character.isupper() or character.isdigit() or character == "_"
+            for character in candidate
+        )
+    ):
+        return candidate
+    return fallback
 
 
 class WeixinSidecarClient:
