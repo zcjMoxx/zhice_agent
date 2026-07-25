@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,11 +18,19 @@ from fastapi.staticfiles import StaticFiles
 from agent.app.api.routes import ApiError, router
 from agent.app.api.ws import router as ws_router
 from agent.app.auth import AuthHttpError
-from agent.app.logging import GatewayLogOptions, configure_gateway_logging
+from agent.app.logging import (
+    DeferredGatewayTerminalLogs,
+    GatewayLogOptions,
+    configure_gateway_logging,
+)
 from agent.app.runtime import WebRuntime, build_web_runtime
 from agent.config import AppConfig
 from agent.console import console
-from agent.logging_utils import log_event
+from agent.logging_utils import (
+    begin_console_log_deferral,
+    flush_deferred_console_logs,
+    log_event,
+)
 from agent.protocols.auth import AuditEvent
 from agent.protocols.capability import CapabilityStatus
 from agent.protocols.errors import ErrorCode
@@ -66,13 +75,77 @@ def run_gateway(
     )
     trace_path = logging_result.trace_path or config.logs_dir / "YYYY-MM-DD" / "trace.log"
     print(f"trace-log: {'on' if resolved_log_options.trace_log else 'off'} path={console.path(trace_path)}")
-    uvicorn.run(
-        app,
+    server_config = uvicorn.Config(
+        app=app,
         host=host,
         port=port,
         log_level=_uvicorn_log_level(resolved_log_options),
         access_log=resolved_log_options.http_access_log,
     )
+    begin_console_log_deferral()
+    try:
+        _OrderedGatewayServer(server_config).run()
+    except KeyboardInterrupt:
+        # A second Ctrl+C may escape Uvicorn while graceful shutdown is in progress.
+        # The terminal should still exit quietly instead of printing asyncio internals.
+        return
+    finally:
+        flush_deferred_console_logs()
+
+
+class _SelectedLogBuffer(logging.Filter):
+    """Hold selected records from one logger and replay them unchanged later."""
+
+    def __init__(self, logger: logging.Logger, messages: set[str]):
+        super().__init__()
+        self.logger = logger
+        self.messages = messages
+        self.records: list[logging.LogRecord] = []
+
+    def start(self) -> None:
+        self.logger.addFilter(self)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage() in self.messages:
+            self.records.append(record)
+            return False
+        return True
+
+    def flush(self) -> None:
+        self.logger.removeFilter(self)
+        records = self.records
+        self.records = []
+        for record in records:
+            self.logger.handle(record)
+
+
+class _OrderedGatewayServer(uvicorn.Server):
+    """Keep Uvicorn's status block visually separate from channel lifecycle logs."""
+
+    async def startup(self, sockets=None) -> None:
+        channel_logs = DeferredGatewayTerminalLogs()
+        channel_logs.start()
+        try:
+            await super().startup(sockets=sockets)
+        finally:
+            channel_logs.flush()
+            flush_deferred_console_logs()
+
+    async def shutdown(self, sockets=None) -> None:
+        server_logger = logging.getLogger("uvicorn.error")
+        server_logs = _SelectedLogBuffer(
+            server_logger,
+            {
+                "Shutting down",
+                "Waiting for application shutdown.",
+                "Application shutdown complete.",
+            },
+        )
+        server_logs.start()
+        try:
+            await super().shutdown(sockets=sockets)
+        finally:
+            server_logs.flush()
 
 
 def create_app(
@@ -85,14 +158,6 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        log_event(
-            gateway_logger,
-            logging.INFO,
-            "channel.start",
-            channel="web",
-            state="available",
-            code="WEB_GATEWAY_AVAILABLE",
-        )
         manager = getattr(runtime, "channel_manager", None)
         if manager is not None:
             manager.start()
@@ -217,45 +282,127 @@ def create_app(
 
 def _log_external_channel_startup(runtime: object) -> None:
     statuses_method = getattr(runtime, "capability_statuses", None)
-    if not callable(statuses_method):
-        return
-    statuses = statuses_method()
-    for key in sorted(statuses):
-        if not str(key).startswith("channel."):
+    statuses = statuses_method() if callable(statuses_method) else {}
+    enabled_channels = ["web"]
+    results: list[tuple[int, str, dict[str, object]]] = []
+    for channel in _configured_channel_order(runtime, statuses):
+        status = _resolve_channel_startup_status(runtime, statuses, channel)
+        if status is None:
             continue
-        status = statuses[key]
         state = str(getattr(status, "state", "unavailable"))
         code = str(getattr(status, "code", "CHANNEL_STATUS_UNKNOWN"))
         if state == "available":
-            level = logging.INFO
-            event = "channel.start"
+            enabled_channels.append(channel)
+            fields = {"channel": channel, **_channel_ready_fields(runtime, channel)}
+            results.append((logging.INFO, "channel.ready", fields))
         elif state == "disabled":
-            level = logging.INFO
-            event = "channel.skip"
+            results.append(
+                (
+                    logging.INFO,
+                    "channel.skip",
+                    {"channel": channel, "state": state, "code": code},
+                )
+            )
         else:
-            level = logging.WARNING
-            event = "channel.start_failed"
-        fields: dict[str, object] = {
-            "channel": str(key).removeprefix("channel."),
-            "state": state,
-            "code": code,
-        }
-        details = getattr(status, "details", {})
-        if isinstance(details, dict) and details.get("error_type"):
-            fields["error_type"] = details["error_type"]
+            fields = {"channel": channel, "state": state, "code": code}
+            details = getattr(status, "details", {})
+            if isinstance(details, dict) and details.get("error_type"):
+                fields["error_type"] = details["error_type"]
+            results.append((logging.WARNING, "channel.start_failed", fields))
+    log_event(
+        gateway_logger,
+        logging.INFO,
+        "channel.enabled",
+        channels=enabled_channels,
+    )
+    for level, event, fields in results:
         log_event(gateway_logger, level, event, **fields)
+        _mark_channel_startup_reported(runtime, str(fields.get("channel") or ""))
+
+
+def _configured_channel_order(runtime: object, statuses: dict) -> tuple[str, ...]:
+    config = getattr(runtime, "channel_config", None)
+    configured = tuple(getattr(config, "order", ()) or ())
+    discovered = tuple(
+        str(key).removeprefix("channel.")
+        for key in statuses
+        if str(key).startswith("channel.")
+    )
+    return tuple(dict.fromkeys((*configured, *discovered)))
+
+
+def _resolve_channel_startup_status(runtime: object, statuses: dict, channel: str):
+    base_status = statuses.get(f"channel.{channel}")
+    manager = getattr(runtime, "channel_manager", None)
+    adapters = getattr(manager, "adapters", {}) if manager is not None else {}
+    matching = tuple(
+        adapter
+        for key, adapter in adapters.items()
+        if _adapter_channel_name(str(key)) == channel
+        and callable(getattr(adapter, "status", None))
+    )
+    if not matching:
+        return base_status
+    deadline = time.monotonic() + (10.0 if channel == "qq" else 0.0)
+    while True:
+        current = tuple(adapter.status() for adapter in matching)
+        states = {str(getattr(status, "state", "unavailable")) for status in current}
+        if states == {"available"}:
+            return current[0]
+        if "unavailable" in states or time.monotonic() >= deadline:
+            return current[0]
+        time.sleep(0.05)
+
+
+def _channel_ready_fields(runtime: object, channel: str) -> dict[str, object]:
+    if channel == "qq":
+        return {"mode": "shared"}
+    if channel != "weixin":
+        return {}
+    identity = getattr(runtime, "channel_identity", None)
+    store = getattr(identity, "store", None)
+    counts_method = getattr(store, "channel_account_status_counts", None)
+    counts = counts_method("weixin") if callable(counts_method) else {}
+    return {
+        "mode": "per_user",
+        "accounts": sum(int(value) for value in counts.values()),
+        "active": int(counts.get("active", 0)),
+        "reconnect_required": int(counts.get("reconnect_required", 0)),
+    }
+
+
+def _adapter_channel_name(key: str) -> str:
+    if key.startswith("qq.") or key == "channel.qq":
+        return "qq"
+    return key.removeprefix("channel.").split(".", 1)[0]
+
+
+def _mark_channel_startup_reported(runtime: object, channel: str) -> None:
+    manager = getattr(runtime, "channel_manager", None)
+    adapters = getattr(manager, "adapters", {}) if manager is not None else {}
+    for key, adapter in adapters.items():
+        if _adapter_channel_name(str(key)) != channel:
+            continue
+        mark = getattr(adapter, "mark_startup_readiness_reported", None)
+        if callable(mark):
+            mark()
 
 
 def _log_channel_shutdown(runtime: object) -> None:
     manager = getattr(runtime, "channel_manager", None)
     adapters = getattr(manager, "adapters", {}) if manager is not None else {}
     if isinstance(adapters, dict):
+        stopped: set[str] = set()
         for key in reversed(tuple(adapters)):
+            channel = _adapter_channel_name(str(key))
+            if channel in stopped:
+                continue
+            stopped.add(channel)
             log_event(
                 gateway_logger,
                 logging.INFO,
                 "channel.stop",
-                channel=str(key).removeprefix("channel."),
+                channel=channel,
                 state="stopped",
             )
     log_event(

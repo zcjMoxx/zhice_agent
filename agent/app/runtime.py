@@ -1340,7 +1340,15 @@ def build_web_runtime(
         dedup,
         channel_runtime,
     )
-    all_adapters = tuple(adapters) + ((weixin_adapter,) if weixin_adapter is not None else ())
+    adapters_by_channel = {
+        "qq": tuple(adapters),
+        "weixin": ((weixin_adapter,) if weixin_adapter is not None else ()),
+    }
+    all_adapters = tuple(
+        adapter
+        for channel in channel_config.order
+        for adapter in adapters_by_channel[channel]
+    )
     runtime.channel_manager = ChannelManager(all_adapters)
     runtime.channel_status = channel_status
     runtime.channel_statuses = {"channel.weixin": weixin_status}

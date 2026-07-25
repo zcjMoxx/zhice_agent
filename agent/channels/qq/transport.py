@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import importlib
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 from threading import Thread
@@ -13,9 +14,71 @@ from typing import Protocol
 
 from agent.channels.qq.normalize import normalize_c2c_message, normalize_group_message
 from agent.channels.qq.outbound import QQOutboundButton, QQOutboundMessage
-from agent.logging_utils import log_event
+from agent.logging_utils import DeferredConsoleHandler, log_event
 
 qq_logger = logging.getLogger("zcagent.agent.channel.qq")
+
+
+class _BotpyConsoleFormatter(logging.Formatter):
+    """Match Uvicorn's colored level prefix for concise SDK messages."""
+
+    _LEVEL_COLORS = {
+        logging.DEBUG: "36",
+        logging.INFO: "32",
+        logging.WARNING: "33",
+        logging.ERROR: "31",
+        logging.CRITICAL: "91",
+    }
+
+    def __init__(self, *, use_colors: bool):
+        super().__init__()
+        self.use_colors = use_colors
+
+    def format(self, record: logging.LogRecord) -> str:
+        level_name = record.levelname
+        color = self._LEVEL_COLORS.get(record.levelno)
+        if self.use_colors and color:
+            level_name = f"\033[{color}m{level_name}\033[0m"
+        separator = " " * max(8 - len(record.levelname), 0)
+        message = record.getMessage().replace("[botpy]", "[qq]", 1)
+        rendered = f"{level_name}:{separator} {message}"
+        if record.exc_info:
+            rendered = f"{rendered}\n{self.formatException(record.exc_info)}"
+        return rendered
+
+
+class _BotpyConsoleHandler(DeferredConsoleHandler):
+    """Render useful botpy messages and suppress the routine heartbeat-start line."""
+
+    def __init__(self, stream=None):
+        super().__init__(stream)
+        self._install_formatter()
+
+    def setFormatter(self, _formatter: logging.Formatter | None) -> None:  # noqa: N802
+        self._install_formatter()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.funcName == "_send_heart":
+            return
+        super().emit(record)
+
+    def _install_formatter(self) -> None:
+        use_colors = bool(
+            not os.environ.get("NO_COLOR")
+            and hasattr(self.stream, "isatty")
+            and self.stream.isatty()
+        )
+        logging.Handler.setFormatter(
+            self,
+            _BotpyConsoleFormatter(use_colors=use_colors),
+        )
+
+
+_BOTPY_CONSOLE_HANDLER = {
+    "handler": _BotpyConsoleHandler,
+    "format": "%(message)s",
+    "level": logging.WARNING,
+}
 
 
 class QQSendUnconfirmedError(RuntimeError):
@@ -73,6 +136,13 @@ class BotpyQQTransport:
                         return None
 
                     async def on_error(self, event_method, *args, **kwargs):
+                        log_event(
+                            qq_logger,
+                            logging.WARNING,
+                            "channel.qq.degraded",
+                            account_key=account_key,
+                            event_method=str(event_method or "unknown")[:80],
+                        )
                         if transport._state_handler is not None:
                             transport._state_handler("degraded")
                         await super().on_error(event_method, *args, **kwargs)
@@ -88,7 +158,12 @@ class BotpyQQTransport:
                         await handler(event)
 
                 intents = botpy.Intents(public_messages=True)
-                client = Client(intents=intents)
+                client = Client(
+                    intents=intents,
+                    bot_log=True,
+                    ext_handlers=_BOTPY_CONSOLE_HANDLER,
+                )
+                logging.getLogger("botpy").propagate = False
                 transport._client = client
                 client.run(appid=transport.account.app_id, secret=transport.account.app_secret)
             except Exception:  # noqa: BLE001 - optional transport must degrade safely.

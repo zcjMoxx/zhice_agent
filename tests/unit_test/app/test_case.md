@@ -23,7 +23,7 @@
 - runtime 抛出配置、LLM 和未知错误时返回领域化稳定错误码，不暴露堆栈。
 - core 测试只使用 `agent.core.loop` 和 `agent.core.context` 新路径。
 - gateway 测试确认不再保留 `agent/gateway.py` 顶层兼容导出模块。
-- Gateway lifespan 为 Web、QQ、微信记录结构化 `channel.start/channel.skip/channel.start_failed/channel.stop`；可选渠道失败不阻断 Web，日志只包含安全状态、稳定 code 和异常类型。
+- Gateway lifespan 对正常渠道输出 `channel.enabled/channel.ready`，禁用/异常渠道记录 `channel.skip/channel.start_failed`，关闭记录 `channel.stop`；所有渠道事件在终端使用 Uvicorn 风格，trace 保留结构化事件。外部渠道及 ready 日志严格遵循 `channels.yml` 映射顺序；QQ 等待真实 `on_ready` 且超时有界，超时后恢复会补发 ready。微信仅输出 `mode=per_user` 及账号状态聚合计数。可选渠道失败不阻断 Web，日志不包含 credential 或外部账号标识。
 - WebSocket `hello client=web` 返回 web command profile 能力，默认不支持 `/history` 和 `/exit`。
 - WebSocket `hello client=external` 打开 external command profile 能力，`/history` 进入 external profile，`/exit` 关闭当前 WS 连接。
 - `/sessions rename <id> <title>`、`/sessions delete <id>` 和 `/sessions delete` 在 runtime slash command 层有覆盖。

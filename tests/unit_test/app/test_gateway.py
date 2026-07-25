@@ -1,17 +1,33 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
+import uvicorn
 from fastapi.testclient import TestClient
 
 from agent.app.auth import AuthService
-from agent.app.gateway import create_app, format_gateway_check, gateway_status, run_gateway
-from agent.app.logging import GatewayLoggingResult, GatewayLogOptions
+from agent.app.gateway import (
+    _OrderedGatewayServer,
+    _resolve_channel_startup_status,
+    create_app,
+    format_gateway_check,
+    gateway_status,
+    run_gateway,
+)
+from agent.app.logging import (
+    GatewayLoggingResult,
+    GatewayLogOptions,
+    configure_gateway_logging,
+)
 from agent.auth.store import SQLiteAuthStore
 from agent.cli import main
 from agent.config import AppConfig
+from agent.logging_utils import log_event
 from agent.protocols.capability import CapabilityStatus
 
 REPOSITORY_STATIC_DIR = Path(__file__).resolve().parents[3] / "web" / "static"
@@ -52,18 +68,63 @@ def test_gateway_logs_web_and_external_channel_lifecycle(tmp_path, caplog):
     lifecycle = [
         (getattr(record, "event", ""), getattr(record, "fields", {}))
         for record in caplog.records
-        if getattr(record, "event", "").startswith("channel.")
+        if getattr(record, "event", "") == "channel.stop"
     ]
     assert [(event, fields["channel"], fields["state"]) for event, fields in lifecycle] == [
-        ("channel.start", "web", "available"),
-        ("channel.start", "qq", "available"),
-        ("channel.start", "weixin", "available"),
         ("channel.stop", "weixin", "stopped"),
         ("channel.stop", "qq", "stopped"),
         ("channel.stop", "web", "stopped"),
     ]
     assert runtime.manager.started is True
     assert runtime.manager.stopped is True
+    summary = next(
+        record for record in caplog.records if getattr(record, "event", "") == "channel.enabled"
+    )
+    assert summary.fields["channels"] == ["web", "qq", "weixin"]
+    ready = [
+        record.fields
+        for record in caplog.records
+        if getattr(record, "event", "") == "channel.ready"
+    ]
+    assert [fields["channel"] for fields in ready] == ["qq", "weixin"]
+    assert ready[0]["mode"] == "shared"
+    assert ready[1] == {
+        "channel": "weixin",
+        "mode": "per_user",
+        "accounts": 3,
+        "active": 2,
+        "reconnect_required": 1,
+    }
+
+
+def test_gateway_channel_summary_and_ready_events_follow_config_order(tmp_path, caplog):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    static_dir.joinpath("index.html").write_text("<html></html>", encoding="utf-8")
+    runtime = _LifecycleRuntime(
+        {
+            "channel.qq": CapabilityStatus("channel.qq", "available", "CHANNEL_QQ_AVAILABLE"),
+            "channel.weixin": CapabilityStatus(
+                "channel.weixin", "available", "CHANNEL_WEIXIN_AVAILABLE"
+            ),
+        },
+        order=("weixin", "qq"),
+    )
+
+    with caplog.at_level(logging.INFO, logger="zcagent.gateway"):
+        with TestClient(create_app(config=_config(tmp_path), runtime=runtime, static_dir=static_dir)):
+            pass
+
+    summary = next(
+        record for record in caplog.records if getattr(record, "event", "") == "channel.enabled"
+    )
+    ready = [
+        record.fields["channel"]
+        for record in caplog.records
+        if getattr(record, "event", "") == "channel.ready"
+    ]
+    assert summary.fields["channels"] == ["web", "weixin", "qq"]
+    assert ready == ["weixin", "qq"]
 
 
 def test_gateway_logs_disabled_and_failed_channels_without_blocking_web(tmp_path, caplog):
@@ -99,6 +160,27 @@ def test_gateway_logs_disabled_and_failed_channels_without_blocking_web(tmp_path
     assert records["weixin"].levelno == logging.WARNING
     assert records["weixin"].fields["code"] == "CHANNEL_START_FAILED"
     assert records["weixin"].fields["error_type"] == "WeixinSidecarError"
+
+
+def test_qq_startup_readiness_timeout_is_bounded(monkeypatch):
+    adapter = SimpleNamespace(
+        status=lambda: CapabilityStatus(
+            "qq.main", "degraded", "CHANNEL_QQ_DEGRADED"
+        )
+    )
+    runtime = SimpleNamespace(
+        channel_manager=SimpleNamespace(adapters={"qq.main": adapter})
+    )
+    ticks = iter((0.0, 11.0))
+    monkeypatch.setattr("agent.app.gateway.time.monotonic", lambda: next(ticks))
+
+    status = _resolve_channel_startup_status(
+        runtime,
+        {"channel.qq": CapabilityStatus("channel.qq", "available", "CHANNEL_QQ_AVAILABLE")},
+        "qq",
+    )
+
+    assert status.state == "degraded"
 
 
 def test_gateway_serves_admin_route_from_static_application(tmp_path):
@@ -342,7 +424,7 @@ def test_run_gateway_prints_trace_log_after_http_logs(tmp_path, capsys, monkeypa
             trace_path=logs_dir / "2026-07-08" / "trace.log"
         ),
     )
-    monkeypatch.setattr("agent.app.gateway.uvicorn.run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("agent.app.gateway._OrderedGatewayServer.run", lambda _self: None)
 
     run_gateway(config, log_options=GatewayLogOptions())
 
@@ -351,6 +433,94 @@ def test_run_gateway_prints_trace_log_after_http_logs(tmp_path, capsys, monkeypa
     http_index = _line_index(lines, "http-access-log:")
     trace_index = _line_index(lines, "trace-log:")
     assert agent_index < http_index < trace_index
+
+
+def test_run_gateway_swallows_keyboard_interrupt_during_server_shutdown(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+
+    monkeypatch.setattr("agent.app.gateway.build_web_runtime", lambda _config: _FakeRuntime())
+    monkeypatch.setattr(
+        "agent.app.gateway.configure_gateway_logging",
+        lambda _options, *, logs_dir: GatewayLoggingResult(trace_path=logs_dir / "trace.log"),
+    )
+
+    def interrupt(_self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("agent.app.gateway._OrderedGatewayServer.run", interrupt)
+
+    run_gateway(config, log_options=GatewayLogOptions())
+
+
+def test_ordered_gateway_server_groups_channel_logs_outside_uvicorn_status(
+    tmp_path, monkeypatch
+):
+    stream = io.StringIO()
+    configure_gateway_logging(
+        GatewayLogOptions(trace_log=False),
+        logs_dir=tmp_path / "logs",
+        terminal_stream=stream,
+    )
+    server_logger = logging.getLogger("uvicorn.error")
+    server_handler = logging.StreamHandler(stream)
+    server_handler.setFormatter(logging.Formatter("INFO:     %(message)s"))
+    original_handlers = list(server_logger.handlers)
+    original_propagate = server_logger.propagate
+    server_logger.handlers = [server_handler]
+    server_logger.propagate = False
+
+    async def fake_startup(_server, sockets=None):
+        del sockets
+        log_event(
+            logging.getLogger("zcagent.gateway"),
+            logging.INFO,
+            "channel.start",
+            channel="web",
+            state="available",
+        )
+        server_logger.info("Application startup complete.")
+        server_logger.info("Uvicorn running on http://127.0.0.1:10086")
+
+    async def fake_shutdown(_server, sockets=None):
+        del sockets
+        server_logger.info("Shutting down")
+        server_logger.info("Waiting for application shutdown.")
+        log_event(
+            logging.getLogger("zcagent.gateway"),
+            logging.INFO,
+            "channel.stop",
+            channel="web",
+            state="stopped",
+        )
+        server_logger.info("Application shutdown complete.")
+
+    monkeypatch.setattr(uvicorn.Server, "startup", fake_startup)
+    monkeypatch.setattr(uvicorn.Server, "shutdown", fake_shutdown)
+    server = _OrderedGatewayServer(uvicorn.Config(lambda _scope, _receive, _send: None, log_config=None))
+    try:
+        asyncio.run(server.startup())
+        asyncio.run(server.shutdown())
+    finally:
+        server_logger.handlers = original_handlers
+        server_logger.propagate = original_propagate
+
+    lines = stream.getvalue().splitlines()
+    assert [line.startswith("INFO:     [") for line in lines] == [
+        False,
+        False,
+        True,
+        True,
+        False,
+        False,
+        False,
+    ]
+    assert "Application startup complete." in lines[0]
+    assert "Uvicorn running" in lines[1]
+    assert lines[2] == "INFO:     [web] start | state=available"
+    assert lines[3] == "INFO:     [web] channel stopped | state=stopped"
+    assert "Shutting down" in lines[4]
+    assert "Waiting for application shutdown." in lines[5]
+    assert "Application shutdown complete." in lines[6]
 
 
 def test_cli_gateway_check_does_not_start_gateway(tmp_path, monkeypatch, capsys):
@@ -454,11 +624,25 @@ class _LifecycleManager:
 
 
 class _LifecycleRuntime(_FakeRuntime):
-    def __init__(self, statuses, adapter_keys=("channel.qq", "channel.weixin")):
+    def __init__(
+        self,
+        statuses,
+        adapter_keys=("channel.qq", "channel.weixin"),
+        order=("qq", "weixin"),
+    ):
         super().__init__()
         self._statuses = statuses
         self.manager = _LifecycleManager(adapter_keys)
         self.channel_manager = self.manager
+        self.channel_config = SimpleNamespace(order=order)
+        self.channel_identity = SimpleNamespace(
+            store=SimpleNamespace(
+                channel_account_status_counts=lambda _channel: {
+                    "active": 2,
+                    "reconnect_required": 1,
+                }
+            )
+        )
 
     def capability_statuses(self):
         return dict(self._statuses)

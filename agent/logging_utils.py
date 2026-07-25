@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from collections.abc import Mapping
 from typing import Any
 
@@ -25,6 +26,41 @@ _ASSIGNMENT_SECRET_RE = re.compile(
 )
 _BEARER_RE = re.compile(r"(?i)(Authorization\s*:\s*Bearer\s+)([^\s]+)")
 _OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+_CONSOLE_DEFER_LOCK = threading.RLock()
+_CONSOLE_DEFER_ACTIVE = False
+_DEFERRED_CONSOLE_RECORDS: list[tuple[logging.StreamHandler, logging.LogRecord]] = []
+
+
+class DeferredConsoleHandler(logging.StreamHandler):
+    """Buffer console records during Gateway startup, then replay them unchanged."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        with _CONSOLE_DEFER_LOCK:
+            if _CONSOLE_DEFER_ACTIVE:
+                _DEFERRED_CONSOLE_RECORDS.append((self, record))
+                return
+        super().emit(record)
+
+
+def begin_console_log_deferral() -> None:
+    """Begin a fresh, process-local startup deferral window."""
+
+    global _CONSOLE_DEFER_ACTIVE
+    with _CONSOLE_DEFER_LOCK:
+        _DEFERRED_CONSOLE_RECORDS.clear()
+        _CONSOLE_DEFER_ACTIVE = True
+
+
+def flush_deferred_console_logs() -> None:
+    """Replay deferred records before allowing new console records through."""
+
+    global _CONSOLE_DEFER_ACTIVE
+    with _CONSOLE_DEFER_LOCK:
+        records = tuple(_DEFERRED_CONSOLE_RECORDS)
+        _DEFERRED_CONSOLE_RECORDS.clear()
+        _CONSOLE_DEFER_ACTIVE = False
+        for handler, record in records:
+            logging.StreamHandler.emit(handler, record)
 
 
 def log_event(logger: logging.Logger, level: int, event: str, **fields: Any) -> None:

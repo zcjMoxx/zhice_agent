@@ -310,7 +310,15 @@ API 失败响应使用统一错误结构：真实 HTTP 状态码保持数字语�
 
 默认启动时会打印简短 Agent lifecycle log，并写入 workspace trace；`turn.done` 在终端和 trace 中保留最终回答第一条非空行、最多 80 字符的 `output_preview`。`llm.call`、`llm.done` 等调用细节默认不刷终端，需要时用 `--agent-log-level debug` 或查看 trace。重复的 `llm.direct`、成功 `session.save`、`web.chat.accepted/done` 和每 Turn 模型选择事件不再写入：
 
-Gateway lifespan 会为 Web、QQ、微信分别记录结构化渠道结果：可用时为 `gateway.channel.start`，未启用时为 `gateway.channel.skip`，显式启用但不可用或启动失败时为 WARNING `gateway.channel.start_failed`，关闭时为 `gateway.channel.stop`。这些日志直接复用 `/health` 的聚合状态与稳定 code，不输出渠道 credential 或外部账号标识。
+Gateway 的渠道加载、就绪、停止、断连、重连与发送异常在终端统一使用 Uvicorn 风格，与带时间的 Agent/LLM/Tool 执行日志明显区分；trace 仍保存原始结构化 event 和安全字段。外部渠道及 ready 日志严格遵循 `${ZHICE_AGENT_WORKSPACE}/config/channels.yml` 中的映射顺序：
+
+```text
+INFO:     [gateway] channels enabled | channels=["web","qq","weixin"]
+INFO:     [qq] channel ready | mode=shared
+INFO:     [weixin] channel ready | mode=per_user accounts=20 active=18 reconnect_required=2
+```
+
+QQ 是所有用户共用的单机器人，只有真实 botpy `on_ready` 后才输出一条 ready；SDK 登录细节默认不刷终端。微信是每位 Web 用户独立绑定的 AI 插件账号，启动日志只显示隐私安全的状态聚合，不逐账号输出。正常微信收发细节只写 DEBUG trace，sidecar、重连和发送失败才显示 WARNING，且不输出 credential、外部账号标识或 context token。
 
 终端中的实际耗时会自动显示为 `500ms`、`1.25s`、`3m20s` 或 `1h5m5s`；trace 仍保留原始 `duration_ms` 数值。
 

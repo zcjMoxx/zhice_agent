@@ -777,7 +777,22 @@ class SQLiteAuthStore:
                 """,
                 (channel,),
             ).fetchall()
-        return [dict(row) for row in rows]
+            return [dict(row) for row in rows]
+
+    def channel_account_status_counts(self, channel: str) -> dict[str, int]:
+        """Return privacy-safe account totals grouped only by lifecycle status."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS total
+                FROM channel_accounts
+                WHERE channel=?
+                GROUP BY status
+                """,
+                (channel,),
+            ).fetchall()
+        return {str(row["status"]): int(row["total"]) for row in rows}
 
     def update_channel_account_status(
         self, *, channel: str, account_key: str, status: str

@@ -43,6 +43,31 @@ def test_channel_account_uniqueness_keeps_two_users_isolated(tmp_path):
     assert store.get_channel_account_for_user(channel="weixin", owner_user_id=bob.id) is None
 
 
+def test_channel_account_status_counts_are_aggregate_and_privacy_safe(tmp_path):
+    store, alice, _sessions = _services(tmp_path)
+    bob = store.create_user("bob", "Bob", "bob-password")
+    for account_key, owner_id, suffix in (
+        ("opaque-a", alice.id, "a"),
+        ("opaque-b", bob.id, "b"),
+    ):
+        store.create_channel_account(
+            channel="weixin",
+            account_key=account_key,
+            owner_user_id=owner_id,
+            external_account_id=f"bot-{suffix}",
+            external_user_id=f"wx-{suffix}",
+            credential_ref=f"channels/weixin/accounts/{account_key}.json",
+        )
+    store.update_channel_account_status(
+        channel="weixin", account_key="opaque-b", status="reconnect_required"
+    )
+
+    counts = store.channel_account_status_counts("weixin")
+
+    assert counts == {"active": 1, "reconnect_required": 1}
+    assert "opaque" not in str(counts)
+
+
 def test_binding_finalize_writes_secret_outside_database_and_status_is_safe(tmp_path):
     store, user, _sessions = _services(tmp_path)
     sidecar = _BindingSidecar()

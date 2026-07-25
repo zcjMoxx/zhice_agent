@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -11,8 +12,11 @@ from pathlib import Path
 from queue import Queue
 from typing import Callable
 
+from agent.logging_utils import log_event
+
 PROTOCOL_VERSION = "1"
 MAX_FRAME_BYTES = 256 * 1024
+sidecar_logger = logging.getLogger("zcagent.agent.channel.weixin")
 
 
 class WeixinSidecarError(RuntimeError):
@@ -161,6 +165,12 @@ class WeixinSidecarClient:
                     self._handler(frame)
         except Exception as exc:  # noqa: BLE001 - isolate an optional sidecar failure.
             self._failure = type(exc).__name__
+            log_event(
+                sidecar_logger,
+                logging.WARNING,
+                "channel.weixin.sidecar_failed",
+                error_type=self._failure,
+            )
             with self._pending_lock:
                 queues = tuple(self._pending.values())
             for pending in queues:

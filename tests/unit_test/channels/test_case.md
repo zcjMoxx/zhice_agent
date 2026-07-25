@@ -38,6 +38,8 @@
 - Keyboard 被拒绝时先降级为 Markdown 链接；Markdown 仍失败时降级为纯文本 URL，且不重复创建授权请求。
 - 普通结构化回复 Markdown 失败时回退同一纯文本内容，不重复 Agent Turn。
 - QQ API 明确抛错时记录 `channel.qq.send_failed`；SDK 返回 `None` 时记录 `channel.qq.send_unconfirmed` 并把 receipt 标记为 error。
+- QQ 正常启动不展开 botpy 登录细节，在真实 `on_ready` 后输出 Uvicorn 风格 `[qq] channel ready | mode=shared`；启动期超时后若连接恢复，只补发一次 ready，状态降级输出 WARNING，且不输出 app secret。
+- 微信正常启动按 `active/reconnect_required` 聚合账号数；消息接收、接受、发送开始/完成只进 DEBUG trace，sidecar、重连和发送失败以 Uvicorn 风格 WARNING 输出，并只使用内部账号短哈希。
 
 ## 边界路径
 

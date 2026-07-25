@@ -8,17 +8,47 @@ from datetime import datetime
 import pytest
 
 from agent.app.logging import (
+    DeferredGatewayTerminalLogs,
     GatewayLogOptions,
     TerminalLogFormatter,
     _format_duration_ms,
     configure_gateway_logging,
     reset_gateway_logging,
 )
-from agent.logging_utils import log_event, preview_json, preview_text, redact_mapping
+from agent.logging_utils import (
+    DeferredConsoleHandler,
+    begin_console_log_deferral,
+    flush_deferred_console_logs,
+    log_event,
+    preview_json,
+    preview_text,
+    redact_mapping,
+)
 
 
 def teardown_function() -> None:
+    flush_deferred_console_logs()
     reset_gateway_logging()
+
+
+def test_deferred_console_handler_replays_startup_records_after_enabled_summary():
+    stream = io.StringIO()
+    handler = DeferredConsoleHandler(stream)
+    handler.setFormatter(logging.Formatter("[%(levelname)s]  %(funcName)-16s %(message)s"))
+    logger = logging.getLogger("test.deferred.botpy")
+    logger.handlers = [handler]
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    begin_console_log_deferral()
+
+    logger.info("[botpy] 登录机器人账号中...")
+
+    assert stream.getvalue() == ""
+    stream.write('gateway.channel.enabled | channels=["web","qq","weixin"]\n')
+    flush_deferred_console_logs()
+    lines = stream.getvalue().splitlines()
+    assert lines[0].startswith("gateway.channel.enabled")
+    assert lines[1] == "[INFO]  test_deferred_console_handler_replays_startup_records_after_enabled_summary [botpy] 登录机器人账号中..."
 
 
 def test_terminal_formatter_uses_bracketed_seconds_and_pipe_separator():
@@ -209,6 +239,100 @@ def test_configure_gateway_logging_writes_date_partitioned_trace_jsonl(tmp_path)
     assert payload["api_key"] == "***"
     assert "secret" not in result.trace_path.read_text(encoding="utf-8")
     assert "[20" in stream.getvalue()
+
+
+def test_configure_gateway_logging_emits_gateway_channel_events_to_terminal_and_trace(tmp_path):
+    stream = io.StringIO()
+    result = configure_gateway_logging(
+        GatewayLogOptions(trace_log=True),
+        logs_dir=tmp_path / "logs",
+        terminal_stream=stream,
+    )
+
+    log_event(
+        logging.getLogger("zcagent.gateway"),
+        logging.INFO,
+        "channel.enabled",
+        channels=["web", "qq", "weixin"],
+    )
+
+    terminal = stream.getvalue()
+    assert 'INFO:     [gateway] channels enabled | channels=["web","qq","weixin"]' in terminal
+    assert 'channels=["web","qq","weixin"]' in terminal
+    assert result.trace_path is not None
+    payload = json.loads(result.trace_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert payload == {
+        "ts": payload["ts"],
+        "level": "INFO",
+        "component": "gateway",
+        "event": "channel.enabled",
+        "channels": ["web", "qq", "weixin"],
+    }
+
+
+def test_external_channel_events_use_server_style_while_agent_turn_keeps_timestamp(tmp_path):
+    stream = io.StringIO()
+    configure_gateway_logging(
+        GatewayLogOptions(trace_log=False),
+        logs_dir=tmp_path / "logs",
+        terminal_stream=stream,
+    )
+
+    log_event(
+        logging.getLogger("zcagent.agent.channel.weixin"),
+        logging.WARNING,
+        "channel.weixin.send_failed",
+        account_ref="wx-a31f",
+        error_type="WeixinSidecarError",
+    )
+    log_event(
+        logging.getLogger("zcagent.agent.turn"),
+        logging.INFO,
+        "turn.start",
+        channel="weixin",
+    )
+
+    lines = stream.getvalue().splitlines()
+    assert lines[0] == (
+        "WARNING:  [weixin] send failed | "
+        "account_ref=wx-a31f error_type=WeixinSidecarError"
+    )
+    assert lines[1].startswith("[20")
+    assert "agent.turn.start" in lines[1]
+
+
+def test_deferred_gateway_terminal_logs_replay_after_server_status_without_delaying_trace(
+    tmp_path,
+):
+    stream = io.StringIO()
+    result = configure_gateway_logging(
+        GatewayLogOptions(trace_log=True),
+        logs_dir=tmp_path / "logs",
+        terminal_stream=stream,
+    )
+    deferred = DeferredGatewayTerminalLogs()
+    deferred.start()
+
+    log_event(
+        logging.getLogger("zcagent.gateway"),
+        logging.INFO,
+        "channel.start",
+        channel="web",
+        state="available",
+    )
+
+    assert stream.getvalue() == ""
+    assert result.trace_path is not None
+    assert "channel.start" in result.trace_path.read_text(encoding="utf-8")
+
+    stream.write("INFO:     Application startup complete.\n")
+    stream.write("INFO:     Uvicorn running on http://127.0.0.1:10086\n")
+    deferred.flush()
+
+    lines = stream.getvalue().splitlines()
+    assert lines[0] == "INFO:     Application startup complete."
+    assert lines[1].startswith("INFO:     Uvicorn running")
+    assert lines[2] == "INFO:     [web] start | state=available"
 
 
 def test_tool_terminal_is_compact_while_trace_keeps_full_ids(tmp_path):

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import uuid
 
 from agent.channels.limits import SlidingWindowRateLimiter
 from agent.channels.weixin.normalize import WeixinEventError, normalize_message
 from agent.channels.weixin.outbound import render_chunks
+from agent.logging_utils import log_event
 from agent.protocols.capability import CapabilityStatus
 from agent.protocols.channel import ChannelCapabilities, ChannelExecutionContext
 
@@ -25,6 +27,7 @@ WEIXIN_C2C_CAPABILITIES = ChannelCapabilities(
     can_close_conversation=False,
     command_profile="weixin_c2c",
 )
+weixin_logger = logging.getLogger("zcagent.agent.channel.weixin")
 
 
 class WeixinClawAdapter:
@@ -104,15 +107,23 @@ class WeixinClawAdapter:
             self.identity.store.update_channel_account_status(
                 channel="weixin", account_key=account_key, status=status
             )
+            log_event(
+                weixin_logger,
+                logging.WARNING,
+                "channel.weixin.reconnect_required",
+                account_ref=_safe_account_ref(account_key),
+            )
         elif status == "degraded":
             self._state = "degraded"
         elif status == "active":
             self._state = "available"
 
     async def handle_frame(self, frame: dict[str, object]) -> None:
+        log_event(weixin_logger, logging.DEBUG, "channel.weixin.message_received")
         try:
             event = normalize_message(frame)
         except WeixinEventError:
+            log_event(weixin_logger, logging.DEBUG, "channel.weixin.message_rejected")
             await self._ack(frame, "rejected")
             return
         account = self.identity.store.get_channel_account(
@@ -174,6 +185,13 @@ class WeixinClawAdapter:
         except Exception as exc:
             terminal_status = "error"
             terminal_error = type(exc).__name__
+            log_event(
+                weixin_logger,
+                logging.DEBUG,
+                "channel.weixin.message_failed",
+                account_ref=_safe_account_ref(event.account_key),
+                error_type=terminal_error,
+            )
             raise
         finally:
             await self._typing(event, False)
@@ -209,16 +227,33 @@ class WeixinClawAdapter:
 
     async def _send(self, event, content: str) -> None:
         for chunk in render_chunks(content, self.config.text_chunk_limit):
-            await asyncio.to_thread(
-                self.sidecar.request,
-                "message.send",
-                account_key=event.account_key,
-                peer=event.external_conversation_id,
-                context_token_ref=event.safe_metadata.get("context_token_ref", ""),
-                text=chunk,
-            )
+            fields = {"account_ref": _safe_account_ref(event.account_key)}
+            log_event(weixin_logger, logging.DEBUG, "channel.weixin.send_start", **fields)
+            try:
+                await asyncio.to_thread(
+                    self.sidecar.request,
+                    "message.send",
+                    account_key=event.account_key,
+                    peer=event.external_conversation_id,
+                    context_token_ref=event.safe_metadata.get("context_token_ref", ""),
+                    text=chunk,
+                )
+            except Exception as exc:
+                log_event(
+                    weixin_logger,
+                    logging.WARNING,
+                    "channel.weixin.send_failed",
+                    **fields,
+                    error_type=type(exc).__name__,
+                )
+                raise
+            log_event(weixin_logger, logging.DEBUG, "channel.weixin.send_done", **fields)
 
 
 def _capture_text(payload: dict[str, object], target: list[str]) -> None:
     if payload.get("type") == "text_delta" and payload.get("content"):
         target.append(str(payload["content"]))
+
+
+def _safe_account_ref(account_key: str) -> str:
+    return "wx-" + uuid.uuid5(uuid.NAMESPACE_URL, account_key).hex[:8]

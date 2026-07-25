@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import sqlite3
 import threading
@@ -27,7 +28,11 @@ from agent.channels.qq.outbound import (
     chunk_text,
 )
 from agent.channels.qq.startup import check_qq_startup
-from agent.channels.qq.transport import BotpyQQTransport, QQSendUnconfirmedError
+from agent.channels.qq.transport import (
+    BotpyQQTransport,
+    QQSendUnconfirmedError,
+    _BotpyConsoleHandler,
+)
 from agent.channels.runtime_adapter import ChannelRuntimeAdapter
 from agent.protocols.channel import (
     ChannelCapabilities,
@@ -66,6 +71,23 @@ channels:
     assert config.qq.accounts[0].app_secret == "secret-456"
     assert config.qq.accounts[0].web_base_url == "http://127.0.0.1:10086"
     assert "secret-456" not in repr(config.qq.accounts[0])
+
+
+def test_channel_config_preserves_declared_external_channel_order(tmp_path):
+    (tmp_path / "channels.yml").write_text(
+        """
+channels:
+  weixin:
+    enabled: true
+  qq:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+
+    config = load_channel_configuration(tmp_path)
+
+    assert config.order == ("weixin", "qq")
 
 
 def test_channel_config_rejects_duplicate_accounts(tmp_path):
@@ -596,18 +618,21 @@ def test_qq_startup_missing_credentials_is_unavailable():
     assert status.code == "CHANNEL_QQ_CREDENTIALS_MISSING"
 
 
-def test_botpy_client_is_constructed_inside_its_worker_thread(monkeypatch):
+def test_botpy_client_is_constructed_inside_worker_with_default_sdk_logging(monkeypatch, caplog):
     constructed_thread_ids = []
+    client_options = []
 
     class FakeClient:
-        def __init__(self, *, intents):
+        def __init__(self, *, intents, bot_log, ext_handlers):
             del intents
             constructed_thread_ids.append(threading.get_ident())
+            client_options.append((bot_log, ext_handlers))
             assert asyncio.get_event_loop() is not None
 
         def run(self, *, appid, secret):
             assert appid == "app"
             assert secret == "secret"
+            asyncio.get_event_loop().run_until_complete(self.on_ready())
 
     fake_botpy = SimpleNamespace(
         Client=FakeClient,
@@ -623,11 +648,72 @@ def test_botpy_client_is_constructed_inside_its_worker_thread(monkeypatch):
     async def start_from_running_loop():
         transport.start(lambda _event: asyncio.sleep(0))
 
-    asyncio.run(start_from_running_loop())
-    transport._thread.join(timeout=2)
+    with caplog.at_level(logging.INFO, logger="zcagent.agent.channel.qq"):
+        asyncio.run(start_from_running_loop())
+        transport._thread.join(timeout=2)
 
     assert constructed_thread_ids
     assert constructed_thread_ids[0] != caller_thread_id
+    assert client_options[0][0] is True
+    assert client_options[0][1]["handler"] is _BotpyConsoleHandler
+    assert client_options[0][1]["format"] == "%(message)s"
+    assert [
+        getattr(record, "event", "")
+        for record in caplog.records
+        if getattr(record, "event", "").startswith("channel.qq.")
+    ] == []
+
+
+def test_qq_late_ready_and_degraded_transitions_use_channel_events(tmp_path, caplog):
+    store, _user, sessions = _services(tmp_path)
+    adapter = QQChannelAdapter(
+        _Account(),
+        _FakeTransport(),
+        ExternalIdentityService(store),
+        ChannelConversationService(store, sessions),
+        ChannelDedupService(store),
+        _FakeChannelRuntime(),
+    )
+    adapter.mark_startup_readiness_reported()
+
+    with caplog.at_level(logging.INFO, logger="zcagent.agent.channel.qq"):
+        adapter._set_state("available")
+        adapter._set_state("available")
+        adapter._set_state("degraded")
+
+    events = [
+        getattr(record, "event", "")
+        for record in caplog.records
+        if getattr(record, "event", "").startswith("channel.qq.")
+    ]
+    assert events == ["channel.qq.ready", "channel.qq.degraded"]
+
+
+def test_botpy_console_handler_matches_uvicorn_prefix_and_suppresses_heartbeat():
+    stream = io.StringIO()
+    handler = _BotpyConsoleHandler(stream)
+    logger = logging.getLogger("test.botpy.console")
+    logger.handlers = [handler]
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+
+    logger.info("[botpy] 登录机器人账号中...", stacklevel=1)
+    heartbeat = logging.LogRecord(
+        logger.name,
+        logging.INFO,
+        __file__,
+        1,
+        "[botpy] 心跳维持启动...",
+        (),
+        None,
+        func="_send_heart",
+    )
+    logger.handle(heartbeat)
+
+    output = stream.getvalue()
+    assert output.startswith("INFO:     [qq] 登录机器人账号中...")
+    assert "test_botpy_console_handler" not in output
+    assert "心跳维持启动" not in output
 
 
 def test_botpy_rich_message_drops_keyboard_before_plain_text_fallback():

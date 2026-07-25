@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from urllib.parse import quote
 
@@ -16,6 +17,7 @@ from agent.channels.qq.outbound import (
     build_neutral_message,
     chunk_text,
 )
+from agent.logging_utils import log_event
 from agent.presentation import markdown_to_plain_text
 from agent.protocols.capability import CapabilityStatus
 from agent.protocols.channel import ChannelCapabilities, ChannelExecutionContext
@@ -37,6 +39,7 @@ QQ_GROUP_CAPABILITIES = ChannelCapabilities(
 _QQ_C2C_MAX_PASSIVE_REPLIES = 4
 _QQ_GROUP_MAX_PASSIVE_REPLIES = 5
 _QQ_REPLY_TRUNCATION_NOTICE = "\n\n[回答过长，剩余内容请在私聊或 Web 查看。]"
+qq_channel_logger = logging.getLogger("zcagent.agent.channel.qq")
 
 
 class QQChannelAdapter:
@@ -54,6 +57,7 @@ class QQChannelAdapter:
         self._conversation_limit = SlidingWindowRateLimiter(limit=30, window_seconds=60)
         self._account_limit = SlidingWindowRateLimiter(limit=120, window_seconds=60)
         self._attachments = QQAttachmentService(max_bytes=account.max_attachment_bytes)
+        self._startup_readiness_reported = False
         set_state_handler = getattr(transport, "set_state_handler", None)
         if callable(set_state_handler):
             set_state_handler(self._set_state)
@@ -229,7 +233,18 @@ class QQChannelAdapter:
 
     def _set_state(self, state: str) -> None:
         if state in {"available", "degraded", "disabled"}:
+            previous = self._state
             self._state = state
+            if self._startup_readiness_reported and state != previous and state != "disabled":
+                log_event(
+                    qq_channel_logger,
+                    logging.INFO if state == "available" else logging.WARNING,
+                    "channel.qq.ready" if state == "available" else "channel.qq.degraded",
+                    mode="shared",
+                )
+
+    def mark_startup_readiness_reported(self) -> None:
+        self._startup_readiness_reported = True
 
 
 def _capture_text(payload: dict[str, object], target: list[str]) -> None:

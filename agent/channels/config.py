@@ -55,6 +55,7 @@ class WeixinChannelConfig:
 class ChannelConfiguration:
     qq: QQChannelConfig = QQChannelConfig()
     weixin: WeixinChannelConfig = WeixinChannelConfig()
+    order: tuple[str, ...] = ("qq", "weixin")
 
 
 def load_channel_configuration(config_dir: Path) -> ChannelConfiguration:
@@ -69,7 +70,14 @@ def load_channel_configuration(config_dir: Path) -> ChannelConfiguration:
         raise ChannelConfigurationError(f"Invalid channel config: {path}") from exc
     if not isinstance(raw, dict) or not isinstance(raw.get("channels", {}), dict):
         raise ChannelConfigurationError("channels.yml must contain a channels mapping")
-    qq_raw = raw.get("channels", {}).get("qq", {}) or {}
+    channels_raw = raw.get("channels", {})
+    configured_order = tuple(
+        str(key) for key in channels_raw if str(key) in {"qq", "weixin"}
+    )
+    channel_order = configured_order + tuple(
+        key for key in ("qq", "weixin") if key not in configured_order
+    )
+    qq_raw = channels_raw.get("qq", {}) or {}
     if not isinstance(qq_raw, dict):
         raise ChannelConfigurationError("channels.qq must be a mapping")
     enabled = _bool(qq_raw.get("enabled", False), "channels.qq.enabled")
@@ -108,7 +116,7 @@ def load_channel_configuration(config_dir: Path) -> ChannelConfiguration:
                 ),
             )
         )
-    weixin_raw = raw.get("channels", {}).get("weixin", {}) or {}
+    weixin_raw = channels_raw.get("weixin", {}) or {}
     if not isinstance(weixin_raw, dict):
         raise ChannelConfigurationError("channels.weixin must be a mapping")
     weixin_transport = str(weixin_raw.get("transport", "sidecar_stdio")).strip().lower()
@@ -136,6 +144,7 @@ def load_channel_configuration(config_dir: Path) -> ChannelConfiguration:
                 "channels.weixin.text_chunk_limit",
             ),
         ),
+        order=channel_order,
     )
 
 

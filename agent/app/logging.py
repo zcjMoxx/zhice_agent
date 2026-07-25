@@ -14,7 +14,10 @@ from typing import TextIO
 from agent.logging_utils import redact_mapping
 
 _AGENT_LOGGER_NAME = "zcagent.agent"
+_GATEWAY_LOGGER_NAME = "zcagent.gateway"
+_OWNED_LOGGER_NAMES = (_AGENT_LOGGER_NAME, _GATEWAY_LOGGER_NAME)
 _OUR_HANDLER_ATTR = "_zhice_gateway_logging_handler"
+_TERMINAL_HANDLER_ATTR = "_zhice_gateway_terminal_handler"
 _COLORAMA_FIXED = False
 _COLOR_RESET = "\033[0m"
 _TIME_COLOR = "32"
@@ -60,6 +63,18 @@ class TerminalLogFormatter(logging.Formatter):
         timestamp = datetime.fromtimestamp(record.created).strftime("[%Y-%m-%d %H:%M:%S]")
         component = _component_for_logger(record.name)
         event = str(getattr(record, "event", record.getMessage()))
+        server_message = _channel_server_message(
+            component,
+            event,
+            getattr(record, "fields", {}),
+        )
+        if server_message is not None:
+            return _server_style_line(
+                record.levelname,
+                record.levelno,
+                server_message,
+                color=self.color,
+            )
         action, phase, terminal_fields = _terminal_view(
             component,
             event,
@@ -133,6 +148,44 @@ class DailyTraceFileHandler(logging.Handler):
             self.handleError(record)
 
 
+class DeferredGatewayTerminalLogs(logging.Filter):
+    """Temporarily hold ZhiCe terminal records without delaying trace writes."""
+
+    def __init__(self):
+        super().__init__()
+        self._handlers: list[logging.Handler] = []
+        self._records: list[tuple[logging.Handler, logging.LogRecord]] = []
+
+    def start(self) -> None:
+        """Attach this buffer to the terminal handlers currently owned by Gateway."""
+
+        for logger_name in _OWNED_LOGGER_NAMES:
+            logger = logging.getLogger(logger_name)
+            for handler in logger.handlers:
+                if not getattr(handler, _TERMINAL_HANDLER_ATTR, False):
+                    continue
+                handler.addFilter(self)
+                self._handlers.append(handler)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        for handler in self._handlers:
+            if record.levelno >= handler.level:
+                self._records.append((handler, record))
+                break
+        return False
+
+    def flush(self) -> None:
+        """Detach the buffer and replay held terminal records in their original order."""
+
+        for handler in self._handlers:
+            handler.removeFilter(self)
+        records = self._records
+        self._handlers = []
+        self._records = []
+        for handler, record in records:
+            handler.handle(record)
+
+
 def configure_gateway_logging(
     options: GatewayLogOptions,
     *,
@@ -141,31 +194,36 @@ def configure_gateway_logging(
 ) -> GatewayLoggingResult:
     """Configure Agent terminal and workspace trace handlers idempotently."""
 
-    agent_logger = logging.getLogger(_AGENT_LOGGER_NAME)
-    _remove_our_handlers(agent_logger)
-    agent_logger.propagate = False
-
     levels = [_level_number(options.agent_log_level)]
     if options.trace_log:
         levels.append(logging.DEBUG)
-    agent_logger.setLevel(min(levels))
-
-    if options.agent_log:
-        stream = terminal_stream or sys.stderr
-        terminal_handler = logging.StreamHandler(stream)
-        terminal_handler.setLevel(_level_number(options.agent_log_level))
-        terminal_handler.setFormatter(TerminalLogFormatter(color=_stream_supports_color(stream)))
-        setattr(terminal_handler, _OUR_HANDLER_ATTR, True)
-        agent_logger.addHandler(terminal_handler)
+    logger_level = min(levels)
+    stream = terminal_stream or sys.stderr
 
     trace_path: Path | None = None
     if options.trace_log:
-        trace_handler = DailyTraceFileHandler(logs_dir)
-        trace_handler.setLevel(logging.DEBUG)
-        trace_path = trace_handler.current_path()
+        trace_path = DailyTraceFileHandler(logs_dir).current_path()
         trace_path.parent.mkdir(parents=True, exist_ok=True)
-        setattr(trace_handler, _OUR_HANDLER_ATTR, True)
-        agent_logger.addHandler(trace_handler)
+
+    for logger_name in _OWNED_LOGGER_NAMES:
+        logger = logging.getLogger(logger_name)
+        _remove_our_handlers(logger)
+        logger.propagate = False
+        logger.setLevel(logger_level)
+        if options.agent_log:
+            terminal_handler = logging.StreamHandler(stream)
+            terminal_handler.setLevel(_level_number(options.agent_log_level))
+            terminal_handler.setFormatter(
+                TerminalLogFormatter(color=_stream_supports_color(stream))
+            )
+            setattr(terminal_handler, _OUR_HANDLER_ATTR, True)
+            setattr(terminal_handler, _TERMINAL_HANDLER_ATTR, True)
+            logger.addHandler(terminal_handler)
+        if options.trace_log:
+            trace_handler = DailyTraceFileHandler(logs_dir)
+            trace_handler.setLevel(logging.DEBUG)
+            setattr(trace_handler, _OUR_HANDLER_ATTR, True)
+            logger.addHandler(trace_handler)
 
     _configure_uvicorn_logging(options)
     return GatewayLoggingResult(trace_path=trace_path)
@@ -174,10 +232,11 @@ def configure_gateway_logging(
 def reset_gateway_logging() -> None:
     """Remove gateway-owned logging handlers and restore propagation."""
 
-    agent_logger = logging.getLogger(_AGENT_LOGGER_NAME)
-    _remove_our_handlers(agent_logger)
-    agent_logger.setLevel(logging.NOTSET)
-    agent_logger.propagate = True
+    for logger_name in _OWNED_LOGGER_NAMES:
+        logger = logging.getLogger(logger_name)
+        _remove_our_handlers(logger)
+        logger.setLevel(logging.NOTSET)
+        logger.propagate = True
 
 
 def _remove_our_handlers(logger: logging.Logger) -> None:
@@ -217,6 +276,66 @@ def _format_fields(raw_fields: object) -> str:
     for key, value in fields.items():
         parts.append(f"{key}={_format_field_value(value)}")
     return " ".join(parts)
+
+
+def _channel_server_message(
+    component: str,
+    event: str,
+    raw_fields: object,
+) -> str | None:
+    """Render external-channel lifecycle and delivery events like Uvicorn."""
+
+    fields = redact_mapping(raw_fields) if isinstance(raw_fields, dict) else {}
+    channel = str(fields.pop("channel", "") or "")
+    label = ""
+    message = ""
+    if component == "gateway" and event == "channel.enabled":
+        label = "gateway"
+        message = "channels enabled"
+    elif component == "gateway" and event.startswith("channel."):
+        label = channel or "gateway"
+        message = {
+            "channel.ready": "channel ready",
+            "channel.skip": "channel disabled",
+            "channel.start_failed": "channel unavailable",
+            "channel.stop": "channel stopped",
+        }.get(event, event.removeprefix("channel.").replace("_", " "))
+    elif event.startswith("channel."):
+        parts = event.split(".", 2)
+        if len(parts) == 3:
+            label = parts[1]
+            message = parts[2].replace(".", " ").replace("_", " ")
+            message = {
+                "ready": "channel ready",
+                "degraded": "channel degraded",
+            }.get(message, message)
+    if not label:
+        return None
+    rendered_fields = _format_fields(fields)
+    result = f"[{label}] {message}"
+    return f"{result} | {rendered_fields}" if rendered_fields else result
+
+
+def _server_style_line(
+    level_name: str,
+    level_no: int,
+    message: str,
+    *,
+    color: bool,
+) -> str:
+    rendered_level = level_name
+    if color:
+        level_color = {
+            logging.DEBUG: "36",
+            logging.INFO: "32",
+            logging.WARNING: "33",
+            logging.ERROR: "31",
+            logging.CRITICAL: "91",
+        }.get(level_no)
+        if level_color:
+            rendered_level = _style(level_name, level_color)
+    separator = " " * max(8 - len(level_name), 0)
+    return f"{rendered_level}:{separator} {message}"
 
 
 def _terminal_view(

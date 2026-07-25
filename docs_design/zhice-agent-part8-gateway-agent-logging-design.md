@@ -8,7 +8,7 @@
 >
 > 设计依据：`docs_design/2026-07-02-gateway-runtime-logging-design.md`、`docs_design/2026-07-06-next-stage-sequencing-design.md`、`docs_design/2026-07-25-channel-lifecycle-startup-logging-design.md`
 >
-> 当前状态：第八部分代码已落地。当前代码已经具备分层 gateway 日志参数、安全 preview / redaction helper、`AgentLoop` / WebRuntime / tool dispatch 运行打点、Web/QQ/微信渠道启动与停止结果、`[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` 终端格式，以及 `${ZHICE_AGENT_WORKSPACE}/logs/YYYY-MM-DD/trace.log` JSONL trace。
+> 当前状态：第八部分代码已落地。当前代码已经具备分层 gateway 日志参数、安全 preview / redaction helper、`AgentLoop` / WebRuntime / tool dispatch 运行打点、按 `channels.yml` 顺序输出的 Web/QQ/微信渠道生命周期、Agent 执行的 `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` 格式、渠道连接的 Uvicorn `LEVEL: [channel] event` 格式，以及 `${ZHICE_AGENT_WORKSPACE}/logs/YYYY-MM-DD/trace.log` JSONL trace。
 
 ---
 
@@ -25,7 +25,7 @@
 这为运行日志提供了稳定关联字段。当前日志现状是：
 
 - `agent/app/gateway.py`：`zcagent gateway` 打印启动摘要，接收 `GatewayLogOptions`，并把 HTTP access/server 日志与 Agent lifecycle log 分开配置。
-- `agent/app/gateway.py` 的 lifespan 在 ChannelManager 启动后复用聚合 capability 状态，为 Web、QQ、微信记录 `channel.start/channel.skip/channel.start_failed/channel.stop`；可选渠道失败仍不阻断 Web。
+- `agent/app/gateway.py` 的 lifespan 按 `channels.yml` 顺序启动并输出渠道；QQ 有界等待真实 on_ready，微信只显示每用户独立账号的状态聚合；可选渠道失败仍不阻断 Web。
 - `agent/app/logging.py`：配置终端 handler、日期目录 JSONL trace handler 和 uvicorn logger level。
 - `agent/logging_utils.py`：提供 `preview_text`、`preview_json`、`redact_mapping` 和 `log_event`，供 app/core 复用。
 - `agent/app/runtime.py`：使用 `zcagent.agent.web` / `zcagent.agent.session` 打印 WebRuntime chat/session lifecycle。
