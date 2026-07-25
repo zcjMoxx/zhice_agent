@@ -214,6 +214,7 @@ class LLMProvider(Protocol):
 
 - Session 历史按 Turn 处理：最近 50 个 user Turn 为候选，最近 3 个直接保留，更早历史最多选择 3 个相关 Turn。
 - CLI 与 Web 统一保留 `max_history_messages=60` 的消息数量兜底。
+- CLI 展示层使用共享 Markdown-to-plain renderer 打印最终回答和历史；Session 仍保存原始 Markdown，Web 等支持 Markdown 的客户端不受影响。
 - `ContextBuilder.build(..., context_budget=...)` 根据 endpoint 输入预算裁剪最旧历史；无工具聊天虽然没有 Tool schema，仍服从同一 token budget。
 - 超长消息按 `max_message_chars` 截断，并在尾部追加 `[truncated]`。
 - 第三部分落地后，历史中的合法 assistant tool call / tool result 块也会进入 ContextBuilder；本文的无工具链路不单独维护另一套上下文实现。

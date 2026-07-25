@@ -16,6 +16,7 @@ from agent.channels.qq.outbound import (
     build_neutral_message,
     chunk_text,
 )
+from agent.presentation import markdown_to_plain_text
 from agent.protocols.capability import CapabilityStatus
 from agent.protocols.channel import ChannelCapabilities, ChannelExecutionContext
 
@@ -32,6 +33,10 @@ QQ_GROUP_CAPABILITIES = ChannelCapabilities(
     inbound_media=frozenset({"image", "file"}),
     command_profile="qq_group",
 )
+
+_QQ_C2C_MAX_PASSIVE_REPLIES = 4
+_QQ_GROUP_MAX_PASSIVE_REPLIES = 5
+_QQ_REPLY_TRUNCATION_NOTICE = "\n\n[回答过长，剩余内容请在私聊或 Web 查看。]"
 
 
 class QQChannelAdapter:
@@ -198,18 +203,24 @@ class QQChannelAdapter:
             return
         await self._send_message(event, build_binding_prompt())
 
-    async def _send(self, event, content: str) -> None:
-        for index, chunk in enumerate(chunk_text(content)):
+    async def _send(self, event, content: str, *, render_markdown: bool = False) -> None:
+        rendered = markdown_to_plain_text(content) if render_markdown else content
+        chunks = _bounded_reply_chunks(rendered, event.conversation_type)
+        for index, chunk in enumerate(chunks):
             await self.transport.send_text(
                 event,
                 chunk,
                 quote=event.conversation_type == "group" and index == 0,
+                msg_seq=index + 1,
             )
 
     async def _send_message(self, event, outbound: QQOutboundMessage) -> None:
         await self.transport.send_message(event, outbound)
 
     async def _send_runtime_content(self, event, content: str) -> None:
+        if event.conversation_type == "group":
+            await self._send(event, content, render_markdown=True)
+            return
         markdown = build_agent_markdown(content)
         if markdown is not None:
             await self._send_message(event, markdown)
@@ -224,3 +235,18 @@ class QQChannelAdapter:
 def _capture_text(payload: dict[str, object], target: list[str]) -> None:
     if payload.get("type") == "text_delta" and payload.get("content"):
         target.append(str(payload["content"]))
+
+
+def _bounded_reply_chunks(content: str, conversation_type: str) -> tuple[str, ...]:
+    chunks = list(chunk_text(content))
+    max_replies = (
+        _QQ_GROUP_MAX_PASSIVE_REPLIES
+        if conversation_type == "group"
+        else _QQ_C2C_MAX_PASSIVE_REPLIES
+    )
+    if len(chunks) <= max_replies:
+        return tuple(chunks)
+    bounded = chunks[:max_replies]
+    available = max(1, 1800 - len(_QQ_REPLY_TRUNCATION_NOTICE))
+    bounded[-1] = bounded[-1][:available].rstrip() + _QQ_REPLY_TRUNCATION_NOTICE
+    return tuple(bounded)

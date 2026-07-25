@@ -120,7 +120,7 @@ zcagent channels status
 zcagent channels link-code qq --user alice --account main
 ```
 
-未绑定 QQ 用户会看到“绑定”按钮；裸 `/bind` 返回一次性 Web Markdown 登录链接和 URL 按钮，登录成功后自动绑定当前 Web 用户，也可以在 Web“个人设置”生成一次性绑定码后发送 `/bind <code>`。个人设置会显示当前用户自己的 QQ 绑定并允许解绑，解绑保留历史 Session。Web/CLI 可以查看本人跨渠道历史，QQ 私聊 Session 可跨端继续；QQ 群 Session 在 Web/CLI 只读，只能派生新的 Web Session。QQ 不提供跨渠道 `/sessions` 管理。普通结构化回复在安全长度内使用 Markdown，短句、超长内容和富消息失败时使用文本。当前 `qq-botpy 1.2.1` 未使用不稳定的原生 token stream。
+未绑定 QQ 用户会看到“绑定”按钮；裸 `/bind` 返回一次性 Web Markdown 登录链接和 URL 按钮，登录成功后自动绑定当前 Web 用户，也可以在 Web“个人设置”生成一次性绑定码后发送 `/bind <code>`。个人设置会显示当前用户自己的 QQ 绑定并允许解绑，解绑保留历史 Session。Web/CLI 可以查看本人跨渠道历史，QQ 私聊 Session 可跨端继续；QQ 群 Session 在 Web/CLI 只读，只能派生新的 Web Session。QQ 不提供跨渠道 `/sessions` 管理。QQ 私聊的普通结构化回复在安全长度内使用 Markdown；QQ 群聊和 CLI 通过共享 renderer 把 Markdown 转为可读纯文本。QQ 被动回复分块使用递增 `msg_seq`，群聊最多 5 块、单聊最多 4 块。当前 `qq-botpy 1.2.1` 未使用不稳定的原生 token stream。
 
 ## LLM 配置
 

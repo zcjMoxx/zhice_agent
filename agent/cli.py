@@ -50,6 +50,7 @@ from agent.memory.markdown_store import MarkdownMemoryStore
 from agent.memory.presentation import format_memory_list
 from agent.memory.safety import MemorySafetyPolicy
 from agent.message import Message
+from agent.presentation import markdown_to_plain_text
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.protocols.auth import AuditEvent
 from agent.protocols.capability import CapabilityStatus
@@ -574,7 +575,7 @@ def _run_chat(argv: Sequence[str]) -> int:
                         prompt_loader.load("subagent_once") if force_subagent_once else ""
                     ),
                 )
-            print(result)
+            print(markdown_to_plain_text(result))
         except KeyboardInterrupt:
             session_store.append(
                 session_id,
@@ -938,7 +939,12 @@ def _print_history(session_store: JsonlSessionStore, session_id: str) -> None:
         print(console.warning("(empty history)"))
         return
     for message in state.messages[-10:]:
-        print(f"{console.command(message.role)}: {message.content}")
+        content = (
+            markdown_to_plain_text(message.content)
+            if message.role == "assistant"
+            else message.content
+        )
+        print(f"{console.command(message.role)}: {content}")
 
 
 def _print_sessions(

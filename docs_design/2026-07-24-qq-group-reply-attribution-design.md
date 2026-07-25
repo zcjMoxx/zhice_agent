@@ -1,5 +1,7 @@
 # QQ 群聊回复归属设计
 
+> 说明：真实 QQ 客户端未稳定展示 Markdown 消息携带的 `message_reference`，当前普通群聊 Agent 回复已调整为纯文本引用；详见 `2026-07-24-qq-group-markdown-reference-compatibility-fix.md` 和 Part 14 活文档。本文正文保留初始方案。
+
 ## 背景
 
 Part 14 已支持 QQ 群内按成员隔离 conversation route，但机器人出站消息只携带被动回复所需的 `msg_id`，客户端不会始终把回答明确展示为属于哪位提问者。多人连续提问时，即使后端 Session 隔离正确，群内阅读仍容易串线。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import threading
 from dataclasses import dataclass, replace
@@ -26,7 +27,7 @@ from agent.channels.qq.outbound import (
     chunk_text,
 )
 from agent.channels.qq.startup import check_qq_startup
-from agent.channels.qq.transport import BotpyQQTransport
+from agent.channels.qq.transport import BotpyQQTransport, QQSendUnconfirmedError
 from agent.channels.runtime_adapter import ChannelRuntimeAdapter
 from agent.protocols.channel import (
     ChannelCapabilities,
@@ -526,7 +527,40 @@ def test_qq_structured_agent_reply_uses_markdown(tmp_path):
 
     assert transport.sent == []
     assert transport.rich[0].markdown.startswith("处理方式：")
-    assert transport.rich[0].fallback_text == transport.rich[0].markdown
+    assert transport.rich[0].fallback_text == "处理方式：\n• 重新上传图片\n• 描述图片内容"
+
+
+def test_qq_group_structured_agent_reply_uses_quoted_text(tmp_path):
+    store, user, sessions = _services(tmp_path)
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="group-member",
+    )
+    transport = _FakeTransport()
+    adapter = QQChannelAdapter(
+        _Account(),
+        transport,
+        ExternalIdentityService(store),
+        ChannelConversationService(store, sessions),
+        ChannelDedupService(store),
+        _FakeChannelRuntime("处理方式：\n- 第一项\n- 第二项"),
+    )
+    event = replace(
+        _event("event-group-markdown-as-text"),
+        conversation_type="group",
+        external_conversation_id="group-openid",
+        external_user_id="group-member",
+        reply_target=ChannelReplyTarget("qq", "main", "group", "group-openid"),
+    )
+
+    asyncio.run(adapter.handle_event(event))
+
+    assert transport.rich == []
+    assert transport.sent == ["处理方式：\n• 第一项\n• 第二项"]
+    assert transport.quotes == [True]
+    assert transport.sequences == [1]
 
 
 def test_agent_markdown_detection_keeps_plain_and_long_content_as_text():
@@ -620,6 +654,7 @@ def test_botpy_rich_message_drops_keyboard_before_plain_text_fallback():
     assert reply.calls[1] == {
         "msg_type": 2,
         "markdown": {"content": "[登录并绑定](https://example.com/bind)"},
+        "msg_seq": 1,
     }
 
 
@@ -685,6 +720,7 @@ def test_botpy_group_text_reply_quotes_trigger_message():
         {
             "content": "群聊回答",
             "msg_type": 0,
+            "msg_seq": 1,
             "message_reference": {"message_id": "message-1"},
         }
     ]
@@ -697,7 +733,49 @@ def test_botpy_direct_text_reply_does_not_add_group_reference():
 
     asyncio.run(transport.send_text(_event("event-direct-text"), "私聊回答", quote=True))
 
-    assert reply.calls == [{"content": "私聊回答", "msg_type": 0}]
+    assert reply.calls == [{"content": "私聊回答", "msg_type": 0, "msg_seq": 1}]
+
+
+def test_botpy_text_reply_logs_confirmed_delivery(caplog):
+    transport = BotpyQQTransport(_Account())
+    reply = _FakeReplyMessage()
+    transport._messages["message-1"] = reply
+
+    with caplog.at_level(logging.DEBUG, logger="zcagent.agent.channel.qq"):
+        asyncio.run(transport.send_text(_event("event-confirmed-text"), "私聊回答"))
+
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "").startswith("channel.qq.send_")
+    ]
+    assert [record.event for record in records] == [
+        "channel.qq.send_start",
+        "channel.qq.send_done",
+    ]
+    assert records[-1].fields["response_message_id_hash"]
+    assert records[-1].fields["source_message_id_hash"] != "message-1"
+
+
+def test_botpy_none_reply_is_unconfirmed_and_not_retried(caplog):
+    transport = BotpyQQTransport(_Account())
+    reply = _FakeReplyMessage(unconfirmed=True)
+    transport._messages["message-1"] = reply
+    outbound = QQOutboundMessage(
+        markdown="**回答**",
+        fallback_text="回答",
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="zcagent.agent.channel.qq"):
+        with pytest.raises(QQSendUnconfirmedError, match="no delivery confirmation"):
+            asyncio.run(transport.send_message(_event("event-unconfirmed"), outbound))
+
+    assert len(reply.calls) == 1
+    assert [
+        record.event
+        for record in caplog.records
+        if getattr(record, "event", "").startswith("channel.qq.send_")
+    ] == ["channel.qq.send_start", "channel.qq.send_unconfirmed"]
 
 
 def test_botpy_group_markdown_fallback_keeps_trigger_reference():
@@ -753,6 +831,98 @@ def test_qq_group_long_text_quotes_only_first_chunk(tmp_path):
 
     assert len(transport.sent) == 2
     assert transport.quotes == [True, False]
+    assert transport.sequences == [1, 2]
+
+
+def test_qq_group_reply_caps_five_chunks_and_marks_truncation(tmp_path):
+    store, user, sessions = _services(tmp_path)
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="group-member",
+    )
+    transport = _FakeTransport()
+    adapter = QQChannelAdapter(
+        _Account(),
+        transport,
+        ExternalIdentityService(store),
+        ChannelConversationService(store, sessions),
+        ChannelDedupService(store),
+        _FakeChannelRuntime("x" * 11000),
+    )
+    event = replace(
+        _event("event-group-reply-cap"),
+        conversation_type="group",
+        external_conversation_id="group-openid",
+        external_user_id="group-member",
+        reply_target=ChannelReplyTarget("qq", "main", "group", "group-openid"),
+    )
+
+    asyncio.run(adapter.handle_event(event))
+
+    assert len(transport.sent) == 5
+    assert transport.sequences == [1, 2, 3, 4, 5]
+    assert transport.quotes == [True, False, False, False, False]
+    assert transport.sent[-1].endswith("[回答过长，剩余内容请在私聊或 Web 查看。]")
+
+
+def test_qq_direct_reply_caps_four_chunks_with_unique_sequences(tmp_path):
+    store, user, sessions = _services(tmp_path)
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="openid",
+    )
+    transport = _FakeTransport()
+    adapter = QQChannelAdapter(
+        _Account(),
+        transport,
+        ExternalIdentityService(store),
+        ChannelConversationService(store, sessions),
+        ChannelDedupService(store),
+        _FakeChannelRuntime("x" * 9000),
+    )
+
+    asyncio.run(adapter.handle_event(_event("event-direct-reply-cap")))
+
+    assert len(transport.sent) == 4
+    assert transport.sequences == [1, 2, 3, 4]
+    assert transport.quotes == [False, False, False, False]
+    assert transport.sent[-1].endswith("[回答过长，剩余内容请在私聊或 Web 查看。]")
+
+
+def test_qq_send_error_marks_persistent_receipt_as_error(tmp_path):
+    store, user, sessions = _services(tmp_path)
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="openid",
+    )
+    transport = _FakeTransport(
+        send_error=QQSendUnconfirmedError("QQ delivery was not confirmed")
+    )
+    adapter = QQChannelAdapter(
+        _Account(),
+        transport,
+        ExternalIdentityService(store),
+        ChannelConversationService(store, sessions),
+        ChannelDedupService(store),
+        _FakeChannelRuntime("runtime reply"),
+    )
+    event = _event("event-unconfirmed-receipt")
+
+    with pytest.raises(QQSendUnconfirmedError):
+        asyncio.run(adapter.handle_event(event))
+
+    with sqlite3.connect(tmp_path / "state" / "auth.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT status, error_code FROM channel_event_receipts WHERE event_id=?",
+            (event.event_id,),
+        ).fetchone()
+    assert row == ("error", "QQSendUnconfirmedError")
 
 
 def _services(tmp_path):
@@ -833,10 +1003,12 @@ class _FakeChannelRuntime:
 
 
 class _FakeTransport:
-    def __init__(self):
+    def __init__(self, *, send_error=None):
         self.sent = []
         self.quotes = []
+        self.sequences = []
         self.rich = []
+        self.send_error = send_error
 
     def start(self, handler):
         self.handler = handler
@@ -844,18 +1016,22 @@ class _FakeTransport:
     def stop(self):
         return None
 
-    async def send_text(self, event, content, *, quote=False):
+    async def send_text(self, event, content, *, quote=False, msg_seq=1):
         self.sent.append(content)
         self.quotes.append(quote)
+        self.sequences.append(msg_seq)
+        if self.send_error is not None:
+            raise self.send_error
 
     async def send_message(self, event, outbound):
         self.rich.append(outbound)
 
 
 class _FakeReplyMessage:
-    def __init__(self, *, fail_keyboard=False, fail_rich=False):
+    def __init__(self, *, fail_keyboard=False, fail_rich=False, unconfirmed=False):
         self.fail_keyboard = fail_keyboard
         self.fail_rich = fail_rich
+        self.unconfirmed = unconfirmed
         self.calls = []
 
     async def reply(self, **kwargs):
@@ -864,4 +1040,6 @@ class _FakeReplyMessage:
             raise RuntimeError("keyboard rejected")
         if self.fail_rich and kwargs.get("msg_type") == 2:
             raise RuntimeError("rich message rejected")
-        return None
+        if self.unconfirmed:
+            return None
+        return SimpleNamespace(id=f"reply-{len(self.calls)}")

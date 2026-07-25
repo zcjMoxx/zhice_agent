@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from agent.presentation import markdown_to_plain_text
+
 
 @dataclass(frozen=True)
 class QQOutboundButton:
@@ -89,7 +91,10 @@ def build_agent_markdown(text: str, *, limit: int = 1800) -> QQOutboundMessage |
     content = str(text or "").strip()
     if not content or len(content) > limit or not _looks_like_markdown(content):
         return None
-    return QQOutboundMessage(markdown=content, fallback_text=content)
+    return QQOutboundMessage(
+        markdown=content,
+        fallback_text=markdown_to_plain_text(content),
+    )
 
 
 def _looks_like_markdown(text: str) -> bool:

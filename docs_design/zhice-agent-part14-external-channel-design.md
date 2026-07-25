@@ -2,7 +2,7 @@
 
 > 状态：第一版已实现并进入当前代码基线；第一条真实外部渠道选择 QQ，后续微信、飞书等渠道复用同一中性协议与运行边界
 >
-> 日期设计记录：`docs_design/2026-07-23-qq-external-channel-boundary-design.md`、`docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`、`docs_design/2026-07-24-qq-binding-keyboard-rendering-fix.md`、`docs_design/2026-07-24-qq-group-manual-binding-design.md`、`docs_design/2026-07-24-clear-session-command-rename-design.md`、`docs_design/2026-07-24-qq-group-reply-attribution-design.md`
+> 日期设计记录：`docs_design/2026-07-23-qq-external-channel-boundary-design.md`、`docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`、`docs_design/2026-07-24-qq-binding-keyboard-rendering-fix.md`、`docs_design/2026-07-24-qq-group-manual-binding-design.md`、`docs_design/2026-07-24-clear-session-command-rename-design.md`、`docs_design/2026-07-24-qq-group-reply-attribution-design.md`、`docs_design/2026-07-24-qq-group-markdown-reference-compatibility-fix.md`、`docs_design/2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`
 >
 > 承接文档：`docs_design/zhice-agent-part13-subagent-design.md`
 >
@@ -654,9 +654,10 @@ QQ Adapter 消费已有 RuntimeEvent，但不把每个内部状态都发成消�
 - Markdown 表格必要时转换为普通文本或多个块；
 - QQ 群消息接口没有独立成员 mention 参数，自定义 Markdown 也没有群成员 `@` 语法；群聊回答统一通过 `message_reference` 引用触发者原消息建立可见归属，不拼接或暴露 member OpenID；
 - 引用只用于第一条文本分块，后续块保持同一 Turn 关联；单条 Markdown 及其发送降级尝试保持同一引用；
+- 同一入站消息的文本分块使用递增 `msg_seq`；群聊最多 5 块，单聊最多 4 块，超限时最后一块明确提示转私聊或 Web 查看完整内容；
 - 发送重试必须有次数和总时限，不能无限重试。
 
-普通 Agent 回复只有在包含标题、列表、引用、代码、链接或强调等明确结构且能在单个安全块内发送时才使用 QQ 自定义 Markdown；普通短句和超长内容继续使用文本。Markdown 发送失败使用相同内容降级为纯文本，不重新执行 Agent Turn。
+普通 Agent 回复只有在 QQ 私聊、包含标题、列表、引用、代码、链接或强调等明确结构且能在单个安全块内发送时才使用 QQ 自定义 Markdown；普通短句和超长内容继续使用文本。真实 QQ 客户端未稳定展示群聊 Markdown 携带的 `message_reference`，所以群聊 Runtime 回答先经共享 Markdown-to-plain renderer 转为可读普通文本，再分块并在第一块引用触发消息。Markdown 发送失败使用相同内容降级为纯文本，不重新执行 Agent Turn。
 
 ### 17.4 绑定消息的 Markdown 与键盘
 

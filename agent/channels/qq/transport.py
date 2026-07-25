@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from threading import Thread
 from typing import Protocol
 
 from agent.channels.qq.normalize import normalize_c2c_message, normalize_group_message
 from agent.channels.qq.outbound import QQOutboundButton, QQOutboundMessage
+from agent.logging_utils import log_event
 
 qq_logger = logging.getLogger("zcagent.agent.channel.qq")
+
+
+class QQSendUnconfirmedError(RuntimeError):
+    """The SDK returned without confirming that QQ accepted the message."""
 
 
 class QQTransport(Protocol):
@@ -20,7 +27,14 @@ class QQTransport(Protocol):
 
     def stop(self) -> None: ...
 
-    async def send_text(self, event, content: str, *, quote: bool = False) -> None: ...
+    async def send_text(
+        self,
+        event,
+        content: str,
+        *,
+        quote: bool = False,
+        msg_seq: int = 1,
+    ) -> None: ...
 
     async def send_message(self, event, outbound: QQOutboundMessage) -> None: ...
 
@@ -100,15 +114,26 @@ class BotpyQQTransport:
         if self._state_handler is not None:
             self._state_handler("disabled")
 
-    async def send_text(self, event, content: str, *, quote: bool = False) -> None:
+    async def send_text(
+        self,
+        event,
+        content: str,
+        *,
+        quote: bool = False,
+        msg_seq: int = 1,
+    ) -> None:
         message = self._messages.get(event.message_id)
         if message is None:
             raise RuntimeError("QQ reply target is no longer available")
-        payload: dict[str, object] = {"content": content, "msg_type": 0}
+        payload: dict[str, object] = {
+            "content": content,
+            "msg_type": 0,
+            "msg_seq": msg_seq,
+        }
         reference = _group_reference(event) if quote else None
         if reference is not None:
             payload["message_reference"] = reference
-        await message.reply(**payload)
+        await self._reply(event, message, payload)
 
     async def send_message(self, event, outbound: QQOutboundMessage) -> None:
         """Send Markdown/keyboard output with progressively safer presentation fallback."""
@@ -120,11 +145,16 @@ class BotpyQQTransport:
         reference = _group_reference(event)
         last_error: Exception | None = None
         for payload in attempts:
+            payload["msg_seq"] = 1
             if reference is not None:
                 payload["message_reference"] = reference
             try:
-                await message.reply(**payload)
+                await self._reply(event, message, payload)
                 return
+            except QQSendUnconfirmedError:
+                # QQ may already have accepted this msg_id + msg_seq. Sending a
+                # fallback here could duplicate the same logical reply.
+                raise
             except Exception as exc:  # noqa: BLE001 - optional rich output must degrade safely.
                 last_error = exc
                 qq_logger.warning(
@@ -137,6 +167,44 @@ class BotpyQQTransport:
                 )
         if last_error is not None:
             raise last_error
+
+    async def _reply(self, event, message, payload: dict[str, object]) -> object:
+        fields = _send_log_fields(self.account.key, event, payload)
+        log_event(qq_logger, logging.DEBUG, "channel.qq.send_start", **fields)
+        started = time.perf_counter()
+        try:
+            response = await message.reply(**payload)
+        except Exception as exc:  # noqa: BLE001 - log the SDK boundary before propagation.
+            log_event(
+                qq_logger,
+                logging.WARNING,
+                "channel.qq.send_failed",
+                **fields,
+                error_code=type(exc).__name__,
+                duration_ms=_elapsed_ms(started),
+            )
+            raise
+        if response is None:
+            log_event(
+                qq_logger,
+                logging.WARNING,
+                "channel.qq.send_unconfirmed",
+                **fields,
+                error_code="QQ_SEND_UNCONFIRMED",
+                duration_ms=_elapsed_ms(started),
+            )
+            raise QQSendUnconfirmedError(
+                "QQ SDK returned no delivery confirmation; the reply was not retried"
+            )
+        log_event(
+            qq_logger,
+            logging.INFO,
+            "channel.qq.send_done",
+            **fields,
+            response_message_id_hash=_safe_hash(_response_message_id(response)),
+            duration_ms=_elapsed_ms(started),
+        )
+        return response
 
 
 def _build_send_attempts(outbound: QQOutboundMessage) -> tuple[dict[str, object], ...]:
@@ -166,6 +234,41 @@ def _build_send_attempts(outbound: QQOutboundMessage) -> tuple[dict[str, object]
     if fallback and (keyboard is not None or outbound.markdown):
         attempts.append({"msg_type": 0, "content": fallback})
     return tuple(attempts)
+
+
+def _send_log_fields(account_key: str, event, payload: dict[str, object]) -> dict[str, object]:
+    content = payload.get("content")
+    markdown = payload.get("markdown")
+    if content is None and isinstance(markdown, dict):
+        content = markdown.get("content", "")
+    return {
+        "account_key": account_key,
+        "conversation_type": event.conversation_type,
+        "event_id_hash": _safe_hash(event.event_id),
+        "source_message_id_hash": _safe_hash(event.message_id),
+        "msg_type": payload.get("msg_type", 0),
+        "msg_seq": payload.get("msg_seq", 1),
+        "has_reference": "message_reference" in payload,
+        "has_keyboard": "keyboard" in payload,
+        "content_chars": len(str(content or "")),
+    }
+
+
+def _response_message_id(response: object) -> str:
+    if isinstance(response, dict):
+        return str(response.get("id", ""))
+    return str(getattr(response, "id", "") or "")
+
+
+def _safe_hash(value: object) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.perf_counter() - started) * 1000))
 
 
 def _group_reference(event) -> dict[str, str] | None:

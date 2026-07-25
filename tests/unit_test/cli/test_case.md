@@ -68,8 +68,8 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 - 输入：普通用户消息，测试中替换为 Fake LLM。
 - Tool：每个 CLI Turn 使用独立 discovery Provider，首轮只暴露 `discover_tools`，发现后才激活实际 Tool schema。
-- 预期：CLI 调用 AgentLoop 并打印 assistant 文本。
-- 检查点：测试不访问真实网络或真实 LLM。
+- 预期：CLI 调用 AgentLoop，并通过共享 Markdown-to-plain renderer 打印 assistant 文本和 `/history` 中的 assistant 消息。
+- 检查点：测试不访问真实网络或真实 LLM；终端不显示 Markdown 样式标记，Session JSONL 仍保存原始 Markdown。
 
 ## Part 7 Turn Coverage
 

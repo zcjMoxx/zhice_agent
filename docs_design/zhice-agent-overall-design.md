@@ -481,7 +481,7 @@ hello
 6. 重复调用 LLM，直到得到无工具调用的最终 assistant 回复，或达到工具轮数上限
 7. 保存 user / assistant(tool_calls) / tool / assistant(final) 等本轮消息
 8. 如果 LLM 或保存失败，也把错误作为 assistant 消息保留
-9. CLI 打印最终文本
+9. CLI 通过共享 Markdown-to-plain renderer 打印最终文本
 ```
 
 ### 4.2 Mermaid 流程图
@@ -1488,11 +1488,11 @@ Part 14 第一版已实现并进入当前代码基线。第一条真实外部渠
 - 命令、模型偏好、stop、Memory、Tool、Hook、MCP 和 Subagent 继续复用当前 runtime，仅按 `qq_c2c` / `qq_group` capabilities 裁剪展示和支持范围。
 - 入站先做回声过滤、持久去重、限流、身份、会话和附件 guard，再进入 Agent；同一 conversation route 串行，不同会话有界并行。
 - QQ 运行态优先使用 `qq-botpy` 可选依赖和 WebSocket。官方 Node connector 只作为可选扫码配网能力；Webhook 等 Part 15 具备公网部署条件后接入。
-- 当前 SDK 不启用未验证的 C2C stream；普通回复按结构选择 Markdown，短句和超长内容使用文本，发送失败不能重新执行 Agent Turn。
+- 当前 SDK 不启用未验证的 C2C stream；QQ 私聊普通回复按结构选择 Markdown，QQ 群聊与 CLI 复用共享 Markdown-to-plain renderer。QQ 文本分块使用递增 `msg_seq`，群聊最多 5 块、单聊最多 4 块；发送失败不能重新执行 Agent Turn。
 - 凭证、token、绑定码、签名和完整外部 ID 全链路脱敏；附件继续经过 SSRF、大小、类型和用户目录边界。
 - QQ 断线或依赖不可用只局部降级，不阻断 Web/CLI；health、trace、Runtime Activity 和 Security Audit 使用现有结构化出口。
 
-当前设计依据：`docs_design/zhice-agent-part14-external-channel-design.md`；初始边界记录：`docs_design/2026-07-23-qq-external-channel-boundary-design.md`；跨渠道 Session、解绑和 Markdown 收敛：`docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`。
+当前设计依据：`docs_design/zhice-agent-part14-external-channel-design.md`；初始边界记录：`docs_design/2026-07-23-qq-external-channel-boundary-design.md`；跨渠道 Session、解绑和 Markdown 收敛：`docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`；纯文本展示与回复序号：`docs_design/2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`。
 
 ### 15.4 Part 15：生产部署与发布
 

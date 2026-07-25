@@ -341,6 +341,33 @@ def test_cli_chat_defaults_to_daily_session_without_banner_noise(tmp_path, capsy
     assert [item["function"]["name"] for item in echo.tools_calls[0]] == ["discover_tools"]
 
 
+def test_cli_chat_and_history_render_assistant_markdown_as_plain_text(
+    tmp_path, capsys, monkeypatch
+):
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
+    monkeypatch.setattr("agent.cli._default_session_id", lambda: "chat-markdown")
+    markdown = "# 结果\n\n**总计：** 265 天\n\n- 第一项\n- 第二项"
+    monkeypatch.setattr(
+        "agent.cli._build_llm_provider",
+        lambda *_args: _EchoLLM(markdown),
+    )
+    inputs = iter(["计算时间", "/history", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    result = main([])
+
+    output = capsys.readouterr().out
+    session_text = (
+        tmp_path / "contexts" / "sessions" / "chat-markdown.jsonl"
+    ).read_text(encoding="utf-8")
+    assert result == 0
+    assert "结果\n\n总计： 265 天\n\n• 第一项\n• 第二项" in output
+    assert "**总计：**" not in output
+    assert "**总计：**" in session_text
+
+
 def test_cli_chat_respects_explicit_session_id(tmp_path, capsys, monkeypatch):
     """An explicit --session should still resume the named conversation."""
 
@@ -1036,16 +1063,17 @@ sources:
 
 
 class _EchoLLM:
-    def __init__(self):
+    def __init__(self, content="ok"):
         self.chat_calls = 0
         self.tools_calls = []
+        self.content = content
 
     def chat(self, messages, tools=None):
         from agent.protocols.llm import LLMResponse
 
         self.chat_calls += 1
         self.tools_calls.append(tools)
-        return LLMResponse(content="ok")
+        return LLMResponse(content=self.content)
 
 
 def _endpoint(name: str, *, priority: int = 1) -> LLMEndpoint:
