@@ -5,6 +5,14 @@ from agent.protocols.subagent import subagent_unavailable_payload
 from agent.subagents.startup import check_subagent_startup
 
 
+def _write_subagents(config_dir, body):
+    indented = "\n".join(f"  {line}" if line else "" for line in body.splitlines())
+    config_dir.joinpath("config.yml").write_text(
+        f"schema_version: 1\nsubagents:\n{indented}\n",
+        encoding="utf-8",
+    )
+
+
 def test_missing_config_disables_subagent_without_error(tmp_path):
     result = check_subagent_startup(tmp_path / "config", PromptLoader(tmp_path / "prompts"))
 
@@ -16,7 +24,7 @@ def test_missing_config_disables_subagent_without_error(tmp_path):
 def test_invalid_config_isolated_as_unavailable(tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    config_dir.joinpath("subagents.yml").write_text("enabled: [invalid]\n", encoding="utf-8")
+    _write_subagents(config_dir, "enabled: [invalid]")
 
     result = check_subagent_startup(config_dir, PromptLoader(tmp_path / "prompts"))
 
@@ -27,10 +35,10 @@ def test_invalid_config_isolated_as_unavailable(tmp_path):
 def test_missing_enabled_prompt_returns_precise_use_error(tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    config_dir.joinpath("subagents.yml").write_text(
+    _write_subagents(
+        config_dir,
         "enabled: true\nprofiles:\n  explorer:\n    description: inspect\n"
         "    tools: [read_file]\n",
-        encoding="utf-8",
     )
     prompts = tmp_path / "prompts"
     prompts.mkdir()
@@ -50,10 +58,10 @@ def test_missing_enabled_prompt_returns_precise_use_error(tmp_path):
 def test_all_required_prompts_keep_subagent_available(tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    config_dir.joinpath("subagents.yml").write_text(
+    _write_subagents(
+        config_dir,
         "enabled: true\nprofiles:\n  explorer:\n    description: inspect\n"
         "    tools: [read_file]\n",
-        encoding="utf-8",
     )
     prompts = tmp_path / "prompts"
     prompts.mkdir()

@@ -25,7 +25,7 @@ class McpStartupResult:
 def check_mcp_startup(config_dir: Path | str) -> McpStartupResult:
     """Fail closed for MCP while allowing the core Agent to start."""
 
-    path = Path(config_dir).expanduser().resolve() / "mcp.json"
+    path = Path(config_dir).expanduser().resolve() / "config.yml"
     if not path.exists():
         return _disabled("MCP_CONFIG_MISSING", "MCP is not configured for this workspace.")
     try:
@@ -46,7 +46,7 @@ def check_mcp_startup(config_dir: Path | str) -> McpStartupResult:
                 state="unavailable",
                 code="MCP_CONFIG_INVALID",
                 message="MCP configuration is invalid.",
-                hint="Fix config/mcp.json, then restart the process.",
+                hint="Fix the mcp section in config/config.yml, then restart the process.",
                 details={"config_file": path.name, "error_type": type(exc).__name__},
             ),
         )
@@ -72,6 +72,6 @@ def _disabled(code: str, message: str) -> McpStartupResult:
             state="disabled",
             code=code,
             message=message,
-            hint="Copy config/mcp.example.json to the runtime config directory to enable MCP.",
+            hint="Configure the mcp.servers section in config/config.yml to enable MCP.",
         ),
     )

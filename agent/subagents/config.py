@@ -9,9 +9,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-import yaml
-
 from agent.protocols.subagent import SubagentProfile
+from agent.runtime_config import load_runtime_section
 
 DEFAULT_MAX_PARALLEL = 3
 HARD_MAX_PARALLEL = 8
@@ -65,47 +64,19 @@ class SubagentConfig:
         return self.profiles.get(name)
 
 
-class _UniqueKeyLoader(yaml.SafeLoader):
-    """Safe YAML loader that rejects duplicate mapping keys."""
-
-
-def _construct_unique_mapping(loader, node, deep=False):
-    mapping = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        if key in mapping:
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                f"found duplicate key {key!r}",
-                key_node.start_mark,
-            )
-        mapping[key] = loader.construct_object(value_node, deep=deep)
-    return mapping
-
-
-_UniqueKeyLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_mapping,
-)
-
-
 def load_subagent_config(config_path: Path) -> SubagentConfig:
-    """Load subagents.yml; a missing or empty file disables Subagents."""
+    """Load config.yml subagents; a missing or empty section disables Subagents."""
 
     path = Path(config_path).expanduser().resolve()
-    if path.is_dir() or (not path.exists() and path.suffix == ""):
-        path = path / "subagents.yml"
-    if not path.exists():
-        return SubagentConfig()
+    config_dir = path if path.is_dir() or path.suffix == "" else path.parent
     try:
-        raw = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        raise SubagentConfigurationError(f"Cannot read Subagent config: {path.name}") from exc
-    if raw is None:
-        return SubagentConfig()
+        raw = load_runtime_section(config_dir, "subagents", default={})
+    except ValueError as exc:
+        raise SubagentConfigurationError("Cannot read Subagent config: config.yml") from exc
     if not isinstance(raw, dict):
         raise SubagentConfigurationError("Subagent config root must be an object")
+    if not raw:
+        return SubagentConfig()
     allowed = {
         "enabled",
         "max_parallel",

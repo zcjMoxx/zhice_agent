@@ -7,6 +7,14 @@ import pytest
 from agent.skills.sync import SkillSourceSync, SkillSyncError
 
 
+def _write_skills_section(config_dir, body):
+    indented = "\n".join(f"  {line}" if line else "" for line in body.strip().splitlines())
+    config_dir.joinpath("config.yml").write_text(
+        f"schema_version: 1\nskills:\n{indented}\n",
+        encoding="utf-8",
+    )
+
+
 def test_sync_loads_empty_config_when_missing(tmp_path):
     """Missing skill_sources.yml should keep sync disabled."""
 
@@ -110,7 +118,8 @@ def test_skill_repo_placeholder_points_to_repo_root(tmp_path):
     _write_skill(skill_repo / "skills", "demo")
     config_dir = workspace / "config"
     config_dir.mkdir(parents=True)
-    config_dir.joinpath("skill_sources.yml").write_text(
+    _write_skills_section(
+        config_dir,
         """
 sync:
   on_startup: never
@@ -122,7 +131,6 @@ sources:
     sync: true
     local_dir: "${ZHICE_AGENT_SKILL_REPO}"
 """,
-        encoding="utf-8",
     )
     sync = SkillSourceSync(
         workspace=workspace,
@@ -288,14 +296,14 @@ def test_runtime_extends_dir_must_stay_in_workspace(tmp_path):
     workspace = tmp_path / "workspace"
     config_dir = workspace / "config"
     config_dir.mkdir(parents=True)
-    config_dir.joinpath("skill_sources.yml").write_text(
+    _write_skills_section(
+        config_dir,
         f"""
 extends_dir: "{_yaml_path(tmp_path / "outside-extends")}"
 sync:
   on_startup: always
 sources: []
 """,
-        encoding="utf-8",
     )
     sync = SkillSourceSync(
         workspace=workspace,
@@ -310,7 +318,8 @@ sources: []
 def _write_config(workspace, source_repo, *, on_startup="never", sync_enabled=True):
     config_dir = workspace / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_dir.joinpath("skill_sources.yml").write_text(
+    _write_skills_section(
+        config_dir,
         f"""
 sync:
   on_startup: {on_startup}
@@ -323,7 +332,6 @@ sources:
     sync: {_yaml_bool(sync_enabled)}
     local_dir: "{_yaml_path(source_repo)}"
 """,
-        encoding="utf-8",
     )
 
 

@@ -53,6 +53,7 @@ TURN_CANCELLED_TEXT = "[stopped]"
 TurnEventCallback = Callable[[dict[str, Any]], None]
 turn_logger = logging.getLogger("zcagent.agent.turn")
 llm_logger = logging.getLogger("zcagent.agent.llm")
+context_logger = logging.getLogger("zcagent.agent.context")
 tool_logger = logging.getLogger("zcagent.agent.tool")
 session_logger = logging.getLogger("zcagent.agent.session")
 
@@ -192,6 +193,14 @@ class AgentLoop:
                 "workspace": workspace,
                 "session_id": session_id,
             }
+            if getattr(self.context_builder, "supports_context_engineering", False):
+                build_kwargs.update(
+                    {
+                        "tool_definitions": tools.definitions() if tools else None,
+                        "session_store": sessions,
+                        "llm_provider": llm,
+                    }
+                )
             if context_budget is not None:
                 build_kwargs["context_budget"] = context_budget
             messages = self.context_builder.build(**build_kwargs)
@@ -258,6 +267,7 @@ class AgentLoop:
                 session_id,
                 pending_session_messages,
                 workspace,
+                context_builder=self.context_builder,
             )
             _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
             log_event(
@@ -294,6 +304,28 @@ class AgentLoop:
                 messages,
                 tool_definitions=tool_definitions,
                 context_budget=context_budget,
+            )
+            plan = getattr(self.context_builder, "last_plan", None)
+            log_event(
+                context_logger,
+                logging.DEBUG,
+                "context.selection",
+                session_id=session_id,
+                turn_id=resolved_turn_id,
+                phase="initial" if tool_iterations == 0 else "tool_result",
+                iteration=tool_iterations + 1,
+                mode=getattr(plan, "mode", "legacy"),
+                context_items=len(llm_messages),
+                dropped_context_items=max(0, len(messages) - len(llm_messages)),
+                reason=(
+                    "tool_growth_refit"
+                    if tool_iterations > 0 and len(llm_messages) < len(messages)
+                    else "planned_context"
+                ),
+                estimated_input_tokens=estimate_llm_tokens(
+                    llm_messages,
+                    tool_definitions=tool_definitions,
+                ),
             )
             llm_started = time.perf_counter()
             estimated_input_tokens = estimate_llm_tokens(
@@ -390,6 +422,7 @@ class AgentLoop:
                     session_id,
                     pending_session_messages,
                     workspace,
+                    context_builder=self.context_builder,
                 )
                 _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
                 log_event(
@@ -449,6 +482,7 @@ class AgentLoop:
                     session_id,
                     pending_session_messages,
                     workspace,
+                    context_builder=self.context_builder,
                 )
                 _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
                 log_event(
@@ -607,7 +641,13 @@ class AgentLoop:
                         turn_id=resolved_turn_id,
                         error_type=type(exc).__name__,
                     )
-                save_error = _append_session_messages(sessions, session_id, pending_session_messages, workspace)
+                save_error = _append_session_messages(
+                    sessions,
+                    session_id,
+                    pending_session_messages,
+                    workspace,
+                    context_builder=self.context_builder,
+                )
                 _log_session_save(save_error, session_id, resolved_turn_id, len(pending_session_messages))
                 log_event(
                     turn_logger,
@@ -1727,10 +1767,10 @@ def _message_to_llm_dict(message: Message) -> dict[str, Any]:
 def _format_llm_error(exc: Exception, workspace: Path) -> str:
     """Turn provider/config failures into actionable CLI text."""
 
-    config_path = workspace / "config" / "llm_endpoints.json"
+    config_path = workspace / "config" / "models.json"
     message = str(exc)
     if isinstance(exc, LLMConfigurationError):
-        if "Set api_key in llm_endpoints.json." in message:
+        if "Set api_key in models.json." in message:
             return (
                 f"{console.error('LLM configuration is incomplete: missing API key.')}\n"
                 "Choose one:\n"
@@ -1786,11 +1826,25 @@ def _append_session_messages(
     session_id: str,
     messages: list[Message],
     workspace: Path,
+    *,
+    context_builder: ContextBuilder | None = None,
 ) -> str | None:
     """Persist pending messages and return a user-facing save error if needed."""
 
     try:
         sessions.append(session_id, messages)
+        on_committed = getattr(context_builder, "on_turn_committed", None)
+        if callable(on_committed):
+            try:
+                on_committed(sessions, session_id, messages)
+            except Exception as exc:  # noqa: BLE001 - derived state cannot fail Session truth.
+                log_event(
+                    turn_logger,
+                    logging.WARNING,
+                    "context.index.commit_failed",
+                    session_id=session_id,
+                    error_type=type(exc).__name__,
+                )
     except OSError as exc:
         sessions_dir = workspace / "contexts" / "sessions"
         return (

@@ -18,6 +18,7 @@
 - 输入：Session 中已有历史消息，当前用户输入一条新消息。
 - 预期：历史消息交给 ContextBuilder，当前消息不提前写入历史。
 - 检查点：ContextBuilder 收到原始 history、当前 user message、workspace 和 session_id。
+- Part 15 ContextBuilder 还接收当前已授权 SessionStore、实际 LLMProvider、可见 Tool schemas 和 failover-safe ContextBudget；FakeContextBuilder 兼容旧最小签名。
 
 ### Case 3: LLM 调用失败
 
@@ -76,6 +77,7 @@
 - AgentLoop emits concise INFO lifecycle logs for `turn.start` and `turn.done`; `turn.done.output_preview` keeps only the first non-empty answer line up to 80 characters in terminal and trace. `llm.call` and `llm.done` remain at DEBUG, while duplicate `llm.direct` and successful `session.save` events are omitted.
 - Tool dispatch emits `tool.start` and `tool.done` with `session_id`, `turn_id`, tool name, success flag, duration, and safe output preview.
 - Lifecycle log fields must not leak secret-like values or full long user/tool content.
+- 每次初始和 Tool 后 LLM 调用前记录安全的 `context.selection`，包含 phase、mode、数量与 token 估算，不记录完整消息或 embedding。
 
 ## Part 9 Tool Policy Coverage
 

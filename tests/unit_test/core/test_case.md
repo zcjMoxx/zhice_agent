@@ -15,8 +15,8 @@ Verify shared core helpers that are not tied to a concrete LLM, tool provider, W
 ### Case 2: Untagged messages
 
 - Input: messages without `turn_id` mixed with messages that have `turn_id`.
-- Expected: untagged messages are ignored by turn grouping.
-- Checkpoints: no synthetic turn ids are generated.
+- Expected: untagged legacy messages are grouped by user-message boundaries with deterministic in-memory ids.
+- Checkpoints: JSONL is not rewritten; explicit later Turn ids and original order remain unchanged.
 
 ### Case 3: Multiple explicit turns
 
@@ -27,5 +27,5 @@ Verify shared core helpers that are not tied to a concrete LLM, tool provider, W
 ### Case 4: Next turn index
 
 - Input: sessions with explicit indices or no explicit indices.
-- Expected: explicit max index plus one wins; otherwise index starts at `1`.
-- Checkpoints: untagged messages do not create derived indices.
+- Expected: explicit max index plus one wins; otherwise count lazily inferred legacy user Turns plus one.
+- Checkpoints: old JSONL stays unchanged while new writes avoid duplicate Turn indices.

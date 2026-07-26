@@ -86,7 +86,7 @@ def test_run_turn_keeps_repetitive_lifecycle_logs_at_debug(tmp_path, caplog):
 
     records = [record for record in caplog.records if record.name.startswith("zcagent.agent")]
     debug_events = [record.event for record in records if record.levelname == "DEBUG"]  # type: ignore[attr-defined]
-    assert debug_events == ["llm.call", "llm.done"]
+    assert debug_events == ["context.selection", "llm.call", "llm.done"]
 
 
 def test_run_turn_uses_external_turn_id_when_provided(tmp_path):
@@ -204,7 +204,7 @@ def test_run_turn_explains_missing_api_key(tmp_path):
     from agent.core.loop import AgentLoop
     from agent.protocols.llm import LLMConfigurationError
 
-    llm = RaisingLLM(LLMConfigurationError("LLM API key is missing. Set api_key in llm_endpoints.json."))
+    llm = RaisingLLM(LLMConfigurationError("LLM API key is missing. Set api_key in models.json."))
     sessions = InMemorySessionStore()
     loop = AgentLoop(
         llm=llm,
@@ -219,7 +219,7 @@ def test_run_turn_explains_missing_api_key(tmp_path):
     assert "Choose one" in result
     assert "api_key" in result
     assert "${YOUR_ENV_NAME}" in result
-    assert str(tmp_path / "config" / "llm_endpoints.json") in result
+    assert str(tmp_path / "config" / "models.json") in result
 
 
 def test_run_turn_explains_missing_placeholder_environment_variable(tmp_path):
@@ -267,7 +267,7 @@ def test_run_turn_explains_provider_request_failure(tmp_path):
 
     result = loop.run_turn("default", "hello")
 
-    assert "llm_endpoints.json" in result
+    assert "models.json" in result
     assert "base_url" in result
     assert "api_key" in result
 

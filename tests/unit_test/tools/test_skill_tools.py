@@ -175,8 +175,7 @@ description: Demo skill.
 def _make_skill_sync(workspace, source):
     config_dir = workspace / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_dir.joinpath("skill_sources.yml").write_text(
-        f"""
+    body = f"""
 sync:
   on_startup: never
   background:
@@ -186,7 +185,10 @@ sources:
   - name: official
     sync: true
     local_dir: "{source.resolve().as_posix()}"
-""",
+"""
+    indented = "\n".join(f"  {line}" if line else "" for line in body.strip().splitlines())
+    config_dir.joinpath("config.yml").write_text(
+        f"schema_version: 1\nskills:\n{indented}\n",
         encoding="utf-8",
     )
     return SkillSourceSync(

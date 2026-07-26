@@ -57,7 +57,7 @@ def test_openai_provider_requires_api_key(monkeypatch):
 
     from agent.llm.openai_provider import OpenAIProvider
 
-    with pytest.raises(Exception, match="llm_endpoints.json"):
+    with pytest.raises(Exception, match="models.json"):
         OpenAIProvider(_endpoint()).chat(messages=[{"role": "user", "content": "hello"}])
 
 

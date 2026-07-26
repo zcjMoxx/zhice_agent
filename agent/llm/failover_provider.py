@@ -153,6 +153,8 @@ class EndpointFailoverProvider:
             metadata["model"] = endpoint.model
             metadata["attempted_endpoints"] = attempted_names
             metadata["input_token_limit"] = self.context_budget.input_token_limit
+            metadata["input_price_per_million"] = endpoint.input_price_per_million
+            metadata["output_price_per_million"] = endpoint.output_price_per_million
             return LLMResponse(
                 content=response.content,
                 tool_calls=list(response.tool_calls),

@@ -27,7 +27,7 @@ _STAGES = {"pre_tooluse", "post_tooluse"}
 
 
 def load_hook_registry(config_path: Path, *, workspace: Path) -> HookRegistry:
-    """Load one hooks.yml file; a missing file means Hooks are disabled."""
+    """Load one standalone Hook mapping file for low-level parser tests/tools."""
 
     workspace = Path(workspace).expanduser().resolve()
     config_path = Path(config_path).expanduser().resolve()
@@ -37,6 +37,13 @@ def load_hook_registry(config_path: Path, *, workspace: Path) -> HookRegistry:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise HookConfigurationError(f"Cannot read Hook config: {config_path}") from exc
+    return load_hook_registry_mapping(raw, workspace=workspace)
+
+
+def load_hook_registry_mapping(raw: Any, *, workspace: Path) -> HookRegistry:
+    """Validate one already-loaded Hook mapping from config.yml."""
+
+    workspace = Path(workspace).expanduser().resolve()
     if raw is None:
         return HookRegistry()
     if not isinstance(raw, dict) or set(raw) - {"version", "hooks"}:

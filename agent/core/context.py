@@ -3,13 +3,28 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
+import threading
+import warnings
+from concurrent.futures import Future
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from agent.context.compaction import (
+    CompactionStore,
+    format_compaction_evidence,
+    validate_compaction,
+)
+from agent.context.config import ContextEngineeringConfig
+from agent.context.index import SQLiteTurnSearchIndex
+from agent.context.planner import ContextPlanner, context_root_for_session_store
+from agent.context.turn_document import build_turn_documents
 from agent.core.context_relevance import select_relevant_turns
 from agent.core.turns import group_messages_by_turn
+from agent.logging_utils import log_event
 from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.protocols.llm import ContextBudget, LLMContextBudgetError
@@ -22,6 +37,7 @@ DEFAULT_MAX_RELEVANT_TURNS = 3
 _CJK_CHAR_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
 _MESSAGE_TOKEN_OVERHEAD = 4
 _TOOL_CONTENT_MIN_CHARS = 128
+context_logger = logging.getLogger("zcagent.agent.context")
 
 
 class ContextBuilder:
@@ -39,6 +55,9 @@ class ContextBuilder:
         max_skill_summaries: int = 50,
         max_skill_summary_chars: int = 5000,
         extra_system_prompts: tuple[str, ...] = (),
+        context_config: ContextEngineeringConfig | None = None,
+        embedding_provider=None,
+        compaction_llm_provider=None,
     ):
         """Configure prompt source and history/message size limits."""
 
@@ -67,6 +86,27 @@ class ContextBuilder:
         self.max_skill_summaries = max_skill_summaries
         self.max_skill_summary_chars = max_skill_summary_chars
         self.extra_system_prompts = tuple(extra_system_prompts)
+        if (
+            max_history_turns != 50
+            or max_relevant_turns != DEFAULT_MAX_RELEVANT_TURNS
+            or always_include_recent_turns != DEFAULT_ALWAYS_INCLUDE_RECENT_TURNS
+            or max_history_messages != 60
+        ):
+            warnings.warn(
+                "Fixed history count settings are deprecated and no longer remove budget-fitting Session Turns.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        self.context_planner = ContextPlanner(
+            context_config or ContextEngineeringConfig(),
+            embedding_provider=embedding_provider,
+        )
+        self.compaction_llm_provider = compaction_llm_provider
+        self._background_lock = threading.Lock()
+        self._background_futures: dict[tuple[str, str], Future] = {}
+        self._background_states: dict[tuple[str, str], dict[str, Any]] = {}
+        self.last_plan = None
+        self.supports_context_engineering = True
 
     def build(
         self,
@@ -75,24 +115,299 @@ class ContextBuilder:
         workspace: Path,
         session_id: str,
         context_budget: ContextBudget | None = None,
+        tool_definitions: list[dict[str, Any]] | None = None,
+        session_store: object | None = None,
+        llm_provider: object | None = None,
     ) -> list[dict[str, Any]]:
-        """Return OpenAI-style messages for one chat turn."""
+        """Return budget-first full-Session messages for one chat turn."""
 
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": self._build_system_prompt(workspace=workspace, session_id=session_id),
-            }
-        ]
-
-        recent_history = self._select_recent_history(history, query=user_message.content)
-        messages.extend(self._history_to_llm_dicts(recent_history))
-
+        system_message = {
+            "role": "system",
+            "content": self._build_system_prompt(workspace=workspace, session_id=session_id),
+        }
         current_user = self._message_to_llm_dict(user_message)
         if current_user is None or current_user["role"] != "user":
             raise ValueError("user_message must have role 'user'")
-        messages.append(current_user)
-        return self.fit_messages(messages, context_budget=context_budget)
+        try:
+            compaction_prompt = self.prompt_loader.load("context_compaction").strip()
+        except PromptNotFoundError:
+            compaction_prompt = ""
+        try:
+            history_query_prompt = self.prompt_loader.load("history_query_planner").strip()
+        except PromptNotFoundError:
+            history_query_prompt = ""
+        try:
+            query_rewrite_prompt = self.prompt_loader.load("context_query_rewrite").strip()
+        except PromptNotFoundError:
+            query_rewrite_prompt = ""
+        projected_full_tokens = estimate_llm_tokens(
+            [system_message, *self._history_to_llm_dicts(history), current_user],
+            tool_definitions=tool_definitions,
+        )
+        self._wait_for_background_if_needed(
+            session_store,
+            session_id,
+            projected_full_tokens,
+            context_budget,
+        )
+        self._remember_background_state(
+            session_store=session_store,
+            session_id=session_id,
+            workspace=workspace,
+            context_budget=context_budget,
+            tool_definitions=tool_definitions,
+            compaction_llm=self.compaction_llm_provider or llm_provider,
+        )
+        self.last_plan = self.context_planner.plan(
+            session_id=session_id,
+            turns=group_messages_by_turn(history),
+            system_message=system_message,
+            current_user=current_user,
+            history_to_messages=self._history_to_llm_dicts,
+            estimate_tokens=estimate_llm_tokens,
+            context_budget=context_budget,
+            tool_definitions=tool_definitions,
+            context_root=context_root_for_session_store(session_store),
+            llm=llm_provider,
+            compaction_llm=self.compaction_llm_provider or llm_provider,
+            compaction_prompt=compaction_prompt,
+            history_query_prompt=history_query_prompt,
+            query_rewrite_prompt=query_rewrite_prompt,
+        )
+        return self.fit_messages(
+            list(self.last_plan.messages),
+            tool_definitions=tool_definitions,
+            context_budget=context_budget,
+        )
+
+    def on_turn_committed(
+        self,
+        session_store: object,
+        session_id: str,
+        messages: list[Message],
+    ) -> None:
+        """Synchronously make a committed Turn available to lexical retrieval."""
+
+        context_root = context_root_for_session_store(session_store)
+        if context_root is None:
+            return
+        documents = build_turn_documents(session_id, group_messages_by_turn(messages))
+        if documents:
+            SQLiteTurnSearchIndex(context_root / "context_index.sqlite3").upsert(documents)
+        self._maybe_schedule_background(session_store, session_id)
+
+    def delete_derived_session(self, session_store: object, session_id: str) -> None:
+        """Invalidate compaction and index state for clear/delete lifecycle."""
+
+        self.context_planner.delete_session(
+            context_root_for_session_store(session_store),
+            session_id,
+        )
+        key = _background_session_key(session_store, session_id)
+        with self._background_lock:
+            future = self._background_futures.pop(key, None)
+            self._background_states.pop(key, None)
+        if future is not None:
+            future.cancel()
+
+    def _remember_background_state(
+        self,
+        *,
+        session_store,
+        session_id: str,
+        workspace: Path,
+        context_budget: ContextBudget | None,
+        tool_definitions,
+        compaction_llm,
+    ) -> None:
+        if (
+            not self.context_planner.config.compaction.background_enabled
+            or context_budget is None
+            or session_store is None
+            or compaction_llm is None
+        ):
+            return
+        key = _background_session_key(session_store, session_id)
+        with self._background_lock:
+            self._background_states[key] = {
+                "session_store": session_store,
+                "workspace": Path(workspace),
+                "context_budget": context_budget,
+                "tool_definitions": list(tool_definitions or []),
+                "compaction_llm": compaction_llm,
+            }
+
+    def _wait_for_background_if_needed(
+        self,
+        session_store,
+        session_id: str,
+        projected_full_tokens: int,
+        context_budget: ContextBudget | None,
+    ) -> None:
+        if context_budget is None or session_store is None:
+            return
+        trigger = int(
+            context_budget.input_token_limit
+            * self.context_planner.config.compaction.trigger_budget_ratio
+        )
+        if projected_full_tokens < trigger:
+            return
+        key = _background_session_key(session_store, session_id)
+        with self._background_lock:
+            future = self._background_futures.get(key)
+        if future is None:
+            return
+        log_event(
+            context_logger,
+            logging.INFO,
+            "context.compaction.background_waited",
+            session_id=session_id,
+        )
+        try:
+            future.result()
+        except Exception as exc:  # noqa: BLE001 - foreground planner will safely retry.
+            log_event(
+                context_logger,
+                logging.WARNING,
+                "context.compaction.background_failed",
+                session_id=session_id,
+                error_type=type(exc).__name__,
+            )
+
+    def _maybe_schedule_background(self, session_store, session_id: str) -> None:
+        config = self.context_planner.config
+        if not config.compaction.background_enabled:
+            return
+        key = _background_session_key(session_store, session_id)
+        with self._background_lock:
+            state = self._background_states.get(key)
+            existing = self._background_futures.get(key)
+        if state is None or (existing is not None and not existing.done()):
+            return
+        messages = session_store.load(session_id).messages
+        turns = group_messages_by_turn(messages)
+        if not turns:
+            return
+        context_root = context_root_for_session_store(session_store)
+        if context_root is None:
+            return
+        system_message = {
+            "role": "system",
+            "content": self._build_system_prompt(state["workspace"], session_id),
+        }
+        reusable_messages = [system_message, *self._history_to_llm_dicts(messages)]
+        record = CompactionStore(context_root / "compactions").load(session_id)
+        if record is not None:
+            covered = [
+                turn for turn in turns if (turn.turn_index or 0) <= record.source_end_turn_index
+            ]
+            if validate_compaction(record, covered):
+                tail = [
+                    turn
+                    for turn in turns
+                    if (turn.turn_index or 0) > record.source_end_turn_index
+                ]
+                reusable_messages = [
+                    system_message,
+                    {"role": "system", "content": format_compaction_evidence(record)},
+                    *self._history_to_llm_dicts(
+                        [message for turn in tail for message in turn.messages]
+                    ),
+                ]
+            else:
+                CompactionStore(context_root / "compactions").delete(session_id)
+        reusable_tokens = estimate_llm_tokens(
+            reusable_messages,
+            tool_definitions=state["tool_definitions"],
+        )
+        background_trigger = int(
+            state["context_budget"].input_token_limit
+            * config.compaction.background_trigger_budget_ratio
+        )
+        if reusable_tokens < background_trigger:
+            return
+        future: Future = Future()
+        with self._background_lock:
+            current = self._background_futures.get(key)
+            if current is not None and not current.done():
+                return
+            self._background_futures[key] = future
+        thread = threading.Thread(
+            target=self._run_background_compaction,
+            args=(key, session_id, state, future),
+            name="zcagent-context-precompact",
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_background_compaction(self, key, session_id: str, state, future: Future) -> None:
+        log_event(
+            context_logger,
+            logging.INFO,
+            "context.compaction.background_started",
+            session_id=session_id,
+        )
+        try:
+            config = self.context_planner.config
+            background_config = replace(
+                config,
+                history_query=replace(
+                    config.history_query,
+                    enabled=False,
+                    planner_fallback=False,
+                ),
+                compaction=replace(
+                    config.compaction,
+                    trigger_budget_ratio=config.compaction.background_trigger_budget_ratio,
+                    background_enabled=False,
+                ),
+                retrieval=replace(config.retrieval, enabled=False),
+            )
+            session_store = state["session_store"]
+            messages = session_store.load(session_id).messages
+            planner = ContextPlanner(background_config)
+            plan = planner.plan(
+                session_id=session_id,
+                turns=group_messages_by_turn(messages),
+                system_message={
+                    "role": "system",
+                    "content": self._build_system_prompt(state["workspace"], session_id),
+                },
+                current_user={"role": "user", "content": "[background precompaction]"},
+                history_to_messages=self._history_to_llm_dicts,
+                estimate_tokens=estimate_llm_tokens,
+                context_budget=state["context_budget"],
+                tool_definitions=state["tool_definitions"],
+                context_root=context_root_for_session_store(session_store),
+                llm=None,
+                compaction_llm=state["compaction_llm"],
+                compaction_phase="background",
+                compaction_prompt=self.prompt_loader.load("context_compaction").strip(),
+            )
+            if not plan.compaction_id and "compaction" in plan.degraded:
+                raise RuntimeError("background compaction degraded")
+            future.set_result(plan)
+            log_event(
+                context_logger,
+                logging.INFO,
+                "context.compaction.background_done",
+                session_id=session_id,
+                compaction_id=plan.compaction_id,
+                compacted_through=plan.compacted_through_turn_index,
+            )
+        except Exception as exc:  # noqa: BLE001 - background work never blocks Session truth.
+            future.set_exception(exc)
+            log_event(
+                context_logger,
+                logging.WARNING,
+                "context.compaction.background_failed",
+                session_id=session_id,
+                error_type=type(exc).__name__,
+            )
+        finally:
+            with self._background_lock:
+                if self._background_futures.get(key) is future:
+                    self._background_futures.pop(key, None)
 
     def fit_messages(
         self,
@@ -351,6 +666,11 @@ def _compact_json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
     except (TypeError, ValueError):
         return str(value)
+
+
+def _background_session_key(session_store: object, session_id: str) -> tuple[str, str]:
+    root = context_root_for_session_store(session_store)
+    return (str(root or id(session_store)), session_id)
 
 
 def _conversation_turn_ranges(messages: list[dict[str, Any]]) -> list[tuple[int, int]]:

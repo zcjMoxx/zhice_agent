@@ -51,7 +51,7 @@ def test_missing_channel_config_is_disabled(tmp_path):
 def test_channel_config_resolves_env_and_hides_secret_from_repr(tmp_path, monkeypatch):
     monkeypatch.setenv("QQ_APP", "app-123")
     monkeypatch.setenv("QQ_SECRET", "secret-456")
-    (tmp_path / "channels.yml").write_text(
+    (tmp_path / "config.yml").write_text(
         """
 channels:
   qq:
@@ -74,7 +74,7 @@ channels:
 
 
 def test_channel_config_preserves_declared_external_channel_order(tmp_path):
-    (tmp_path / "channels.yml").write_text(
+    (tmp_path / "config.yml").write_text(
         """
 channels:
   weixin:
@@ -91,7 +91,7 @@ channels:
 
 
 def test_channel_config_rejects_duplicate_accounts(tmp_path):
-    (tmp_path / "channels.yml").write_text(
+    (tmp_path / "config.yml").write_text(
         """
 channels:
   qq:

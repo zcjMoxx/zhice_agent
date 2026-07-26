@@ -1,6 +1,6 @@
 # ZhiCe-Agent Memory 作用域、主动候选与确认写入设计记录
 
-> 说明：本文记录的 Memory tool confirmation、候选状态机和 Web 编辑确认方案已被 `docs_design/2026-07-16-conversational-memory-consent-design.md` 替代；显式 Session Summary 也已因没有上下文消费闭环而删除，参考 `docs_design/2026-07-16-remove-unclosed-session-summary-design.md`。当前仍适用的是 Memory 作用域、Markdown 存储和安全过滤边界。
+> 说明：本文记录的 Memory tool confirmation、候选状态机和 Web 编辑确认方案已被 `docs_design/2026-07-16-conversational-memory-consent-design.md` 替代；显式 Session Summary 也已因没有上下文消费闭环而删除，参考 `docs_design/2026-07-16-remove-unclosed-session-summary-design.md`。当前仍适用的是 Memory 作用域、Markdown 存储和安全过滤边界。正文中的“Part 16 自动 recall”旧路线已调整：完整 Session 上下文工程现为 Part 15，参考 `docs_design/zhice-agent-part15-context-engineering-design.md`；运行可靠性与部署归入 Part 16。
 
 > 日期：2026-07-15
 >

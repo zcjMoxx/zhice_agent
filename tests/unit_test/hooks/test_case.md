@@ -6,7 +6,7 @@
 
 ## 用例覆盖
 
-- 缺少 `hooks.yml` 或空 hooks 时返回空 Registry，不启动子进程。
+- 缺少`config.yml.hooks`或`entries: []`时返回空Registry，不启动子进程。
 - 合法配置按顺序注册；Tool matcher 只接受精确名称或独立 `*`，部分通配符启动失败；`exempt_roles` / `exempt_permissions` 支持缺省、空列表和去重，非法类型或 key 启动失败；重复名称、非法 stage、workspace 外脚本和非法限制值启动失败。
 - 真实 Python fixture 通过 stdin/stdout JSON 覆盖 continue、block、modify 和 enrich。
 - pre Hook timeout、输出超限、非法 JSON、非法字段和脚本异常 fail closed。

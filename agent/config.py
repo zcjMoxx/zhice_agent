@@ -37,6 +37,7 @@ _ENDPOINT_ROUTE_KEYS = {
     "api_key",
     "context_window",
     "max_tokens",
+    "pricing",
 }
 
 
@@ -68,19 +69,19 @@ class AppConfig:
     def mcp_config_path(self) -> Path:
         """Workspace runtime MCP configuration path."""
 
-        return self.config_dir / "mcp.json"
+        return self.config_dir / "config.yml"
 
     @property
     def hooks_config_path(self) -> Path:
         """Workspace runtime Tool Hook configuration path."""
 
-        return self.config_dir / "hooks.yml"
+        return self.config_dir / "config.yml"
 
     @property
     def channels_config_path(self) -> Path:
         """Workspace runtime external-channel configuration path."""
 
-        return self.config_dir / "channels.yml"
+        return self.config_dir / "config.yml"
 
     @property
     def mcp_runtime_dir(self) -> Path:
@@ -181,9 +182,16 @@ def resolve_llm_endpoint_alias(config_dir: Path, name: str | None) -> str:
     alias such as ``"default": "openai_gpt5"`` resolves to ``openai_gpt5``.
     """
 
+    endpoint_name, _ = resolve_model_route(config_dir, name)
+    return endpoint_name
+
+
+def resolve_model_route(config_dir: Path, name: str | None) -> tuple[str, str]:
+    """Resolve a route or endpoint/model string into its two explicit parts."""
+
     endpoint_name = (name or "").strip()
     if not endpoint_name or endpoint_name == "auto":
-        return ""
+        return "", ""
 
     raw = _load_llm_endpoint_config(config_dir)
     aliases = _endpoint_aliases(raw)
@@ -194,11 +202,14 @@ def resolve_llm_endpoint_alias(config_dir: Path, name: str | None) -> str:
             raise LLMConfigurationError(f"LLM endpoint alias cycle detected: {endpoint_name}")
         seen.add(endpoint_name)
         endpoint_name = aliases[endpoint_name]
-    return endpoint_name
+    endpoint, separator, model = endpoint_name.partition("/")
+    if not endpoint.strip() or (separator and not model.strip()):
+        raise LLMConfigurationError(f"Invalid model route: {endpoint_name!r}")
+    return endpoint.strip(), model.strip()
 
 
 def load_llm_endpoints(config_dir: Path) -> list[LLMEndpoint]:
-    """Load all endpoint objects from config/llm_endpoints.json."""
+    """Load all chat endpoint objects from config/models.json."""
 
     raw = _load_llm_endpoint_config(config_dir)
     endpoints = [
@@ -211,23 +222,33 @@ def load_llm_endpoints(config_dir: Path) -> list[LLMEndpoint]:
 
 
 def _load_llm_endpoint_config(config_dir: Path) -> dict[str, object]:
-    """Read the raw endpoint JSON before interpreting endpoint fields."""
+    """Read config/models.json and expose its chat endpoints plus routing aliases."""
 
-    path = config_dir / "llm_endpoints.json"
+    path = config_dir / "models.json"
     if not path.exists():
         raise LLMConfigurationError(
-            "LLM endpoint config is missing. Create config/llm_endpoints.json from "
-            "config/llm_endpoints.example.json."
+            "Model config is missing. Create config/models.json from config/models.example.json."
         )
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise LLMConfigurationError(f"Invalid LLM endpoint config JSON: {path}") from exc
+        raise LLMConfigurationError(f"Invalid model config JSON: {path}") from exc
 
     if not isinstance(raw, dict):
-        raise LLMConfigurationError("LLM endpoint config must be a JSON object")
-    return raw
+        raise LLMConfigurationError("models.json must be a JSON object")
+    if raw.get("schema_version", 1) != 1:
+        raise LLMConfigurationError("models.json schema_version must be 1")
+    chat = raw.get("chat", {})
+    routing = raw.get("routing", {})
+    if not isinstance(chat, dict) or not isinstance(routing, dict):
+        raise LLMConfigurationError("models.json chat and routing must be objects")
+    normalized: dict[str, object] = dict(chat)
+    for alias in ("chat", "compaction"):
+        value = routing.get(alias)
+        if isinstance(value, str) and value.strip():
+            normalized["default" if alias == "chat" else alias] = value.strip()
+    return normalized
 
 
 def init_runtime_files(
@@ -237,6 +258,8 @@ def init_runtime_files(
     create_llm_config: bool = True,
     create_skill_sources_config: bool = True,
     create_channels_config: bool = True,
+    create_context_config: bool = True,
+    create_embedding_config: bool = True,
     create_prompts: bool = True,
     endpoint_name: str = "default",
     protocol: str = "openai",
@@ -268,23 +291,48 @@ def init_runtime_files(
         env_path = config.workspace / ".env"
         if _write_text_once(env_path, _build_env_template(config), force=force):
             written.append(env_path)
-    if create_llm_config:
-        llm_path = config.config_dir / "llm_endpoints.json"
+    if create_llm_config or create_embedding_config:
+        llm_path = config.config_dir / "models.json"
         endpoint_payload = {
             "protocol": protocol,
             "provider": "",
             "base_url": base_url,
             "api_key": api_key,
             "model": model,
+            "supported_models": [model],
             "max_tokens": max_tokens,
             "context_window": context_window,
             "temperature": temperature,
             "priority": 1,
             "enabled": True,
             "role": "default",
+            "pricing": {
+                "input_per_million": 0,
+                "output_per_million": 0,
+            },
         }
+        route = f"{endpoint_name}/{model}"
         payload = {
-            endpoint_name: endpoint_payload
+            "schema_version": 1,
+            "routing": {
+                "chat": route,
+                "compaction": route,
+                "embedding": "default_embedding",
+            },
+            "chat": {endpoint_name: endpoint_payload},
+            "embedding": {
+                "default_embedding": {
+                    "protocol": "openai",
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key": "${ZHICE_EMBEDDING_API_KEY}",
+                    "model": "text-embedding-3-small",
+                    "supported_models": ["text-embedding-3-small"],
+                    "dimensions": 1536,
+                    "timeout": 30,
+                    "batch_size": 16,
+                    "enabled": False,
+                }
+            },
         }
         if _write_text_once(
             llm_path,
@@ -292,18 +340,17 @@ def init_runtime_files(
             force=force,
         ):
             written.append(llm_path)
-    if create_skill_sources_config:
-        source = _default_workspace() / "config" / "skill_sources.example.yml"
+    if any(
+        (
+            create_skill_sources_config,
+            create_channels_config,
+            create_context_config,
+        )
+    ):
+        source = _default_workspace() / "config" / "config.example.yml"
         if not source.is_file():
-            raise InitConfigurationError(f"Source Skill config template is missing: {source}")
-        target = config.config_dir / "skill_sources.yml"
-        if _write_text_once(target, source.read_text(encoding="utf-8"), force=force):
-            written.append(target)
-    if create_channels_config:
-        source = _default_workspace() / "config" / "channels.example.yml"
-        if not source.is_file():
-            raise InitConfigurationError(f"Source Channel config template is missing: {source}")
-        target = config.channels_config_path
+            raise InitConfigurationError(f"Unified config template is missing: {source}")
+        target = config.config_dir / "config.yml"
         if _write_text_once(target, source.read_text(encoding="utf-8"), force=force):
             written.append(target)
     if create_prompts:
@@ -473,7 +520,19 @@ def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
         enabled=_coerce_bool(data.get("enabled"), True, "enabled"),
         role=_resolve_endpoint_text(name, data.get("role") or "default", "role"),
         supported_models=supported_models,
+        input_price_per_million=_price(data, "input_per_million"),
+        output_price_per_million=_price(data, "output_per_million"),
     )
+
+
+def _price(data: dict[str, object], field: str) -> float:
+    pricing = data.get("pricing", {})
+    if not isinstance(pricing, dict):
+        raise LLMConfigurationError("LLM endpoint pricing must be an object")
+    value = _coerce_float(pricing.get(field), 0.0, f"pricing.{field}")
+    if value < 0:
+        raise LLMConfigurationError(f"LLM endpoint price must be non-negative: {field}")
+    return value
 
 
 def _resolve_supported_models(endpoint_name: str, value: object) -> tuple[str, ...]:

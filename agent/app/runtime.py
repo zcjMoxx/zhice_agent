@@ -19,11 +19,16 @@ from agent.auth.store import SQLiteAuthStore
 from agent.auth.tool_policy import RbacToolExecutionPolicy
 from agent.auth.user_context import FilesystemUserContextResolver
 from agent.config import AppConfig
+from agent.context.config import load_context_config
+from agent.context.startup import check_context_engineering_startup
 from agent.core.context import DEFAULT_CONTEXT_PROMPTS, ContextBuilder
 from agent.core.loop import AgentLoop, CancellationToken
 from agent.core.turns import new_turn_id
 from agent.hooks import create_hook_runtime
-from agent.llm.runtime import create_configured_llm_provider
+from agent.llm.runtime import (
+    create_configured_llm_provider,
+    create_optional_aliased_llm_provider,
+)
 from agent.llm.selection import ConfiguredLLMProviderResolver
 from agent.logging_utils import log_event
 from agent.mcp import McpRuntime, check_mcp_startup
@@ -41,7 +46,7 @@ from agent.protocols.capability import CapabilityStatus
 from agent.protocols.channel import ChannelExecutionContext
 from agent.protocols.diagnostics import DiagnosticContext
 from agent.protocols.errors import ErrorCode
-from agent.protocols.llm import LLMEndpoint, LLMProvider
+from agent.protocols.llm import LLMConfigurationError, LLMEndpoint, LLMProvider
 from agent.protocols.mcp import McpInteractionResponse
 from agent.protocols.session import (
     SessionContext,
@@ -127,6 +132,7 @@ class WebRuntime:
     subagent_status: CapabilityStatus | None = None
     mcp_status: CapabilityStatus | None = None
     memory_extraction_status: CapabilityStatus | None = None
+    context_engineering_status: CapabilityStatus | None = None
     llm_resolver: ConfiguredLLMProviderResolver | None = None
     tool_policy: RbacToolExecutionPolicy | None = None
     confirmation_broker: SQLiteToolConfirmationBroker | None = None
@@ -171,6 +177,8 @@ class WebRuntime:
         )
         if self.memory_extraction_status is not None:
             statuses["memory_extraction"] = self.memory_extraction_status
+        if self.context_engineering_status is not None:
+            statuses["context_engineering"] = self.context_engineering_status
         if self.channel_status is not None:
             statuses["channel.qq"] = self.channel_status
         if self.channel_statuses is not None:
@@ -569,6 +577,7 @@ class WebRuntime:
         if command == "clear":
             self._cancel_memory_extraction(actor, session_id)
             self._clear_subagent_force_once(actor, session_id)
+            self._invalidate_session_context(actor, session_id)
             if self.session_access is not None and actor.user_id is not None:
                 self.session_access.clear_session(actor, session_id)
             else:
@@ -651,6 +660,7 @@ class WebRuntime:
             if target_session_id == session_id:
                 self._cancel_memory_extraction(actor, session_id)
                 self._clear_subagent_force_once(actor, session_id)
+                self._invalidate_session_context(actor, session_id)
                 if self.session_access is not None and actor.user_id is not None:
                     self.session_access.clear_session(actor, session_id)
                 else:
@@ -778,6 +788,7 @@ class WebRuntime:
         actor, session_id = _normalize_actor_session(actor, session_id)
         self._cancel_memory_extraction(actor, session_id)
         self.cancel_session(actor, session_id)
+        self._invalidate_session_context(actor, session_id)
         if self.session_access is not None and actor.user_id is not None:
             self.session_access.delete_session(actor, session_id)
         else:
@@ -790,6 +801,20 @@ class WebRuntime:
             session_id=session_id,
             request_id=request_id,
         )
+
+    def _invalidate_session_context(self, actor: ActorContext, session_id: str) -> None:
+        """Delete rebuildable state within the actor-authorized Session store."""
+
+        sessions = self.sessions
+        if self.session_access is not None and actor.user_id is not None:
+            try:
+                sessions = self.session_access.resolve_session(actor, session_id).store
+            except SessionAccessError:
+                return
+        builder = getattr(self.agent_loop, "context_builder", None)
+        invalidate = getattr(builder, "delete_derived_session", None)
+        if callable(invalidate):
+            invalidate(sessions, session_id)
 
     def cancel_session(
         self,
@@ -1227,13 +1252,31 @@ def build_web_runtime(
     mcp_startup = check_mcp_startup(config.config_dir)
     memory_extraction_startup = check_memory_extraction_startup(prompt_loader)
     subagent_config = subagent_startup.config
+    context_startup = check_context_engineering_startup(config.config_dir, prompt_loader)
+    context_config = load_context_config(config.config_dir)
+    llm = create_configured_llm_provider(config.config_dir, endpoint_name)
+    try:
+        compaction_llm = create_optional_aliased_llm_provider(
+            config.config_dir,
+            "compaction",
+        )
+    except LLMConfigurationError as exc:
+        compaction_llm = None
+        log_event(
+            web_logger,
+            logging.WARNING,
+            "context.compaction.endpoint_degraded",
+            error_type=type(exc).__name__,
+        )
     context_builder = ContextBuilder(
         prompt_loader,
         skills=skill_loader,
         max_history_messages=DEFAULT_WEB_HISTORY_MESSAGES,
         extra_system_prompts=("subagent_orchestration",) if subagent_config.enabled else (),
+        context_config=context_config,
+        embedding_provider=context_startup.embedding_provider,
+        compaction_llm_provider=compaction_llm,
     )
-    llm = create_configured_llm_provider(config.config_dir, endpoint_name)
     default_endpoint = _current_endpoint(llm).name
     llm_resolver = ConfiguredLLMProviderResolver(
         list(llm.endpoints()),
@@ -1297,6 +1340,7 @@ def build_web_runtime(
         subagent_status=subagent_startup.status,
         mcp_status=mcp_startup.status,
         memory_extraction_status=memory_extraction_startup.status,
+        context_engineering_status=context_startup.status,
         llm_resolver=llm_resolver,
         tool_policy=tool_policy,
         confirmation_broker=confirmation_broker,
@@ -1499,8 +1543,8 @@ def _create_skill_loader(
             "skills.runtime_unavailable",
             code="SKILL_SOURCE_CONFIG_INVALID",
             message="Skill source configuration is invalid.",
-            hint="Fix config/skill_sources.yml, then restart the process.",
-            config_file="skill_sources.yml",
+            hint="Fix the skills section in config/config.yml, then restart the process.",
+            config_file="config.yml",
             error_type=type(exc).__name__,
         )
         return SkillLoader([])
@@ -1512,7 +1556,7 @@ def _create_skill_loader(
             code="SKILL_SYNC_FAILED",
             message="Configured Skill source synchronization failed.",
             hint="Run /skills sync --verbose to inspect and retry synchronization.",
-            config_file="skill_sources.yml",
+            config_file="config.yml",
             error_type=type(startup_error).__name__,
         )
     return SkillLoader(roots)
@@ -1626,7 +1670,7 @@ def _load_subagent_profile_summaries(config_dir) -> tuple[tuple[str, str], ...]:
     try:
         from agent.subagents.config import load_subagent_config
 
-        config = load_subagent_config(config_dir / "subagents.yml")
+        config = load_subagent_config(config_dir)
     except (ImportError, OSError, ValueError):
         return ()
     summaries: list[tuple[str, str]] = []

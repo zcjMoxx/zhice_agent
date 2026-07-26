@@ -1,0 +1,74 @@
+schema_version: 1
+
+context:
+  full_history:
+    enabled: true
+  history_query:
+    enabled: true
+    planner_fallback: true
+  compaction:
+    enabled: true
+    trigger_budget_ratio: 0.85
+    recent_keep_ratio: 0.15
+    post_compaction_max_ratio: 0.35
+    min_recent_turns: 8
+    background_enabled: true
+    background_trigger_budget_ratio: 0.80
+  retrieval:
+    enabled: true
+    top_k: 6
+    semantic_weight: 0.45
+    lexical_weight: 0.30
+    entity_weight: 0.15
+    anchor_weight: 0.08
+    recency_weight: 0.02
+    min_semantic_score: 0.15
+  index:
+    backend: sqlite
+
+skills:
+  sync:
+    on_startup: always
+    log: changes_only
+    background:
+      enabled: false
+      interval_seconds: 0
+  sources:
+    - name: zhice-official
+      sync: true
+      local_dir: "${ZHICE_AGENT_SKILL_REPO}"
+      git_url: "https://example.com/skills.git"
+      target: master
+
+subagents:
+  enabled: false
+  max_parallel: 3
+  max_tasks_per_call: 4
+  max_depth: 1
+  max_subagents_per_parent_turn: 6
+  max_batches_per_parent_turn: 1
+  max_batch_result_chars: 32000
+  profiles: {}
+
+channels:
+  qq:
+    enabled: false
+    transport: websocket
+    accounts: []
+  weixin:
+    enabled: false
+    transport: sidecar_stdio
+    node_path: node
+    sidecar_entry: integrations/weixin_sidecar/dist/main.js
+    binding_timeout_seconds: 480
+    max_parallel_conversations: 8
+    text_chunk_limit: 4000
+
+hooks:
+  version: 1
+  entries: []
+
+mcp:
+  servers: {}
+
+logging: {}

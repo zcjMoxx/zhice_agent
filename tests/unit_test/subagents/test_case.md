@@ -8,7 +8,7 @@
 
 ### Case 1：缺少配置
 
-- 输入：运行态 `config/subagents.yml` 不存在。
+- 输入：运行态`config/config.yml`不存在或`subagents`分区缺失。
   - 预期：Subagent 是正常 disabled 状态，不影响应用启动。
 - 输入：Subagent 配置无效或必需 Prompt 缺失。
   - 预期：仅 Subagent capability 标记为 unavailable，返回稳定错误码和修复提示，不抛出启动异常。

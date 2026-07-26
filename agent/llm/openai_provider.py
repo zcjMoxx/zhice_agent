@@ -86,7 +86,7 @@ def _read_api_key(endpoint: LLMEndpoint) -> str:
     api_key = endpoint.api_key.strip()
     if api_key:
         return api_key
-    raise LLMConfigurationError("LLM API key is missing. Set api_key in llm_endpoints.json.")
+    raise LLMConfigurationError("LLM API key is missing. Set api_key in models.json.")
 
 
 def _clean_message(message: dict[str, Any]) -> dict[str, Any]:

@@ -16,7 +16,7 @@
 
 - 输入：endpoint 中包含或缺失 `api_key`。
 - 预期：有 key 时写入 Bearer Authorization；缺失 key 时请求前失败。
-- 检查点：错误提示指向 `llm_endpoints.json`。
+- 检查点：错误提示指向`models.json`。
 
 ### Case 3: tools 请求体
 

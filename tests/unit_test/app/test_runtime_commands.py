@@ -45,7 +45,7 @@ def test_missing_skill_source_config_is_silent_and_disabled(tmp_path, caplog):
 def test_invalid_skill_source_config_logs_one_structured_gateway_warning(tmp_path, caplog):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    (config_dir / "skill_sources.yml").write_text("sync: [", encoding="utf-8")
+    (config_dir / "config.yml").write_text("skills: []\n", encoding="utf-8")
     skill_sync = SkillSourceSync(
         workspace=tmp_path,
         config_dir=config_dir,
@@ -64,7 +64,7 @@ def test_invalid_skill_source_config_logs_one_structured_gateway_warning(tmp_pat
     ]
     assert len(records) == 1
     assert records[0].fields["code"] == "SKILL_SOURCE_CONFIG_INVALID"
-    assert records[0].fields["config_file"] == "skill_sources.yml"
+    assert records[0].fields["config_file"] == "config.yml"
     assert str(tmp_path) not in str(records[0].fields)
 
 

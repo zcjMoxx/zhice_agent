@@ -20,8 +20,8 @@ def test_group_messages_by_explicit_turn_id():
     assert [message.content for message in groups[0].messages] == ["hello", "hi"]
 
 
-def test_group_messages_ignores_messages_without_turn_id():
-    """Messages without explicit turn ids are not interpreted as turns."""
+def test_group_messages_backfills_messages_without_turn_id():
+    """Legacy messages receive deterministic in-memory Turn boundaries."""
 
     groups = group_messages_by_turn(
         [
@@ -32,8 +32,12 @@ def test_group_messages_ignores_messages_without_turn_id():
         ],
     )
 
-    assert [group.turn_id for group in groups] == ["turn-2"]
-    assert [[message.content for message in group.messages] for group in groups] == [["second", "two"]]
+    assert [group.turn_id for group in groups] == ["legacy-turn-1", "turn-2"]
+    assert [message.content for message in groups[0].messages] == ["first", "one"]
+    assert [[message.content for message in group.messages] for group in groups] == [
+        ["first", "one"],
+        ["second", "two"],
+    ]
 
 
 def test_group_multiple_explicit_turns_keeps_file_order():
@@ -83,8 +87,8 @@ def test_next_turn_index_uses_explicit_indices_first():
     )
 
 
-def test_next_turn_index_starts_at_one_without_explicit_indices():
-    """Messages without new turn indices do not create a derived index."""
+def test_next_turn_index_counts_legacy_user_turns_without_explicit_indices():
+    """New writes continue after lazily inferred legacy Turn boundaries."""
 
     assert (
         next_turn_index(
@@ -94,5 +98,5 @@ def test_next_turn_index_starts_at_one_without_explicit_indices():
                 Message(role="user", content="second"),
             ],
         )
-        == 1
+        == 3
     )

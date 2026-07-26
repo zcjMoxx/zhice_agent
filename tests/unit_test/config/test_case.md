@@ -2,7 +2,7 @@
 
 ## 测试目标
 
-验证配置加载、运行时目录派生、dotenv 读取、LLM endpoint 解析和 `zcagent init` 文件初始化都遵守 workspace 边界和 secret 管理约定。
+验证双文件配置加载、运行时目录派生、dotenv读取、模型路由和`zcagent init`都遵守workspace边界和Secret管理约定。
 
 Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared/readonly` 都从 workspace 派生。
 
@@ -32,11 +32,11 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 - 预期：第一阶段需要的运行目录全部存在。
 - 检查点：`config`、`prompts`、`contexts/sessions`、`extends`、`logs` 被创建。
 
-### Case 5: LLM endpoint 解析
+### Case 5: Models端点与路由解析
 
-- 输入：读取 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`。
+- 输入：读取`${ZHICE_AGENT_WORKSPACE}/config/models.json`。
 - 预期：解析为 `LLMEndpoint`。
-- 检查点：支持 `api_key` 明文和 `${ENV_VAR}` 占位；支持 keyed object 和顶层 `endpoints` 列表；支持 `default` 别名；支持 `priority`、`enabled`、`role`、`context_window` 和 `max_tokens`；缺少 `context_window` 时默认 `131072`；非法 JSON、未知 endpoint、未定义环境变量都会给出配置错误。
+- 检查点：Chat/Compaction/Embedding用途分离；支持`endpoint`和`endpoint/model`；显式模型必须命中`supported_models`；支持明文和`${ENV_VAR}`；价格非负；缺Secret、未知端点、非法预算明确失败；旧`llm_endpoints.json`存在也不读取。
 
 ### Case 6: dotenv 读取
 
@@ -47,5 +47,11 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 ### Case 7: 初始化运行时文件
 
 - 输入：调用 `init_runtime_files()`。
-- 预期：生成本地 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`、`${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`、`${ZHICE_AGENT_WORKSPACE}/config/channels.yml` 和 prompts，可选生成 `${ZHICE_AGENT_WORKSPACE}/.env`。
-- 检查点：`channels.yml` 从仓库 `config/channels.example.yml` 复制；默认不覆盖已有文件但会补齐缺失文件；`force=True` 会刷新模板；模板缺失返回稳定配置错误；生成 LLM 配置只写 `context_window` 和 `max_tokens` 两个预算字段。
+- 预期：只生成`${ZHICE_AGENT_WORKSPACE}/config/models.json`、`${ZHICE_AGENT_WORKSPACE}/config/config.yml`和prompts，可选生成`${ZHICE_AGENT_WORKSPACE}/.env`。
+- 检查点：默认不覆盖已有文件；`force=True`刷新两个主模板；路由直观写为`endpoint/model`；不会生成旧分散配置文件。
+
+### Case 8: config.yml分区隔离
+
+- 输入：分别加载Context、Skills、Subagents、Channels、Hooks和MCP分区。
+- 预期：缺失分区使用安全默认或禁用可选能力；错误类型只使对应能力失败。
+- 检查点：YAML根结构和`schema_version`统一校验；各模块继续严格校验本领域字段；不从旧文件懒读取。

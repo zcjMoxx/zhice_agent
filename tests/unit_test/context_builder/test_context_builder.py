@@ -33,8 +33,8 @@ def test_build_includes_system_prompt_and_current_user_message(tmp_path):
     assert messages[-1] == {"role": "user", "content": "hello"}
 
 
-def test_build_keeps_recent_history_in_order(tmp_path):
-    """Only the most recent configured history messages should be sent."""
+def test_build_keeps_full_history_in_order(tmp_path):
+    """Deprecated fixed message limits no longer remove history that fits."""
 
     from agent.core.context import ContextBuilder
 
@@ -58,14 +58,15 @@ def test_build_keeps_recent_history_in_order(tmp_path):
     )
 
     assert messages[1:] == [
+        {"role": "user", "content": "old user"},
         {"role": "assistant", "content": "recent assistant"},
         {"role": "user", "content": "recent user"},
         {"role": "user", "content": "current"},
     ]
 
 
-def test_build_keeps_relevant_recent_user_turns_in_order(tmp_path):
-    """Turn-based history should keep relevant recent user turns in order."""
+def test_build_keeps_all_budget_fitting_turns_in_order(tmp_path):
+    """Full mode keeps all complete Turns in original order."""
 
     from agent.core.context import ContextBuilder
 
@@ -92,6 +93,8 @@ def test_build_keeps_relevant_recent_user_turns_in_order(tmp_path):
     )
 
     assert [message["content"] for message in messages[1:]] == [
+        "u1",
+        "a1",
         "u2",
         "a2",
         "u3",
@@ -100,8 +103,8 @@ def test_build_keeps_relevant_recent_user_turns_in_order(tmp_path):
     ]
 
 
-def test_build_omits_unrelated_turn_history(tmp_path):
-    """Unrelated prior turns should not enter the LLM context."""
+def test_build_keeps_unrelated_turn_when_full_history_fits(tmp_path):
+    """Relevance must not delete Session state before the budget requires it."""
 
     from agent.core.context import ContextBuilder
 
@@ -123,7 +126,7 @@ def test_build_omits_unrelated_turn_history(tmp_path):
         session_id="default",
     )
 
-    assert [message["role"] for message in messages] == ["system", "user"]
+    assert [message["role"] for message in messages] == ["system", "user", "assistant", "user"]
     assert messages[-1]["content"] == "你好"
 
 
@@ -179,8 +182,8 @@ def test_build_keeps_previous_turn_for_short_confirmation(tmp_path):
     ]
 
 
-def test_build_can_omit_all_history_by_turn_count(tmp_path):
-    """A zero turn limit should leave only system and current user messages."""
+def test_deprecated_zero_turn_limit_does_not_remove_history(tmp_path):
+    """The removed fixed Turn strategy cannot override budget-first full mode."""
 
     from agent.core.context import ContextBuilder
 
@@ -194,12 +197,12 @@ def test_build_can_omit_all_history_by_turn_count(tmp_path):
         session_id="default",
     )
 
-    assert [message["role"] for message in messages] == ["system", "user"]
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
     assert messages[-1]["content"] == "current"
 
 
-def test_build_drops_old_whole_turns_for_message_cap(tmp_path):
-    """The message hard cap should drop old turns rather than split them."""
+def test_deprecated_message_cap_does_not_drop_budget_fitting_turns(tmp_path):
+    """Message count is no longer a normal Session deletion policy."""
 
     from agent.core.context import ContextBuilder
 
@@ -226,14 +229,18 @@ def test_build_drops_old_whole_turns_for_message_cap(tmp_path):
     )
 
     assert [message["content"] for message in messages[1:]] == [
+        "project-alpha u1",
+        "project-alpha a1",
+        "project-alpha u2",
+        "project-alpha a2",
         "project-alpha u3",
         "project-alpha a3",
         "project-alpha current",
     ]
 
 
-def test_build_turn_selection_ignores_messages_without_turn_id(tmp_path):
-    """Turn-based selection should ignore untagged history messages."""
+def test_build_lazily_backfills_messages_without_turn_id(tmp_path):
+    """Legacy Session messages remain available through inferred Turn groups."""
 
     from agent.core.context import ContextBuilder
 
@@ -253,6 +260,8 @@ def test_build_turn_selection_ignores_messages_without_turn_id(tmp_path):
     )
 
     assert [message["content"] for message in messages[1:]] == [
+        "untagged assistant",
+        "untagged user",
         "kept user",
         "kept assistant",
         "kept",
@@ -313,8 +322,8 @@ def test_build_includes_complete_tool_messages_and_ids(tmp_path):
     ]
 
 
-def test_build_drops_orphan_tool_messages_after_history_trimming(tmp_path):
-    """OpenAI-compatible providers reject tool messages without tool_calls."""
+def test_build_preserves_complete_legacy_tool_block_in_full_mode(tmp_path):
+    """A complete tool-call/result block remains atomic in full history."""
 
     from agent.core.context import ContextBuilder
 
@@ -340,8 +349,14 @@ def test_build_drops_orphan_tool_messages_after_history_trimming(tmp_path):
         session_id="default",
     )
 
-    assert [message["role"] for message in messages] == ["system", "assistant", "user"]
-    assert messages[1]["content"] == "kept"
+    assert [message["role"] for message in messages] == [
+        "system",
+        "assistant",
+        "tool",
+        "assistant",
+        "user",
+    ]
+    assert messages[3]["content"] == "kept"
 
 
 def test_build_drops_incomplete_assistant_tool_call_blocks(tmp_path):
@@ -551,7 +566,7 @@ def test_context_builder_defaults_use_recent_three_plus_three_relevant_turns(tmp
     assert builder.max_relevant_turns == 3
 
 
-def test_build_keeps_recent_three_and_adds_three_older_relevant_turns(tmp_path):
+def test_build_keeps_all_turns_when_full_history_fits(tmp_path):
     from agent.core.context import ContextBuilder
 
     builder = ContextBuilder(PromptLoader(_write_required_prompts(tmp_path)))
@@ -594,12 +609,12 @@ def test_build_keeps_recent_three_and_adds_three_older_relevant_turns(tmp_path):
         "project-alpha old one",
         "project-alpha old two",
         "project-alpha old three",
+        "unrelated old four",
+        "unrelated old five",
         "recent six",
         "recent seven",
         "recent eight",
     ]
-    assert "unrelated old four" not in contents
-    assert "unrelated old five" not in contents
 
 
 def test_context_budget_drops_retrieved_turns_before_recent_three(tmp_path):

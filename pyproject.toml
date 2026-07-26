@@ -15,6 +15,7 @@ dependencies = [
     "jsonschema>=4.23.0,<5",
     "litellm>=1.0.0",
     "mcp>=1.27.0,<2",
+    "numpy>=1.26.0",
     "PyYAML>=6.0",
     "uvicorn>=0.29.0",
 ]

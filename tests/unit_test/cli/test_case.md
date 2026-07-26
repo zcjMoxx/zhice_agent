@@ -12,7 +12,7 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 - 输入：显式 workspace、endpoint、base_url、api_key、model 等参数。
 - 预期：在 workspace 下生成运行时配置和 prompts。
-- 检查点：默认不生成 `.env`；已有文件默认保留，缺失文件会补齐，包括 `config/channels.yml`、可选 `prompts/diagnostics.md` 和 `prompts/exec.md`；显式 env file 可提供 workspace。完成提示明确 LLM endpoint 是聊天必需配置，`context_window/max_tokens` 已有默认值，Channel、Skill source 与其它扩展能力仅在启用时配置。
+- 检查点：默认不生成`.env`；只生成`config/models.json`、`config/config.yml`和Prompts；已有文件默认保留；显式env file可提供workspace；不会生成旧分散配置文件。
 
 ### Case 2: 缺少 workspace
 
@@ -34,7 +34,7 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 ### Case 4.1: chat 启动 LLM 配置检查
 
-- 输入：workspace 缺少 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`，或 endpoint 缺少必需字段如 `api_key`。
+- 输入：workspace缺少`${ZHICE_AGENT_WORKSPACE}/config/models.json`，或endpoint缺少必需字段如`api_key`。
 - 预期：缺少文件时提示运行 `zcagent init`；已有文件非法时优先提示编辑现有文件，仅把 `zcagent init --force` 作为明确覆盖模板的选项。
 - 检查点：这类必需配置缺失会阻断聊天启动；Skill source 缺失表示可选扩展未启用，静默使用空 SkillLoader。
 - Skill source 文件已经存在但非法时只打印一次 `Skill capability unavailable`，不再同时显示“sync skipped”和“disabled”；启动同步失败但配置仍可加载时显示 degraded 并提示 `/skills sync --verbose`。

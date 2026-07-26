@@ -32,7 +32,7 @@
 
 ### Case 5: 缺失 Skill source 配置
 
-- 输入：workspace 没有 `config/skill_sources.yml`。
+- 输入：workspace没有`config/config.yml`或没有`skills`分区。
 - 预期：启动同步保持禁用；手动同步返回明确错误。
 - 检查点：错误信息提示运行 `zcagent init`。
 
@@ -50,7 +50,7 @@
 
 ### Case 8: `${ZHICE_AGENT_SKILL_REPO}` 占位符
 
-- 输入：`skill_sources.yml` 使用 `local_dir: "${ZHICE_AGENT_SKILL_REPO}"`。
+- 输入：`config.yml.skills`使用`local_dir: "${ZHICE_AGENT_SKILL_REPO}"`。
 - 预期：占位符展开到技能仓库根目录。
 - 检查点：运行时 Skill 根目录为 `extends/{source}/skills`。
 

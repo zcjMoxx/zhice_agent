@@ -8,7 +8,7 @@
 
 - `/health` 和 `/api/health` 返回基础状态、当前模型、auth 初始化状态和安全的可选 capability 状态；Subagent unavailable 不改变 overall `status=ok`，且不暴露 workspace/session 路径。
 - 静态聊天 Web 不渲染或主动请求 capability 启动横幅；health 状态保留给诊断和自动化检查。
-- Gateway/CLI 缺少 `skill_sources.yml` 时按未启用的可选扩展静默处理；文件存在但非法时只记录一次结构化 `skills.runtime_unavailable` WARNING，包含稳定 code 且不泄露绝对路径。
+- Gateway/CLI缺少`config.yml.skills`时按未启用的可选扩展静默处理；分区存在但非法时只记录一次结构化`skills.runtime_unavailable` WARNING，包含稳定code且不泄露绝对路径。
 - `/` 从可替换 `static_dir` 返回静态首页。
 - `/admin` 返回独立管理路由入口；聊天页 Administration 导航到该路由，不再打开管理弹窗。
 - `GET /api/sessions` 返回会话摘要并把更新时间格式化为 ISO 8601。
@@ -23,7 +23,7 @@
 - runtime 抛出配置、LLM 和未知错误时返回领域化稳定错误码，不暴露堆栈。
 - core 测试只使用 `agent.core.loop` 和 `agent.core.context` 新路径。
 - gateway 测试确认不再保留 `agent/gateway.py` 顶层兼容导出模块。
-- Gateway lifespan 对正常渠道输出 `channel.enabled/channel.ready`，禁用/异常渠道记录 `channel.skip/channel.start_failed`，关闭记录 `channel.stop`；所有渠道事件在终端使用 Uvicorn 风格，trace 保留结构化事件。外部渠道及 ready 日志严格遵循 `channels.yml` 映射顺序；QQ 等待真实 `on_ready` 且超时有界，超时后恢复会补发 ready。微信仅输出 `mode=per_user` 及账号状态聚合计数。可选渠道失败不阻断 Web，日志不包含 credential 或外部账号标识。
+- Gateway lifespan对正常渠道输出`channel.enabled/channel.ready`，禁用/异常渠道记录`channel.skip/channel.start_failed`，关闭记录`channel.stop`；外部渠道及ready日志严格遵循`config.yml.channels`映射顺序；可选渠道失败不阻断Web，日志不包含credential或外部账号标识。
 - WebSocket `hello client=web` 返回 web command profile 能力，默认不支持 `/history` 和 `/exit`。
 - WebSocket `hello client=external` 打开 external command profile 能力，`/history` 进入 external profile，`/exit` 关闭当前 WS 连接。
 - `/sessions rename <id> <title>`、`/sessions delete <id>` 和 `/sessions delete` 在 runtime slash command 层有覆盖。

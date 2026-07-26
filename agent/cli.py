@@ -33,6 +33,8 @@ from agent.config import (
     load_config,
 )
 from agent.console import Spinner, console
+from agent.context.config import load_context_config
+from agent.context.startup import check_context_engineering_startup
 from agent.core.context import ContextBuilder
 from agent.core.loop import AgentLoop, CancellationToken
 from agent.core.turns import assign_turn, new_turn_id, next_turn_index
@@ -41,6 +43,7 @@ from agent.llm import LLMConfigurationError
 from agent.llm.failover_provider import EndpointFailoverProvider
 from agent.llm.runtime import (
     create_configured_llm_provider,
+    create_optional_aliased_llm_provider,
     resolve_preferred_endpoint,
     validate_startup_llm_endpoints,
 )
@@ -273,11 +276,10 @@ def _run_chat(argv: Sequence[str]) -> int:
     prompt_loader = PromptLoader(config.prompts_dir)
     session_store = JsonlSessionStore(config.sessions_dir)
     skill_loader = _create_skill_loader(skill_sync, startup_error=skill_sync_error)
-    context_builder = ContextBuilder(
-        prompt_loader,
-        skills=skill_loader,
-        max_history_messages=DEFAULT_CHAT_HISTORY_MESSAGES,
-    )
+    context_startup = check_context_engineering_startup(config.config_dir, prompt_loader)
+    if context_startup.status.state == "degraded":
+        print(console.warning(_format_cli_capability_status(context_startup.status)))
+    context_config = load_context_config(config.config_dir)
     if not _load_startup_prompts(prompt_loader):
         return 1
     try:
@@ -285,6 +287,27 @@ def _run_chat(argv: Sequence[str]) -> int:
     except LLMConfigurationError as exc:
         _print_llm_configuration_error(exc, config)
         return 1
+    try:
+        compaction_llm = create_optional_aliased_llm_provider(
+            config.config_dir,
+            "compaction",
+        )
+    except LLMConfigurationError as exc:
+        compaction_llm = None
+        print(
+            console.warning(
+                "Compaction endpoint alias is unavailable; using the turn model. "
+                f"({type(exc).__name__})"
+            )
+        )
+    context_builder = ContextBuilder(
+        prompt_loader,
+        skills=skill_loader,
+        max_history_messages=DEFAULT_CHAT_HISTORY_MESSAGES,
+        context_config=context_config,
+        embedding_provider=context_startup.embedding_provider,
+        compaction_llm_provider=compaction_llm,
+    )
     model_runtime = _build_cli_model_runtime(llm, config, session_store)
     subagent_runtime = _build_cli_subagent_runtime(config, session_store)
     if subagent_runtime.status.state == "unavailable":
@@ -377,6 +400,7 @@ def _run_chat(argv: Sequence[str]) -> int:
             )
             continue
         if user_text == "/clear":
+            context_builder.delete_derived_session(session_store, session_id)
             session_store.clear(session_id)
             subagent_runtime.preferences.clear_force_once(subagent_runtime.context, session_id)
             print(f"{console.warning('session cleared:')} {console.command(session_id)}")
@@ -391,6 +415,7 @@ def _run_chat(argv: Sequence[str]) -> int:
                 user_text.removeprefix("/sessions").strip(),
                 subagent_runtime,
                 auth_store,
+                context_builder,
             )
             continue
         if user_text == "/history":
@@ -815,7 +840,7 @@ def _create_skill_loader(
     except SkillSyncError as exc:
         print(
             console.warning(
-                "Skill capability unavailable: invalid config/skill_sources.yml "
+                "Skill capability unavailable: invalid config/config.yml skills section "
                 f"({exc}). Fix the file, then restart."
             )
         )
@@ -918,7 +943,7 @@ def _print_llm_configuration_error(exc: LLMConfigurationError, config) -> None:
     print(console.error(f"LLM configuration is invalid: {exc}"))
     print(console.warning("Chat cannot start until an enabled LLM endpoint is configured."))
     print()
-    endpoint_path = config.config_dir / "llm_endpoints.json"
+    endpoint_path = config.config_dir / "models.json"
     if endpoint_path.exists():
         print(
             f"  {console.success('Recommended:')} edit {console.path(endpoint_path)} and fix "
@@ -1002,6 +1027,7 @@ def _handle_sessions_command(
     target: str,
     subagent_runtime=None,
     auth_store: SQLiteAuthStore | None = None,
+    context_builder: ContextBuilder | None = None,
 ) -> None:
     """Handle local /sessions management commands."""
 
@@ -1034,6 +1060,8 @@ def _handle_sessions_command(
                 )
                 return
             if session_id == current_session_id:
+                if context_builder is not None:
+                    context_builder.delete_derived_session(session_store, current_session_id)
                 session_store.clear(current_session_id)
                 if subagent_runtime is not None:
                     subagent_runtime.preferences.clear_force_once(
@@ -1042,6 +1070,8 @@ def _handle_sessions_command(
                     )
                 print(f"{console.warning('session cleared:')} {console.command(current_session_id)}")
                 return
+            if context_builder is not None:
+                context_builder.delete_derived_session(session_store, session_id)
             session_store.delete(session_id)
             print(f"{console.warning('session deleted:')} {console.command(session_id)}")
             return
@@ -1457,7 +1487,7 @@ def _load_subagent_profile_summaries(config_dir) -> tuple[tuple[str, str], ...]:
     try:
         from agent.subagents.config import load_subagent_config
 
-        config = load_subagent_config(config_dir / "subagents.yml")
+        config = load_subagent_config(config_dir)
     except (ImportError, OSError, ValueError):
         return ()
     summaries: list[tuple[str, str]] = []

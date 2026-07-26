@@ -4,10 +4,32 @@ import builtins
 import json
 
 import pytest
+import yaml
 
 from agent.app.logging import GatewayLogOptions
 from agent.cli import _resolve_preferred_endpoint, main
 from agent.protocols.llm import LLMEndpoint
+
+
+def _write_models(config_dir, chat, routing=None):
+    config_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "routing": {"chat": next(iter(chat))} if routing is None else routing,
+        "chat": chat,
+        "embedding": {},
+    }
+    config_dir.joinpath("models.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_config_section(config_dir, section, value):
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / "config.yml"
+    root = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+    root = root or {}
+    root.setdefault("schema_version", 1)
+    root[section] = value
+    path.write_text(yaml.safe_dump(root, sort_keys=False), encoding="utf-8")
 
 
 def test_cli_init_generates_runtime_files(tmp_path, capsys, monkeypatch):
@@ -43,14 +65,13 @@ def test_cli_init_generates_runtime_files(tmp_path, capsys, monkeypatch):
     assert "context_window" not in output
     assert "api_key" not in output
     assert not (tmp_path / ".env").exists()
-    assert (tmp_path / "config" / "llm_endpoints.json").is_file()
+    assert (tmp_path / "config" / "models.json").is_file()
     endpoint = json.loads(
-        (tmp_path / "config" / "llm_endpoints.json").read_text(encoding="utf-8")
-    )["local"]
+        (tmp_path / "config" / "models.json").read_text(encoding="utf-8")
+    )["chat"]["local"]
     assert endpoint["max_tokens"] == 8192
     assert "max_input_tokens" not in endpoint
-    assert (tmp_path / "config" / "skill_sources.yml").is_file()
-    assert (tmp_path / "config" / "channels.yml").is_file()
+    assert (tmp_path / "config" / "config.yml").is_file()
     assert (tmp_path / "prompts" / "identity.md").is_file()
     assert (tmp_path / "prompts" / "diagnostics.md").is_file()
     assert (tmp_path / "prompts" / "exec.md").is_file()
@@ -69,9 +90,8 @@ def test_cli_init_preserves_existing_files_and_fills_missing(tmp_path, capsys, m
     assert result == 0
     assert "created:" in output
     assert (tmp_path / ".env").read_text(encoding="utf-8") == "EXISTING=1\n"
-    assert (tmp_path / "config" / "llm_endpoints.json").is_file()
-    assert (tmp_path / "config" / "skill_sources.yml").is_file()
-    assert (tmp_path / "config" / "channels.yml").is_file()
+    assert (tmp_path / "config" / "models.json").is_file()
+    assert (tmp_path / "config" / "config.yml").is_file()
     assert (tmp_path / "prompts" / "identity.md").is_file()
 
 
@@ -108,8 +128,8 @@ def test_cli_init_uses_explicit_env_file_workspace(tmp_path, capsys, monkeypatch
     assert result == 0
     assert "created:" in output
     assert not (workspace / ".env").exists()
-    assert (workspace / "config" / "llm_endpoints.json").is_file()
-    assert (workspace / "config" / "channels.yml").is_file()
+    assert (workspace / "config" / "models.json").is_file()
+    assert (workspace / "config" / "config.yml").is_file()
 
 
 def test_cli_reports_missing_workspace_when_no_env_exists(tmp_path, capsys, monkeypatch):
@@ -226,7 +246,7 @@ def test_cli_chat_errors_when_llm_config_is_missing(tmp_path, capsys, monkeypatc
     output = capsys.readouterr().out
     assert result == 1
     assert "LLM configuration is invalid" in output
-    assert "llm_endpoints.json" in output
+    assert "models.json" in output
     assert "zcagent init" in output
 
 
@@ -238,19 +258,18 @@ def test_cli_chat_errors_when_enabled_llm_has_no_api_key(tmp_path, capsys, monke
     _write_runtime_prompts(tmp_path)
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_dir.joinpath("llm_endpoints.json").write_text(
-        '{"default":{"protocol":"openai","base_url":"https://api.test/v1",'
-        '"api_key":"","model":"m","context_window":8192}}',
-        encoding="utf-8",
+    _write_models(
+        config_dir,
+        {"default": {"protocol": "openai", "base_url": "https://api.test/v1", "api_key": "", "model": "m", "context_window": 8192}},
     )
 
     result = main([])
 
     output = capsys.readouterr().out
     assert result == 1
-    assert "LLM endpoint is missing required field: api_key" in output
+    assert "api_key" in output
     assert "Chat cannot start" in output
-    assert "llm_endpoints.json" in output
+    assert "models.json" in output
     assert "edit" in output
     assert "zcagent init --force" in output
     assert "run zcagent init to create" not in output
@@ -261,11 +280,13 @@ def test_cli_chat_rejects_invalid_hook_config(tmp_path, capsys, monkeypatch):
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    _write_runtime_prompts(tmp_path)
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    (config_dir / "hooks.yml").write_text(
-        "version: 1\nhooks:\n  - name: invalid\n    stage: unknown\n    script: hook.py\n",
-        encoding="utf-8",
+    _write_config_section(
+        config_dir,
+        "hooks",
+        {"version": 1, "entries": [{"name": "invalid", "stage": "unknown", "script": "hook.py"}]},
     )
 
     result = main([])
@@ -303,7 +324,7 @@ def test_cli_chat_reports_one_warning_for_invalid_skill_sources_config(
     _write_runtime_prompts(tmp_path)
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_dir.joinpath("skill_sources.yml").write_text("sources: [", encoding="utf-8")
+    config_dir.joinpath("config.yml").write_text("skills: []\n", encoding="utf-8")
     monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
     monkeypatch.setattr(builtins, "input", lambda _prompt="": "/exit")
 
@@ -312,7 +333,7 @@ def test_cli_chat_reports_one_warning_for_invalid_skill_sources_config(
     output = capsys.readouterr().out
     assert result == 0
     assert output.count("Skill capability unavailable") == 1
-    assert "invalid config/skill_sources.yml" in output
+    assert "invalid config/config.yml skills section" in output
     assert "skills disabled" not in output
     assert "skills sync skipped" not in output
 
@@ -419,9 +440,10 @@ def test_cli_auto_endpoint_uses_default_alias_when_configured(tmp_path):
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    (config_dir / "llm_endpoints.json").write_text(
-        '{"default":"backup","backup":{"protocol":"openai","base_url":"https://b.test/v1","api_key":"k","model":"m"}}',
-        encoding="utf-8",
+    _write_models(
+        config_dir,
+        {"backup": {"protocol": "openai", "base_url": "https://b.test/v1", "api_key": "k", "model": "m"}},
+        {"chat": "backup"},
     )
     endpoints = [_endpoint("backup", priority=2)]
 
@@ -433,9 +455,13 @@ def test_cli_auto_endpoint_uses_priority_when_no_default_exists(tmp_path):
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    (config_dir / "llm_endpoints.json").write_text(
-        '{"slow":{"protocol":"openai","base_url":"https://s.test/v1","api_key":"k","model":"s"},"fast":{"protocol":"openai","base_url":"https://f.test/v1","api_key":"k","model":"f"}}',
-        encoding="utf-8",
+    _write_models(
+        config_dir,
+        {
+            "slow": {"protocol": "openai", "base_url": "https://s.test/v1", "api_key": "k", "model": "s"},
+            "fast": {"protocol": "openai", "base_url": "https://f.test/v1", "api_key": "k", "model": "f"},
+        },
+        {},
     )
     endpoints = [_endpoint("slow", priority=3), _endpoint("fast", priority=1)]
 
@@ -706,10 +732,10 @@ def test_cli_missing_subagent_prompt_warns_but_chat_still_starts(
     _write_runtime_prompts(tmp_path)
     config_dir = tmp_path / "config"
     config_dir.mkdir(exist_ok=True)
-    config_dir.joinpath("subagents.yml").write_text(
-        "enabled: true\nprofiles:\n  explorer:\n    description: inspect\n"
-        "    tools: [read_file]\n",
-        encoding="utf-8",
+    _write_config_section(
+        config_dir,
+        "subagents",
+        {"enabled": True, "profiles": {"explorer": {"description": "inspect", "tools": ["read_file"]}}},
     )
     monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
     inputs = iter(["/subagent", "/exit"])
@@ -734,7 +760,7 @@ def test_cli_invalid_mcp_config_warns_but_chat_still_starts(tmp_path, capsys, mo
     _write_runtime_prompts(tmp_path)
     config_dir = tmp_path / "config"
     config_dir.mkdir(exist_ok=True)
-    config_dir.joinpath("mcp.json").write_text("{invalid", encoding="utf-8")
+    config_dir.joinpath("config.yml").write_text("mcp: []\n", encoding="utf-8")
     monkeypatch.setattr("agent.cli._build_llm_provider", lambda *_args: _EchoLLM())
     inputs = iter(["/mcp", "/exit"])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
@@ -744,7 +770,7 @@ def test_cli_invalid_mcp_config_warns_but_chat_still_starts(tmp_path, capsys, mo
     output = capsys.readouterr().out
     assert result == 0
     assert "MCP_CONFIG_INVALID" in output
-    assert "Fix config/mcp.json" in output
+    assert "Fix the mcp section in config/config.yml" in output
     assert "bye" in output
 
 
@@ -1045,20 +1071,23 @@ Demo body.
 def _write_skill_sources_config(workspace, source, *, on_startup):
     config_dir = workspace / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_dir.joinpath("skill_sources.yml").write_text(
-        f"""
-sync:
-  on_startup: {on_startup}
-  background:
-    enabled: false
-    interval_seconds: 0
-  log: changes_only
-sources:
-  - name: official
-    sync: true
-    local_dir: "{source.resolve().as_posix()}"
-""",
-        encoding="utf-8",
+    _write_config_section(
+        config_dir,
+        "skills",
+        {
+            "sync": {
+                "on_startup": on_startup,
+                "background": {"enabled": False, "interval_seconds": 0},
+                "log": "changes_only",
+            },
+            "sources": [
+                {
+                    "name": "official",
+                    "sync": True,
+                    "local_dir": source.resolve().as_posix(),
+                }
+            ],
+        },
     )
 
 

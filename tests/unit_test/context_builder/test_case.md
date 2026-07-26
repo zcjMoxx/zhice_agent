@@ -2,7 +2,7 @@
 
 ## 测试目标
 
-验证 ContextBuilder 能把 prompt、运行环境、混合 Turn 历史和当前用户消息组装成 OpenAI-compatible messages，按 endpoint 输入预算裁剪，并保留完整工具调用块。
+验证 ContextBuilder 能把 prompt、运行环境、完整 Session Turn、派生 evidence 和当前用户消息组装成 OpenAI-compatible messages，按 endpoint 输入预算治理，并保留完整工具调用块。
 
 ## 用例覆盖
 
@@ -12,10 +12,10 @@
 - 预期：第一条消息为 system，包含 identity、tool_use_policy、skills_intro 和运行环境；存在 `diagnostics.md` / `exec.md` 时分别追加独立 `Diagnostics Policy` / `Exec Policy`，缺失时不阻断主流程。
 - 检查点：workspace 与 session_id 进入 system prompt；当前 user message 追加到最后。
 
-### Case 2: 历史消息顺序
+### Case 2: 预算内完整历史
 
-- 输入：多条历史消息和 `max_history_messages` 限制。
-- 预期：只保留最近的历史消息，并保持原顺序。
+- 输入：多条历史消息以及已废弃的固定 Turn/消息数参数。
+- 预期：预算允许时全部保留并保持原顺序，固定数量参数不再主动删除 Session 状态。
 - 检查点：当前用户消息不参与历史裁剪，始终追加在末尾。
 
 ### Case 3: 历史内容截断
@@ -48,17 +48,10 @@
 - 预期：构造上下文时抛出可定位的错误。
 - 检查点：错误信息包含缺失 prompt 名称。
 
-## Part 7 Turn Coverage
+## Part 15 Coverage
 
-- Treat `max_history_turns` as the recent user-turn candidate count.
-- Default to 50 recent user-turn candidates and keep at most 5 relevant turns.
-- Select only locally relevant candidate turns before injecting history.
-- Omit unrelated prior turns, including greeting-only current inputs.
-- Keep direct follow-ups when the current input references terms from a previous full turn.
-- Keep short confirmations only when the immediately previous assistant message is asking for confirmation.
-- Keep the immediately previous Turn for short Chinese contextual follow-ups such as “为什么没调用，什么原因”, even when bigram overlap alone is below the relevance threshold.
-- Keep the immediately previous Turn for explicit meta-references such as “我刚刚问了什么”“上一轮我问的是什么” and “What did I just ask?”, without making latest-Turn inclusion unconditional.
-- Preserve the old message-count behavior when `max_history_turns=None`.
-- Drop old turns as whole units when the message hard cap is exceeded.
-- Ignore untagged history messages in recent user turn selection.
-- Keep OpenAI-compatible tool-call block filtering after turn selection.
+- 预算允许时完整 Session Turn 全量进入上下文，不受旧 `max_history_turns` / `max_history_messages` 固定数量策略影响。
+- 历史过长时由 ContextPlan 装配 compaction、deterministic history evidence、retrieved old Turn 和连续 recent raw Turn。
+- 无 `turn_id` 的旧 Session 消息按 user 边界懒推导稳定 Turn，不丢弃历史真值。
+- 每次 Tool result 后重新执行 failover-safe budget fit；删除以完整 Turn/tool block 为原子。
+- 保留 OpenAI-compatible tool-call block 过滤、tool result 截断和固定区超预算错误。

@@ -10,13 +10,15 @@ from agent.subagents.config import (
 
 
 def _write(path: Path, text: str) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return path
+    config_path = path.parent / "config.yml" if path.parent.name == "config" else path.parent / "config.yml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    indented = "\n".join(f"  {line}" if line else "" for line in text.strip().splitlines())
+    config_path.write_text(f"schema_version: 1\nsubagents:\n{indented}\n", encoding="utf-8")
+    return config_path
 
 
 def test_missing_config_disables_subagents(tmp_path):
-    config = load_subagent_config(tmp_path / "config" / "subagents.yml")
+    config = load_subagent_config(tmp_path / "config")
 
     assert config.enabled is False
     assert config.list_profiles() == ()

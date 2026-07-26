@@ -8,7 +8,7 @@
 >
 > 设计依据：`docs_design/2026-07-04-turn-runtime-and-context-design.md`、`docs_design/2026-07-06-next-stage-sequencing-design.md`
 >
-> 当前状态：核心 turn 持久化已按本地开发口径落地。第七部分只处理 turn 运行单元和上下文治理，不主动引入独立的用户系统、数据库、长期记忆或子代理调度；旧 JSONL、metadata fallback 和 legacy grouping 不作为本阶段兼容目标。
+> 当前状态：核心 Turn 持久化已落地；原“最近 3 + 旧相关最多 3”已由 Part 15 完整 Session 上下文工程替代。当前实现采用预算内完整历史、确定性历史查询、结构化 compaction 和混合检索；详细施工与验收口径见 `docs_design/zhice-agent-part15-context-engineering-design.md`。
 
 ---
 
@@ -20,7 +20,7 @@
 - `WebRuntime.ActiveTurn(turn_id, token)`：Web 侧内存态 active turn 和 cancellation token。
 - `WebSocket /ws`：浏览器主聊天通道，已经有 accepted、text、done、stopped 等事件。
 - `JsonlSessionStore`：继续以 JSONL 保存会话消息。
-- `ContextBuilder`：按 Turn 做最近 3 + 旧相关最多 3 的混合选择，保留合法 tool-call block，并应用 60 message 与 endpoint token 预算。
+- `ContextBuilder`：通过 `ContextPlanner` 预算优先保留完整历史；长会话才使用 compaction、历史 evidence 和混合检索，并在每次 LLM 调用前保持合法 tool-call block 与 endpoint token 预算。
 
 第七部分启动前的问题是这些能力还没有共享同一个持久 turn 边界：
 
@@ -47,10 +47,10 @@ Web accepted turn_id
 2. 新写入的 user、assistant、tool、stopped/error marker 都带同一个 `turn_id`。
 3. 新写入消息带 `turn_index`，用于 session 内排序和调试。
 4. `JsonlSessionStore` 只读写顶层 turn 字段，旧 metadata fallback 不再保留。
-5. 没有显式 `turn_id` 的历史消息不参与 turn-based context selection。
+5. 没有显式 `turn_id` 的旧历史按 user 边界懒推导稳定 Turn；不重写 JSONL。
 6. `AgentLoop.run_turn()` 支持外部传入 `turn_id`，Web accepted 的 id 能传到 AgentLoop 和 Session。
 7. WebSocket accepted、channel_text、done、stopped、error 使用同一个 `turn_id`。
-8. `ContextBuilder` 从最近 50 个 user Turn 中优先保留最近 3 个，再从更早候选中选择最多 3 个相关 Turn。
+8. `ContextBuilder` 在预算允许时保留全部完整 Turn；只有超过安全预算才进入 compaction/retrieval。
 9. 历史 tool-call block 在 turn 裁剪后仍保持 OpenAI-compatible，不出现孤立 tool result。
 10. 为后续运行日志、权限审计、CLI stop、memory compaction 提供稳定字段，但不在本阶段主动实现这些独立系统。
 
@@ -69,8 +69,8 @@ Web accepted turn_id
 - tool iteration limit marker 归属同一 turn。
 - WebRuntime active turn id 与 AgentLoop turn id 统一。
 - WebSocket event 携带一致 `turn_id`。
-- `ContextBuilder(max_history_turns=...)`。
-- CLI/Web 共用的 `ContextBudget` 与 60 message 兜底。
+- `ContextBuilder`、`ContextPlanner`、`ContextPlan` 与 failover-safe `ContextBudget`。
+- CLI/Web/QQ/微信共用的预算内完整历史和长会话治理。
 - turn 裁剪后的 tool-call block 合法性。
 - 单元测试和 `test_case.md` 更新。
 
@@ -80,7 +80,7 @@ Web accepted turn_id
 
 - CLI 并发输入型 `/stop`。
 - 通用 turn lifecycle hook 插件协议。
-- 长期 memory、summary、compaction。
+- 长期 Memory（Session compaction 已由 Part 15 独立实现）。
 - 用户、登录、权限、数据库、audit log。
 - 子代理调度。
 - 跨进程 active turn registry。
@@ -322,51 +322,44 @@ run_turn 内部收集 pending_session_messages
 
 ```python
 ContextBuilder(
-    max_history_turns: int | None = 50,
-    max_relevant_turns: int = 3,
-    always_include_recent_turns: int = 3,
-    max_history_messages: int = 60,
     max_message_chars: int = 8000,
+    context_config: ContextEngineeringConfig | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
     ...
 )
 ```
 
 说明：
 
-- `max_history_turns=None` 表示沿用 message-based 裁剪，主要用于测试或特殊调用。
-- `max_history_turns=0` 表示不带历史，只带当前 user message。
-- `max_history_turns>0` 表示最近 user Turn 候选数量；当前默认取最近 50 个候选。
-- `always_include_recent_turns=3` 表示正常预算下直接保留最近 3 个 Turn，不要求词法相关。
-- `max_relevant_turns=3` 表示从 recent 分区之前的较早候选中最多选择 3 个相关 Turn。
-- `max_history_messages=60` 是 CLI/Web 共用的消息数量兜底；发送前还必须服从本次 endpoint/failover `ContextBudget`。
+- `context_config` 来自 `${ZHICE_AGENT_WORKSPACE}/config/context.yml`；缺失时使用安全默认值。
+- `embedding_provider` 来自可选 `embedding_endpoints.json`；缺失或失败时语义召回诚实降级，完整历史、历史查询、compaction 和 FTS 继续可用。
+- `max_history_turns`、`max_relevant_turns`、`always_include_recent_turns`、`max_history_messages` 仍保留在构造签名中兼容一个版本周期，但不再作为正常删历史策略。
+- 每次构建同时接收当前已授权 `SessionStore`、实际 `LLMProvider`、可见 Tool schemas 和 failover-safe `ContextBudget`。
 
 ### 8.2 构建流程
 
 ```text
-ContextBuilder.build(history, user_message, workspace, session_id, context_budget)
-  -> group history by explicit turns
-  -> take latest 50 user turns as candidates
-  -> reserve latest 3 turns as recent context
-  -> score only older candidates against current user message
-  -> keep up to 3 older relevant turns
-  -> merge in original chronological order
-  -> drop oldest selected turns until message count is within max_history_messages
-  -> flatten selected turn messages
-  -> _history_to_llm_dicts()
-  -> append current user message
-  -> fit messages within ContextBudget
+ContextBuilder.build(...)
+  -> group explicit Turns and lazily infer legacy Turn boundaries
+  -> ContextPlanner estimates system + full Session + current user + Tool schemas
+  -> full history fits safe budget: keep every complete Turn in original order
+  -> high-confidence history meta-query: deterministic current-Session scan + evidence
+  -> long history: structured compaction + retrieved old Turns + continuous recent raw Turns
+  -> _history_to_llm_dicts() preserves complete tool-call blocks
+  -> fit_messages() before initial and every Tool-result LLM call
+  -> emit safe context.selection trace
 ```
 
 关键点：
 
-- 先按 turn 选，再转 LLM messages。
+- 先按完整 Turn 规划，再转 LLM messages。
 - 不把当前 user message 放进 history 分组。
-- 本地相关性比较使用 turn 内完整文本，不只看 anchor 或关键词。
-- 最近 3 个 Turn 在正常预算下直接进入上下文，因此短期代词、确认和“我刚刚问了什么”不再依赖词法命中才能获得上一轮；相关性算法只负责补充更早历史。
-- “你好”“谢谢”等新问题不会额外召回更早无关 Turn；“好的/ok/嗯”和明确回指信号仍用于旧候选评分与极端预算降级时的保护。
+- 旧 Session 没有 turn id 时按 user 消息边界推导 `legacy-turn-N` 和顺序索引，仅在内存中回填；JSONL 不重写。
+- 明确“我问过什么/介绍过谁/最开始/最近 N 个”等问题优先由 `SessionHistoryQueryResolver` 执行；规则无法完整规划时可让 LLM 只输出受限计划，执行层仍锁定当前授权 Session。
+- 长会话检索将 FTS5/BM25、embedding 精确 cosine、entity/anchor exact 和 recency 通过加权 RRF 融合；选中后按原始时间顺序注入。
 - 长期 Memory 通知只表示持久偏好或事实，不替代 Session Turn 历史。
 - tool-call block 的合法性继续由 `_history_to_llm_dicts()` 兜底。
-- `fit_messages()` 将当次 Tool schemas 纳入估算；超限时从最旧历史 Turn 开始删除，再截断 tool result，必要时删除当前 Turn 中较早的完整已完成 Tool 块。system、current user 与最新必要调用链仍超限时抛出 `LLMContextBudgetError`。
+- `fit_messages()` 将当次 Tool schemas 纳入估算；超限时以完整 Turn/tool block 为原子收缩并截断过长 tool result。system、current user 与最新必要调用链仍超限时抛出 `LLMContextBudgetError`。
 - AgentLoop 在初次和每次工具结果调用前都重新预算；Session JSONL 仍保存完整消息真值。
 
 ### 8.3 tool block 原子性
@@ -376,6 +369,19 @@ turn 裁剪不能产生孤立 tool result。要求：
 - 如果 assistant 有 `tool_calls`，只有对应 tool result 都存在时才带入该 block。
 - 裁剪边界不能从 assistant tool_calls 和 tool result 中间切开。
 - 旧历史里已经不完整的 tool block 继续跳过，不影响后续消息。
+
+### 8.4 Part 15 当前实现
+
+原固定 Turn 数策略已经替换为：
+
+```text
+完整历史在安全预算内 -> 全量携带
+明确 Session 历史问题 -> 确定性扫描 SessionStore
+历史超过安全预算 -> 结构化 compaction + 动态 recent raw window
+旧细节召回 -> FTS/BM25 + embedding + entity/anchor 混合检索
+```
+
+Session JSONL 继续保存完整真值；compaction 与索引位于 actor 隔离的 `context/` 目录，是可失效、可删除、可从 JSONL 懒回填的派生数据。完整设计和验收范围见 `docs_design/zhice-agent-part15-context-engineering-design.md` 与 `docs_design/2026-07-26-full-session-context-engineering-design.md`。
 
 ---
 
@@ -532,7 +538,7 @@ tests/unit_test/core/test_turns.py
 | write turn fields | append 带 turn 字段的 Message | JSONL 顶层写出 `turn_id`、`turn_index`、`parent_turn_id` |
 | read turn fields | 读取新 JSONL | Message 恢复 turn 字段 |
 | no metadata fallback | turn 字段只在 metadata 中 | Message 不恢复 turn 字段 |
-| untagged jsonl | 记录无 turn 字段 | `load()` 正常，Message.turn_id 为 None，不参与 turn selection |
+| untagged jsonl | 记录无 turn 字段 | `load()` 正常，Message.turn_id 为 None；Context 层按 user 边界懒推导 |
 | list sessions | 新旧记录混合 | preview、updated_at、message_count 不受影响 |
 
 ### 12.2 Turn grouping
@@ -540,9 +546,9 @@ tests/unit_test/core/test_turns.py
 | 用例 | 输入/场景 | 期望 |
 | --- | --- | --- |
 | explicit turns | 多条消息带相同 turn_id | 分为同一个 TurnGroup |
-| untagged messages | user/assistant 没有 turn_id | 不派生 TurnGroup |
-| mixed history | untagged + explicit 混合 | 只保留显式 turn，按文件顺序输出 |
-| next index | 没有显式 turn_index | 下一轮 index = 1 |
+| untagged messages | user/assistant 没有 turn_id | 按 user 边界派生 `legacy-turn-N` |
+| mixed history | untagged + explicit 混合 | 新旧 Turn 都保留，按文件顺序输出 |
+| next index | 没有显式 turn_index | 下一轮 index = 推导出的 user Turn 数 + 1 |
 
 ### 12.3 AgentLoop
 
@@ -559,13 +565,12 @@ tests/unit_test/core/test_turns.py
 
 | 用例 | 输入/场景 | 期望 |
 | --- | --- | --- |
-| recent turns | 5 个 user turn，max_history_turns=2 | 只带最近 2 个 user turn |
-| default hybrid | 50 个候选且更早历史有相关项 | 最近 3 个 Turn + 旧相关最多 3 个 |
-| no history | max_history_turns=0 | 只带 system 和当前 user |
-| message fallback | max_history_turns=None | 使用原 message-based 行为 |
-| local relevance | 当前输入和较早候选 Turn 无关 | 不额外带该旧 Turn |
-| follow-up relevance | 当前输入引用较早 Turn 的术语/代码/错误 | 带该旧 Turn |
-| hard cap | selected turns 超过 max_history_messages | 从旧 turn 开始整体丢弃 |
+| full mode | 完整历史低于安全预算 | 全部完整 Turn 按原顺序进入上下文 |
+| deprecated limits | 显式传旧 max_history 参数 | 不再以固定数量主动删历史 |
+| history query | “我之前让我介绍过谁” | 当前授权 Session 确定性扫描并注入原文 evidence |
+| long mode | 完整历史超过安全预算 | compaction + retrieved old Turn + continuous recent raw Turn |
+| mixed retrieval | 词法、语义、entity、anchor 命中 | 加权 RRF 后 top-k，注入时恢复时间顺序 |
+| embedding failure | endpoint 超时或未配置 | FTS/history query/raw recent 继续工作并标记 degraded |
 | token budget | messages + schemas 超过 endpoint input limit | 从最旧历史 Turn 开始收窄，并保持当前必要链路 |
 | tool block complete | assistant tool_calls + tool | block 完整保留 |
 | tool block incomplete | 缺 tool result | 不产生孤立 tool result |

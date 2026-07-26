@@ -15,23 +15,31 @@ def new_turn_id() -> str:
 
 
 def group_messages_by_turn(messages: list[Message]) -> list[TurnGroup]:
-    """Group messages that already carry explicit turn ids."""
+    """Group messages by explicit ids, with deterministic legacy user boundaries."""
 
     groups: list[TurnGroup] = []
 
+    legacy_index = 0
+    active_legacy_id = ""
     for message in messages:
-        if not message.turn_id:
-            continue
+        turn_id = message.turn_id
+        if not turn_id:
+            if message.role == "user" or not active_legacy_id:
+                legacy_index += 1
+                active_legacy_id = f"legacy-turn-{legacy_index}"
+            turn_id = active_legacy_id
+        else:
+            active_legacy_id = ""
 
-        if groups and groups[-1].turn_id == message.turn_id:
+        if groups and groups[-1].turn_id == turn_id:
             groups[-1].messages.append(message)
             if groups[-1].turn_index is None:
                 groups[-1].turn_index = message.turn_index
         else:
             groups.append(
                 TurnGroup(
-                    turn_id=message.turn_id,
-                    turn_index=message.turn_index,
+                    turn_id=turn_id,
+                    turn_index=message.turn_index or len(groups) + 1,
                     messages=[message],
                 )
             )
@@ -50,7 +58,12 @@ def next_turn_index(messages: list[Message]) -> int:
     if explicit_indices:
         return max(explicit_indices) + 1
 
-    return 1
+    legacy_user_turns = sum(
+        1
+        for group in group_messages_by_turn(messages)
+        if any(message.role == "user" for message in group.messages)
+    )
+    return legacy_user_turns + 1
 
 
 def assign_turn(

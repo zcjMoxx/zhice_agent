@@ -3,7 +3,7 @@
 ## 测试目标
 
 - 中性 Channel 数据结构不依赖 QQ SDK。
-- `channels.yml` 缺失时默认禁用，环境变量引用、非法配置和 secret repr 安全。
+- `config.yml.channels`缺失时默认禁用，环境变量引用、非法配置和Secret repr安全。
 - 一次性绑定码只保存 hash，按 channel/account 限定、过期和重放 fail closed。
 - 私聊裸 `/bind` 创建绑定当前 QQ OpenID 的一次性 Web 授权链接；登录消费后写入同一 `external_identities`，过期和重放 fail closed。
 - conversation route 持久复用，`/new` 原子切换到随机内部 Session。
@@ -43,7 +43,7 @@
 
 ## 边界路径
 
-- 空 `channels.yml`、空文本、长文本分块。
+- 空`channels`分区、空文本、长文本分块。
 - 多 account 相同 external user id 不冲突。
 - 进程重建 service 后 route/receipt 仍从 SQLite 生效。
 - QQ 群 capability 不暴露个人模型、Session 和历史命令。

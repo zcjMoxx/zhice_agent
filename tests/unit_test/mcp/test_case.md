@@ -2,12 +2,12 @@
 
 ## 测试目标
 
-- 验证常见 `mcpServers` JSON 的严格解析、transport 推断和环境变量展开。
+- 验证`config.yml.mcp.servers`的严格解析、transport推断和环境变量展开。
 - 验证远端 Tool 名称、schema、数量和碰撞边界。
 - 验证 MCP 结果归一化与 actor-scoped artifact 落盘。
 - 使用本地 fake stdio Server 验证 initialize、`tools/list`、`tools/call`、同步 Adapter 和关闭流程。
-- 验证无配置时 Runtime 保持禁用，不影响内置 Tool。
-- 验证 startup checker 将缺失/空配置标记为 disabled，将非法 JSON、placeholder 和安全配置标记为 unavailable，并返回空 specs。
+- 验证无配置时 Runtime 保持禁用，不启动线程、不记录启停日志，也不影响内置 Tool。
+- 验证startup checker将缺失/空分区标记为disabled，将非法分区、placeholder和安全配置标记为unavailable，并返回空specs；旧`mcp.json`不再读取。
 
 ## 关键检查点
 

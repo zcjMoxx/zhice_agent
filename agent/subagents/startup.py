@@ -43,7 +43,7 @@ def check_subagent_startup(
         return _unavailable(
             "SUBAGENT_CONFIG_INVALID",
             "Subagent configuration is invalid.",
-            "Fix config/subagents.yml, then restart the process.",
+            "Fix the subagents section in config/config.yml, then restart the process.",
             error_type=type(exc).__name__,
         )
     if not config.enabled:
@@ -54,7 +54,7 @@ def check_subagent_startup(
                 state="disabled",
                 code="SUBAGENT_DISABLED",
                 message="Subagent is not enabled for this workspace.",
-                hint="Copy config/subagents.example.yml to the runtime config directory to enable it.",
+                hint="Enable and configure the subagents section in config/config.yml.",
             ),
         )
     for prompt_name in SUBAGENT_REQUIRED_PROMPTS:

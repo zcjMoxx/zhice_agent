@@ -8,11 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-import yaml
+from agent.runtime_config import load_runtime_section
 
 
 class ChannelConfigurationError(RuntimeError):
-    """Raised when channels.yml has an invalid or unsafe shape."""
+    """Raised when the config.yml channels section is invalid or unsafe."""
 
 
 _ENV_VALUE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
@@ -59,18 +59,17 @@ class ChannelConfiguration:
 
 
 def load_channel_configuration(config_dir: Path) -> ChannelConfiguration:
-    """Load channels.yml; a missing file means all channels are disabled."""
+    """Load config.yml channels; a missing section disables all channels."""
 
-    path = config_dir / "channels.yml"
-    if not path.exists():
-        return ChannelConfiguration()
+    path = config_dir / "config.yml"
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        channels_raw = load_runtime_section(config_dir, "channels", default={})
+    except ValueError as exc:
         raise ChannelConfigurationError(f"Invalid channel config: {path}") from exc
-    if not isinstance(raw, dict) or not isinstance(raw.get("channels", {}), dict):
-        raise ChannelConfigurationError("channels.yml must contain a channels mapping")
-    channels_raw = raw.get("channels", {})
+    if not isinstance(channels_raw, dict):
+        raise ChannelConfigurationError("config.yml channels must be a mapping")
+    if not channels_raw:
+        return ChannelConfiguration()
     configured_order = tuple(
         str(key) for key in channels_raw if str(key) in {"qq", "weixin"}
     )

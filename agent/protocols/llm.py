@@ -25,6 +25,8 @@ class LLMEndpoint:
     enabled: bool = True
     role: str = "default"
     supported_models: tuple[str, ...] = ()
+    input_price_per_million: float = 0.0
+    output_price_per_million: float = 0.0
 
 
 def effective_input_token_limit(endpoint: LLMEndpoint) -> int:

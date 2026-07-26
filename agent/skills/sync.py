@@ -11,8 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from agent.runtime_config import load_runtime_config
 from agent.skills.loader import SkillRoot
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -50,7 +49,7 @@ class SkillSource:
 
 @dataclass(frozen=True)
 class SkillSyncSettings:
-    """Global sync behavior from workspace config/skill_sources.yml."""
+    """Global sync behavior from workspace config/config.yml skills."""
 
     extends_dir: Path
     on_startup: str = "never"
@@ -155,7 +154,7 @@ class SkillSourceSync:
         self.config_dir = Path(config_dir).expanduser().resolve()
         self.extends_dir = Path(extends_dir).expanduser().resolve()
         self.skill_repo = Path(skill_repo).expanduser().resolve() if skill_repo else _default_skill_repo()
-        self.config_path = self.config_dir / "skill_sources.yml"
+        self.config_path = self.config_dir / "config.yml"
 
     def sync_on_startup(self) -> SkillSyncResult | None:
         """Run startup sync according to config, returning None when disabled."""
@@ -220,16 +219,17 @@ class SkillSourceSync:
         return result
 
     def load(self) -> tuple[SkillSyncSettings, list[SkillSource]]:
-        """Load and validate workspace config/skill_sources.yml."""
+        """Load and validate the skills section of workspace config/config.yml."""
 
         if not self.config_path.exists():
             return SkillSyncSettings(extends_dir=self.extends_dir), []
         try:
-            raw = yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as exc:
-            raise SkillSyncError(f"Invalid skill_sources.yml: {exc}") from exc
+            root = load_runtime_config(self.config_dir)
+        except ValueError as exc:
+            raise SkillSyncError(f"Invalid config.yml skills section: {exc}") from exc
+        raw = root.get("skills", {})
         if not isinstance(raw, dict):
-            raise SkillSyncError("skill_sources.yml must be a mapping")
+            raise SkillSyncError("config.yml skills must be a mapping")
 
         expanded = _expand_placeholders(raw, self._placeholder_vars())
         settings = _parse_settings(expanded, self.extends_dir)
@@ -239,9 +239,14 @@ class SkillSourceSync:
         return settings, sources
 
     def has_config(self) -> bool:
-        """Return whether workspace config/skill_sources.yml exists."""
+        """Return whether workspace config/config.yml declares skills."""
 
-        return self.config_path.exists()
+        if not self.config_path.exists():
+            return False
+        try:
+            return "skills" in load_runtime_config(self.config_dir)
+        except ValueError as exc:
+            raise SkillSyncError(f"Invalid config.yml skills section: {exc}") from exc
 
     def skill_roots(self) -> list[SkillRoot]:
         """Return configured runtime Skill package roots under extends_dir."""

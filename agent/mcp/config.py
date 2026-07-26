@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from agent.protocols.mcp import McpOAuthSpec, McpServerSpec
+from agent.runtime_config import load_runtime_section
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _SERVER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -46,17 +46,18 @@ class McpConfigError(RuntimeError):
 
 
 def load_mcp_server_specs(config_dir: Path | str) -> tuple[McpServerSpec, ...]:
-    """Load ``mcp.json``; a missing file means MCP is disabled."""
+    """Load config.yml mcp.servers; a missing section disables MCP."""
 
-    path = Path(config_dir) / "mcp.json"
-    if not path.exists():
-        return ()
+    path = Path(config_dir) / "config.yml"
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        section = load_runtime_section(config_dir, "mcp", default={})
+    except ValueError as exc:
         raise McpConfigError(f"Cannot read MCP config: {path.name}") from exc
-    if not isinstance(raw, dict):
+    if not isinstance(section, dict):
         raise McpConfigError("MCP config root must be an object")
+    if not section:
+        return ()
+    raw = {"mcpServers": section.get("servers", {})}
     _reject_unknown(raw, _ROOT_FIELDS, "root")
     servers = raw.get("mcpServers")
     if not isinstance(servers, dict):
