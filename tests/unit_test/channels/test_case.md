@@ -37,7 +37,8 @@
 - SDK 缺失或 credentials 缺失仅返回 unavailable。
 - Keyboard 被拒绝时先降级为 Markdown 链接；Markdown 仍失败时降级为纯文本 URL，且不重复创建授权请求。
 - 普通结构化回复 Markdown 失败时回退同一纯文本内容，不重复 Agent Turn。
-- QQ API 明确抛错时记录 `channel.qq.send_failed`；SDK 返回 `None` 时记录 `channel.qq.send_unconfirmed` 并把 receipt 标记为 error。
+- QQ API明确抛错时记录`channel.qq.send_failed`；SDK返回`None`时记录`channel.qq.send_unconfirmed`并把receipt标记为error，但不把仍在线的WebSocket渠道标记为degraded。
+- QQ HTTP请求上限默认15秒、允许每账号配置1~60秒，并真实传入`botpy.Client(timeout=...)`。
 - QQ 正常启动不展开 botpy 登录细节，在真实 `on_ready` 后输出 Uvicorn 风格 `[qq] channel ready | mode=shared`；启动期超时后若连接恢复，只补发一次 ready，状态降级输出 WARNING，且不输出 app secret。
 - 微信正常启动按 `active/reconnect_required` 聚合账号数；消息接收、接受、发送开始/完成只进 DEBUG trace，sidecar、重连和发送失败以 Uvicorn 风格 WARNING 输出，并只使用内部账号短哈希。
 
@@ -48,4 +49,4 @@
 - 进程重建 service 后 route/receipt 仍从 SQLite 生效。
 - QQ 群 capability 不暴露个人模型、Session 和历史命令。
 - Keyboard payload 只在 QQ transport 组装，AgentLoop 和中性 Channel 协议不依赖 QQ SDK 类型。
-- 投递状态未知时不继续发送 Markdown 降级或重试同一 `msg_id + msg_seq`，避免重复回复。
+- 投递状态未知时不继续发送Markdown降级或重试同一`msg_id + msg_seq`，避免重复回复；未确认异常在Adapter边界终止传播。

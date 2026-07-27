@@ -9,7 +9,7 @@ import subprocess
 import threading
 import uuid
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 from typing import Callable
 
 from agent.logging_utils import log_event
@@ -17,6 +17,7 @@ from agent.logging_utils import log_event
 PROTOCOL_VERSION = "1"
 MAX_FRAME_BYTES = 256 * 1024
 WEIXIN_TOKEN_STALE = "WEIXIN_TOKEN_STALE"
+WEIXIN_ACCOUNT_START_TIMEOUT_SECONDS = 15.0
 sidecar_logger = logging.getLogger("zcagent.agent.channel.weixin")
 
 
@@ -29,6 +30,8 @@ def safe_weixin_error_code(value: object, fallback: str = "WEIXIN_TRANSPORT_ERRO
     if (
         candidate.isascii()
         and 1 <= len(candidate) <= 64
+        and candidate[0].isupper()
+        and candidate[0].isalpha()
         and all(
             character.isupper() or character.isdigit() or character == "_"
             for character in candidate
@@ -146,8 +149,10 @@ class WeixinSidecarClient:
             process.stdin.write(encoded + "\n")
             process.stdin.flush()
             result = pending.get(timeout=timeout_seconds or self.timeout_seconds)
-        except Exception as exc:
-            raise WeixinSidecarError("sidecar request timed out") from exc
+        except Empty as exc:
+            raise WeixinSidecarError("SIDECAR_REQUEST_TIMEOUT") from exc
+        except OSError as exc:
+            raise WeixinSidecarError("SIDECAR_WRITE_FAILED") from exc
         finally:
             with self._pending_lock:
                 self._pending.pop(request_id, None)

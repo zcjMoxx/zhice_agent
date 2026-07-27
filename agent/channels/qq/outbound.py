@@ -9,6 +9,10 @@ from typing import Literal
 from agent.presentation import markdown_to_plain_text
 
 
+class QQSendUnconfirmedError(RuntimeError):
+    """The SDK returned without confirming that QQ accepted the message."""
+
+
 @dataclass(frozen=True)
 class QQOutboundButton:
     """SDK-independent description of one QQ keyboard button."""

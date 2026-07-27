@@ -783,7 +783,7 @@ QQ 出站发送额外区分：
 - `channel.qq.send_failed`：SDK 或平台明确抛出错误；
 - `channel.qq.send_unconfirmed`：botpy 返回 `None`，投递结果未知，receipt 必须为 error。
 
-出站 trace 只记录平台 ID 的短 hash、消息类型、`msg_seq`、字符数、引用/Keyboard 标志和耗时。`send_unconfirmed` 不自动重试同一 `msg_id + msg_seq`，避免状态未知时重复发送。
+出站trace只记录平台ID的短hash、消息类型、`msg_seq`、字符数、引用/Keyboard标志和耗时。`channels.qq.accounts[].http_timeout_seconds`默认15秒并限制为1~60秒，避免受`qq-botpy`默认5秒上限影响。`send_unconfirmed`仍不自动重试同一`msg_id + msg_seq`，因为平台明确拒绝相同组合重复发送，超时后无法证明首次请求是否已接收；该异常在Adapter边界把receipt闭合为error，但不再冒泡到botpy并误把WebSocket渠道标记为degraded。
 
 ### 20.3 Runtime Activity 与 Security Audit
 
@@ -1095,7 +1095,9 @@ Node -> Python:
   message.received / message.send_result / account.status / health.status
 ```
 
-每个账号有独立长轮询、AbortController、同步游标和退避状态。单账号失败只影响本人；sidecar 失败只影响微信 capability。Gateway stop 先停止轮询并通知上游，再回收子进程。同一个 workspace 只允许一个 Gateway 持有微信 sidecar lease。
+每个账号有独立长轮询、AbortController、同步游标和退避状态。同一个 `account_key` 的 start/stop/reconnect 串行执行，重复 start 必须先完整停止旧 poller；stop 会释放等待 Python ACK 的入站消息，不能阻塞重连或 Gateway 退出。单账号失败只影响本人；sidecar 失败只影响微信 capability。Gateway stop 先停止轮询并通知上游，再回收子进程。同一个 workspace 只允许一个 Gateway 持有微信 sidecar lease。
+
+账号持久化状态表达授权是否仍可用：只有微信明确返回`WEIXIN_TOKEN_STALE`才写入`reconnect_required`。`notifyStart`、stdio和持续轮询错误只进入运行态`degraded/reconnecting`并保留绑定；Python等待`account.start`使用15秒窗口，必须大于Node `notifyStart`的10秒上限，避免同水位超时竞态。Node长轮询的单次或两次连续失败只发送`account.poll_retry`进入DEBUG trace，不改变账号状态，连续第三次失败才进入degraded，恢复成功后只切回一次active。本地`account.start`从1秒开始、Node长轮询从2秒开始指数退避，均以30秒为上限。poll错误按DNS、连接重置、连接超时、HTTP、响应解析和上游业务码安全分类，不输出原始异常正文。可信且账号/发送者匹配的入站消息也可修复数据库与实际sidecar状态不一致，不要求用户手动点击Reconnect。
 
 ## 32. 微信 Web 绑定
 
@@ -1119,7 +1121,7 @@ attempt 只从当前登录 Actor 得到 owner，不接收 URL/body user id。一
 ```text
 getUpdates
   -> sidecar allowlist normalize
-  -> account active + sender match
+  -> account active/recoverable + sender match
   -> persistent receipt claim
   -> rate limit
   -> ExternalIdentityService.resolve
@@ -1133,6 +1135,10 @@ getUpdates
 ```
 
 sidecar 在 Python 对批次消息给出 accepted/duplicate/rejected ACK 后原子保存新游标。崩溃重投由现有 receipt 去重。当前 claim 后、Turn 完成前崩溃的 `processing` 窗口不在微信 Adapter 内另建队列解决。
+
+微信已完成Agent Turn的回复在发送前按纯文本chunk写入SQLite Outbox。每个chunk使用由`account_key + event_id + chunk_index`确定性派生的稳定`delivery_id/client_id`；只有Sidecar明确返回`sent`才标记完成。发送失败不重新执行Agent Turn，而是保留pending、立即把微信能力降级并调度账号恢复；账号重新active或进程重启后按原顺序只重放pending chunk。已sent记录不重放并按保留期清理，解绑删除本账号Outbox但保留Session历史。
+
+Python的`message.send`等待窗口必须大于Node官方发送API上限，避免客户端提前超时制造未知状态。每条入站消息在trace中闭合为accepted、duplicate、rejected、done或failed；额外记录`outbox_enqueued/outbox_replay_start/outbox_replay_done/outbox_replay_failed`，只带安全账号/交付引用、chunk序号、数量和allowlist错误码。token、context token、消息正文、原始响应和完整外部标识不进入lifecycle事件。
 
 ## 34. 微信第一版 Capability
 
@@ -1152,7 +1158,7 @@ ChannelCapabilities(
 )
 ```
 
-第一版只做 direct text。RuntimeEvent 聚合为最终文本，Markdown 转共享纯文本，按 4000 字符安全分块。typing 失败只降级；发送失败不重新执行 Agent Turn；不发送密集 tool progress 消息。
+第一版只做direct text。RuntimeEvent聚合为最终文本，Markdown转共享纯文本，按4000字符安全分块。typing失败只降级；发送失败不重新执行Agent Turn，而由稳定client_id的持久化Outbox在重连后补发；不发送密集tool progress消息。
 
 ## 35. 微信 Session、Memory 与命令
 

@@ -18,6 +18,7 @@ const FIXED_BASE_URL = "https://ilinkai.weixin.qq.com";
 const QR_POLL_TIMEOUT_MS = 35_000;
 const ACK_TIMEOUT_MS = 120_000;
 const STALE_TOKEN_CODE = -14;
+export const POLL_DEGRADED_FAILURE_THRESHOLD = 3;
 
 export const officialDriver = {
   available: true,
@@ -198,13 +199,17 @@ class OfficialAccount {
 
   async send(frame) {
     const context = this.contextFor(frame);
+    const clientId = String(frame.client_id || "");
+    if (!/^zhice-weixin-[a-f0-9]{32}$/.test(clientId)) {
+      throw transportError("CLIENT_ID_INVALID");
+    }
     await sendMessage({
       ...this.apiOptions(15_000),
       body: {
         msg: {
           from_user_id: "",
           to_user_id: context.peer,
-          client_id: `zhice-weixin-${crypto.randomUUID()}`,
+          client_id: clientId,
           message_type: 2,
           message_state: 2,
           item_list: [{ type: 1, text_item: { text: String(frame.text || "") } }],
@@ -263,7 +268,7 @@ class OfficialAccount {
         }
         if (code !== 0) throw transportError("WEIXIN_GET_UPDATES_FAILED");
         failures = 0;
-        this.updateStatus("active", "OK");
+        if (this.status !== "active") this.updateStatus("active", "OK");
         const messages = (response.msgs || []).filter((message) => this.isAllowedText(message));
         const dispositions = await Promise.all(messages.map((message) => this.deliver(message)));
         if (dispositions.every((value) => ["accepted", "duplicate", "rejected"].includes(value))) {
@@ -276,7 +281,17 @@ class OfficialAccount {
         if (this.controller.signal.aborted) return;
         failures += 1;
         const delay = Math.min(30_000, 1000 * 2 ** Math.min(failures, 5));
-        this.updateStatus("degraded", safeCode(error, "WEIXIN_POLL_FAILED"));
+        const code = safePollCode(error);
+        if (shouldDegradePoll(failures)) {
+          this.updateStatus("degraded", code);
+        } else {
+          this.emit({
+            type: "account.poll_retry",
+            account_key: this.accountKey,
+            code,
+            consecutive_failures: failures,
+          });
+        }
         await sleep(delay, this.controller.signal);
       }
     }
@@ -389,5 +404,32 @@ function transportError(code) {
 
 function safeCode(error, fallback) {
   const code = String(error?.code || fallback);
-  return /^[A-Z0-9_]{1,64}$/.test(code) ? code : fallback;
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : fallback;
+}
+
+export function safePollCode(error) {
+  const explicit = safeCode(error, "");
+  if (/^WEIXIN_[A-Z0-9_]{1,56}$/.test(explicit)) return explicit;
+  const details = [
+    error?.code,
+    error?.name,
+    error?.message,
+    error?.cause?.code,
+    error?.cause?.name,
+    error?.cause?.message,
+  ].map((value) => String(value || "")).join(" ");
+  if (/ENOTFOUND|EAI_AGAIN|DNS/i.test(details)) return "WEIXIN_POLL_DNS_FAILED";
+  if (/ECONNRESET|UND_ERR_SOCKET|socket|connection reset/i.test(details)) {
+    return "WEIXIN_POLL_CONNECTION_RESET";
+  }
+  if (/ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|ENETUNREACH|EHOSTUNREACH|timeout/i.test(details)) {
+    return "WEIXIN_POLL_TIMEOUT";
+  }
+  if (error instanceof SyntaxError) return "WEIXIN_POLL_INVALID_RESPONSE";
+  if (/getUpdates\s+[45]\d\d/i.test(details)) return "WEIXIN_POLL_HTTP_FAILED";
+  return "WEIXIN_POLL_FAILED";
+}
+
+export function shouldDegradePoll(failures) {
+  return failures === POLL_DEGRADED_FAILURE_THRESHOLD;
 }

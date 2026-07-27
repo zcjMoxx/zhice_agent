@@ -10,7 +10,11 @@ import uuid
 from agent.channels.limits import SlidingWindowRateLimiter
 from agent.channels.weixin.normalize import WeixinEventError, normalize_message
 from agent.channels.weixin.outbound import render_chunks
-from agent.channels.weixin.sidecar import WEIXIN_TOKEN_STALE, safe_weixin_error_code
+from agent.channels.weixin.sidecar import (
+    WEIXIN_ACCOUNT_START_TIMEOUT_SECONDS,
+    WEIXIN_TOKEN_STALE,
+    safe_weixin_error_code,
+)
 from agent.logging_utils import log_event
 from agent.protocols.capability import CapabilityStatus
 from agent.protocols.channel import ChannelCapabilities, ChannelExecutionContext
@@ -29,6 +33,7 @@ WEIXIN_C2C_CAPABILITIES = ChannelCapabilities(
     command_profile="weixin_c2c",
 )
 weixin_logger = logging.getLogger("zcagent.agent.channel.weixin")
+WEIXIN_SEND_TIMEOUT_SECONDS = 20.0
 
 
 class WeixinClawAdapter:
@@ -49,6 +54,10 @@ class WeixinClawAdapter:
         self._retry_stop = threading.Event()
         self._retry_lock = threading.Lock()
         self._retry_threads: dict[str, threading.Thread] = {}
+        self._retry_requested: set[str] = set()
+        self._outbox_lock = threading.Lock()
+        self._outbox_threads: dict[str, threading.Thread] = {}
+        self._send_locks: dict[str, threading.Lock] = {}
         self._reauth_accounts: set[str] = set()
         self.sidecar.set_event_handler(self._on_frame)
         self.binding.set_account_starter(self.start_account)
@@ -61,6 +70,7 @@ class WeixinClawAdapter:
         self._state = "degraded"
         self._retry_stop.clear()
         self.sidecar.start()
+        self.identity.store.prune_weixin_outbound()
         account_states: list[str] = []
         for account in self.identity.store.list_active_channel_accounts("weixin"):
             account_key = str(account["account_key"])
@@ -89,7 +99,10 @@ class WeixinClawAdapter:
     ) -> str:
         try:
             response = self.sidecar.request(
-                "account.start", account_key=account_key, credential=credential
+                "account.start",
+                timeout_seconds=WEIXIN_ACCOUNT_START_TIMEOUT_SECONDS,
+                account_key=account_key,
+                credential=credential,
             )
         except Exception as exc:  # noqa: BLE001 - classify before retrying.
             code = _safe_error_code(exc)
@@ -136,6 +149,9 @@ class WeixinClawAdapter:
         if frame_type == "account.status":
             self._handle_account_status(frame)
             return
+        if frame_type == "account.poll_retry":
+            self._handle_poll_retry(frame)
+            return
         if frame_type == "message.received":
             threading.Thread(
                 target=self._run_inbound_frame,
@@ -173,6 +189,24 @@ class WeixinClawAdapter:
         elif status == "reconnect_required":
             self._state = "degraded"
             self._log_reconnecting(account_key, code)
+
+    def _handle_poll_retry(self, frame: dict[str, object]) -> None:
+        account_key = str(frame.get("account_key") or "")
+        if not account_key:
+            return
+        code = safe_weixin_error_code(frame.get("code"), "WEIXIN_POLL_FAILED")
+        try:
+            failures = int(frame.get("consecutive_failures") or 1)
+        except (TypeError, ValueError):
+            failures = 1
+        log_event(
+            weixin_logger,
+            logging.DEBUG,
+            "channel.weixin.poll_retry",
+            account_ref=_safe_account_ref(account_key),
+            reason_code=code,
+            consecutive_failures=max(1, min(failures, 999)),
+        )
 
     async def handle_frame(self, frame: dict[str, object]) -> None:
         log_event(weixin_logger, logging.DEBUG, "channel.weixin.message_received")
@@ -347,29 +381,101 @@ class WeixinClawAdapter:
             pass
 
     async def _send(self, event, content: str) -> None:
-        for chunk in render_chunks(content, self.config.text_chunk_limit):
-            fields = {"account_ref": _safe_account_ref(event.account_key)}
-            log_event(weixin_logger, logging.DEBUG, "channel.weixin.send_start", **fields)
-            try:
-                await asyncio.to_thread(
-                    self.sidecar.request,
-                    "message.send",
-                    account_key=event.account_key,
-                    peer=event.external_conversation_id,
-                    context_token_ref=event.safe_metadata.get("context_token_ref", ""),
-                    text=chunk,
-                )
-            except Exception as exc:
-                log_event(
-                    weixin_logger,
-                    logging.WARNING,
-                    "channel.weixin.send_failed",
-                    **fields,
-                    error_type=type(exc).__name__,
-                    error_code=_safe_error_code(exc),
-                )
-                raise
-            log_event(weixin_logger, logging.DEBUG, "channel.weixin.send_done", **fields)
+        rows: list[dict[str, object]] = []
+        for chunk_index, chunk in enumerate(
+            render_chunks(content, self.config.text_chunk_limit)
+        ):
+            delivery_id = _delivery_id(event.account_key, event.event_id, chunk_index)
+            row = self.identity.store.enqueue_weixin_outbound(
+                delivery_id=delivery_id,
+                account_key=event.account_key,
+                event_id=event.event_id,
+                peer=event.external_conversation_id,
+                context_token_ref=event.safe_metadata.get("context_token_ref", ""),
+                chunk_index=chunk_index,
+                text=chunk,
+            )
+            rows.append(row)
+            log_event(
+                weixin_logger,
+                logging.DEBUG,
+                "channel.weixin.outbox_enqueued",
+                account_ref=_safe_account_ref(event.account_key),
+                delivery_ref=_safe_delivery_ref(delivery_id),
+                chunk_index=chunk_index,
+            )
+        for row in rows:
+            if str(row.get("status") or "") == "sent":
+                continue
+            await asyncio.to_thread(self._deliver_outbox_row, row, False)
+
+    def _deliver_outbox_row(
+        self, row: dict[str, object], replay: bool
+    ) -> None:
+        delivery_id = str(row["delivery_id"])
+        account_key = str(row["account_key"])
+        with self._outbox_lock:
+            send_lock = self._send_locks.setdefault(account_key, threading.Lock())
+        with send_lock:
+            if not self.identity.store.is_weixin_outbound_pending(delivery_id):
+                return
+            self._deliver_pending_outbox_row(row, replay)
+
+    def _deliver_pending_outbox_row(
+        self, row: dict[str, object], replay: bool
+    ) -> None:
+        delivery_id = str(row["delivery_id"])
+        account_key = str(row["account_key"])
+        fields = {
+            "account_ref": _safe_account_ref(account_key),
+            "delivery_ref": _safe_delivery_ref(delivery_id),
+            "chunk_index": int(row["chunk_index"]),
+            "replay": replay,
+        }
+        log_event(weixin_logger, logging.DEBUG, "channel.weixin.send_start", **fields)
+        self.identity.store.mark_weixin_outbound_attempt(delivery_id)
+        try:
+            response = self.sidecar.request(
+                "message.send",
+                timeout_seconds=WEIXIN_SEND_TIMEOUT_SECONDS,
+                account_key=account_key,
+                peer=str(row["peer"]),
+                context_token_ref=str(row["context_token_ref"]),
+                client_id=delivery_id,
+                text=str(row["text"]),
+            )
+            if str(response.get("status") or "") != "sent":
+                raise RuntimeError("WEIXIN_SEND_NOT_CONFIRMED")
+        except Exception as exc:
+            code = _safe_error_code(exc)
+            self.identity.store.mark_weixin_outbound_error(
+                delivery_id, error_code=code
+            )
+            log_event(
+                weixin_logger,
+                logging.WARNING,
+                "channel.weixin.send_failed",
+                **fields,
+                error_type=type(exc).__name__,
+                error_code=code,
+            )
+            self._trigger_transport_recovery(account_key, code)
+            raise
+        self.identity.store.mark_weixin_outbound_sent(delivery_id)
+        log_event(weixin_logger, logging.DEBUG, "channel.weixin.send_done", **fields)
+
+    def _trigger_transport_recovery(self, account_key: str, code: str) -> None:
+        if code == WEIXIN_TOKEN_STALE:
+            self._mark_reconnect_required(account_key, code)
+            return
+        self._state = "degraded"
+        self._log_reconnecting(account_key, code)
+        try:
+            credential = self.binding.credentials.read(account_key)
+        except (OSError, ValueError):
+            self._mark_reconnect_required(account_key, "WEIXIN_CREDENTIAL_UNAVAILABLE")
+            return
+        self._schedule_account_retry(account_key, credential)
 
     def _mark_active(self, account_key: str, *, trigger: str) -> None:
         changed = self._set_binding_active(account_key)
@@ -385,6 +491,71 @@ class WeixinClawAdapter:
                 account_ref=_safe_account_ref(account_key),
                 trigger=trigger,
             )
+        self._schedule_outbox_drain(account_key)
+
+    def _schedule_outbox_drain(self, account_key: str) -> None:
+        if self._retry_stop.is_set():
+            return
+        with self._outbox_lock:
+            current = self._outbox_threads.get(account_key)
+            if current is not None and current.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._drain_outbox,
+                args=(account_key,),
+                name=f"weixin-outbox-{account_key[-8:]}",
+                daemon=True,
+            )
+            self._outbox_threads[account_key] = thread
+            thread.start()
+
+    def _drain_outbox(self, account_key: str) -> None:
+        try:
+            rows = self.identity.store.list_pending_weixin_outbound(account_key)
+            if not rows:
+                return
+            log_event(
+                weixin_logger,
+                logging.INFO,
+                "channel.weixin.outbox_replay_start",
+                account_ref=_safe_account_ref(account_key),
+                pending_count=len(rows),
+            )
+            completed_events: set[str] = set()
+            for row in rows:
+                if self._retry_stop.is_set():
+                    return
+                try:
+                    self._deliver_outbox_row(row, True)
+                except Exception as exc:  # noqa: BLE001 - next reconnect retries pending rows.
+                    log_event(
+                        weixin_logger,
+                        logging.WARNING,
+                        "channel.weixin.outbox_replay_failed",
+                        account_ref=_safe_account_ref(account_key),
+                        error_type=type(exc).__name__,
+                        error_code=_safe_error_code(exc),
+                    )
+                    return
+                event_id = str(row["event_id"])
+                if not self.identity.store.has_pending_weixin_outbound_event(
+                    account_key=account_key, event_id=event_id
+                ):
+                    completed_events.add(event_id)
+            for event_id in completed_events:
+                self.dedup.finish(
+                    "weixin", account_key, event_id, status="done"
+                )
+            log_event(
+                weixin_logger,
+                logging.INFO,
+                "channel.weixin.outbox_replay_done",
+                account_ref=_safe_account_ref(account_key),
+                delivered_count=len(rows),
+            )
+        finally:
+            with self._outbox_lock:
+                self._outbox_threads.pop(account_key, None)
 
     def _set_binding_active(self, account_key: str) -> bool | None:
         account = self.identity.store.get_channel_account(
@@ -429,9 +600,12 @@ class WeixinClawAdapter:
     def _schedule_account_retry(
         self, account_key: str, credential: dict[str, object]
     ) -> None:
+        if self._retry_stop.is_set():
+            return
         with self._retry_lock:
             current = self._retry_threads.get(account_key)
             if current is not None and current.is_alive():
+                self._retry_requested.add(account_key)
                 return
             thread = threading.Thread(
                 target=self._retry_account_start,
@@ -467,6 +641,10 @@ class WeixinClawAdapter:
         finally:
             with self._retry_lock:
                 self._retry_threads.pop(account_key, None)
+                requested = account_key in self._retry_requested
+                self._retry_requested.discard(account_key)
+            if requested and not self._retry_stop.is_set():
+                self._schedule_account_retry(account_key, credential)
 
 
 def _capture_text(payload: dict[str, object], target: list[str]) -> None:
@@ -476,6 +654,15 @@ def _capture_text(payload: dict[str, object], target: list[str]) -> None:
 
 def _safe_account_ref(account_key: str) -> str:
     return "wx-" + uuid.uuid5(uuid.NAMESPACE_URL, account_key).hex[:8]
+
+
+def _delivery_id(account_key: str, event_id: str, chunk_index: int) -> str:
+    value = f"{account_key}\0{event_id}\0{chunk_index}"
+    return "zhice-weixin-" + uuid.uuid5(uuid.NAMESPACE_URL, value).hex
+
+
+def _safe_delivery_ref(delivery_id: str) -> str:
+    return "delivery-" + delivery_id[-12:]
 
 
 def _safe_error_code(exc: Exception) -> str:

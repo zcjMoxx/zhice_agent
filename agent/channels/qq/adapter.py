@@ -11,6 +11,7 @@ from agent.channels.limits import SlidingWindowRateLimiter
 from agent.channels.qq.attachments import QQAttachmentService
 from agent.channels.qq.outbound import (
     QQOutboundMessage,
+    QQSendUnconfirmedError,
     build_agent_markdown,
     build_binding_authorization,
     build_binding_prompt,
@@ -156,6 +157,9 @@ class QQChannelAdapter:
                 content = str(getattr(result, "content", "") or "".join(deltas))
                 if content:
                     await self._send_runtime_content(event, content)
+        except QQSendUnconfirmedError as exc:
+            terminal_status = "error"
+            terminal_error = type(exc).__name__
         except Exception as exc:
             terminal_status = "error"
             terminal_error = type(exc).__name__

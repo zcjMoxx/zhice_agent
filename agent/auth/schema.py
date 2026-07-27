@@ -210,6 +210,23 @@ CREATE TABLE IF NOT EXISTS channel_event_receipts (
   PRIMARY KEY(channel, account_key, event_id)
 );
 
+CREATE TABLE IF NOT EXISTS weixin_outbound_messages (
+  delivery_id TEXT PRIMARY KEY,
+  account_key TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  peer TEXT NOT NULL,
+  context_token_ref TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_error_code TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  sent_at TEXT,
+  UNIQUE(account_key, event_id, chunk_index)
+);
+
 CREATE TABLE IF NOT EXISTS turn_runs (
   turn_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -308,6 +325,8 @@ CREATE INDEX IF NOT EXISTS idx_channel_conversations_owner
   ON channel_conversations(owner_user_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_channel_receipts_seen
   ON channel_event_receipts(channel, account_key, first_seen_at);
+CREATE INDEX IF NOT EXISTS idx_weixin_outbound_pending
+  ON weixin_outbound_messages(account_key, status, created_at, chunk_index);
 CREATE INDEX IF NOT EXISTS idx_turn_runs_session ON turn_runs(session_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_turn_runs_actor ON turn_runs(actor_user_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_turn ON tool_call_records(session_id, turn_id);

@@ -19,7 +19,11 @@ from agent.channels.identity import ExternalIdentityService
 from agent.channels.weixin.adapter import WeixinClawAdapter
 from agent.channels.weixin.binding import WeixinBindingService
 from agent.channels.weixin.outbound import render_chunks
-from agent.channels.weixin.sidecar import WeixinSidecarError
+from agent.channels.weixin.sidecar import WeixinSidecarError, safe_weixin_error_code
+
+
+def test_weixin_error_code_rejects_numeric_dom_exception_code():
+    assert safe_weixin_error_code("20", "WEIXIN_POLL_FAILED") == "WEIXIN_POLL_FAILED"
 
 
 def test_channel_account_uniqueness_keeps_two_users_isolated(tmp_path):
@@ -225,6 +229,29 @@ def test_inbound_activity_automatically_recovers_reconnect_required_account(
     assert "channel.weixin.message_done" in [event for event, _fields in events]
 
 
+def test_single_poll_retry_is_debug_only_and_does_not_degrade_channel(
+    tmp_path, monkeypatch
+):
+    adapter, _runtime, _sidecar, _store = _adapter(tmp_path)
+    adapter._state = "available"
+    events = _capture_adapter_events(monkeypatch)
+
+    adapter._on_frame(
+        {
+            "type": "account.poll_retry",
+            "account_key": "opaque-a",
+            "code": "WEIXIN_POLL_DNS_FAILED",
+            "consecutive_failures": 1,
+        }
+    )
+
+    assert adapter.status().state == "available"
+    retry = next(fields for event, fields in events if event == "channel.weixin.poll_retry")
+    assert retry["reason_code"] == "WEIXIN_POLL_DNS_FAILED"
+    assert retry["consecutive_failures"] == 1
+    assert "channel.weixin.reconnecting" not in [event for event, _fields in events]
+
+
 def test_send_failure_logs_safe_sidecar_error_code(tmp_path, monkeypatch):
     sidecar = _FailingSendSidecar()
     adapter, _runtime, _sidecar, _store = _adapter(tmp_path, sidecar=sidecar)
@@ -238,6 +265,108 @@ def test_send_failure_logs_safe_sidecar_error_code(tmp_path, monkeypatch):
     event_names = [event for event, _fields in events]
     assert "channel.weixin.message_failed" in event_names
     assert "channel.weixin.inbound_failed" in event_names
+
+
+def test_send_uses_stable_client_id_long_timeout_and_marks_outbox_sent(tmp_path):
+    adapter, runtime, sidecar, store = _adapter(tmp_path)
+    frame = _frame(event_id="stable-delivery", sender="wx-a")
+
+    asyncio.run(adapter.handle_frame(frame))
+
+    sends = [payload for kind, payload in sidecar.calls if kind == "message.send"]
+    assert len(runtime.calls) == 1
+    assert len(sends) == 1
+    assert sends[0]["timeout_seconds"] == 20.0
+    assert sends[0]["client_id"].startswith("zhice-weixin-")
+    assert len(sends[0]["client_id"]) == len("zhice-weixin-") + 32
+    assert store.list_pending_weixin_outbound("opaque-a") == []
+
+
+def test_send_failure_reconnects_and_replays_without_rerunning_agent(tmp_path, monkeypatch):
+    sidecar = _RecoveringSendSidecar()
+    adapter, runtime, _sidecar, store = _adapter(tmp_path, sidecar=sidecar)
+    staged = adapter.binding.credentials.stage(
+        "opaque-a", {"bot_token": "secret", "external_user_id": "wx-a"}
+    )
+    adapter.binding.credentials.promote(staged, "opaque-a")
+    events = _capture_adapter_events(monkeypatch)
+
+    adapter._run_inbound_frame(_frame(event_id="replay-after-reconnect", sender="wx-a"))
+
+    assert sidecar.recovered.wait(timeout=3.0)
+    assert _wait_for(lambda: sidecar.send_attempts == 2, timeout=3.0)
+    assert _wait_for(
+        lambda: store.list_pending_weixin_outbound("opaque-a") == [], timeout=1.0
+    )
+    assert len(runtime.calls) == 1
+    assert len(set(sidecar.client_ids)) == 1
+    assert sidecar.timeouts == [20.0, 20.0]
+    event_names = [event for event, _fields in events]
+    assert "channel.weixin.reconnecting" in event_names
+    assert "channel.weixin.outbox_replay_start" in event_names
+    assert _wait_for(
+        lambda: any(
+            event == "channel.weixin.outbox_replay_done"
+            for event, _fields in events
+        ),
+        timeout=1.0,
+    )
+
+
+def test_new_adapter_process_recovers_persisted_pending_outbox(tmp_path):
+    failing = _FailingSendSidecar()
+    adapter, first_runtime, _sidecar, store = _adapter(tmp_path, sidecar=failing)
+    adapter._run_inbound_frame(_frame(event_id="persisted-pending", sender="wx-a"))
+    pending = store.list_pending_weixin_outbound("opaque-a")
+    assert len(pending) == 1
+
+    recovered_sidecar = _Sidecar()
+    second_runtime = _Runtime()
+    binding = WeixinBindingService(store, recovered_sidecar, tmp_path)
+    restarted = WeixinClawAdapter(
+        WeixinChannelConfig(enabled=True),
+        recovered_sidecar,
+        binding,
+        ExternalIdentityService(store),
+        adapter.conversations,
+        ChannelDedupService(store),
+        second_runtime,
+    )
+    restarted._mark_active("opaque-a", trigger="account_start")
+
+    assert _wait_for(
+        lambda: store.list_pending_weixin_outbound("opaque-a") == [], timeout=2.0
+    )
+    sends = [payload for kind, payload in recovered_sidecar.calls if kind == "message.send"]
+    assert len(first_runtime.calls) == 1
+    assert second_runtime.calls == []
+    assert [payload["client_id"] for payload in sends] == [pending[0]["delivery_id"]]
+
+
+def test_partial_chunk_failure_replays_only_unsent_chunks(tmp_path):
+    sidecar = _PartialRecoveringSendSidecar()
+    adapter, runtime, _sidecar, store = _adapter(
+        tmp_path,
+        sidecar=sidecar,
+        config=WeixinChannelConfig(enabled=True, text_chunk_limit=2),
+    )
+    staged = adapter.binding.credentials.stage(
+        "opaque-a", {"bot_token": "secret", "external_user_id": "wx-a"}
+    )
+    adapter.binding.credentials.promote(staged, "opaque-a")
+
+    adapter._run_inbound_frame(_frame(event_id="partial-chunks", sender="wx-a"))
+
+    assert sidecar.recovered.wait(timeout=3.0)
+    assert _wait_for(
+        lambda: store.list_pending_weixin_outbound("opaque-a") == [], timeout=3.0
+    )
+    assert len(runtime.calls) == 1
+    counts = {
+        client_id: sidecar.client_ids.count(client_id)
+        for client_id in sidecar.client_ids
+    }
+    assert sorted(counts.values()) == [1, 1, 2]
 
 
 def test_ack_failure_is_logged_without_dropping_the_turn(tmp_path, monkeypatch):
@@ -269,6 +398,7 @@ def test_transient_account_start_failure_keeps_binding_active(tmp_path, monkeypa
     assert adapter.status().state == "degraded"
     reconnecting = next(fields for event, fields in events if event == "channel.weixin.reconnecting")
     assert reconnecting["reason_code"] == "SIDECAR_REQUEST_TIMEOUT"
+    assert sidecar.account_start_payload["timeout_seconds"] == 15.0
 
 
 def test_only_explicit_stale_token_requires_reauthentication(tmp_path, monkeypatch):
@@ -382,8 +512,18 @@ def test_unlink_removes_live_binding_but_keeps_session_index(tmp_path):
         conversation_type="c2c",
         external_chat_id="safe-chat",
     )
+    store.enqueue_weixin_outbound(
+        delivery_id="zhice-weixin-0123456789abcdef0123456789abcdef",
+        account_key="opaque-a",
+        event_id="pending-before-unlink",
+        peer="wx-a",
+        context_token_ref="ctx-safe-ref",
+        chunk_index=0,
+        text="pending reply",
+    )
     assert adapter.binding.unlink(actor) == "unbound"
     assert store.get_channel_account(channel="weixin", account_key="opaque-a") is None
+    assert store.list_pending_weixin_outbound("opaque-a") == []
     assert store.session_index_get("weixin_history") is not None
 
 
@@ -398,7 +538,7 @@ def _services(tmp_path):
     return store, user, sessions
 
 
-def _adapter(tmp_path, *, sidecar=None):
+def _adapter(tmp_path, *, sidecar=None, config=None):
     store, user, sessions = _services(tmp_path)
     store.create_channel_account(
         channel="weixin",
@@ -412,7 +552,7 @@ def _adapter(tmp_path, *, sidecar=None):
     runtime = _Runtime()
     binding = WeixinBindingService(store, sidecar, tmp_path)
     adapter = WeixinClawAdapter(
-        WeixinChannelConfig(enabled=True),
+        config or WeixinChannelConfig(enabled=True),
         sidecar,
         binding,
         ExternalIdentityService(store),
@@ -448,6 +588,8 @@ class _Sidecar:
 
     def request(self, frame_type, **payload):
         self.calls.append((frame_type, payload))
+        if frame_type == "message.send":
+            return {"type": "message.send_result", "status": "sent"}
         return {"type": f"{frame_type}_result", "status": "ok"}
 
     def stop(self):
@@ -475,6 +617,7 @@ class _AccountStartFailingSidecar(_Sidecar):
 
     def request(self, frame_type, **payload):
         if frame_type == "account.start":
+            self.account_start_payload = payload
             raise WeixinSidecarError(self.code)
         return super().request(frame_type, **payload)
 
@@ -493,6 +636,42 @@ class _RecoveringAccountStartSidecar(_Sidecar):
             self.recovered.set()
             return {"type": "account.status", "status": "active", "code": "OK"}
         return super().request(frame_type, **payload)
+
+
+class _RecoveringSendSidecar(_Sidecar):
+    def __init__(self):
+        super().__init__()
+        self.send_attempts = 0
+        self.client_ids = []
+        self.timeouts = []
+        self.recovered = threading.Event()
+
+    def request(self, frame_type, **payload):
+        self.calls.append((frame_type, payload))
+        if frame_type == "message.send":
+            self.send_attempts += 1
+            self.client_ids.append(payload["client_id"])
+            self.timeouts.append(payload["timeout_seconds"])
+            if self.send_attempts == 1:
+                raise WeixinSidecarError("SIDECAR_REQUEST_TIMEOUT")
+            return {"type": "message.send_result", "status": "sent"}
+        if frame_type == "account.start":
+            self.recovered.set()
+            return {"type": "account.status", "status": "active", "code": "OK"}
+        return {"type": f"{frame_type}_result", "status": "ok"}
+
+
+class _PartialRecoveringSendSidecar(_RecoveringSendSidecar):
+    def request(self, frame_type, **payload):
+        if frame_type != "message.send":
+            return super().request(frame_type, **payload)
+        self.calls.append((frame_type, payload))
+        self.send_attempts += 1
+        self.client_ids.append(payload["client_id"])
+        self.timeouts.append(payload["timeout_seconds"])
+        if self.send_attempts == 2:
+            raise WeixinSidecarError("SIDECAR_REQUEST_TIMEOUT")
+        return {"type": "message.send_result", "status": "sent"}
 
 
 class _DegradedAccountStartSidecar(_Sidecar):

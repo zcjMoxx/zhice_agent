@@ -22,6 +22,7 @@
 - 重复初始化、错误密码、disabled 用户、过期或撤销 token。
 - 用户改密校验当前密码；成功时撤销包括当前会话在内的全部登录态，失败时不产生部分更新。
 - 外部渠道身份映射到稳定内部 user_id。
+- 微信Outbox表幂等建表，pending/sent状态和attempt计数可恢复；账号解绑删除对应Outbox但保留Session历史。
 - 所有角色的日常 session 列表只返回自己；`session.manage.any` 只用于显式管理动作。
 - Owner 是 CLI 本地操作者的 Web 身份：Web session 复用 CLI `contexts/sessions*`，工具文件根目录直接使用 workspace，解析时不创建 `contexts/users/{owner_id}`；普通用户继续使用独立用户目录。
 - `ensure_session` 只在首次创建时返回 `created=True`，本人创建和写入由认证身份与 ownership 直接允许。

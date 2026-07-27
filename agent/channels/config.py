@@ -29,6 +29,7 @@ class QQAccountConfig:
     c2c_enabled: bool = True
     group_enabled: bool = True
     group_require_mention: bool = True
+    http_timeout_seconds: int = 15
     max_parallel_conversations: int = 8
     max_attachment_bytes: int = 20 * 1024 * 1024
 
@@ -106,6 +107,12 @@ def load_channel_configuration(config_dir: Path) -> ChannelConfiguration:
                 group_require_mention=_bool(
                     item.get("group_require_mention", True), "group_require_mention"
                 ),
+                http_timeout_seconds=_bounded_int(
+                    item.get("http_timeout_seconds", 15),
+                    "http_timeout_seconds",
+                    minimum=1,
+                    maximum=60,
+                ),
                 max_parallel_conversations=_positive_int(
                     item.get("max_parallel_conversations", 8), "max_parallel_conversations"
                 ),
@@ -168,6 +175,30 @@ def _positive_int(value: object, field_name: str) -> int:
         raise ChannelConfigurationError(f"{field_name} must be a positive integer") from exc
     if result < 1:
         raise ChannelConfigurationError(f"{field_name} must be a positive integer")
+    return result
+
+
+def _bounded_int(
+    value: object,
+    field_name: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if isinstance(value, bool):
+        raise ChannelConfigurationError(
+            f"{field_name} must be between {minimum} and {maximum}"
+        )
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ChannelConfigurationError(
+            f"{field_name} must be between {minimum} and {maximum}"
+        ) from exc
+    if result < minimum or result > maximum:
+        raise ChannelConfigurationError(
+            f"{field_name} must be between {minimum} and {maximum}"
+        )
     return result
 
 

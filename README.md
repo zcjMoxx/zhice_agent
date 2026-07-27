@@ -113,7 +113,7 @@ Skill source、MCP 和 Subagent 都是可选扩展：未配置时作为 disabled
 python -m pip install -e ".[qq]"
 ```
 
-运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`channels`分区，模板为`config/config.example.yml`。本地项目`config/.env`提供`QQBOT_APP_ID`和`QQBOT_APP_SECRET`，业务配置只保留环境变量引用。
+运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`channels`分区，模板为`config/config.example.yml`。本地项目`config/.env`提供`QQBOT_APP_ID`和`QQBOT_APP_SECRET`，业务配置只保留环境变量引用。每个QQ账号的`http_timeout_seconds`默认15秒，可在1~60秒内调整；未确认投递不会误把WebSocket渠道标记为断线，也不会盲目重发相同`msg_id + msg_seq`。
 
 查看状态；CLI 绑定码命令保留为管理/故障恢复入口：
 

@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Callable
 
 from agent.auth.store import AuthStoreError, SQLiteAuthStore
-from agent.channels.weixin.sidecar import WEIXIN_TOKEN_STALE, safe_weixin_error_code
+from agent.channels.weixin.sidecar import (
+    WEIXIN_ACCOUNT_START_TIMEOUT_SECONDS,
+    WEIXIN_TOKEN_STALE,
+    safe_weixin_error_code,
+)
 from agent.logging_utils import log_event
 from agent.protocols.auth import ActorContext
 
@@ -176,6 +180,7 @@ class WeixinBindingService:
         try:
             response = self.sidecar.request(
                 "account.start",
+                timeout_seconds=WEIXIN_ACCOUNT_START_TIMEOUT_SECONDS,
                 account_key=account_key,
                 credential=credential,
             )
@@ -270,7 +275,10 @@ class WeixinBindingService:
             return
         try:
             response = self.sidecar.request(
-                "account.start", account_key=account_key, credential=credential
+                "account.start",
+                timeout_seconds=WEIXIN_ACCOUNT_START_TIMEOUT_SECONDS,
+                account_key=account_key,
+                credential=credential,
             )
             status = str(response.get("status") or "degraded")
             code = safe_weixin_error_code(

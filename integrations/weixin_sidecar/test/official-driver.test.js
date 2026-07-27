@@ -4,7 +4,71 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { officialDriver } from "../src/official-driver.js";
+import {
+  officialDriver,
+  safePollCode,
+  shouldDegradePoll,
+} from "../src/official-driver.js";
+
+test("official driver classifies poll failures without exposing raw details", () => {
+  assert.equal(
+    safePollCode(Object.assign(new TypeError("fetch failed secret"), {
+      cause: { code: "ENOTFOUND" },
+    })),
+    "WEIXIN_POLL_DNS_FAILED",
+  );
+  assert.equal(safePollCode(new SyntaxError("private upstream body")), "WEIXIN_POLL_INVALID_RESPONSE");
+  assert.equal(
+    safePollCode(Object.assign(new Error("business failure"), { code: "WEIXIN_GET_UPDATES_FAILED" })),
+    "WEIXIN_GET_UPDATES_FAILED",
+  );
+  assert.equal(shouldDegradePoll(1), false);
+  assert.equal(shouldDegradePoll(2), false);
+  assert.equal(shouldDegradePoll(3), true);
+  assert.equal(shouldDegradePoll(4), false);
+});
+
+test("official driver keeps one transient poll failure out of account status", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalState = process.env.ZHICE_WEIXIN_STATE_DIR;
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zhice-weixin-poll-retry-"));
+  process.env.ZHICE_WEIXIN_STATE_DIR = stateRoot;
+  const events = [];
+  let polls = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    const text = String(url);
+    if (text.includes("notifystart") || text.includes("notifystop")) return jsonResponse({ ret: 0 });
+    if (text.includes("getupdates")) {
+      polls += 1;
+      if (polls === 1) {
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+      }
+      if (polls === 2) return jsonResponse({ ret: 0, msgs: [] });
+      return abortableResponse(options.signal);
+    }
+    throw new Error("unexpected fetch");
+  };
+  let account;
+  try {
+    account = await officialDriver.startAccount({
+      accountKey: "opaque-poll-retry",
+      credential: accountCredential(),
+      emit: (frame) => events.push(frame),
+    });
+    await waitFor(() => polls >= 2, 3500);
+    const retry = events.find((frame) => frame.type === "account.poll_retry");
+    assert.equal(retry.code, "WEIXIN_POLL_CONNECTION_RESET");
+    assert.equal(retry.consecutive_failures, 1);
+    assert.equal(events.some((frame) => frame.type === "account.status"), false);
+    assert.equal(account.status, "active");
+  } finally {
+    await account?.stop();
+    globalThis.fetch = originalFetch;
+    if (originalState === undefined) delete process.env.ZHICE_WEIXIN_STATE_DIR;
+    else process.env.ZHICE_WEIXIN_STATE_DIR = originalState;
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
 
 test("official driver completes QR binding with allowlisted credential fields", async () => {
   const originalFetch = globalThis.fetch;
@@ -159,10 +223,12 @@ test("official driver ACKs before cursor commit and sends with saved context", a
     await account.send({
       peer: "user@im.wechat",
       context_token_ref: inbound.context_token_ref,
+      client_id: "zhice-weixin-0123456789abcdef0123456789abcdef",
       text: "reply",
     });
     assert.equal(sentBodies[0].msg.context_token, "context-secret");
     assert.equal(sentBodies[0].msg.to_user_id, "user@im.wechat");
+    assert.equal(sentBodies[0].msg.client_id, "zhice-weixin-0123456789abcdef0123456789abcdef");
   } finally {
     await account?.stop();
     globalThis.fetch = originalFetch;

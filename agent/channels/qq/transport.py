@@ -13,7 +13,11 @@ from threading import Thread
 from typing import Protocol
 
 from agent.channels.qq.normalize import normalize_c2c_message, normalize_group_message
-from agent.channels.qq.outbound import QQOutboundButton, QQOutboundMessage
+from agent.channels.qq.outbound import (
+    QQOutboundButton,
+    QQOutboundMessage,
+    QQSendUnconfirmedError,
+)
 from agent.logging_utils import DeferredConsoleHandler, log_event
 
 qq_logger = logging.getLogger("zcagent.agent.channel.qq")
@@ -79,10 +83,6 @@ _BOTPY_CONSOLE_HANDLER = {
     "format": "%(message)s",
     "level": logging.WARNING,
 }
-
-
-class QQSendUnconfirmedError(RuntimeError):
-    """The SDK returned without confirming that QQ accepted the message."""
 
 
 class QQTransport(Protocol):
@@ -160,6 +160,7 @@ class BotpyQQTransport:
                 intents = botpy.Intents(public_messages=True)
                 client = Client(
                     intents=intents,
+                    timeout=int(getattr(transport.account, "http_timeout_seconds", 15)),
                     bot_log=True,
                     ext_handlers=_BOTPY_CONSOLE_HANDLER,
                 )

@@ -54,6 +54,7 @@ channels:
   qq:
     enabled: false
     transport: websocket
+    # Each account may set http_timeout_seconds: 15 (allowed range: 1..60).
     accounts: []
   weixin:
     enabled: false

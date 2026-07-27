@@ -825,6 +825,11 @@ class SQLiteAuthStore:
                 "UPDATE channel_accounts SET status='disabled', updated_at=? WHERE id=?",
                 (_utc_now(), str(row["id"])),
             )
+            if channel == "weixin":
+                connection.execute(
+                    "DELETE FROM weixin_outbound_messages WHERE account_key=?",
+                    (str(row["account_key"]),),
+                )
             connection.execute(
                 """
                 DELETE FROM external_identities
@@ -1211,6 +1216,161 @@ class SQLiteAuthStore:
                 """,
                 (status, _utc_now(), error_code, channel, account_key, event_id),
             )
+
+    def enqueue_weixin_outbound(
+        self,
+        *,
+        delivery_id: str,
+        account_key: str,
+        event_id: str,
+        peer: str,
+        context_token_ref: str,
+        chunk_index: int,
+        text: str,
+    ) -> dict[str, Any]:
+        """Idempotently persist one Weixin response chunk before transport send."""
+
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO weixin_outbound_messages(
+                  delivery_id, account_key, event_id, peer, context_token_ref,
+                  chunk_index, text, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    delivery_id,
+                    account_key,
+                    event_id,
+                    peer,
+                    context_token_ref,
+                    chunk_index,
+                    text,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM weixin_outbound_messages WHERE delivery_id=?",
+                (delivery_id,),
+            ).fetchone()
+        if row is None:
+            raise AuthStoreError("cannot persist Weixin outbound message")
+        result = dict(row)
+        expected = {
+            "account_key": account_key,
+            "event_id": event_id,
+            "peer": peer,
+            "context_token_ref": context_token_ref,
+            "chunk_index": chunk_index,
+            "text": text,
+        }
+        if any(result[key] != value for key, value in expected.items()):
+            raise AuthStoreError("Weixin outbound delivery id conflicts with persisted content")
+        return result
+
+    def list_pending_weixin_outbound(
+        self, account_key: str
+    ) -> list[dict[str, Any]]:
+        """Return one account's pending chunks in original enqueue order."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM weixin_outbound_messages
+                WHERE account_key=? AND status='pending'
+                ORDER BY created_at, rowid
+                """,
+                (account_key,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def is_weixin_outbound_pending(self, delivery_id: str) -> bool:
+        """Return whether one deterministic delivery still needs transport send."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM weixin_outbound_messages
+                WHERE delivery_id=? AND status='pending'
+                """,
+                (delivery_id,),
+            ).fetchone()
+        return row is not None
+
+    def mark_weixin_outbound_attempt(
+        self, delivery_id: str, *, error_code: str = ""
+    ) -> None:
+        """Record one bounded delivery attempt while keeping the chunk pending."""
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE weixin_outbound_messages
+                SET attempt_count=attempt_count+1, last_error_code=?, updated_at=?
+                WHERE delivery_id=? AND status='pending'
+                """,
+                (error_code, _utc_now(), delivery_id),
+            )
+
+    def mark_weixin_outbound_error(
+        self, delivery_id: str, *, error_code: str
+    ) -> None:
+        """Attach the latest safe transport error without double-counting an attempt."""
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE weixin_outbound_messages
+                SET last_error_code=?, updated_at=?
+                WHERE delivery_id=? AND status='pending'
+                """,
+                (error_code, _utc_now(), delivery_id),
+            )
+
+    def mark_weixin_outbound_sent(self, delivery_id: str) -> None:
+        """Mark one acknowledged Sidecar send as terminally delivered."""
+
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE weixin_outbound_messages
+                SET status='sent', last_error_code='', updated_at=?, sent_at=?
+                WHERE delivery_id=?
+                """,
+                (now, now, delivery_id),
+            )
+
+    def has_pending_weixin_outbound_event(
+        self, *, account_key: str, event_id: str
+    ) -> bool:
+        """Return whether an inbound event still has undelivered chunks."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM weixin_outbound_messages
+                WHERE account_key=? AND event_id=? AND status='pending' LIMIT 1
+                """,
+                (account_key, event_id),
+            ).fetchone()
+        return row is not None
+
+    def prune_weixin_outbound(self, *, sent_retention_days: int = 7) -> int:
+        """Delete only old sent rows; pending delivery state is never expired."""
+
+        cutoff = (datetime.now(UTC) - timedelta(days=sent_retention_days)).isoformat()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM weixin_outbound_messages
+                WHERE status='sent' AND sent_at IS NOT NULL AND sent_at < ?
+                """,
+                (cutoff,),
+            )
+        return cursor.rowcount
 
     def session_index_get(self, session_id: str) -> dict[str, Any] | None:
         """Return one session index row as a plain dict."""

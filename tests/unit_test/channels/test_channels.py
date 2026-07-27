@@ -70,6 +70,7 @@ channels:
     assert config.qq.accounts[0].app_id == "app-123"
     assert config.qq.accounts[0].app_secret == "secret-456"
     assert config.qq.accounts[0].web_base_url == "http://127.0.0.1:10086"
+    assert config.qq.accounts[0].http_timeout_seconds == 15
     assert "secret-456" not in repr(config.qq.accounts[0])
 
 
@@ -103,6 +104,26 @@ channels:
         encoding="utf-8",
     )
     with pytest.raises(ChannelConfigurationError, match="unique"):
+        load_channel_configuration(tmp_path)
+
+
+@pytest.mark.parametrize("timeout", [0, 61])
+def test_channel_config_rejects_unsafe_qq_http_timeout(tmp_path, timeout):
+    (tmp_path / "config.yml").write_text(
+        f"""
+channels:
+  qq:
+    enabled: true
+    accounts:
+      - key: main
+        app_id: app
+        app_secret: secret
+        http_timeout_seconds: {timeout}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ChannelConfigurationError, match="between 1 and 60"):
         load_channel_configuration(tmp_path)
 
 
@@ -623,10 +644,10 @@ def test_botpy_client_is_constructed_inside_worker_with_default_sdk_logging(monk
     client_options = []
 
     class FakeClient:
-        def __init__(self, *, intents, bot_log, ext_handlers):
+        def __init__(self, *, intents, timeout, bot_log, ext_handlers):
             del intents
             constructed_thread_ids.append(threading.get_ident())
-            client_options.append((bot_log, ext_handlers))
+            client_options.append((timeout, bot_log, ext_handlers))
             assert asyncio.get_event_loop() is not None
 
         def run(self, *, appid, secret):
@@ -654,9 +675,10 @@ def test_botpy_client_is_constructed_inside_worker_with_default_sdk_logging(monk
 
     assert constructed_thread_ids
     assert constructed_thread_ids[0] != caller_thread_id
-    assert client_options[0][0] is True
-    assert client_options[0][1]["handler"] is _BotpyConsoleHandler
-    assert client_options[0][1]["format"] == "%(message)s"
+    assert client_options[0][0] == 15
+    assert client_options[0][1] is True
+    assert client_options[0][2]["handler"] is _BotpyConsoleHandler
+    assert client_options[0][2]["format"] == "%(message)s"
     assert [
         getattr(record, "event", "")
         for record in caplog.records
@@ -1000,8 +1022,7 @@ def test_qq_send_error_marks_persistent_receipt_as_error(tmp_path):
     )
     event = _event("event-unconfirmed-receipt")
 
-    with pytest.raises(QQSendUnconfirmedError):
-        asyncio.run(adapter.handle_event(event))
+    asyncio.run(adapter.handle_event(event))
 
     with sqlite3.connect(tmp_path / "state" / "auth.sqlite3") as connection:
         row = connection.execute(
@@ -1062,6 +1083,7 @@ class _Account:
     c2c_enabled: bool = True
     group_enabled: bool = True
     group_require_mention: bool = True
+    http_timeout_seconds: int = 15
     max_parallel_conversations: int = 2
     max_attachment_bytes: int = 1024
 
