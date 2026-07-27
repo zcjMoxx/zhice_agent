@@ -2,15 +2,15 @@
 
 ## 测试目标
 
-覆盖 Part 6 Web 最小版的 HTTP app、API schema、静态资源服务和 core 直接导入。
+覆盖 Part 6 HTTP/WS 基础、Part 9 Auth/RBAC 和 Part 16 Vue 产品面 app read model、包内静态资源与兼容协议。
 
 ## 用例覆盖
 
 - `/health` 和 `/api/health` 返回基础状态、当前模型、auth 初始化状态和安全的可选 capability 状态；Subagent unavailable 不改变 overall `status=ok`，且不暴露 workspace/session 路径。
-- 静态聊天 Web 不渲染或主动请求 capability 启动横幅；health 状态保留给诊断和自动化检查。
+- 聊天 Web 不渲染或主动请求 capability 启动横幅；health 状态保留给诊断、系统监控和自动化检查。
 - Gateway/CLI缺少`config.yml.skills`时按未启用的可选扩展静默处理；分区存在但非法时只记录一次结构化`skills.runtime_unavailable` WARNING，包含稳定code且不泄露绝对路径。
-- `/` 从可替换 `static_dir` 返回静态首页。
-- `/admin` 返回独立管理路由入口；聊天页 Administration 导航到该路由，不再打开管理弹窗。
+- `/` 从可替换 `static_dir` 返回 SPA 首页；`/_setup` 和 `/admin` 继续返回同一 Vue 入口并保留服务端安全条件。
+- 默认静态目录定位 `agent/web/static` 包内 production build；首页引用 `/static/assets/*`，Python wheel 运行不要求 Node.js。
 - `GET /api/sessions` 返回会话摘要并把更新时间格式化为 ISO 8601。
 - `GET /api/sessions/{session_id}` 返回指定会话消息。
 - `POST /api/chat` 调用 runtime 并返回 assistant 消息。
@@ -27,7 +27,7 @@
 - WebSocket `hello client=web` 返回 web command profile 能力，默认不支持 `/history` 和 `/exit`。
 - WebSocket `hello client=external` 打开 external command profile 能力，`/history` 进入 external profile，`/exit` 关闭当前 WS 连接。
 - `/sessions rename <id> <title>`、`/sessions delete <id>` 和 `/sessions delete` 在 runtime slash command 层有覆盖。
-- assistant Markdown 使用异步 KaTeX 支持 `$...$`、`$$...$$`、`\\(...\\)`、`\\[...\\]`；`\\bm{}` 映射到 `\\boldsymbol{}`。KaTeX 加载失败时保留原始公式文本且不阻断页面，`pre/code` 不参与数学渲染。
+- assistant Markdown 使用本地打包的 Marked、DOMPurify 与 KaTeX 支持常用行内/块级公式；`\\bm{}` 映射到 `\\boldsymbol{}`，不再依赖运行时 CDN。
 
 ## 关键检查点
 
@@ -77,8 +77,8 @@
 - HTTP、SSE 和 WebSocket 都把解析后的 ActorContext 传入 WebRuntime。
 - 模型读写携带 session_id，不能修改 gateway 进程级共享 provider。
 - 普通 viewer 可以查看、设置和重置自己会话的模型偏好，模型切换不再阻断正常聊天。
-- 登录、注册、Owner 初始化、setup credential、账号改密和动态管理员创建用户的敏感输入框都有固定的小眼睛按钮；按钮可切换显示/隐藏并在表单重开时恢复隐藏状态，不进入 Tab 顺序。Enter 保留浏览器原生表单行为；Edge 原生密码 reveal/clear 控件被隐藏，避免双眼睛。
-- 登录页、侧边栏和 favicon 使用用户选定的 A 版 ZC 星芒 Logo PNG 资产；用户入口采用 C 版交叠双字母结构与 F 版白底深蓝配色，取用户名前两个字符。
+- 登录、注册和 Owner 初始化复用 Vue AuthLayout；桌面端品牌/表单横向滑动，移动端内容切换，密码可见性、原生表单提交和 reduced-motion 均保留。
+- 登录页、侧边栏和 favicon 使用 A 版 ZC 星芒 Logo PNG；用户头像使用单个 initials 文本节点，英文取首尾词首字母，中文稳定取一至两个字符。
 - Owner 和其他角色的聊天侧栏默认只列当前用户自己的 session；前端账号切换会清空上一账号的 active session 和 messages。
 - Recent diagnostics 不出现在常驻 Web UI，也不保留 REST 表单入口；普通聊天通过 `diagnose_my_recent_activity` 自动诊断当前 Session 的上一轮或最近失败。
 - 普通成功 HTTP 请求不写 Security Audit；认证失败、特权拒绝和安全相关操作继续审计。
@@ -87,6 +87,16 @@
 - QQ 裸 `/bind` 返回的 `channel_bind` 授权 token 在未登录时保留到登录完成，登录成功后自动调用授权 API；token 过期、重放或冲突返回稳定错误且不写入 identity。
 - Web Session 列表标明 Web、CLI、QQ 私聊、QQ群聊来源；QQ群聊在 Web 只读并可派生新的 Web Session。
 - 服务端拒绝 Web 直接向 QQ 群 Session 发送普通消息或 slash command，不能只依赖前端禁用输入框。
+
+## Part 16 Vue Web Product Coverage
+
+- Vue 3/Vite/TypeScript、Vue Router、Pinia、Vitest、Vue Test Utils、Lucide Vue 与 CSS Design Tokens 由 `web/frontend` 管理；构建产物提交到 `agent/web/static`。
+- typed API client 保留稳定 HTTP error，typed WebSocket client 保留 hello/message/stop/confirmation/MCP elicitation frame；RuntimeEvent reducer 覆盖乱序、终态和 child 独立 sequence。
+- Session 窄侧栏不显示消息数；三点菜单支持 ESC 关闭、重命名和二次确认删除；外部群 Session 只读并可 fork 到 Web。
+- 设置中心包含常规、个性化、个人资料、账号与安全、渠道连接；主题按登录身份保存在 browser localStorage，支持系统/浅色/暗色曜石。
+- 管理后台按权限独立显示概览、用户、角色、系统监控和安全审计；所有内置 permission key 都有中文能力域映射，未知 key 回退技术名称，Owner 固定只读。
+- `GET /api/admin/monitor` 需要 `turn.read.any`，只聚合 Gateway、Capability 与结构化 Runtime Activity 真值，不返回根因诊断。
+- `GET /api/audit/events` 保持旧 `limit/session_id/turn_id` 兼容，并增加事件、操作者、结果、时间和 cursor 筛选；`audit.export` 独立保护 CSV 导出。
 
 ## Part 10 Memory Coverage
 

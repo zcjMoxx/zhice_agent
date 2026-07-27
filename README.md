@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到第十四部分 QQ 与微信 ClawBot 外部渠道接入。主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到 Part 16 Web 产品体验与 Vue 前端工程。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -12,7 +12,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - Turn-scoped `discover_tools` 按需发现与动态 Tool schema 激活；模型不再首轮接收全部业务 Tool
 - 受限 `exec`、`read_file`、`list_dir`、`grep`
 - Skill source 同步、SkillLoader、`load_skills` 和 `sync_skills`
-- CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道，以及支持安全 Markdown 与 KaTeX 公式的静态 Web UI
+- CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道，以及支持安全 Markdown、KaTeX 公式和明暗曜石主题的 Vue Web UI
 - `turn_id` / `turn_index` 持久化、WebSocket turn 对齐、预算内完整 Session 历史、确定性历史查询、结构化 compaction、SQLite FTS/embedding 混合检索和 endpoint token 预算
 - Gateway / Agent 分层运行日志、Web/QQ/微信渠道启动结果、终端时间戳格式和 workspace `logs/YYYY-MM-DD/trace.log`
 - SQLite 本地用户、角色、特权权限、可撤销登录态、唯一永久 Owner、Owner 管理权委派、普通用户自助注册和个人设置
@@ -28,7 +28,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 
 当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge 或市集。MCP Runtime 直接读取常见 `mcpServers` 配置，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Part 12 已完成 turn/context/LLM/tool RuntimeEvent、WebSocket/SSE/CLI 与前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime；Hook 只能增加业务阻断、修改后重新走核心校验或补充安全 display/ui_metadata，不能降低 RBAC、危险确认、workspace guard、timeout、脱敏或 SSRF。Part 13 在此基线上增加同步 Provider 下的有界线程并行、父能力交集、独立 child 运行态和 workspace lease。SkillExecutor、`skill.*` 和 ProgressSink 属于未来 Skill Runtime / Part 18。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
 
-Tool capability selection 已从原 Part 16 路线提前进入当前基线。每个 CLI/Web/child Turn 首次只向模型提供 `discover_tools`；模型判断需要真实能力时先查询并激活最小 Tool 集合，下一模型步才收到这些具体 schema。Catalog 在 actor RBAC 和 Subagent Profile 过滤之后生成，未激活 Tool 即使被编造也返回 `TOOL_NOT_ACTIVATED`；实际 Tool 仍经过确认、Hook、workspace guard 和审计。Session JSONL 保存完整历史真值；CLI、Web、external WebSocket、QQ 和微信共用同一 `ContextBuilder/ContextPlanner`：预算允许时携带全部完整 Turn，明确历史元问题确定性扫描当前 Session，超长历史使用结构化 compaction、连续 recent raw Turn 和 SQLite FTS5/BM25 + embedding BLOB 精确 cosine + entity/anchor/recency 混合召回。每次初始/工具结果 LLM 调用前都把实际 Tool schema 纳入 failover-safe endpoint token 预算。child 使用新鲜独立 Session 上下文，不能读取父 Session 索引，但继承父 Turn 的同一输入预算。
+Tool capability selection 已从原可靠性路线提前进入当前基线。每个 CLI/Web/child Turn 首次只向模型提供 `discover_tools`；模型判断需要真实能力时先查询并激活最小 Tool 集合，下一模型步才收到这些具体 schema。Catalog 在 actor RBAC 和 Subagent Profile 过滤之后生成，未激活 Tool 即使被编造也返回 `TOOL_NOT_ACTIVATED`；实际 Tool 仍经过确认、Hook、workspace guard 和审计。Session JSONL 保存完整历史真值；CLI、Web、external WebSocket、QQ 和微信共用同一 `ContextBuilder/ContextPlanner`：预算允许时携带全部完整 Turn，明确历史元问题确定性扫描当前 Session，超长历史使用结构化 compaction、连续 recent raw Turn 和 SQLite FTS5/BM25 + embedding BLOB 精确 cosine + entity/anchor/recency 混合召回。每次初始/工具结果 LLM 调用前都把实际 Tool schema 纳入 failover-safe endpoint token 预算。child 使用新鲜独立 Session 上下文，不能读取父 Session 索引，但继承父 Turn 的同一输入预算。
 
 ## 设计文档
 
@@ -45,6 +45,8 @@ Tool capability selection 已从原 Part 16 路线提前进入当前基线。每
 - 第十四部分外部渠道已实现第一版 QQ 闭环，入口是 `docs_design/zhice-agent-part14-external-channel-design.md`，初始边界见 `docs_design/2026-07-23-qq-external-channel-boundary-design.md`，跨渠道 Session、用户解绑和 QQ Markdown 收敛见 `docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`。QQ SDK 仅位于 transport 层；未知身份在 LLM 前拒绝，群聊按触发用户隔离 Session，高风险确认转私聊或 Web。
 - 第十四部分实现二微信 ClawBot 已落地，当前口径见 `docs_design/zhice-agent-part14-external-channel-design.md`，完整取舍和真实 POC 证据见 `docs_design/2026-07-24-weixin-clawbot-channel-design.md`。一个 Web 用户独立拥有一个微信 AI 账号，共享 Node Transport sidecar 接入现有 Channel Runtime，不引入第二套 AgentLoop。2026-07-24 已用真实微信验证 AI 标识、扫码、direct text 收发、context token、游标恢复和 notifyStop；双真实账号并发仍需第二名用户验收。
 - Part 15 完整 Session 上下文工程已进入当前代码基线，设计入口是 `docs_design/zhice-agent-part15-context-engineering-design.md`。本地第一实现不要求独立向量数据库服务：用户隔离 SQLite 保存 FTS5 文档、metadata 和 float32 embedding BLOB，Session 内用精确 cosine 与 RRF 混合排序；embedding 未配置时 health 诚实标记 degraded，但完整历史、历史查询、compaction 和 FTS 继续工作。
+- Part 16 Web 产品体验与 Vue 前端工程已实现并进入当前基线，当前活文档是 `docs_design/zhice-agent-part16-web-product-design.md`，完整方案记录见 `docs_design/2026-07-27-web-product-experience-and-vue-frontend-design.md`。Vue 3/Vite/TypeScript 源码位于 `web/frontend`，构建产物位于 `agent/web/static` 并随 Python wheel 发布；登录、聊天、Session、五栏设置、渠道连接和中文管理后台共用明暗曜石主题，同时保持现有 API、WebSocket、Session 与 RBAC 兼容。
+- Part 17 顺延承接运行可靠性、系统级诊断、生产部署与发布；它复用 Part 16 的前端工程和监控页面，不建立第二套 Web。
 - 按需 Tool 发现与动态 Capability Selection 已提前落地，设计记录见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md`；它是通用运行时能力，不归入 Part 13 的业务委派判断。
 
 Subagent运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`subagents`分区，仓库模板为`config/config.example.yml`。缺少分区时功能默认关闭；启用后可用裸`/subagent`查看当前模式和Profile。能力不可用时，CLI、本地操作者和Owner会看到真实原因与修复建议；普通Web用户只会看到能力暂时不可用并联系管理员，不暴露内部配置。
@@ -82,6 +84,21 @@ python -m pip install -e .
 zcagent
 zcagent gateway
 ```
+
+## Web 前端开发
+
+正式运行直接使用 Python 包内 `agent/web/static`，不要求安装 Node.js。只有修改前端源码时才需要进入 `web/frontend`：
+
+```bash
+cd web/frontend
+npm ci
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+```
+
+`npm run build` 使用 `/static/` base，并覆盖生成 `agent/web/static`。仓库提交 production build，前端改动必须同时提交源码、`package-lock.json` 和最新构建产物。
 
 命令会被安装到当前 Python 环境对应的 `Scripts` 目录。你这台机器当前是全局 Anaconda 环境在承接这个命令。`.venv` 仍然适合做隔离，但不是这套参考式工作流的必需条件。
 

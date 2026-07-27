@@ -93,7 +93,7 @@ ZhiCe-Agent 当前已经具备稳定的短期上下文链路：
 
 - 在后续上下文优化 Part 单独设计 `/compact`、上下文替换、续接与失败回退；endpoint token 预算已经进入当前基线。
 - 为已保存条目引入过期时间、数值置信度、更完整的来源引用和冲突提示。
-- 在 Part 16 评估自动 recall 和 ContextBuilder augmenter，并复用当前 ContextBudget。
+- 在后续 Memory / Context 增强中评估自动 recall 和 ContextBuilder augmenter，并复用当前 ContextBudget。
 - 数据量明显增长后再评估 SQLite FTS 或向量检索。
 
 这些增强不能改变当前原则：Memory 必须可见、可删、可追踪、按用户隔离。
@@ -311,7 +311,7 @@ max_query_chars = 500
 - 写入先生成同目录临时文件，再 `replace` 原文件。
 - 同一进程按 `durable_file` 使用锁，防止多个 Web turn 同时覆盖。
 - 解析失败、缺少管理标记或文件超限时拒绝写入，不重建和覆盖用户文件。
-- Part 10 不承诺跨进程写锁；多进程部署在 Part 16 再设计共享状态。
+- Part 10 不承诺跨进程写锁；多进程部署在 Part 17 再设计共享状态。
 
 ---
 

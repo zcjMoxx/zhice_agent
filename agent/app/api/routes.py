@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import inspect
+import io
 import json
 from datetime import UTC, datetime
 from queue import Queue
@@ -13,6 +15,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
 from agent.app.api.schemas import (
+    AdminMonitorResponse,
     AdminUserCreateRequest,
     AdminUsersResponse,
     AdminUserUpdateRequest,
@@ -32,6 +35,7 @@ from agent.app.api.schemas import (
     LoginRequest,
     ModelPreferenceRequest,
     ModelsResponse,
+    MonitorActivityResponse,
     PasswordChangeRequest,
     ProfileUpdateRequest,
     PublicUserResponse,
@@ -872,22 +876,73 @@ def update_role(
     return RoleResponse(**role)
 
 
+@router.get("/admin/monitor", response_model=AdminMonitorResponse)
+def read_admin_monitor(request: Request, limit: int = 50) -> AdminMonitorResponse:
+    """Return current health/capability/Activity truth without inferring causes."""
+
+    _actor(request, "turn.read.any", channel="rest")
+    runtime = _runtime(request)
+    auth = _auth_service(request, required=True)
+    activity = auth.store.list_monitor_activity(limit=limit)
+    statuses_method = getattr(runtime, "capability_statuses", None)
+    try:
+        statuses = statuses_method() if callable(statuses_method) else {}
+    except Exception:  # noqa: BLE001 - the monitor must report partial truth.
+        statuses = {}
+    capabilities = {
+        str(name): _public_monitor_capability(str(name), status)
+        for name, status in statuses.items()
+    }
+    current_model_method = getattr(runtime, "current_model_label", None)
+    try:
+        current_model = str(current_model_method()) if callable(current_model_method) else "unavailable"
+    except Exception:  # noqa: BLE001 - current model is optional monitor context.
+        current_model = "unavailable"
+    return AdminMonitorResponse(
+        gateway={
+            "status": "ok",
+            "name": "ZhiCe-Agent",
+            "current_model": current_model,
+            "auth_initialized": auth.store.has_users(),
+            "owner_initialized": auth.store.has_owner(),
+        },
+        capabilities=capabilities,
+        activity=MonitorActivityResponse(**activity),
+    )
+
+
 @router.get("/audit/events", response_model=AuditEventsResponse)
 def list_audit_events(
     request: Request,
     limit: int = 100,
     session_id: str = "",
     turn_id: str = "",
+    action: str = "",
+    actor_user_id: str = "",
+    decision: str = "",
+    from_ts: str = "",
+    to_ts: str = "",
+    cursor: str = "",
 ) -> AuditEventsResponse:
     """Return bounded audit events for actors with audit.read."""
 
     actor = _actor(request, "audit.read", channel="rest")
     auth = _auth_service(request, required=True)
+    bounded_limit = max(1, min(int(limit), 500))
     events = auth.store.list_audit_events(
-        limit=limit,
+        limit=bounded_limit + 1,
         session_id=session_id,
         turn_id=turn_id,
+        action=action,
+        actor_user_id=actor_user_id or None,
+        decision=decision,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        cursor=cursor,
     )
+    has_more = len(events) > bounded_limit
+    visible_events = events[:bounded_limit]
+    next_cursor = _audit_cursor(visible_events[-1]) if has_more and visible_events else ""
     if auth.audit_sink is not None:
         auth.audit_sink.record(
             AuditEvent(
@@ -902,12 +957,69 @@ def list_audit_events(
                     "limit": limit,
                     "session_filter": bool(session_id),
                     "turn_filter": bool(turn_id),
-                    "result_count": len(events),
+                    "result_count": len(visible_events),
                 },
             )
         )
     return AuditEventsResponse(
-        events=events
+        events=visible_events,
+        next_cursor=next_cursor,
+        has_more=has_more,
+    )
+
+
+@router.get("/audit/events/export")
+def export_audit_events(
+    request: Request,
+    session_id: str = "",
+    turn_id: str = "",
+    action: str = "",
+    actor_user_id: str = "",
+    decision: str = "",
+    from_ts: str = "",
+    to_ts: str = "",
+) -> Response:
+    """Export a bounded filtered security-audit CSV for authorized actors."""
+
+    actor = _actor(request, "audit.export", channel="rest")
+    auth = _auth_service(request, required=True)
+    events = auth.store.list_audit_events(
+        limit=500,
+        session_id=session_id,
+        turn_id=turn_id,
+        action=action,
+        actor_user_id=actor_user_id or None,
+        decision=decision,
+        from_ts=from_ts,
+        to_ts=to_ts,
+    )
+    output = io.StringIO(newline="")
+    fields = [
+        "id", "ts", "actor_user_id", "channel", "action", "resource_type",
+        "resource_id", "session_id", "turn_id", "route", "status_code",
+        "decision", "reason_code", "risk_category", "metadata",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for event in events:
+        writer.writerow({**event, "metadata": json.dumps(event.get("metadata", {}), ensure_ascii=False)})
+    if auth.audit_sink is not None:
+        auth.audit_sink.record(
+            AuditEvent(
+                action="audit.export",
+                resource_type="audit_events",
+                actor=actor,
+                request_id=_request_id(request),
+                channel="rest",
+                route=request.url.path,
+                decision="allow",
+                metadata={"result_count": len(events), "filtered": any((session_id, turn_id, action, actor_user_id, decision, from_ts, to_ts))},
+            )
+        )
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="zhice-security-audit.csv"'},
     )
 
 
@@ -1356,11 +1468,35 @@ def _format_timestamp(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")
 
 
+def _public_monitor_capability(name: str, status: object) -> dict[str, Any]:
+    """Expose only stable public capability state to the Part 16 monitor."""
+
+    state = str(getattr(status, "state", "unavailable"))
+    messages = {
+        "available": f"{name} is available.",
+        "disabled": f"{name} is not enabled.",
+        "degraded": f"{name} is temporarily limited.",
+        "unavailable": f"{name} is temporarily unavailable.",
+    }
+    return {
+        "name": name,
+        "state": state,
+        "code": f"{name.upper().replace('.', '_')}_{state.upper()}",
+        "message": messages.get(state, f"{name} status is {state}."),
+        "hint": "Contact an administrator." if state in {"degraded", "unavailable"} else "",
+        "details": {},
+    }
+
+
+def _audit_cursor(event: dict[str, Any]) -> str:
+    """Build an opaque-enough stable cursor from the last ordered audit row."""
+
+    timestamp = str(event.get("ts") or "")
+    event_id = str(event.get("id") or "")
+    return f"{timestamp}|{event_id}" if timestamp and event_id else ""
+
+
 def _safe_message(message: str) -> str:
     """Bound provider/config error text before returning it over HTTP."""
 
     return message[:500] if message else "request failed"
-    PublicUserResponse,
-    RoleResponse,
-    RoleUpdateRequest,
-    RolesResponse,

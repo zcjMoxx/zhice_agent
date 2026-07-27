@@ -1,122 +1,55 @@
-"""Node-backed tests for the browser RuntimeEvent state reducer."""
+"""Source/build contract tests for the Vue RuntimeEvent frontend."""
 
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
+FRONTEND = Path("web/frontend")
+PACKAGED_STATIC = Path("agent/web/static")
 
 
-def test_frontend_math_renderer_supports_common_latex_and_safe_fallback():
-    script = Path("web/static/app.js").read_text(encoding="utf-8")
-    styles = Path("web/static/styles.css").read_text(encoding="utf-8")
-    index = Path("web/static/index.html").read_text(encoding="utf-8")
+def test_vue_frontend_declares_confirmed_part16_toolchain_and_commands():
+    package = json.loads(FRONTEND.joinpath("package.json").read_text(encoding="utf-8"))
 
-    assert 'const KATEX_VERSION = "0.16.11"' in script
-    assert "cdn.jsdelivr.net/npm/katex@" in script
-    assert '{ left: "$$", right: "$$", display: true }' in script
-    assert '{ left: "\\\\(", right: "\\\\)", display: false }' in script
-    assert 'macros: { "\\\\bm": "\\\\boldsymbol{#1}" }' in script
-    assert 'ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]' in script
-    assert "throwOnError: false" in script
-    assert "trust: false" in script
-    assert ".bubble.markdown .katex-display" in styles
-    assert "overflow-x: auto" in styles
-    assert "/static/app.js?v=20260724-weixin" in index
-    assert "/static/styles.css?v=20260724-weixin" in index
-    assert "sessionAccessNotice" in index
-    assert "channelBindingList" in index
-    assert "continuation_mode" in script
-    assert "/api/channels/bindings" in script
-    assert "/fork" in script
-
-
-def test_frontend_supports_qq_link_code_and_login_authorization():
-    script = Path("web/static/app.js").read_text(encoding="utf-8")
-    index = Path("web/static/index.html").read_text(encoding="utf-8")
-
-    assert 'get("channel_bind")' in script
-    assert 'fetch("/api/channels/qq/link-code"' in script
-    assert 'fetch("/api/channels/qq/authorize"' in script
-    assert "completePendingChannelBind" in script
-    assert 'id="qqLinkCodeButton"' in index
-    assert "Bind with /bind &lt;binding-code&gt;." in index
-    assert 'id="qqLinkCodeOutput"' in index
-
-
-def test_frontend_runtime_event_reducer_orders_and_clears_status():
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    module_path = Path("web/static/runtime-event-state.js").resolve()
-    script = f"""
-const {{ applyRuntimeEvent }} = require({json.dumps(str(module_path))});
-const active = {{ sessionId: 'alpha', turnId: 'turn-1' }};
-const pending = {{ runtimeStatus: '已接收问题', runtimeSequence: 0, runtimeEvents: [] }};
-const event = (type, sequence, title) => ({{
-  session_id: 'alpha', turn_id: 'turn-1',
-  data: {{ type, sequence, turn_id: 'turn-1', display: {{ title }} }}
-}});
-const applied = applyRuntimeEvent(active, pending, event('llm.started', 4, '正在请求模型'));
-const stale = applyRuntimeEvent(active, pending, event('context.started', 3, '旧状态'));
-const terminal = applyRuntimeEvent(active, pending, event('turn.completed', 5, '已完成'));
-process.stdout.write(JSON.stringify({{ applied, stale, terminal, pending }}));
-"""
-
-    completed = subprocess.run(  # noqa: S603 - fixed local node executable and inline test code.
-        [node, "-e", script],
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
+    assert {"vue", "vue-router", "pinia", "@lucide/vue"} <= set(package["dependencies"])
+    assert {"vite", "typescript", "vitest", "@vue/test-utils"} <= set(
+        package["devDependencies"]
     )
-    result = json.loads(completed.stdout)
-
-    assert result["applied"] is True
-    assert result["stale"] is False
-    assert result["terminal"] is True
-    assert result["pending"]["runtimeSequence"] == 5
-    assert result["pending"]["runtimeStatus"] == ""
-    assert len(result["pending"]["runtimeEvents"]) == 2
+    assert set(package["scripts"]) >= {"lint", "typecheck", "test", "build"}
 
 
-def test_frontend_runtime_event_reducer_tracks_child_sequences_independently():
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    module_path = Path("web/static/runtime-event-state.js").resolve()
-    script = f"""
-const {{ applyRuntimeEvent }} = require({json.dumps(str(module_path))});
-const active = {{ sessionId: 'alpha', turnId: 'root-turn' }};
-const pending = {{ runtimeStatus: '', runtimeEvents: [] }};
-const child = (taskId, sequence, type, title) => ({{
-  session_id: 'child-session',
-  data: {{
-    type, sequence, turn_id: `child-${{taskId}}`, root_session_id: 'alpha',
-    root_turn_id: 'root-turn', agent_id: `agent-${{taskId}}`, task_id: taskId,
-    display: {{ title }}
-  }}
-}});
-const first = applyRuntimeEvent(active, pending, child('implementation', 3, 'tool.started', '读取代码'));
-const second = applyRuntimeEvent(active, pending, child('tests', 1, 'llm.started', '运行测试'));
-const done = applyRuntimeEvent(active, pending, child('implementation', 4, 'turn.completed', '已完成'));
-process.stdout.write(JSON.stringify({{ first, second, done, pending }}));
-"""
-    completed = subprocess.run(
-        [node, "-e", script],
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    result = json.loads(completed.stdout)
+def test_runtime_event_reducer_is_typed_and_has_ordering_and_child_tests():
+    reducer = FRONTEND.joinpath("src/runtime-events/reducer.ts").read_text(encoding="utf-8")
+    tests = FRONTEND.joinpath("src/runtime-events/reducer.test.ts").read_text(encoding="utf-8")
 
-    assert result["first"] is True
-    assert result["second"] is True
-    assert result["done"] is True
-    assert result["pending"]["subagentTasks"]["implementation"]["status"] == "completed"
-    assert result["pending"]["subagentTasks"]["tests"]["status"] == "running"
-    assert result["pending"]["runtimeStatus"] == "并行子任务 1/2 已完成"
+    assert "sequence <= state.sequence" in reducer
+    assert "childTasks" in reducer
+    assert "TERMINAL_EVENTS" in reducer
+    assert "ignores stale events" in tests
+    assert "tracks child sequences independently" in tests
+
+
+def test_packaged_vue_build_contains_single_spa_entry_and_runtime_assets():
+    index = PACKAGED_STATIC.joinpath("index.html").read_text(encoding="utf-8")
+
+    assert '<div id="app"></div>' in index
+    assert 'type="module"' in index
+    assert "/static/assets/" in index
+    assert PACKAGED_STATIC.joinpath("zhice-logo-a.png").is_file()
+    assert any(PACKAGED_STATIC.joinpath("assets").glob("*.js"))
+    assert any(PACKAGED_STATIC.joinpath("assets").glob("*.css"))
+
+
+def test_vue_sources_keep_session_channel_and_interaction_compatibility():
+    client = FRONTEND.joinpath("src/api/client.ts").read_text(encoding="utf-8")
+    websocket = FRONTEND.joinpath("src/websocket/client.ts").read_text(encoding="utf-8")
+    chat = FRONTEND.joinpath("src/stores/chat.ts").read_text(encoding="utf-8")
+
+    assert "/api/channels/qq/link-code" in client
+    assert "/api/channels/weixin/reconnect" in client
+    assert "/fork" in client
+    assert 'type: "hello", client: "web"' in websocket
+    assert 'type: "stop"' in websocket
+    assert "mcp_elicitation_response" in websocket
+    assert "tool_confirmation_required" in chat

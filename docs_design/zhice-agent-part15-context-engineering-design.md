@@ -130,7 +130,7 @@ AgentLoop 仍只调用统一的 ContextBuilder/ContextPlanner，不 import SQLit
 - SQLite 损坏时仅隔离可重建的 `context_index.sqlite3`/WAL/SHM 为同目录 `.corrupt-*` 文件并从 JSONL 懒重建；不触碰 Session 真值。
 - 没有 turn id 的旧 JSONL 消息按 user 边界生成仅运行时可见的 `legacy-turn-N`，下一新 Turn index 从推导数量继续，不重写旧文件。
 - `/clear`、Web/CLI Session delete 在实际授权 SessionStore 上删除 compaction/index；渠道解绑仍保留 Session 和派生索引。
-- 当前 Auth 只有用户停用/状态管理，没有物理 user delete API，因此本次没有新增跨边界的账户删除流程；普通用户 context 仍按内部 user id 物理隔离。未来若 Part 17 引入物理删除，必须把整个用户 context（含 sessions、memory、files 与 context 派生状态）作为同一删除事务/补偿流程处理。
+- 当前 Auth 只有用户停用/状态管理，没有物理 user delete API，因此本次没有新增跨边界的账户删除流程；普通用户 context 仍按内部 user id 物理隔离。未来若独立设计物理删除，必须把整个用户 context（含 sessions、memory、files 与 context 派生状态）作为同一删除事务/补偿流程处理。
 
 ## 6. ContextPlan 中性结构
 
@@ -441,7 +441,7 @@ recency  = 0.02
 
 1. 单用户/租户超过约 5 万个 Turn，或单部署超过约 10 万个有效 embedding。
 2. 本地精确 cosine 检索 p95 持续超过 100ms，且优化批量计算后仍不满足延迟目标。
-3. Part 16 生产部署后使用多进程/多实例 Gateway，需要跨进程实时共享索引。
+3. Part 17 生产部署后使用多进程/多实例 Gateway，需要跨进程实时共享索引。
 4. 需要水平扩容、分片、副本、在线备份或独立检索服务 SLA。
 5. 需要跨大量 Session/用户的管理员级搜索，并已有严格权限过滤与租户隔离。
 

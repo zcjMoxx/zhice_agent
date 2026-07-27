@@ -6,7 +6,7 @@
 >
 > 承接文档：`docs_design/zhice-agent-part6-web-minimum-design.md`
 >
-> 当前状态：已实现原生静态 UI，并由第九部分扩展登录视图、用户入口、用户/角色/审计管理、诊断和危险工具确认弹窗。当前仍使用 `web/static` 原生 HTML/CSS/JS，不引入 Vue、Vite、React 或完整前端工程化；浏览器主聊天通道为 `WebSocket /ws`。
+> 当前状态：Part 6 的 Web/API/WS 最小闭环仍是有效基础；原生 `web/static` UI 已在 Part 16 被 Vue 3/Vite/TypeScript 产品面取代。当前前端事实以 `docs_design/zhice-agent-part16-web-product-design.md` 为准，浏览器主聊天通道仍为 `WebSocket /ws`。
 
 ---
 

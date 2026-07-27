@@ -1657,6 +1657,11 @@ class SQLiteAuthStore:
         limit: int = 100,
         session_id: str = "",
         turn_id: str = "",
+        action: str = "",
+        decision: str = "",
+        from_ts: str = "",
+        to_ts: str = "",
+        cursor: str = "",
     ) -> list[dict[str, Any]]:
         """Read bounded audit events for admin and diagnostic views."""
 
@@ -1671,10 +1676,27 @@ class SQLiteAuthStore:
         if turn_id:
             clauses.append("turn_id=?")
             values.append(turn_id)
+        if action:
+            clauses.append("action=?")
+            values.append(action)
+        if decision:
+            clauses.append("decision=?")
+            values.append(decision)
+        if from_ts:
+            clauses.append("ts>=?")
+            values.append(from_ts)
+        if to_ts:
+            clauses.append("ts<=?")
+            values.append(to_ts)
+        if cursor:
+            cursor_ts, separator, cursor_id = cursor.rpartition("|")
+            if separator and cursor_ts and cursor_id:
+                clauses.append("(ts<? OR (ts=? AND id<?))")
+                values.extend((cursor_ts, cursor_ts, cursor_id))
         query = "SELECT * FROM audit_events"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY ts DESC LIMIT ?"
+        query += " ORDER BY ts DESC, id DESC LIMIT ?"
         values.append(max(1, min(int(limit), 500)))
         with self._connect() as connection:
             rows = [dict(row) for row in connection.execute(query, values).fetchall()]
@@ -1684,6 +1706,56 @@ class SQLiteAuthStore:
             except (json.JSONDecodeError, TypeError):
                 row["metadata"] = {}
         return rows
+
+    def list_monitor_activity(self, *, limit: int = 50) -> dict[str, Any]:
+        """Return bounded cross-user Runtime Activity facts for the admin monitor."""
+
+        bounded = max(1, min(int(limit), 200))
+        with self._connect() as connection:
+            recent_turns = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT turn_id, session_id, channel, status, started_at, finished_at,
+                           duration_ms, error_code
+                    FROM turn_runs ORDER BY started_at DESC LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+            ]
+            recent_tools = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT tool_name, decision, result_code, is_error, started_at,
+                           finished_at, duration_seconds
+                    FROM tool_call_records ORDER BY started_at DESC LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+            ]
+            turn_counts = {
+                str(row["status"]): int(row["count"])
+                for row in connection.execute(
+                    "SELECT status, COUNT(*) AS count FROM turn_runs GROUP BY status"
+                ).fetchall()
+            }
+            tool_errors = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM tool_call_records WHERE is_error=1"
+                ).fetchone()[0]
+            )
+        return {
+            "recent_turns": recent_turns,
+            "recent_tools": recent_tools,
+            "summary": {
+                "turns": sum(turn_counts.values()),
+                "running": turn_counts.get("started", 0),
+                "failed": turn_counts.get("error", 0),
+                "stopped": turn_counts.get("stopped", 0),
+                "tool_errors": tool_errors,
+            },
+        }
 
     def list_turn_runs(
         self,

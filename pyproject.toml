@@ -37,6 +37,9 @@ zcagent = "agent.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+artifacts = ["agent/web/static/**"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["agent"]
 

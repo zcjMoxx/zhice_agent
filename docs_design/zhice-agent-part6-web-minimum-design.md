@@ -6,7 +6,7 @@
 >
 > 承接文档：`docs_design/zhice-agent-part5-skill-loader-design.md`
 >
-> 当前状态：第六部分 Web 最小版已实现；第九部分已在其上增加本地登录、RBAC、用户 session 隔离和权限执行边界。当前仍不包含生产公网部署、多租户或多 workspace 安全方案。
+> 当前状态：第六部分 Web 最小版已实现；第九部分增加本地登录、RBAC、用户 Session 隔离和权限执行边界，Part 16 已将原生 UI 替换为包内 Vue build。本文继续维护 FastAPI/REST/WS 最小边界，当前产品界面以 `docs_design/zhice-agent-part16-web-product-design.md` 为准；生产公网部署、多租户和多 workspace 安全方案仍不在当前范围。
 
 ---
 

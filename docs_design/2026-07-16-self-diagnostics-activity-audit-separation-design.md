@@ -1,5 +1,7 @@
 # 自助诊断与 Runtime Activity / Security Audit 拆分设计
 
+> 说明：本文“后续部分”中的旧编号已被 2026-07-27 路线调整替代。当前 Part 16 是 Web 产品体验与 Vue 前端工程，只提供已有 health/Activity 真值的监控展示面；系统级诊断引擎、事故聚合和完整时间线归入 Part 17，参考 `docs_design/zhice-agent-part16-web-product-design.md` 与 `docs_design/zhice-agent-overall-design.md`。
+
 > 日期：2026-07-16
 > 状态：已确认，进入实现
 

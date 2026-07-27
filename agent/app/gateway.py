@@ -596,6 +596,6 @@ def _public_capability_status(name: str, status: CapabilityStatus) -> dict[str, 
 
 
 def _default_static_dir() -> Path:
-    """Return the repository static web directory."""
+    """Return the packaged Vue static directory."""
 
-    return Path(__file__).resolve().parents[2] / "web" / "static"
+    return Path(__file__).resolve().parents[1] / "web" / "static"

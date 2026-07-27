@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from agent.app.auth import AuthService
 from agent.app.gateway import (
+    _default_static_dir,
     _OrderedGatewayServer,
     _resolve_channel_startup_status,
     create_app,
@@ -30,7 +31,7 @@ from agent.config import AppConfig
 from agent.logging_utils import log_event
 from agent.protocols.capability import CapabilityStatus
 
-REPOSITORY_STATIC_DIR = Path(__file__).resolve().parents[3] / "web" / "static"
+PACKAGED_STATIC_DIR = Path(__file__).resolve().parents[3] / "agent" / "web" / "static"
 
 
 def test_gateway_serves_static_index(tmp_path):
@@ -197,80 +198,37 @@ def test_gateway_serves_admin_route_from_static_application(tmp_path):
     assert "Administration UI" in response.text
 
 
-def test_web_admin_is_a_route_and_diagnostics_is_tool_only():
-    html = REPOSITORY_STATIC_DIR.joinpath("index.html").read_text(encoding="utf-8")
-    javascript = REPOSITORY_STATIC_DIR.joinpath("app.js").read_text(encoding="utf-8")
-
-    assert 'id="adminPage"' in html
-    assert 'id="managementDialog"' not in html
-    assert "window.location.assign(\"/admin\")" in javascript
-    assert "const isAdminRoute" in javascript
-    assert "function resetAccountScopedState" in javascript
-    assert "Recent diagnostics" not in html
-    assert "diagnosticsDialog" not in javascript
-    assert "function refreshAuthorizationAfterFailure" in javascript
-    assert "HTTP ${status} (${code})" in javascript
+def test_default_static_dir_is_the_packaged_vue_build():
+    assert _default_static_dir() == PACKAGED_STATIC_DIR.resolve()
+    assert _default_static_dir().joinpath("index.html").is_file()
 
 
-def test_password_inputs_have_persistent_visibility_controls():
-    html = REPOSITORY_STATIC_DIR.joinpath("index.html").read_text(encoding="utf-8")
-    css = REPOSITORY_STATIC_DIR.joinpath("styles.css").read_text(encoding="utf-8")
-    javascript = REPOSITORY_STATIC_DIR.joinpath("app.js").read_text(encoding="utf-8")
-    password_input_ids = [
-        "loginPassword",
-        "currentPassword",
-        "newPassword",
-        "confirmPassword",
-        "bootstrapPassword",
-        "bootstrapSetupToken",
-        "registerPassword",
-        "registerPasswordConfirm",
-    ]
+def test_packaged_vue_entry_serves_home_admin_and_static_assets(tmp_path):
+    client = TestClient(
+        create_app(config=_config(tmp_path), runtime=_FakeRuntime(), static_dir=PACKAGED_STATIC_DIR)
+    )
+    home = client.get("/")
+    admin = client.get("/admin")
+    logo = client.get("/static/zhice-logo-a.png")
 
-    for input_id in password_input_ids:
-        assert f'id="{input_id}" type="password"' in html
-        assert f'data-password-toggle="{input_id}"' in html
-        assert f'aria-controls="{input_id}"' in html
-    assert html.count('tabindex="-1"') >= len(password_input_ids)
-    assert "function initializePasswordToggles" in javascript
-    assert "function resetPasswordVisibility" in javascript
-    assert 'data-password-toggle="adminCreatePassword"' in javascript
-    assert 'aria-controls="adminCreatePassword"' in javascript
-    assert 'tabindex="-1"' in javascript
-    assert ".password-toggle" in css
-    assert ".password-input-wrap" in css
-    assert "::-ms-reveal" in css
-    assert "::-ms-clear" in css
-    assert "20260720-runtime-hooks" in html
-    assert 'id="confirmationEdit"' not in html
-    assert 'id="confirmationContent"' not in html
-    assert "editMemoryConfirmation" not in javascript
-    assert 'id="capabilityBanner"' not in html
-    assert "showStartupCapabilityStatus" not in javascript
-    assert 'fetch("/api/health")' not in javascript
-    assert ".capability-banner" not in css
+    assert home.status_code == 200
+    assert admin.status_code == 200
+    assert '<div id="app"></div>' in home.text
+    assert home.text == admin.text
+    assert 'type="module"' in home.text
+    assert logo.status_code == 200
 
 
-def test_web_brand_uses_selected_image_asset_and_a_distinct_user_icon():
-    html = REPOSITORY_STATIC_DIR.joinpath("index.html").read_text(encoding="utf-8")
-    css = REPOSITORY_STATIC_DIR.joinpath("styles.css").read_text(encoding="utf-8")
-    javascript = REPOSITORY_STATIC_DIR.joinpath("app.js").read_text(encoding="utf-8")
+def test_vue_source_uses_single_initials_node_and_part16_surfaces():
+    root = Path(__file__).resolve().parents[3] / "web" / "frontend" / "src"
+    avatar = root.joinpath("components/UserAvatar.vue").read_text(encoding="utf-8")
+    settings = root.joinpath("components/SettingsCenter.vue").read_text(encoding="utf-8")
+    admin = root.joinpath("layouts/AdminLayout.vue").read_text(encoding="utf-8")
 
-    assert html.count('data-brand-logo="selected-a"') == 3
-    assert html.count('src="/static/zhice-logo-a.png?v=20260711-clean"') == 3
-    assert 'class="avatar user-avatar" id="userAvatar"' in html
-    assert 'id="userAvatarPrimary"' in html
-    assert 'id="userAvatarSecondary"' in html
-    assert ".brand-mark img" in css
-    assert ".user-avatar" in css
-    assert "border-radius: 50%;" in css
-    assert ".avatar-letter-primary" in css
-    assert ".avatar-letter-secondary" in css
-    assert "function getAvatarInitials" in javascript
-    assert "Array.from" in javascript
-    assert "state.currentUser?.username" in javascript
-    assert ".logo-avatar" not in css
-    assert "20260720-runtime-hooks" in html
+    assert '<span class="user-avatar" aria-hidden="true">{{ initials }}</span>' in avatar
+    assert all(name in settings for name in ("常规", "个性化", "个人资料", "账号与安全", "渠道连接"))
+    assert all(name in admin for name in ("概览", "用户管理", "角色与权限", "系统监控", "安全审计"))
+    assert "根因诊断将在 Part 17" in admin
 
 
 def test_owner_setup_page_is_only_served_while_secret_is_configured_and_owner_missing(tmp_path):

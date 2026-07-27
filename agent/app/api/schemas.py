@@ -269,6 +269,24 @@ class AuditEventsResponse(BaseModel):
     """Bounded safe audit event list."""
 
     events: list[dict[str, Any]]
+    next_cursor: str = ""
+    has_more: bool = False
+
+
+class MonitorActivityResponse(BaseModel):
+    """Existing structured Runtime Activity facts for the admin monitor."""
+
+    recent_turns: list[dict[str, Any]] = Field(default_factory=list)
+    recent_tools: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, int] = Field(default_factory=dict)
+
+
+class AdminMonitorResponse(BaseModel):
+    """Current Gateway, capability and Activity read model without diagnosis."""
+
+    gateway: dict[str, Any] = Field(default_factory=dict)
+    capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    activity: MonitorActivityResponse
 
 
 class ToolConfirmationResponse(BaseModel):

@@ -484,19 +484,24 @@ def test_plain_text_rendering_and_4000_character_boundary():
 
 def test_web_settings_exposes_binding_status_cancel_reconnect_and_unlink():
     root = Path(__file__).resolve().parents[3]
-    index = (root / "web" / "static" / "index.html").read_text(encoding="utf-8")
-    script = (root / "web" / "static" / "app.js").read_text(encoding="utf-8")
-    for element_id in (
-        "weixinBindingState",
-        "weixinQr",
-        "weixinBindButton",
-        "weixinCancelButton",
-        "weixinReconnectButton",
-        "weixinUnbindButton",
-    ):
-        assert f'id="{element_id}"' in index
-    assert 'fetch("/api/channels/weixin/reconnect"' in script
-    assert 'cache: "no-store"' in script
+    settings = (root / "web" / "frontend" / "src" / "components" / "SettingsCenter.vue").read_text(
+        encoding="utf-8"
+    )
+    channels = (root / "web" / "frontend" / "src" / "stores" / "channels.ts").read_text(
+        encoding="utf-8"
+    )
+    client = (root / "web" / "frontend" / "src" / "api" / "client.ts").read_text(
+        encoding="utf-8"
+    )
+
+    assert all(
+        action in settings
+        for action in ("startWeixin", "cancelWeixin", "reconnectWeixin", "unlinkWeixin")
+    )
+    assert "weixinAttempt?.qr_data" in settings
+    assert "schedulePoll" in channels
+    assert "/api/channels/weixin/reconnect" in client
+    assert 'cache: "no-store"' in client
 
 
 def test_unlink_removes_live_binding_but_keeps_session_index(tmp_path):

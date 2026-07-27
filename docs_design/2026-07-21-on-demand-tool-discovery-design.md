@@ -1,12 +1,12 @@
 # ZhiCe-Agent 按需 Tool 发现与动态 Capability Selection 设计
 
-> 说明：本文正文保留 2026-07-21 当时“原 Part 16”的路线表述。当前路线已调整为 Part 15 完整 Session 上下文工程、Part 16 运行可靠性与生产部署；Capability Selection 作为已实现基线，不再占未来设计章节。
+> 说明：本文正文保留 2026-07-21 当时“原 Part 16”的路线表述。当前路线已调整为 Part 15 完整 Session 上下文工程、Part 16 Web 产品体验与 Vue 前端工程、Part 17 运行可靠性与生产部署；Capability Selection 作为已实现基线，不再占未来设计章节。
 
 > 日期：2026-07-21
 >
 > 状态：已实现并进入当前代码基线
 >
-> 路线调整：提前落地原 Part 16 的 Capability Selection 子能力；Part 16 其它 Provider retry、全系统诊断和运行优化不随本次前移
+> 路线调整：提前落地原可靠性路线中的 Capability Selection 子能力；Provider retry、全系统诊断和运行优化现归入 Part 17
 
 ## 1. 背景
 

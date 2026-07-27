@@ -79,7 +79,7 @@ Part 14 完成后，应满足：
 - 未绑定 QQ 用户自动注册内部账号；
 - QQ 频道 API 的任意模型直通 Tool；
 - 让模型直接接触 AppSecret、access token、原始 webhook 签名或完整平台 payload；
-- 公网反向代理、证书、容器和生产发布清单；这些仍属于 Part 15；
+- 公网反向代理、证书、容器和生产发布清单；这些仍属于 Part 17；
 - 跨进程 active turn、共享队列和多实例 leader election；
 - 语音识别、视频理解和通用多模态模型改造；
 - 为每个平台重新实现一套 slash command 或 Tool policy。
@@ -108,7 +108,7 @@ ZhiCe-Agent 是 Python 项目，第一实现采用：
 QQ runtime transport: qq-botpy optional dependency + WebSocket gateway
 QQ provisioning: AppID/AppSecret 手动或环境变量配置
 QR provisioning: 可选能力，后续通过官方 qqbot-connector 接入
-Webhook transport: 保留 QQTransport 协议，待 Part 15 公网部署条件具备后启用
+Webhook transport: 保留 QQTransport 协议，待 Part 17 公网部署条件具备后启用
 ```
 
 理由：
@@ -509,7 +509,7 @@ CREATE TABLE channel_conversations (
 - 默认只响应 `@机器人`；未 `@`、机器人自身回声和系统消息直接忽略；
 - 群历史不自动拼入某个用户的 Agent 上下文。
 
-真正群共享 Session 需要成员可见性、加入/退出、共享文件、权限交集和审计规则，留给 Part 17 或单独设计。
+真正群共享 Session 需要成员可见性、加入/退出、共享文件、权限交集和审计规则，留给后续独立设计。
 
 ## 13. 入站处理流程
 
@@ -906,7 +906,7 @@ Gateway 启动时自动启动显式 enabled 的渠道；独立 `start` 主要用
 
 1. 增加可选官方扫码 connector。
 2. 验证凭据数组、取消和二维码过期刷新。
-3. 在 Part 15 公网条件具备后增加 Webhook transport，实现签名验证和同一 Adapter 上层复用。
+3. 在 Part 17 公网条件具备后增加 Webhook transport，实现签名验证和同一 Adapter 上层复用。
 4. 评估 C2C 原生 stream；不可用时继续诚实声明 debounce 能力。
 
 ## 24. 测试方案
@@ -1079,7 +1079,7 @@ ${ZHICE_AGENT_WORKSPACE}/state/channels/weixin/{account_key}/sync.json
 
 credential 原子写入并使用本机严格文件权限；同步游标独立保存。二维码、bot token、context token 和完整微信 ID 不得进入普通日志、trace、audit、Session 或浏览器 URL。Web 二维码接口必须返回 `Cache-Control: no-store`。
 
-第一版本地运行不伪装通用 Secret 加密。远程部署时必须在 Part 15 另接平台 Secret/KMS。
+第一版本地运行不伪装通用 Secret 加密。远程部署时必须在 Part 17 另接平台 Secret/KMS。
 
 ## 31. 微信 sidecar 协议与生命周期
 
