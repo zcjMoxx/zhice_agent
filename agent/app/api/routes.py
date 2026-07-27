@@ -857,6 +857,14 @@ def update_role(
 
     actor = _actor(request, "auth.roles.manage", channel="rest")
     auth = _auth_service(request, required=True)
+    target_role = next((role for role in auth.store.list_roles() if role["id"] == role_id), None)
+    if target_role is not None and target_role["key"] == "admin" and "owner" not in actor.role_keys:
+        raise ApiError(
+            ErrorCode.AUTH_PERMISSION_DENIED,
+            "Only Owner can update administrator role permissions",
+            status_code=403,
+            details={"required_role": "owner"},
+        )
     try:
         role = auth.store.update_role_permissions(role_id, request_body.permission_keys)
     except AuthStoreError as exc:

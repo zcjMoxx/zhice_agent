@@ -68,6 +68,19 @@ def test_viewer_has_no_extra_privileges(tmp_path):
     assert actor.permission_keys == frozenset()
 
 
+def test_admin_role_permissions_are_editable_but_owner_role_remains_protected(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_schema()
+
+    admin = next(role for role in store.list_roles() if role["key"] == "admin")
+    owner = next(role for role in store.list_roles() if role["key"] == "owner")
+    updated = store.update_role_permissions(admin["id"], ["auth.roles.read", "auth.roles.manage"])
+
+    assert updated["permission_keys"] == ["auth.roles.manage", "auth.roles.read"]
+    with pytest.raises(AuthStoreError, match="owner role permissions are protected"):
+        store.update_role_permissions(owner["id"], ["auth.roles.read"])
+
+
 def test_reinitializing_schema_removes_obsolete_baseline_permissions(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     store.initialize_schema()

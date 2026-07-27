@@ -2,6 +2,7 @@
 import { onMounted, watch } from "vue";
 import { RouterView, useRouter } from "vue-router";
 
+import { uiText } from "@/i18n";
 import { installAuthorizationRefresh, useAuthStore } from "@/stores/auth";
 import { useUiStore } from "@/stores/ui";
 
@@ -25,7 +26,7 @@ watch(() => auth.user?.id, (id) => {
 <template>
   <div v-if="!auth.initialized" class="boot-screen" aria-live="polite">
     <img :src="'/static/zhice-logo-a.png'" alt="" />
-    <span>正在连接 ZhiCe-Agent…</span>
+    <span>{{ uiText(ui.language, '正在连接 ZhiCe-Agent…', 'Connecting to ZhiCe-Agent…') }}</span>
   </div>
   <RouterView v-else />
 </template>

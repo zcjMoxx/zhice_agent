@@ -1,9 +1,19 @@
+import type { UiLanguage } from "@/i18n";
+
 export const ROLE_NAMES: Record<string, string> = {
   owner: "系统所有者",
   admin: "管理员",
   developer: "开发者",
   viewer: "普通用户",
   auditor: "审计员",
+};
+
+const ROLE_NAMES_EN: Record<string, string> = {
+  owner: "Owner",
+  admin: "Administrator",
+  developer: "Developer",
+  viewer: "Viewer",
+  auditor: "Auditor",
 };
 
 export const PERMISSION_META: Record<string, { name: string; description: string; group: string }> = {
@@ -23,11 +33,40 @@ export const PERMISSION_META: Record<string, { name: string; description: string
 
 export const BASE_CAPABILITIES = ["与 Agent 对话", "管理本人 Session", "使用本人 Memory", "使用低风险 Tool"];
 
-export function permissionLabel(key: string): string { return PERMISSION_META[key]?.name ?? key; }
+const BASE_CAPABILITIES_EN = ["Chat with Agent", "Manage own Sessions", "Use own Memory", "Use low-risk Tools"];
 
-export function groupedPermissions(keys: string[]): Record<string, string[]> {
+const PERMISSION_META_EN: Record<string, { name: string; group: string }> = {
+  "auth.users.read": { name: "View users", group: "Users and accounts" },
+  "auth.users.manage": { name: "Manage users", group: "Users and accounts" },
+  "auth.admin.manage": { name: "Delegate administrator management", group: "Users and accounts" },
+  "auth.roles.read": { name: "View roles", group: "Roles and permissions" },
+  "auth.roles.manage": { name: "Manage roles", group: "Roles and permissions" },
+  "session.manage.any": { name: "Manage all Sessions", group: "Sessions and chat" },
+  "chat.stop.any": { name: "Stop any Turn", group: "Sessions and chat" },
+  "turn.read.any": { name: "View runtime activity", group: "Runtime and diagnostics" },
+  "tool.exec.dangerous": { name: "Request high-risk execution", group: "Tools and security" },
+  "skill.sync": { name: "Sync Skills", group: "Tools and security" },
+  "audit.read": { name: "View security audit", group: "Audit" },
+  "audit.export": { name: "Export security audit", group: "Audit" },
+};
+
+export function roleName(key: string, language: UiLanguage = "zh-CN"): string {
+  return (language === "en" ? ROLE_NAMES_EN : ROLE_NAMES)[key] ?? key;
+}
+
+export function baseCapabilities(language: UiLanguage = "zh-CN"): string[] {
+  return language === "en" ? BASE_CAPABILITIES_EN : BASE_CAPABILITIES;
+}
+
+export function permissionLabel(key: string, language: UiLanguage = "zh-CN"): string {
+  return (language === "en" ? PERMISSION_META_EN[key]?.name : PERMISSION_META[key]?.name) ?? key;
+}
+
+export function groupedPermissions(keys: string[], language: UiLanguage = "zh-CN"): Record<string, string[]> {
   return keys.reduce<Record<string, string[]>>((groups, key) => {
-    const group = PERMISSION_META[key]?.group ?? "技术权限";
+    const group = language === "en"
+      ? PERMISSION_META_EN[key]?.group ?? "Technical permissions"
+      : PERMISSION_META[key]?.group ?? "技术权限";
     (groups[group] ??= []).push(key);
     return groups;
   }, {});

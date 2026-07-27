@@ -227,6 +227,37 @@ def test_plain_admin_cannot_promote_admin_or_modify_owner(tmp_path):
     assert store.get_user(owner.id).status == "active"
 
 
+def test_only_owner_can_update_administrator_role_permissions(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_owner("owner", "Owner", "password-123")
+    store.create_user("alice", "Alice", "alice-password", role_keys=["admin"])
+    auth = AuthService(store)
+    admin_role = next(role for role in store.list_roles() if role["key"] == "admin")
+    permission_keys = ["auth.roles.manage", "auth.roles.read"]
+
+    owner_client = _client(tmp_path, _AuthRuntime(auth))
+    owner_client.post("/api/auth/login", json={"username": "owner", "password": "password-123"})
+    updated = owner_client.patch(
+        f"/api/admin/roles/{admin_role['id']}", json={"permission_keys": permission_keys}
+    )
+
+    admin_client = _client(tmp_path, _AuthRuntime(auth))
+    admin_client.post("/api/auth/login", json={"username": "alice", "password": "alice-password"})
+    rejected = admin_client.patch(
+        f"/api/admin/roles/{admin_role['id']}", json={"permission_keys": ["auth.roles.read"]}
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["permission_keys"] == permission_keys
+    _assert_error(
+        rejected,
+        403,
+        "AUTH_PERMISSION_DENIED",
+        "Only Owner can update administrator role permissions",
+        details={"required_role": "owner"},
+    )
+
+
 def test_public_registration_rejects_duplicate_username(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     store.initialize_owner("admin", "Admin", "password-123")

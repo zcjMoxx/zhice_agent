@@ -629,8 +629,8 @@ class SQLiteAuthStore:
             role = connection.execute("SELECT * FROM roles WHERE id=?", (role_id,)).fetchone()
             if role is None:
                 raise AuthStoreError("role not found")
-            if str(role["key"]) in {"owner", "admin"}:
-                raise AuthStoreError("owner and admin role permissions are protected")
+            if str(role["key"]) == "owner":
+                raise AuthStoreError("owner role permissions are protected")
             if keys:
                 rows = connection.execute(
                     f"SELECT key FROM permissions WHERE key IN ({_placeholders(keys)})", keys

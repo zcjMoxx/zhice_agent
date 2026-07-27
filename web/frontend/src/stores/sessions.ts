@@ -3,7 +3,6 @@ import { defineStore } from "pinia";
 import { api } from "@/api/client";
 import type { ChatMessage, SessionSummary } from "@/api/types";
 import { webSocket } from "@/websocket/client";
-import { useAuthStore } from "./auth";
 
 export const useSessionStore = defineStore("sessions", {
   state: () => ({
@@ -32,8 +31,6 @@ export const useSessionStore = defineStore("sessions", {
       this.activeId = id;
       this.messages = state.messages;
       this.metadata = state.metadata;
-      const userId = useAuthStore().user?.id || "local";
-      localStorage.setItem(`zhice.lastSession.${userId}`, id);
     },
     async create() {
       const id = await webSocket.createSession();
@@ -43,6 +40,11 @@ export const useSessionStore = defineStore("sessions", {
       this.messages = [];
       this.metadata = {};
       return id;
+    },
+    startDraft() {
+      this.activeId = "";
+      this.messages = [];
+      this.metadata = {};
     },
     async rename(id: string, title: string) {
       await api.renameSession(id, title);
