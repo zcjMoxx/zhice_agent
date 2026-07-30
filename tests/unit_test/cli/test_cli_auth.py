@@ -78,7 +78,7 @@ def test_cli_auth_init_owner_rejects_invalid_setup_token_before_reading_password
 
 def test_cli_auth_init_owner_requires_configured_setup_token(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("ZHICE_AGENT_SETUP_TOKEN", raising=False)
-    monkeypatch.setattr("agent.cli.bootstrap_dotenv", lambda _env_file: None)
+    monkeypatch.setattr("agent.cli.bootstrap_dotenv", lambda _env_file, **_kwargs: None)
     monkeypatch.setattr(
         "agent.cli.getpass.getpass",
         lambda _prompt: pytest.fail("setup token must be configured before prompting"),

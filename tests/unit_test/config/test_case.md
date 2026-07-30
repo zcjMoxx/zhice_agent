@@ -20,11 +20,17 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 - 预期：显式环境变量优先于默认派生路径。
 - 检查点：workspace 和各运行目录被正确覆盖，sessions 仍从 contexts 派生。
 
-### Case 3: 缺少 workspace
+### Case 3: 默认 workspace
 
 - 输入：既不传入 workspace，也不设置 `ZHICE_AGENT_WORKSPACE`。
-- 预期：抛出 `MissingWorkspaceError`。
-- 检查点：错误信息说明如何设置本地 workspace。
+- 预期：使用 `Path.home() / ".zhice"`。
+- 检查点：Windows、Linux 和 Docker 共用同一派生规则。
+
+### Case 3.1: workspace runtime env
+
+- 输入：`${workspace}/config/.env`包含普通变量和冲突的`ZHICE_AGENT_WORKSPACE`。
+- 预期：加载普通变量，但不允许runtime env反向改变已解析workspace。
+- 检查点：显式`--env-file`仍可作为一次性bootstrap覆盖。
 
 ### Case 4: 创建运行目录
 
@@ -47,8 +53,8 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 ### Case 7: 初始化运行时文件
 
 - 输入：调用 `init_runtime_files()`。
-- 预期：只生成`${ZHICE_AGENT_WORKSPACE}/config/models.json`、`${ZHICE_AGENT_WORKSPACE}/config/config.yml`和prompts，可选生成`${ZHICE_AGENT_WORKSPACE}/.env`。
-- 检查点：默认不覆盖已有文件；`force=True`刷新两个主模板；路由直观写为`endpoint/model`；不会生成旧分散配置文件。
+- 预期：默认生成`${ZHICE_AGENT_WORKSPACE}/config/.env`、`models.json`、`config.yml`和prompts；env逐字来自仓库`config/.env.example`。
+- 检查点：公开env模板不含workspace key；已有文件默认保留，`force=True`统一刷新三个主模板；旧`create_env=False`不能关闭标准env初始化；模板缺失返回稳定错误；不会生成旧分散配置文件。
 
 ### Case 8: config.yml分区隔离
 

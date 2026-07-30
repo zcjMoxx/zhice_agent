@@ -11,7 +11,7 @@ from agent.protocols.memory import MemoryStore
 from agent.protocols.skill import SkillProvider
 from agent.protocols.tool import ToolResult
 from agent.skills.sync import SkillSourceSync
-from agent.tools.diagnostics import DiagnoseRecentActivityTool
+from agent.tools.diagnostics import DiagnoseRecentActivityTool, DiagnoseSystemActivityTool
 from agent.tools.exec import ExecTool
 from agent.tools.memory import MemoryReadTool, MemoryWriteTool
 from agent.tools.readonly import GrepTool, ListDirTool, ReadFileTool
@@ -33,6 +33,7 @@ class UserScopedToolProvider:
         skills: SkillProvider | None = None,
         skill_sync: SkillSourceSync | None = None,
         diagnostics=None,
+        system_diagnostics=None,
         diagnostic_context: DiagnosticContext | None = None,
         memory_store: MemoryStore | None = None,
         memory_safety=None,
@@ -55,6 +56,14 @@ class UserScopedToolProvider:
                     actor=actor,
                     diagnostics=diagnostics,
                     context=diagnostic_context,
+                )
+            )
+        if system_diagnostics is not None and actor.has_permission("diagnostics.system.use"):
+            primary_tools.append(
+                DiagnoseSystemActivityTool(
+                    files_dir,
+                    actor=actor,
+                    diagnostics=system_diagnostics,
                 )
             )
         if memory_store is not None and memory_safety is not None:

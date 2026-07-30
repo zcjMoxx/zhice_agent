@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 
 import { api } from "@/api/client";
-import type { MonitorSnapshot, PublicUser, Role } from "@/api/types";
+import type { MonitorSnapshot, PublicUser, Role, SystemDiagnosticsSnapshot } from "@/api/types";
 
 export const useAdminStore = defineStore("admin", {
   state: () => ({
@@ -9,6 +9,7 @@ export const useAdminStore = defineStore("admin", {
     roles: [] as Role[],
     permissions: [] as string[],
     monitor: null as MonitorSnapshot | null,
+    diagnostics: null as SystemDiagnosticsSnapshot | null,
     auditEvents: [] as Record<string, unknown>[],
     auditCursor: "",
     auditHasMore: false,
@@ -23,6 +24,9 @@ export const useAdminStore = defineStore("admin", {
       this.roles = this.roles.map((role) => role.id === id ? updated : role);
     },
     async loadMonitor() { this.monitor = await api.monitor(); },
+    async loadDiagnostics(filters: Record<string, string> = {}) {
+      this.diagnostics = await api.diagnostics(new URLSearchParams({ minutes: "60", limit: "100", ...filters }));
+    },
     async loadAudit(filters: Record<string, string> = {}, append = false) {
       const query = new URLSearchParams({ limit: "50", ...filters });
       if (append && this.auditCursor) query.set("cursor", this.auditCursor);

@@ -1,7 +1,8 @@
 """Tests for the OpenAI-compatible LLM provider."""
 
 import json
-from urllib.error import HTTPError
+from io import BytesIO
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -137,6 +138,81 @@ def test_openai_provider_http_error_does_not_leak_secret(monkeypatch):
         )
 
     assert "secret-openai" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "retryable"),
+    [
+        (401, "AUTH_FAILED", False),
+        (403, "AUTH_FAILED", False),
+        (404, "MODEL_NOT_FOUND", False),
+        (429, "RATE_LIMITED", True),
+        (500, "PROVIDER_UNAVAILABLE", True),
+        (504, "TIMEOUT", True),
+    ],
+)
+def test_openai_provider_classifies_http_errors(status, code, retryable):
+    """HTTP failures should expose stable safe semantics to the retry wrapper."""
+
+    from agent.llm.openai_provider import OpenAIProvider
+    from agent.protocols.llm import LLMProviderError
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        OpenAIProvider(
+            _endpoint(api_key="secret-openai"),
+            urlopen=StatusUrlopen(status, headers={"Retry-After": "2"}),
+        ).chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert exc_info.value.code == code
+    assert exc_info.value.http_status == status
+    assert exc_info.value.retryable is retryable
+    assert exc_info.value.endpoint == "default"
+    assert exc_info.value.model == "fake-openai"
+    assert "secret-openai" not in exc_info.value.safe_message
+    if status == 429:
+        assert exc_info.value.retry_after_seconds == 2
+
+
+def test_openai_provider_classifies_network_and_invalid_response_errors():
+    """Transport and malformed JSON failures should remain distinguishable."""
+
+    from agent.llm.openai_provider import OpenAIProvider
+    from agent.protocols.llm import LLMProviderError
+
+    with pytest.raises(LLMProviderError) as network_error:
+        OpenAIProvider(
+            _endpoint(api_key="key"),
+            urlopen=lambda request, timeout=None: (_ for _ in ()).throw(URLError("offline")),
+        ).chat(messages=[{"role": "user", "content": "hello"}])
+    with pytest.raises(LLMProviderError) as invalid_error:
+        OpenAIProvider(
+            _endpoint(api_key="key"),
+            urlopen=lambda request, timeout=None: RawResponse(b"not-json"),
+        ).chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert network_error.value.code == "NETWORK_ERROR"
+    assert network_error.value.retryable is True
+    assert invalid_error.value.code == "INVALID_RESPONSE"
+    assert invalid_error.value.retryable is True
+
+
+def test_litellm_provider_classifies_sdk_status_and_redacts_secret():
+    """LiteLLM adapters should normalize upstream SDK errors without leaking keys."""
+
+    from agent.llm.litellm_provider import LiteLLMProvider
+    from agent.protocols.llm import LLMProviderError
+
+    sdk_error = FakeSdkError("rate limited litellm-secret", status_code=429, retry_after=3)
+    with pytest.raises(LLMProviderError) as exc_info:
+        LiteLLMProvider(
+            _endpoint_for_litellm(),
+            completion=lambda **kwargs: (_ for _ in ()).throw(sdk_error),
+        ).chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert exc_info.value.code == "RATE_LIMITED"
+    assert exc_info.value.retryable is True
+    assert exc_info.value.retry_after_seconds == 3
+    assert "litellm-secret" not in str(exc_info.value)
 
 
 def test_create_llm_provider_creates_litellm_provider():
@@ -286,6 +362,55 @@ class CompletionRecorder:
 class RaisingUrlopen:
     def __call__(self, request, timeout=None):
         raise HTTPError(request.full_url, 500, "boom secret-openai", hdrs=None, fp=None)
+
+
+class StatusUrlopen:
+    def __init__(self, status, headers=None):
+        self.status = status
+        self.headers = headers or {}
+
+    def __call__(self, request, timeout=None):
+        raise HTTPError(
+            request.full_url,
+            self.status,
+            "provider failure",
+            hdrs=self.headers,
+            fp=BytesIO(b'{"error":"sensitive body"}'),
+        )
+
+
+class RawResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self.payload
+
+
+class FakeSdkError(Exception):
+    def __init__(self, message, *, status_code, retry_after=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
+def _endpoint_for_litellm():
+    from agent.protocols.llm import LLMEndpoint
+
+    return LLMEndpoint(
+        name="litellm",
+        protocol="litellm",
+        base_url="",
+        api_key="litellm-secret",
+        provider="openai",
+        model="gpt-test",
+    )
 
 
 class FakeResponse:

@@ -71,6 +71,58 @@ class McpCatalogSnapshot:
 
     tools: tuple[McpToolDescriptor, ...] = ()
     servers: tuple[McpServerStatus, ...] = ()
+    version: int = 0
+    generated_at: float = 0.0
+
+
+@dataclass(frozen=True)
+class McpConnectionEvent:
+    """One bounded, credential-free Server connection history entry."""
+
+    server_id: str
+    state: str
+    timestamp: float
+    reason_code: str = ""
+
+
+@dataclass(frozen=True)
+class McpToolStats:
+    """Process-lifetime latency and outcome counters for one remote Tool."""
+
+    server_id: str
+    tool_name: str
+    call_count: int = 0
+    success_count: int = 0
+    error_count: int = 0
+    cancelled_count: int = 0
+    total_duration_ms: int = 0
+    max_duration_ms: int = 0
+    last_error_code: str = ""
+
+
+@dataclass(frozen=True)
+class McpOAuthStatus:
+    """Credential-free OAuth lifecycle status for one Server."""
+
+    server_id: str
+    state: Literal["disabled", "configured", "refreshing", "ready", "error"]
+    refresh_count: int = 0
+    last_error_code: str = ""
+    expires_at: float | None = None
+
+
+@dataclass(frozen=True)
+class McpRuntimeStatsSnapshot:
+    """Immutable diagnostic snapshot for MCP health and Tool execution."""
+
+    catalog_version: int = 0
+    active_calls: int = 0
+    catalog_refresh_count: int = 0
+    list_changed_count: int = 0
+    reconnect_count: int = 0
+    connection_history: tuple[McpConnectionEvent, ...] = ()
+    tools: tuple[McpToolStats, ...] = ()
+    oauth: tuple[McpOAuthStatus, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -107,6 +159,7 @@ class McpRuntimeFacade(Protocol):
         actor: ActorContext,
         files_dir: Path,
         *,
+        session_id: str = "",
         interaction_notifier: McpInteractionNotifier | None = None,
     ) -> list[Tool]:
         """Create actor-bound adapters over the shared Catalog."""
@@ -118,6 +171,7 @@ class McpRuntimeFacade(Protocol):
         *,
         actor: ActorContext,
         files_dir: Path,
+        session_id: str = "",
         interaction_notifier: McpInteractionNotifier | None = None,
     ) -> ToolResult:
         """Call one remote Tool without exposing asyncio to AgentLoop."""
@@ -128,6 +182,27 @@ class McpRuntimeFacade(Protocol):
         response: McpInteractionResponse,
     ) -> bool:
         """Resolve one pending Server-originated interaction."""
+
+    def refresh_catalog(self, server_id: str) -> bool:
+        """Atomically refresh one Server's Tool Catalog."""
+
+    def reload(self, specs: tuple[McpServerSpec, ...] | list[McpServerSpec]) -> bool:
+        """Apply a validated Server configuration without restarting the Gateway."""
+
+    def reconnect(self, server_id: str) -> bool:
+        """Reconnect one Server without restarting the Gateway."""
+
+    def cancel_active_calls(
+        self,
+        server_id: str | None = None,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> int:
+        """Propagate cancellation to matching active MCP calls."""
+
+    def stats_snapshot(self) -> McpRuntimeStatsSnapshot:
+        """Return credential-free process-lifetime MCP diagnostics."""
 
     def close(self) -> None:
         """Close connections, subprocesses, and the event-loop thread."""

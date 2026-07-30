@@ -104,3 +104,40 @@ def test_security_audit_no_longer_mutates_runtime_indexes(tmp_path):
 
     assert store.list_turn_runs(actor_user_id=user.id, session_id="session-a") == []
     assert store.list_audit_events(limit=20)[0]["action"] == "chat.turn_started"
+
+
+def test_startup_recovery_finishes_only_interrupted_turns(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("owner", "Owner", "password-123")
+    actor = store.actor_for_user(user.id, channel="web")
+    activity = SqliteRuntimeActivitySink(store)
+    for turn_id in ("interrupted", "completed"):
+        activity.record(
+            RuntimeActivityEvent(
+                action="chat.turn_started",
+                actor=actor,
+                session_id="session-a",
+                turn_id=turn_id,
+                channel="web",
+            )
+        )
+    activity.record(
+        RuntimeActivityEvent(
+            action="chat.turn_done",
+            actor=actor,
+            session_id="session-a",
+            turn_id="completed",
+            channel="web",
+        )
+    )
+
+    assert store.recover_interrupted_turn_runs() == 1
+    turns = {
+        item["turn_id"]: item
+        for item in store.list_turn_runs(actor_user_id=user.id, session_id="session-a")
+    }
+    assert turns["interrupted"]["status"] == "error"
+    assert turns["interrupted"]["error_code"] == "GATEWAY_RESTART_INTERRUPTED"
+    assert turns["interrupted"]["finished_at"]
+    assert turns["completed"]["status"] == "done"
+    assert store.recover_interrupted_turn_runs() == 0

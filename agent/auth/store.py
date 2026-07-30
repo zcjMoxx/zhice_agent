@@ -1757,6 +1757,75 @@ class SQLiteAuthStore:
             },
         }
 
+    def list_system_diagnostic_activity(
+        self,
+        *,
+        actor_user_id: str = "",
+        session_id: str = "",
+        turn_id: str = "",
+        request_id: str = "",
+        channel: str = "",
+        status: str = "",
+        error_code: str = "",
+        tool_name: str = "",
+        from_ts: str = "",
+        limit: int = 100,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return bounded cross-user turn/tool facts for privileged diagnostics."""
+
+        bounded = max(1, min(int(limit), 500))
+        turn_clauses: list[str] = []
+        turn_values: list[Any] = []
+        for column, value in (
+            ("actor_user_id", actor_user_id),
+            ("session_id", session_id),
+            ("turn_id", turn_id),
+            ("request_id", request_id),
+            ("channel", channel),
+            ("status", status),
+            ("error_code", error_code),
+        ):
+            if value:
+                turn_clauses.append(f"{column}=?")
+                turn_values.append(value)
+        if from_ts:
+            turn_clauses.append("started_at>=?")
+            turn_values.append(from_ts)
+        turn_query = "SELECT * FROM turn_runs"
+        if turn_clauses:
+            turn_query += " WHERE " + " AND ".join(turn_clauses)
+        turn_query += " ORDER BY started_at DESC LIMIT ?"
+        turn_values.append(bounded)
+
+        tool_clauses: list[str] = []
+        tool_values: list[Any] = []
+        for column, value in (
+            ("actor_user_id", actor_user_id),
+            ("session_id", session_id),
+            ("turn_id", turn_id),
+            ("tool_name", tool_name),
+        ):
+            if value:
+                tool_clauses.append(f"{column}=?")
+                tool_values.append(value)
+        if error_code:
+            tool_clauses.append("result_code=?")
+            tool_values.append(error_code)
+        if status == "error":
+            tool_clauses.append("is_error=1")
+        if from_ts:
+            tool_clauses.append("started_at>=?")
+            tool_values.append(from_ts)
+        tool_query = "SELECT * FROM tool_call_records"
+        if tool_clauses:
+            tool_query += " WHERE " + " AND ".join(tool_clauses)
+        tool_query += " ORDER BY started_at DESC LIMIT ?"
+        tool_values.append(bounded)
+        with self._connect() as connection:
+            turns = [dict(row) for row in connection.execute(turn_query, turn_values).fetchall()]
+            tools = [dict(row) for row in connection.execute(tool_query, tool_values).fetchall()]
+        return {"turns": turns, "tools": tools}
+
     def list_turn_runs(
         self,
         *,
@@ -1779,6 +1848,20 @@ class SQLiteAuthStore:
         )
         with self._connect() as connection:
             return [dict(row) for row in connection.execute(query, values).fetchall()]
+
+    def recover_interrupted_turn_runs(self) -> int:
+        """Finish Turn rows left active by a previous Gateway process."""
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE turn_runs
+                SET status='error', finished_at=?, error_code='GATEWAY_RESTART_INTERRUPTED'
+                WHERE status='started'
+                """,
+                (_utc_now(),),
+            )
+            return max(0, int(cursor.rowcount))
 
     def list_tool_call_records(
         self,

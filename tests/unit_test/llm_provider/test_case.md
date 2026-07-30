@@ -42,7 +42,20 @@
 - 预期：`create_llm_provider` 返回 `LiteLLMProvider`。
 - 检查点：调用 `litellm.completion(...)`，模型名、api_key、可选 api_base、tools、tool_calls 与 usage 正常透传。
 
-### Case 7: EndpointFailoverProvider
+### Case 7: Provider stable error semantics
+
+- Cover OpenAI HTTP 401/403/404/429/5xx, network failures, and invalid JSON.
+- Cover LiteLLM SDK status codes, `Retry-After`, and secret redaction.
+- Check `code/http_status/retryable/safe_message/endpoint/model` without response bodies or API keys.
+
+### Case 8: Bounded retry, total deadline, and cooldown
+
+- Retry retryable failures on the same endpoint; fail over non-retryable failures immediately.
+- Prefer `Retry-After` over exponential backoff and stop new calls after the total deadline.
+- Skip an exhausted endpoint during process-local cooldown and record structured evidence.
+- Check successful responses and final errors both carry bounded `provider_attempts` evidence.
+
+### Case 9: EndpointFailoverProvider
 
 - 输入：多个 endpoint，包含 preferred endpoint、不同 priority、disabled endpoint。
 - 预期：优先尝试 preferred endpoint；失败后按 priority 尝试其它 enabled endpoint。

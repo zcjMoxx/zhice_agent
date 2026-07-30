@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import socket
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 from urllib import error, request
 
@@ -30,7 +33,7 @@ class OpenAIProvider:
 
         self.endpoint = endpoint
         self._urlopen = urlopen or _default_urlopen
-        self._timeout = timeout
+        self._timeout = min(timeout, endpoint.request_timeout_seconds)
 
     def chat(
         self,
@@ -50,7 +53,7 @@ class OpenAIProvider:
             payload["tools"] = tools
 
         raw = self._post_json("chat/completions", payload, api_key)
-        return _parse_openai_response(raw, self.endpoint.model)
+        return _parse_openai_response(raw, self.endpoint.model, endpoint=self.endpoint)
 
     def _post_json(self, path: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
         """POST JSON to the configured base URL and decode the JSON response."""
@@ -70,14 +73,36 @@ class OpenAIProvider:
             with self._urlopen(req, timeout=self._timeout) as response:
                 response_body = response.read().decode("utf-8")
         except error.HTTPError as exc:
-            raise _provider_http_error(exc, api_key) from exc
+            raise _provider_http_error(exc, self.endpoint, api_key) from exc
         except error.URLError as exc:
-            raise LLMProviderError(f"LLM HTTP request failed: {_safe_reason(exc)}") from exc
+            reason = getattr(exc, "reason", exc)
+            is_timeout = isinstance(reason, (TimeoutError, socket.timeout))
+            raise LLMProviderError(
+                "LLM request timed out." if is_timeout else "LLM network request failed.",
+                code="TIMEOUT" if is_timeout else "NETWORK_ERROR",
+                retryable=True,
+                endpoint=self.endpoint.name,
+                model=self.endpoint.model,
+            ) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise LLMProviderError(
+                "LLM request timed out.",
+                code="TIMEOUT",
+                retryable=True,
+                endpoint=self.endpoint.name,
+                model=self.endpoint.model,
+            ) from exc
 
         try:
             return json.loads(response_body)
         except json.JSONDecodeError as exc:
-            raise LLMProviderError("LLM response was not valid JSON") from exc
+            raise LLMProviderError(
+                "LLM response was not valid JSON.",
+                code="INVALID_RESPONSE",
+                retryable=True,
+                endpoint=self.endpoint.name,
+                model=self.endpoint.model,
+            ) from exc
 
 
 def _read_api_key(endpoint: LLMEndpoint) -> str:
@@ -103,11 +128,32 @@ def _clean_message(message: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
-def _parse_openai_response(raw: dict[str, Any], fallback_model: str) -> LLMResponse:
+def _parse_openai_response(
+    raw: dict[str, Any],
+    fallback_model: str,
+    *,
+    endpoint: LLMEndpoint | None = None,
+) -> LLMResponse:
     """Convert the OpenAI wire response into provider-neutral LLMResponse."""
 
     choices = raw.get("choices") or []
+    if not isinstance(choices, list) or not choices:
+        raise LLMProviderError(
+            "LLM response did not contain a valid choice.",
+            code="INVALID_RESPONSE",
+            retryable=True,
+            endpoint=endpoint.name if endpoint else "",
+            model=endpoint.model if endpoint else fallback_model,
+        )
     first_choice = choices[0] if choices else {}
+    if not isinstance(first_choice, dict) or not isinstance(first_choice.get("message"), dict):
+        raise LLMProviderError(
+            "LLM response did not contain a valid assistant message.",
+            code="INVALID_RESPONSE",
+            retryable=True,
+            endpoint=endpoint.name if endpoint else "",
+            model=endpoint.model if endpoint else fallback_model,
+        )
     message = first_choice.get("message") or {}
     content = message.get("content") or ""
     tool_calls = message.get("tool_calls") or []
@@ -122,20 +168,58 @@ def _parse_openai_response(raw: dict[str, Any], fallback_model: str) -> LLMRespo
     return LLMResponse(content=content, tool_calls=tool_calls, metadata=metadata)
 
 
-def _provider_http_error(exc: error.HTTPError, api_key: str) -> LLMProviderError:
-    """Build a redacted provider error from an HTTPError body."""
+def _provider_http_error(
+    exc: error.HTTPError,
+    endpoint: LLMEndpoint,
+    api_key: str,
+) -> LLMProviderError:
+    """Classify an HTTP failure without retaining its potentially sensitive body."""
 
-    body = ""
+    del api_key  # The response body is intentionally not read or exposed.
+    status = int(exc.code)
+    code, retryable, message = _http_error_semantics(status)
+    return LLMProviderError(
+        message,
+        code=code,
+        http_status=status,
+        retryable=retryable,
+        endpoint=endpoint.name,
+        model=endpoint.model,
+        retry_after_seconds=_retry_after_seconds(exc.headers),
+    )
+
+
+def _http_error_semantics(status: int) -> tuple[str, bool, str]:
+    """Map HTTP status codes to stable provider-neutral semantics."""
+
+    if status in {401, 403}:
+        return "AUTH_FAILED", False, "LLM provider authentication failed."
+    if status == 404:
+        return "MODEL_NOT_FOUND", False, "LLM model or endpoint was not found."
+    if status == 429:
+        return "RATE_LIMITED", True, "LLM provider rate limit was reached."
+    if status in {408, 504}:
+        return "TIMEOUT", True, "LLM request timed out."
+    if 500 <= status <= 599:
+        return "PROVIDER_UNAVAILABLE", True, "LLM provider is temporarily unavailable."
+    return "PROVIDER_ERROR", False, f"LLM provider request failed with status {status}."
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    """Parse a bounded Retry-After delta or HTTP date."""
+
+    if headers is None:
+        return None
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
     try:
-        body = exc.read().decode("utf-8", errors="replace")[:1000]
-    except Exception:
-        body = ""
-    body = body.replace(api_key, "[redacted]") if api_key else body
-    detail = f": {body}" if body else ""
-    return LLMProviderError(f"LLM HTTP request failed with status {exc.code}{detail}")
-
-
-def _safe_reason(exc: error.URLError) -> str:
-    """Return a bounded network-error reason for user-facing messages."""
-
-    return str(getattr(exc, "reason", exc))[:500]
+        return max(0.0, min(float(raw), 300.0))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(raw))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, min((retry_at - datetime.now(timezone.utc)).total_seconds(), 300.0))
+        except (TypeError, ValueError, OverflowError):
+            return None

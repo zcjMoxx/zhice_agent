@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter, deque
 from datetime import UTC, datetime, timedelta
@@ -11,7 +12,7 @@ from typing import Any
 from agent.auth.store import SQLiteAuthStore
 from agent.logging_utils import redact_value
 from agent.protocols.auth import ActorContext
-from agent.protocols.diagnostics import DiagnosticContext
+from agent.protocols.diagnostics import DiagnosticContext, SystemDiagnosticQuery
 
 _MAX_TRACE_LINES_PER_FILE = 2000
 _MAX_VISIBLE_EVENTS = 80
@@ -50,6 +51,15 @@ _SAFE_TRACE_FIELDS = (
     "workspace_mode",
     "endpoint",
     "model",
+    "endpoint_name",
+    "attempt_index",
+    "http_status",
+    "retryable",
+    "backoff_ms",
+    "skip_reason",
+    "cooldown_until",
+    "server_name",
+    "mcp_server",
     "input_preview",
     "output_preview",
 )
@@ -257,6 +267,82 @@ class RecentActivityDiagnostics:
                 events.append(_safe_trace_event(event))
         events.sort(key=lambda item: str(item.get("ts") or ""))
         return events[:_MAX_VISIBLE_EVENTS]
+
+
+class SystemDiagnosticsService:
+    """Privileged bounded diagnostics over cross-user runtime facts and safe trace evidence."""
+
+    def __init__(self, store: SQLiteAuthStore, logs_dir: Path | str):
+        self.store = store
+        self.logs_dir = Path(logs_dir).expanduser().resolve()
+
+    def diagnose(self, filters: dict[str, Any]) -> dict[str, Any]:
+        query = SystemDiagnosticQuery.from_mapping(filters)
+        since = datetime.now(UTC) - timedelta(minutes=query.minutes)
+        activity = self.store.list_system_diagnostic_activity(
+            actor_user_id=query.actor_user_id,
+            session_id=query.session_id,
+            turn_id=query.turn_id,
+            request_id=query.request_id,
+            channel=query.channel,
+            status=query.status,
+            error_code=query.error_code,
+            tool_name=query.tool_name,
+            from_ts=since.isoformat(),
+            limit=query.limit,
+        )
+        turns = [_safe_system_turn(row) for row in activity["turns"]]
+        tools = [_safe_system_tool(row) for row in activity["tools"]]
+        trace_events = self._trace_events(query, since)
+        timeline = _system_timeline(turns, tools, trace_events, query.limit)
+        incidents = _aggregate_incidents(timeline)
+        if query.incident_id:
+            incidents = [row for row in incidents if row["incident_id"] == query.incident_id]
+            evidence_ids = {
+                str(event.get("evidence_id") or "")
+                for incident in incidents
+                for event in incident.get("evidence", [])
+            }
+            timeline = [row for row in timeline if row.get("evidence_id") in evidence_ids]
+        return {
+            "status": "ok",
+            "window_minutes": query.minutes,
+            "filters": {
+                key: value
+                for key, value in query.__dict__.items()
+                if key not in {"minutes", "limit"} and value
+            },
+            "summary": {
+                "turns": len(turns),
+                "tools": len(tools),
+                "trace_events": len(trace_events),
+                "incidents": len(incidents),
+                "errors": sum(1 for row in timeline if bool(row.get("is_error"))),
+            },
+            "incidents": incidents[: query.limit],
+            "timeline": timeline[: query.limit],
+            "limitations": [
+                "Only allowlisted, redacted and bounded runtime evidence is returned.",
+                "Incidents are deterministic fact groupings, not model-inferred root causes.",
+            ],
+        }
+
+    def _trace_events(
+        self,
+        query: SystemDiagnosticQuery,
+        since: datetime,
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for path in _trace_paths(self.logs_dir, since):
+            for raw in _tail_json_objects(path, _MAX_TRACE_LINES_PER_FILE):
+                if not _event_in_range(raw, since) or not _matches_system_trace(raw, query):
+                    continue
+                event = _safe_trace_event(raw)
+                if raw.get("actor_user_id"):
+                    event["actor_user_id"] = redact_value(raw["actor_user_id"])
+                events.append(event)
+        events.sort(key=lambda item: str(item.get("ts") or ""))
+        return events[-query.limit :]
 
 
 def _select_target_turn(
@@ -643,3 +729,163 @@ def _event_in_range(event: dict[str, Any], since: datetime) -> bool:
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=UTC)
     return timestamp >= since
+
+
+def _safe_system_turn(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: row.get(key)
+        for key in (
+            "actor_user_id",
+            "session_id",
+            "turn_id",
+            "request_id",
+            "channel",
+            "status",
+            "started_at",
+            "finished_at",
+            "duration_ms",
+            "error_code",
+        )
+        if row.get(key) not in {None, ""}
+    }
+
+
+def _safe_system_tool(row: dict[str, Any]) -> dict[str, Any]:
+    """Exclude args, cwd, command and output even for privileged diagnostics."""
+
+    return {
+        key: row.get(key)
+        for key in (
+            "actor_user_id",
+            "session_id",
+            "turn_id",
+            "tool_name",
+            "decision",
+            "decision_code",
+            "permission_key",
+            "risk_category",
+            "started_at",
+            "finished_at",
+            "duration_seconds",
+            "is_error",
+            "result_code",
+            "exit_code",
+            "timeout_seconds",
+        )
+        if row.get(key) not in {None, ""}
+    }
+
+
+def _matches_system_trace(event: dict[str, Any], query: SystemDiagnosticQuery) -> bool:
+    exact = {
+        "actor_user_id": query.actor_user_id,
+        "session_id": query.session_id,
+        "turn_id": query.turn_id,
+        "request_id": query.request_id,
+        "channel": query.channel,
+        "component": query.component,
+        "endpoint": query.endpoint,
+        "model": query.model,
+        "mcp_server": query.mcp_server,
+    }
+    for key, expected in exact.items():
+        actual = event.get(key)
+        if key == "mcp_server" and not actual:
+            actual = event.get("server_name")
+        if expected and str(actual or "") != expected:
+            return False
+    if query.tool_name and str(event.get("tool") or event.get("tool_name") or "") != query.tool_name:
+        return False
+    if query.status and str(event.get("status") or "") != query.status:
+        return False
+    if query.error_code and str(
+        event.get("error_code") or event.get("code") or event.get("reason_code") or ""
+    ) != query.error_code:
+        return False
+    return True
+
+
+def _system_timeline(
+    turns: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    traces: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    timeline: list[dict[str, Any]] = []
+    for row in turns:
+        item = {
+            **row,
+            "ts": row.get("started_at", ""),
+            "kind": "turn",
+            "component": "turn",
+            "code": row.get("error_code", ""),
+            "is_error": row.get("status") == "error",
+        }
+        timeline.append(item)
+    for row in tools:
+        item = {
+            **row,
+            "ts": row.get("started_at", ""),
+            "kind": "tool",
+            "component": "tool",
+            "code": row.get("result_code") or row.get("decision_code") or "",
+            "is_error": bool(row.get("is_error")),
+        }
+        timeline.append(item)
+    for row in traces:
+        code = str(row.get("error_code") or row.get("code") or row.get("reason_code") or "")
+        event = str(row.get("event") or "")
+        item = {
+            **row,
+            "kind": "trace",
+            "code": code,
+            "is_error": bool(code) or event.endswith((".error", "_failed", ".failed")),
+        }
+        timeline.append(item)
+    timeline.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
+    for item in timeline:
+        material = "|".join(
+            str(item.get(key) or "")
+            for key in ("ts", "kind", "session_id", "turn_id", "event", "tool_name", "code")
+        )
+        item["evidence_id"] = "evt-" + hashlib.sha256(material.encode()).hexdigest()[:16]
+    return timeline[: max(1, min(limit * 3, 500))]
+
+
+def _aggregate_incidents(timeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in timeline:
+        if not row.get("is_error"):
+            continue
+        component = str(row.get("component") or row.get("kind") or "runtime")
+        code = str(row.get("code") or "RUNTIME_ERROR")
+        subject = str(
+            row.get("endpoint")
+            or row.get("endpoint_name")
+            or row.get("mcp_server")
+            or row.get("server_name")
+            or row.get("tool_name")
+            or ""
+        )
+        groups.setdefault((component, code, subject), []).append(row)
+    incidents: list[dict[str, Any]] = []
+    for (component, code, subject), evidence in groups.items():
+        evidence.sort(key=lambda item: str(item.get("ts") or ""))
+        identity = f"{component}|{code}|{subject}|{evidence[0].get('ts', '')[:13]}"
+        incident_id = "inc-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+        incidents.append(
+            {
+                "incident_id": incident_id,
+                "component": component,
+                "code": code,
+                "subject": subject,
+                "count": len(evidence),
+                "first_seen_at": evidence[0].get("ts", ""),
+                "last_seen_at": evidence[-1].get("ts", ""),
+                "status": "active",
+                "rule": "same_component_code_subject_within_query_window",
+                "evidence": evidence[-10:],
+            }
+        )
+    incidents.sort(key=lambda item: str(item.get("last_seen_at") or ""), reverse=True)
+    return incidents

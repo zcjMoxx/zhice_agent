@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from agent.protocols.mcp import McpOAuthSpec, McpServerSpec
+from agent.protocols.mcp import McpOAuthSpec, McpOAuthStatus, McpServerSpec
 
 
 class McpAuthError(RuntimeError):
@@ -27,6 +27,21 @@ class McpCredentialManager:
 
     def __init__(self) -> None:
         self._tokens: dict[str, _TokenState] = {}
+        self._statuses: dict[str, McpOAuthStatus] = {}
+
+    def status_for(self, spec: McpServerSpec) -> McpOAuthStatus:
+        """Return a credential-free OAuth status for diagnostics."""
+
+        if spec.oauth is None:
+            return McpOAuthStatus(spec.server_id, "disabled")
+        return self._statuses.get(
+            spec.server_id,
+            McpOAuthStatus(
+                spec.server_id,
+                "configured",
+                expires_at=spec.oauth.expires_at,
+            ),
+        )
 
     async def headers_for(self, spec: McpServerSpec) -> dict[str, str]:
         """Return configured headers plus a current OAuth Bearer token."""
@@ -34,7 +49,22 @@ class McpCredentialManager:
         headers = dict(spec.headers)
         if spec.oauth is None:
             return headers
-        token = await self._access_token(spec.server_id, spec.oauth, spec.connect_timeout_seconds)
+        try:
+            token = await self._access_token(
+                spec.server_id,
+                spec.oauth,
+                spec.connect_timeout_seconds,
+            )
+        except McpAuthError:
+            previous = self.status_for(spec)
+            self._statuses[spec.server_id] = McpOAuthStatus(
+                spec.server_id,
+                "error",
+                refresh_count=previous.refresh_count,
+                last_error_code=McpAuthError.code,
+                expires_at=previous.expires_at,
+            )
+            raise
         headers["Authorization"] = f"Bearer {token}"
         return headers
 
@@ -49,9 +79,24 @@ class McpCredentialManager:
             state = _TokenState(oauth.access_token, oauth.expires_at)
             self._tokens[server_id] = state
         if state.access_token and (state.expires_at is None or state.expires_at > time.time() + 30):
+            current = self._statuses.get(server_id)
+            self._statuses[server_id] = McpOAuthStatus(
+                server_id,
+                "ready",
+                refresh_count=current.refresh_count if current else 0,
+                expires_at=state.expires_at,
+            )
             return state.access_token
         if not oauth.refresh_token:
             raise McpAuthError("MCP access token is missing or expired")
+        previous = self._statuses.get(server_id)
+        refresh_count = previous.refresh_count if previous else 0
+        self._statuses[server_id] = McpOAuthStatus(
+            server_id,
+            "refreshing",
+            refresh_count=refresh_count,
+            expires_at=state.expires_at,
+        )
         payload = {
             "grant_type": "refresh_token",
             "refresh_token": oauth.refresh_token,
@@ -77,4 +122,10 @@ class McpCredentialManager:
         if isinstance(expires_in, int | float) and expires_in > 0:
             expires_at = time.time() + float(expires_in)
         self._tokens[server_id] = _TokenState(access_token, expires_at)
+        self._statuses[server_id] = McpOAuthStatus(
+            server_id,
+            "ready",
+            refresh_count=refresh_count + 1,
+            expires_at=expires_at,
+        )
         return access_token

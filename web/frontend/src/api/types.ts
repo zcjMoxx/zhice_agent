@@ -81,6 +81,16 @@ export interface MonitorSnapshot {
   };
 }
 
+export interface SystemDiagnosticsSnapshot {
+  status: string;
+  window_minutes: number;
+  filters: Record<string, unknown>;
+  summary: Record<string, number>;
+  incidents: Record<string, unknown>[];
+  timeline: Record<string, unknown>[];
+  limitations: string[];
+}
+
 export interface RuntimeUiState {
   sequence: number;
   title: string;

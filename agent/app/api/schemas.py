@@ -289,6 +289,18 @@ class AdminMonitorResponse(BaseModel):
     activity: MonitorActivityResponse
 
 
+class SystemDiagnosticsResponse(BaseModel):
+    """Bounded privileged incident and timeline read model."""
+
+    status: str
+    window_minutes: int
+    filters: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, int] = Field(default_factory=dict)
+    incidents: list[dict[str, Any]] = Field(default_factory=list)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class ToolConfirmationResponse(BaseModel):
     """Pending or decided confirmation shown to the requesting actor."""
 

@@ -20,6 +20,7 @@ const failure = ref("");
 const selectedRole = ref("");
 const technicalOpen = ref<Record<string, boolean>>({});
 const auditFilters = reactive({ action: "", actor_user_id: "", decision: "", from_ts: "", to_ts: "" });
+const diagnosticFilters = reactive({ actor_user_id: "", session_id: "", component: "", error_code: "", status: "" });
 const newUser = reactive({ username: "", display_name: "", password: "", roles: ["viewer"] });
 
 function tr(chinese: string, english: string): string { return uiText(ui.language, chinese, english); }
@@ -28,7 +29,7 @@ const tabs = computed(() => [
   { key: "overview", label: tr("概览", "Overview"), icon: Gauge, visible: true },
   { key: "users", label: tr("用户管理", "Users"), icon: Users, visible: auth.can("auth.users.read") },
   { key: "roles", label: tr("角色与权限", "Roles & permissions"), icon: Shield, visible: auth.can("auth.roles.read") },
-  { key: "monitor", label: tr("系统监控", "System monitor"), icon: Activity, visible: auth.can("turn.read.any") },
+  { key: "monitor", label: tr("系统监控", "System monitor"), icon: Activity, visible: auth.can("turn.read.any") || auth.can("diagnostics.system.use") },
   { key: "audit", label: tr("安全审计", "Security audit"), icon: FileClock, visible: auth.can("audit.read") },
 ].filter((item) => item.visible));
 const selectedRoleValue = computed(() => admin.roles.find((role) => role.id === selectedRole.value));
@@ -51,7 +52,10 @@ async function loadTab(next: string) {
   try {
     if (next === "users") await admin.loadUsers();
     if (next === "roles") { await admin.loadRoles(); selectedRole.value ||= orderedRoles.value[0]?.id || ""; }
-    if (next === "monitor") await admin.loadMonitor();
+    if (next === "monitor") {
+      if (auth.can("turn.read.any")) await admin.loadMonitor();
+      if (auth.can("diagnostics.system.use")) await admin.loadDiagnostics(diagnosticFilters);
+    }
     if (next === "audit") await admin.loadAudit(auditFilters);
   } catch (error) { failure.value = errorMessage(error); }
 }
@@ -101,10 +105,19 @@ function fmt(value: unknown): string { return value ? new Date(String(value)).to
       </section>
 
       <section v-else-if="tab === 'monitor'" class="monitor-section">
-        <div class="truth-banner"><Activity :size="22" /><span><strong>{{ tr('当前真值视图', 'Current truth view') }}</strong><small>{{ tr('仅展示 Gateway、Capability 和结构化 Runtime Activity；不推断根因。', 'Shows only Gateway, Capability, and structured Runtime Activity without inferring root causes.') }}</small></span></div>
+        <div class="truth-banner"><Activity :size="22" /><span><strong>{{ tr('运行真值与系统诊断', 'Runtime truth and system diagnostics') }}</strong><small>{{ tr('事故由确定性规则聚合；时间线仅包含白名单脱敏字段，不写入模型推断。', 'Incidents use deterministic rules; timelines contain only allowlisted redacted fields and never persist model inference.') }}</small></span></div>
+        <template v-if="auth.can('turn.read.any')">
         <div class="monitor-grid"><article><span>Gateway</span><strong>{{ admin.monitor?.gateway.status || 'unknown' }}</strong><small>{{ admin.monitor?.gateway.current_model }}</small></article><article v-for="(value, key) in admin.monitor?.activity.summary" :key="key"><span>{{ key }}</span><strong>{{ value }}</strong><small>近期结构化记录</small></article></div>
         <h2>Capability</h2><div class="capability-grid"><article v-for="(capability, key) in admin.monitor?.capabilities" :key="key"><i :class="`status-dot ${capability.state}`"></i><div><strong>{{ capability.name }}</strong><small>{{ capability.message }}</small><code>{{ capability.code }}</code></div></article></div>
         <h2>{{ tr('近期 Turn Activity', 'Recent Turn Activity') }}</h2><div class="data-table activity-table"><div class="table-head"><span>{{ tr('状态', 'Status') }}</span><span>{{ tr('渠道', 'Channel') }}</span><span>{{ tr('开始', 'Started') }}</span><span>{{ tr('耗时', 'Duration') }}</span></div><div v-for="turn in admin.monitor?.activity.recent_turns" :key="String(turn.turn_id)" class="table-row"><span>{{ turn.status }}</span><span>{{ turn.channel }}</span><span>{{ fmt(turn.started_at) }}</span><span>{{ turn.duration_ms ? `${turn.duration_ms} ms` : '—' }}</span></div></div>
+        </template>
+        <section v-if="auth.can('diagnostics.system.use')" class="diagnostics-panel">
+          <h2>{{ tr('系统事故与时间线', 'System incidents and timeline') }}</h2>
+          <form class="diagnostic-filters" @submit.prevent="admin.loadDiagnostics(diagnosticFilters)"><input v-model="diagnosticFilters.actor_user_id" :placeholder="tr('用户 ID', 'User ID')" /><input v-model="diagnosticFilters.session_id" :placeholder="tr('Session ID', 'Session ID')" /><input v-model="diagnosticFilters.component" :placeholder="tr('组件', 'Component')" /><input v-model="diagnosticFilters.error_code" :placeholder="tr('错误码', 'Error code')" /><select v-model="diagnosticFilters.status"><option value="">{{ tr('全部状态', 'All statuses') }}</option><option value="error">error</option><option value="stopped">stopped</option><option value="completed">completed</option></select><button class="primary-button">{{ tr('诊断', 'Diagnose') }}</button></form>
+          <div class="monitor-grid"><article v-for="(value, key) in admin.diagnostics?.summary" :key="key"><span>{{ key }}</span><strong>{{ value }}</strong><small>{{ tr('当前查询窗口', 'Current query window') }}</small></article></div>
+          <div class="incident-list"><details v-for="incident in admin.diagnostics?.incidents" :key="String(incident.incident_id)"><summary><span><strong>{{ incident.code }}</strong><small>{{ incident.component }} · {{ incident.subject || tr('无特定对象', 'No subject') }}</small></span><span>{{ incident.count }} ×</span><span>{{ fmt(incident.last_seen_at) }}</span></summary><code>{{ incident.incident_id }}</code><p>{{ incident.rule }}</p></details><p v-if="!admin.diagnostics?.incidents.length" class="empty-note">{{ tr('当前筛选范围没有确定性事故记录。', 'No deterministic incidents in the selected window.') }}</p></div>
+          <h3>{{ tr('跨组件时间线', 'Cross-component timeline') }}</h3><div class="data-table diagnostic-timeline"><div class="table-head"><span>{{ tr('时间', 'Time') }}</span><span>{{ tr('组件', 'Component') }}</span><span>{{ tr('事件', 'Event') }}</span><span>{{ tr('代码', 'Code') }}</span></div><div v-for="event in admin.diagnostics?.timeline" :key="String(event.evidence_id)" class="table-row"><span>{{ fmt(event.ts) }}</span><span>{{ event.component || event.kind }}</span><span>{{ event.event || event.tool_name || event.status }}</span><span><code>{{ event.code || '—' }}</code></span></div></div>
+        </section>
       </section>
 
       <section v-else class="audit-section">

@@ -27,6 +27,13 @@ class LLMEndpoint:
     supported_models: tuple[str, ...] = ()
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
+    request_timeout_seconds: float = 60.0
+    max_attempts: int = 2
+    total_deadline_seconds: float = 120.0
+    retry_backoff_seconds: float = 0.5
+    retry_backoff_max_seconds: float = 8.0
+    retry_jitter_ratio: float = 0.1
+    cooldown_seconds: float = 30.0
 
 
 def effective_input_token_limit(endpoint: LLMEndpoint) -> int:
@@ -68,7 +75,37 @@ class LLMStreamChunk:
 
 
 class LLMProviderError(RuntimeError):
-    """Base error raised by LLM providers."""
+    """Structured, provider-neutral error raised by LLM providers.
+
+    ``message`` remains the first positional argument so older adapters and
+    test doubles can keep raising ``LLMProviderError("...")``.  The extra
+    fields are deliberately safe and bounded; raw response bodies, request
+    messages, credentials, and tool arguments must never be attached here.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "PROVIDER_ERROR",
+        http_status: int | None = None,
+        retryable: bool = False,
+        safe_message: str | None = None,
+        endpoint: str = "",
+        model: str = "",
+        attempts: list[dict[str, Any]] | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        safe = (safe_message or message or "LLM provider request failed.")[:500]
+        super().__init__(safe)
+        self.code = code
+        self.http_status = http_status
+        self.retryable = retryable
+        self.safe_message = safe
+        self.endpoint = endpoint
+        self.model = model
+        self.attempts = list(attempts or [])
+        self.retry_after_seconds = retry_after_seconds
 
 
 class LLMConfigurationError(LLMProviderError):

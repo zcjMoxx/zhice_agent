@@ -23,10 +23,6 @@ class DotenvConfigurationError(RuntimeError):
     """Raised when a dotenv file exists but cannot be read."""
 
 
-class MissingWorkspaceError(RuntimeError):
-    """Raised when no runtime workspace was provided."""
-
-
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _ENDPOINT_ROUTE_KEYS = {
     "protocol",
@@ -122,13 +118,7 @@ class AppConfig:
 def load_config(workspace: str | Path | None = None) -> AppConfig:
     """Load configuration from explicit input, environment variables, and defaults."""
 
-    workspace_value = workspace or os.getenv("ZHICE_AGENT_WORKSPACE")
-    if not workspace_value:
-        raise MissingWorkspaceError(
-            "ZHICE_AGENT_WORKSPACE is not set. Create config/.env under the project config directory "
-            "with ZHICE_AGENT_WORKSPACE=<runtime-workspace>, or set the environment variable "
-            "before running zcagent."
-        )
+    workspace_value = workspace or os.getenv("ZHICE_AGENT_WORKSPACE") or _default_runtime_workspace()
     workspace_path = _resolve_path(workspace_value)
     config_dir = _resolve_path(os.getenv("ZHICE_AGENT_CONFIG_DIR"), workspace_path / "config")
     prompts_dir = _resolve_path(os.getenv("ZHICE_AGENT_PROMPTS_DIR"), workspace_path / "prompts")
@@ -149,10 +139,16 @@ def load_config(workspace: str | Path | None = None) -> AppConfig:
     )
 
 
-def _default_workspace() -> Path:
-    """Return the project root inferred from this module location."""
+def _project_root() -> Path:
+    """Return the installed/source project root containing bundled templates."""
 
     return Path(__file__).resolve().parents[1]
+
+
+def _default_runtime_workspace() -> Path:
+    """Return the shared local/Linux/Docker default runtime workspace."""
+
+    return Path.home() / ".zhice"
 
 
 def _resolve_path(value: str | Path | None, default: Path | None = None) -> Path:
@@ -254,7 +250,7 @@ def _load_llm_endpoint_config(config_dir: Path) -> dict[str, object]:
 def init_runtime_files(
     config: AppConfig,
     *,
-    create_env: bool = False,
+    create_env: bool = True,
     create_llm_config: bool = True,
     create_skill_sources_config: bool = True,
     create_channels_config: bool = True,
@@ -281,16 +277,16 @@ def init_runtime_files(
     """
 
     written: list[Path] = []
+    del create_env  # Retained only for source compatibility; env initialization is standard.
     config.ensure_dirs()
     _validate_init_token_budget(
         context_window=context_window,
         max_tokens=max_tokens,
     )
 
-    if create_env:
-        env_path = config.workspace / ".env"
-        if _write_text_once(env_path, _build_env_template(config), force=force):
-            written.append(env_path)
+    env_path = config.config_dir / ".env"
+    if _write_text_once(env_path, _build_env_template(), force=force):
+        written.append(env_path)
     if create_llm_config or create_embedding_config:
         llm_path = config.config_dir / "models.json"
         endpoint_payload = {
@@ -347,14 +343,14 @@ def init_runtime_files(
             create_context_config,
         )
     ):
-        source = _default_workspace() / "config" / "config.example.yml"
+        source = _project_root() / "config" / "config.example.yml"
         if not source.is_file():
             raise InitConfigurationError(f"Unified config template is missing: {source}")
         target = config.config_dir / "config.yml"
         if _write_text_once(target, source.read_text(encoding="utf-8"), force=force):
             written.append(target)
     if create_prompts:
-        source_prompts = _default_workspace() / "prompts"
+        source_prompts = _project_root() / "prompts"
         if not source_prompts.is_dir():
             raise InitConfigurationError(f"Source prompts directory is missing: {source_prompts}")
         for source in sorted(source_prompts.glob("*.md")):
@@ -364,33 +360,49 @@ def init_runtime_files(
     return written
 
 
-def load_dotenv_file(path: Path) -> None:
-    """Load KEY=VALUE pairs from a dotenv file without overriding process env."""
+def load_dotenv_file(path: Path, *, excluded_keys: set[str] | None = None) -> None:
+    """Load KEY=VALUE pairs without overriding process env or excluded bootstrap keys."""
 
+    excluded = excluded_keys or set()
     for line in _read_dotenv_text(path).splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
         key = key.strip()
-        if key and key not in os.environ:
+        if key and key not in excluded and key not in os.environ:
             os.environ[key] = _strip_dotenv_quotes(value.strip())
 
 
 def bootstrap_dotenv(
     env_file: str | Path | None = None,
     *,
+    workspace: str | Path | None = None,
     project_root: Path | None = None,
 ) -> Path | None:
-    """Load an explicit env file or project config/.env, preserving existing env values."""
+    """Load explicit or workspace runtime env before the remaining config files."""
 
-    root = project_root or _default_workspace()
-    candidates = [Path(env_file).expanduser()] if env_file else [root / "config" / ".env"]
-    for candidate in candidates:
-        resolved = candidate.resolve()
+    if env_file is not None:
+        resolved = Path(env_file).expanduser().resolve()
         if resolved.exists():
             load_dotenv_file(resolved)
             return resolved
+        return None
+
+    workspace_root = _resolve_path(
+        workspace or os.getenv("ZHICE_AGENT_WORKSPACE") or _default_runtime_workspace()
+    )
+    runtime_env = workspace_root / "config" / ".env"
+    if runtime_env.exists():
+        load_dotenv_file(runtime_env, excluded_keys={"ZHICE_AGENT_WORKSPACE"})
+        return runtime_env
+
+    # Migration-only fallback for existing source checkouts. New installations
+    # and initialized workspaces no longer depend on a project-local real env.
+    legacy_env = (project_root or _project_root()) / "config" / ".env"
+    if legacy_env.exists():
+        load_dotenv_file(legacy_env)
+        return legacy_env.resolve()
     return None
 
 
@@ -428,10 +440,18 @@ def _write_text_once(path: Path, content: str, *, force: bool) -> bool:
     return True
 
 
-def _build_env_template(config: AppConfig) -> str:
-    """Build the minimal local .env template."""
+def _build_env_template() -> str:
+    """Read the repository's single public runtime env template as UTF-8."""
 
-    return f"ZHICE_AGENT_WORKSPACE={config.workspace}\n"
+    source = _project_root() / "config" / ".env.example"
+    if not source.is_file():
+        raise InitConfigurationError(f"Runtime env template is missing: {source}")
+    try:
+        return source.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise InitConfigurationError(
+            f"Runtime env template is not valid UTF-8: {source}"
+        ) from exc
 
 
 def _validate_init_token_budget(
@@ -505,6 +525,40 @@ def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
         raise LLMConfigurationError(
             "LLM endpoint max_tokens must be less than context_window"
         )
+    request_timeout_seconds = _positive_float(
+        data.get("request_timeout_seconds"), 60.0, "request_timeout_seconds"
+    )
+    max_attempts = _coerce_int(data.get("max_attempts"), 2, "max_attempts")
+    if max_attempts < 1:
+        raise LLMConfigurationError("LLM endpoint field must be >= 1: max_attempts")
+    if max_attempts > 5:
+        raise LLMConfigurationError("LLM endpoint field must be <= 5: max_attempts")
+    total_deadline_seconds = _positive_float(
+        data.get("total_deadline_seconds"), 120.0, "total_deadline_seconds"
+    )
+    retry_backoff_seconds = _positive_float(
+        data.get("retry_backoff_seconds"), 0.5, "retry_backoff_seconds", allow_zero=True
+    )
+    retry_backoff_max_seconds = _positive_float(
+        data.get("retry_backoff_max_seconds"),
+        8.0,
+        "retry_backoff_max_seconds",
+        allow_zero=True,
+    )
+    if retry_backoff_max_seconds < retry_backoff_seconds:
+        raise LLMConfigurationError(
+            "LLM endpoint retry_backoff_max_seconds must be >= retry_backoff_seconds"
+        )
+    retry_jitter_ratio = _coerce_float(
+        data.get("retry_jitter_ratio"), 0.1, "retry_jitter_ratio"
+    )
+    if not 0 <= retry_jitter_ratio <= 1:
+        raise LLMConfigurationError(
+            "LLM endpoint retry_jitter_ratio must be between 0 and 1"
+        )
+    cooldown_seconds = _positive_float(
+        data.get("cooldown_seconds"), 30.0, "cooldown_seconds", allow_zero=True
+    )
 
     return LLMEndpoint(
         name=str(endpoint["name"]),
@@ -522,7 +576,29 @@ def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
         supported_models=supported_models,
         input_price_per_million=_price(data, "input_per_million"),
         output_price_per_million=_price(data, "output_per_million"),
+        request_timeout_seconds=request_timeout_seconds,
+        max_attempts=max_attempts,
+        total_deadline_seconds=total_deadline_seconds,
+        retry_backoff_seconds=retry_backoff_seconds,
+        retry_backoff_max_seconds=retry_backoff_max_seconds,
+        retry_jitter_ratio=retry_jitter_ratio,
+        cooldown_seconds=cooldown_seconds,
     )
+
+
+def _positive_float(
+    value: object,
+    default: float,
+    field: str,
+    *,
+    allow_zero: bool = False,
+) -> float:
+    result = _coerce_float(value, default, field)
+    minimum_ok = result >= 0 if allow_zero else result > 0
+    if not minimum_ok:
+        comparator = ">= 0" if allow_zero else "> 0"
+        raise LLMConfigurationError(f"LLM endpoint field must be {comparator}: {field}")
+    return result
 
 
 def _price(data: dict[str, object], field: str) -> float:

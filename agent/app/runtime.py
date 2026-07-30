@@ -13,7 +13,7 @@ from agent.app.auth import AuthService, local_operator_actor
 from agent.auth.activity import SqliteRuntimeActivitySink
 from agent.auth.audit import SqliteAuditSink
 from agent.auth.confirmation import SQLiteToolConfirmationBroker
-from agent.auth.diagnostics import RecentActivityDiagnostics
+from agent.auth.diagnostics import RecentActivityDiagnostics, SystemDiagnosticsService
 from agent.auth.session_access import SessionAccessError, SessionAccessService
 from agent.auth.store import SQLiteAuthStore
 from agent.auth.tool_policy import RbacToolExecutionPolicy
@@ -139,6 +139,7 @@ class WebRuntime:
     activity_sink: SqliteRuntimeActivitySink | None = None
     audit_sink: SqliteAuditSink | None = None
     diagnostics: RecentActivityDiagnostics | None = None
+    system_diagnostics: SystemDiagnosticsService | None = None
     skill_loader: SkillLoader | None = None
     skill_sync: SkillSourceSync | None = None
     prompt_loader: PromptLoader | None = None
@@ -158,6 +159,29 @@ class WebRuntime:
     def __post_init__(self) -> None:
         self._active_turns: dict[tuple[str, str], ActiveTurn] = {}
         self._turns_lock = Lock()
+        self._accepting_turns = True
+        self._shutdown_complete = False
+
+    def startup(self) -> int:
+        """Recover process-local runtime facts before accepting Gateway traffic."""
+
+        recovered = 0
+        store = getattr(self.auth, "store", None)
+        recover = getattr(store, "recover_interrupted_turn_runs", None)
+        if callable(recover):
+            recovered = int(recover())
+        with self._turns_lock:
+            self._accepting_turns = True
+            self._shutdown_complete = False
+        if recovered:
+            log_event(
+                web_logger,
+                logging.WARNING,
+                "gateway.turns_recovered",
+                count=recovered,
+                reason_code="GATEWAY_RESTART_INTERRUPTED",
+            )
+        return recovered
 
     def capability_statuses(self) -> dict[str, CapabilityStatus]:
         """Return transport-neutral optional capability state for health/UI."""
@@ -261,6 +285,9 @@ class WebRuntime:
         """Run one command-aware turn and emit text_delta events as they arrive."""
 
         actor, session_id, message = _normalize_actor_session_message(actor, session_id, message)
+        with self._turns_lock:
+            if not self._accepting_turns:
+                raise RuntimeError("gateway is shutting down and is not accepting new turns")
         resolved_channel = channel_context.channel if channel_context is not None else (
             "external_ws" if command_profile == EXTERNAL_COMMAND_PROFILE else "web"
         )
@@ -363,6 +390,7 @@ class WebRuntime:
                 skills=self.skill_loader,
                 skill_sync=self.skill_sync,
                 diagnostics=self.diagnostics,
+                system_diagnostics=self.system_diagnostics,
                 diagnostic_context=DiagnosticContext(
                     session_id=session_id,
                     current_turn_id=turn_id,
@@ -375,6 +403,7 @@ class WebRuntime:
                     self.mcp_runtime.tools_for_actor(
                         actor,
                         workspace,
+                        session_id=session_id,
                         interaction_notifier=lambda request: _emit_runtime_event(
                             on_event,
                             {"type": "mcp_elicitation_requested", **asdict(request)},
@@ -413,6 +442,7 @@ class WebRuntime:
                     skills=child_skills,
                     skill_sync=self.skill_sync,
                     diagnostics=self.diagnostics,
+                    system_diagnostics=self.system_diagnostics,
                     diagnostic_context=DiagnosticContext(
                         session_id=session_id,
                         current_turn_id=turn_id,
@@ -425,6 +455,7 @@ class WebRuntime:
                         self.mcp_runtime.tools_for_actor(
                             actor,
                             child_workspace,
+                            session_id=session_id,
                             interaction_notifier=lambda request: _emit_runtime_event(
                                 child_on_event,
                                 {
@@ -841,6 +872,11 @@ class WebRuntime:
         if active is None:
             return {"session_id": session_id, "cancelled": 0}
         active.token.cancel()
+        if self.mcp_runtime is not None:
+            self.mcp_runtime.cancel_active_calls(
+                user_id=actor.user_id,
+                session_id=session_id,
+            )
         log_event(
             web_logger,
             logging.INFO,
@@ -1110,6 +1146,8 @@ class WebRuntime:
         """Register the active turn, cancelling any older turn for the session."""
 
         with self._turns_lock:
+            if not self._accepting_turns:
+                raise RuntimeError("gateway is shutting down and is not accepting new turns")
             old_turn = self._active_turns.get(key)
             if old_turn is not None:
                 old_turn.token.cancel()
@@ -1126,6 +1164,17 @@ class WebRuntime:
     def shutdown(self) -> None:
         """Cancel pending background work before the Gateway exits."""
 
+        with self._turns_lock:
+            if self._shutdown_complete:
+                return
+            self._accepting_turns = False
+            active_turns = tuple(self._active_turns.values())
+            self._active_turns.clear()
+            self._shutdown_complete = True
+        for active in active_turns:
+            active.token.cancel()
+        if self.mcp_runtime is not None:
+            self.mcp_runtime.cancel_active_calls()
         if self.channel_manager is not None:
             self.channel_manager.stop()
         if self.memory_scheduler is not None:
@@ -1299,6 +1348,7 @@ def build_web_runtime(
     model_preferences = JsonSessionModelPreferenceStore()
     confirmation_broker = SQLiteToolConfirmationBroker(auth_store)
     diagnostics = RecentActivityDiagnostics(auth_store, config.logs_dir)
+    system_diagnostics = SystemDiagnosticsService(auth_store, config.logs_dir)
     tool_policy = RbacToolExecutionPolicy()
     mcp_runtime = McpRuntime(
         mcp_startup.specs,
@@ -1347,6 +1397,7 @@ def build_web_runtime(
         activity_sink=activity_sink,
         audit_sink=audit_sink,
         diagnostics=diagnostics,
+        system_diagnostics=system_diagnostics,
         skill_loader=skill_loader,
         skill_sync=skill_sync,
         prompt_loader=prompt_loader,

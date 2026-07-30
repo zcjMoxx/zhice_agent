@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import fnmatch
+import random
+import time
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from agent.protocols.llm import (
@@ -18,6 +21,9 @@ from agent.protocols.llm import (
 )
 
 ProviderFactory = Callable[[LLMEndpoint], LLMProvider]
+Clock = Callable[[], float]
+Sleeper = Callable[[float], None]
+RandomSource = Callable[[], float]
 
 
 class EndpointFailoverProvider:
@@ -34,6 +40,10 @@ class EndpointFailoverProvider:
         *,
         preferred_endpoint: str | None = None,
         provider_factory: ProviderFactory | None = None,
+        clock: Clock = time.monotonic,
+        sleep: Sleeper = time.sleep,
+        random_source: RandomSource = random.random,
+        total_deadline_seconds: float | None = None,
     ):
         """Keep only enabled endpoints and prepare name/order lookup tables."""
 
@@ -46,6 +56,16 @@ class EndpointFailoverProvider:
             raise LLMConfigurationError("LLM endpoint names must be unique.")
 
         self._provider_factory = provider_factory or _create_endpoint_provider
+        self._clock = clock
+        self._sleep = sleep
+        self._random_source = random_source
+        configured_deadline = min(endpoint.total_deadline_seconds for endpoint in self._endpoints)
+        self._total_deadline_seconds = (
+            configured_deadline if total_deadline_seconds is None else total_deadline_seconds
+        )
+        if self._total_deadline_seconds <= 0:
+            raise LLMConfigurationError("LLM total deadline must be greater than zero.")
+        self._cooldowns: dict[str, float] = {}
         self._preferred_endpoint = ""
         self._preferred_model = ""
         if preferred_endpoint:
@@ -135,33 +155,126 @@ class EndpointFailoverProvider:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
-        """Try endpoints in order until one provider returns a response."""
+        """Retry transient failures, then fail over within one total deadline."""
 
-        attempts: list[tuple[LLMEndpoint, Exception]] = []
+        evidence: list[dict[str, Any]] = []
+        failures: list[tuple[LLMEndpoint, LLMProviderError]] = []
         attempted_names: list[str] = []
+        call_started = self._clock()
+        deadline = call_started + self._total_deadline_seconds
 
         for endpoint in self._ordered_endpoints():
-            attempted_names.append(endpoint.name)
-            try:
-                response = self._provider_factory(endpoint).chat(messages=messages, tools=tools)
-            except Exception as exc:  # noqa: BLE001 - failover should try the next endpoint.
-                attempts.append((endpoint, exc))
+            now = self._clock()
+            cooldown_until = self._cooldowns.get(endpoint.name, 0.0)
+            if cooldown_until > now:
+                evidence.append(
+                    _skip_evidence(
+                        endpoint,
+                        reason="cooldown",
+                        cooldown_remaining=cooldown_until - now,
+                    )
+                )
                 continue
+            self._cooldowns.pop(endpoint.name, None)
 
-            metadata = dict(response.metadata)
-            metadata["endpoint_name"] = endpoint.name
-            metadata["model"] = endpoint.model
-            metadata["attempted_endpoints"] = attempted_names
-            metadata["input_token_limit"] = self.context_budget.input_token_limit
-            metadata["input_price_per_million"] = endpoint.input_price_per_million
-            metadata["output_price_per_million"] = endpoint.output_price_per_million
-            return LLMResponse(
-                content=response.content,
-                tool_calls=list(response.tool_calls),
-                metadata=metadata,
-            )
+            if now >= deadline:
+                evidence.append(_skip_evidence(endpoint, reason="total_deadline_exceeded"))
+                break
 
-        raise LLMProviderError(_format_failover_error(attempts))
+            attempted_names.append(endpoint.name)
+            for attempt_index in range(1, endpoint.max_attempts + 1):
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    evidence.append(_skip_evidence(endpoint, reason="total_deadline_exceeded"))
+                    break
+                request_endpoint = replace(
+                    endpoint,
+                    request_timeout_seconds=min(endpoint.request_timeout_seconds, remaining),
+                )
+                attempt_started = self._clock()
+                started_at = _utc_now()
+                try:
+                    response = self._provider_factory(request_endpoint).chat(
+                        messages=messages,
+                        tools=tools,
+                    )
+                except Exception as exc:  # noqa: BLE001 - provider boundary normalization.
+                    error = _normalize_provider_error(exc, endpoint)
+                    failures.append((endpoint, error))
+                    attempt = _failure_evidence(
+                        endpoint,
+                        attempt_index=attempt_index,
+                        started_at=started_at,
+                        duration_ms=(self._clock() - attempt_started) * 1000,
+                        error=error,
+                    )
+                    evidence.append(attempt)
+
+                    invalid_response_retry_available = (
+                        error.code != "INVALID_RESPONSE" or attempt_index < 2
+                    )
+                    can_retry = (
+                        error.retryable
+                        and attempt_index < endpoint.max_attempts
+                        and invalid_response_retry_available
+                    )
+                    if can_retry:
+                        backoff = _retry_delay(
+                            endpoint,
+                            attempt_index,
+                            error.retry_after_seconds,
+                            self._random_source(),
+                        )
+                        remaining = deadline - self._clock()
+                        if backoff >= remaining:
+                            attempt["skip_reason"] = "total_deadline_exceeded"
+                            break
+                        attempt["backoff_ms"] = round(backoff * 1000, 3)
+                        self._sleep(backoff)
+                        continue
+
+                    if error.retryable and endpoint.cooldown_seconds > 0:
+                        cooldown_deadline = self._clock() + endpoint.cooldown_seconds
+                        self._cooldowns[endpoint.name] = cooldown_deadline
+                        attempt["cooldown_until"] = (
+                            datetime.now(timezone.utc)
+                            + timedelta(seconds=endpoint.cooldown_seconds)
+                        ).isoformat()
+                    break
+                else:
+                    evidence.append(
+                        _success_evidence(
+                            endpoint,
+                            attempt_index=attempt_index,
+                            started_at=started_at,
+                            duration_ms=(self._clock() - attempt_started) * 1000,
+                        )
+                    )
+
+                    metadata = dict(response.metadata)
+                    metadata["endpoint_name"] = endpoint.name
+                    metadata["model"] = endpoint.model
+                    metadata["attempted_endpoints"] = attempted_names
+                    metadata["provider_attempts"] = evidence
+                    metadata["input_token_limit"] = self.context_budget.input_token_limit
+                    metadata["input_price_per_million"] = endpoint.input_price_per_million
+                    metadata["output_price_per_million"] = endpoint.output_price_per_million
+                    return LLMResponse(
+                        content=response.content,
+                        tool_calls=list(response.tool_calls),
+                        metadata=metadata,
+                    )
+
+        last_error = failures[-1][1] if failures else None
+        raise LLMProviderError(
+            _format_failover_error(failures, evidence),
+            code=last_error.code if last_error else "PROVIDER_UNAVAILABLE",
+            http_status=last_error.http_status if last_error else None,
+            retryable=any(error.retryable for _, error in failures),
+            endpoint=last_error.endpoint if last_error else "",
+            model=last_error.model if last_error else "",
+            attempts=evidence,
+        )
 
     def _ordered_endpoints(self) -> list[LLMEndpoint]:
         """Return call order: preferred first, then enabled endpoints by priority."""
@@ -225,17 +338,26 @@ def _format_supported_models(endpoint: LLMEndpoint) -> str:
     return ", ".join(supported)
 
 
-def _format_failover_error(attempts: list[tuple[LLMEndpoint, Exception]]) -> str:
+def _format_failover_error(
+    failures: list[tuple[LLMEndpoint, LLMProviderError]],
+    evidence: list[dict[str, Any]],
+) -> str:
     """Build one safe error message after every endpoint attempt fails."""
 
-    if not attempts:
+    if not failures:
+        if evidence:
+            return "LLM provider request failed: all endpoints were skipped."
         return "LLM provider request failed: no endpoints were attempted."
 
     lines = ["All enabled LLM endpoints failed."]
-    for endpoint, exc in attempts:
+    seen: set[str] = set()
+    for endpoint, exc in failures:
+        if endpoint.name in seen:
+            continue
+        seen.add(endpoint.name)
         lines.append(
-            f"- {endpoint.name} ({endpoint.model}): "
-            f"{type(exc).__name__}: {_safe_error_message(str(exc), endpoint)}"
+            f"- {endpoint.name} ({endpoint.model}): {exc.code}: "
+            f"{_safe_error_message(exc.safe_message, endpoint)}"
         )
     return "\n".join(lines)
 
@@ -247,3 +369,112 @@ def _safe_error_message(message: str, endpoint: LLMEndpoint) -> str:
     if endpoint.api_key:
         safe = safe.replace(endpoint.api_key, "[redacted]")
     return safe[:300]
+
+
+def _normalize_provider_error(exc: Exception, endpoint: LLMEndpoint) -> LLMProviderError:
+    """Attach endpoint identity and redact legacy/unstructured provider failures."""
+
+    if isinstance(exc, LLMProviderError):
+        return LLMProviderError(
+            _safe_error_message(exc.safe_message, endpoint),
+            code=exc.code,
+            http_status=exc.http_status,
+            retryable=exc.retryable,
+            endpoint=exc.endpoint or endpoint.name,
+            model=exc.model or endpoint.model,
+            attempts=exc.attempts,
+            retry_after_seconds=exc.retry_after_seconds,
+        )
+    return LLMProviderError(
+        "LLM provider request failed.",
+        endpoint=endpoint.name,
+        model=endpoint.model,
+    )
+
+
+def _retry_delay(
+    endpoint: LLMEndpoint,
+    attempt_index: int,
+    retry_after_seconds: float | None,
+    random_value: float,
+) -> float:
+    """Return Retry-After or bounded exponential backoff with light jitter."""
+
+    if retry_after_seconds is not None:
+        return max(0.0, retry_after_seconds)
+    base = min(
+        endpoint.retry_backoff_seconds * (2 ** (attempt_index - 1)),
+        endpoint.retry_backoff_max_seconds,
+    )
+    jitter = base * endpoint.retry_jitter_ratio * ((2 * min(max(random_value, 0.0), 1.0)) - 1)
+    return max(0.0, base + jitter)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _base_evidence(endpoint: LLMEndpoint, *, attempt_index: int, result: str) -> dict[str, Any]:
+    return {
+        "endpoint_name": endpoint.name,
+        "model": endpoint.model,
+        "attempt_index": attempt_index,
+        "started_at": None,
+        "duration_ms": 0.0,
+        "result": result,
+        "error_code": None,
+        "http_status": None,
+        "retryable": False,
+        "backoff_ms": 0.0,
+        "skip_reason": None,
+        "cooldown_until": None,
+    }
+
+
+def _success_evidence(
+    endpoint: LLMEndpoint,
+    *,
+    attempt_index: int,
+    started_at: str,
+    duration_ms: float,
+) -> dict[str, Any]:
+    item = _base_evidence(endpoint, attempt_index=attempt_index, result="success")
+    item["started_at"] = started_at
+    item["duration_ms"] = round(max(duration_ms, 0.0), 3)
+    return item
+
+
+def _failure_evidence(
+    endpoint: LLMEndpoint,
+    *,
+    attempt_index: int,
+    started_at: str,
+    duration_ms: float,
+    error: LLMProviderError,
+) -> dict[str, Any]:
+    item = _base_evidence(endpoint, attempt_index=attempt_index, result="error")
+    item.update(
+        {
+            "started_at": started_at,
+            "duration_ms": round(max(duration_ms, 0.0), 3),
+            "error_code": error.code,
+            "http_status": error.http_status,
+            "retryable": error.retryable,
+        }
+    )
+    return item
+
+
+def _skip_evidence(
+    endpoint: LLMEndpoint,
+    *,
+    reason: str,
+    cooldown_remaining: float | None = None,
+) -> dict[str, Any]:
+    item = _base_evidence(endpoint, attempt_index=0, result="skipped")
+    item["skip_reason"] = reason
+    if cooldown_remaining is not None:
+        item["cooldown_until"] = (
+            datetime.now(timezone.utc) + timedelta(seconds=cooldown_remaining)
+        ).isoformat()
+    return item

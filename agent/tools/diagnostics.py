@@ -92,3 +92,51 @@ class DiagnoseRecentActivityTool(BaseTool):
                 "cause_code": str(payload.get("cause_code") or ""),
             },
         )
+
+
+class DiagnoseSystemActivityTool(BaseTool):
+    """Privileged cross-user diagnostics backed by deterministic runtime evidence."""
+
+    name = "diagnose_system_activity"
+    description = (
+        "Inspect bounded cross-user runtime incidents and timelines. Requires the explicit "
+        "diagnostics.system.use permission and returns only allowlisted redacted evidence."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "minutes": {"type": "integer", "minimum": 1, "maximum": 10080},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+            **{
+                key: {"type": "string", "maxLength": 256}
+                for key in (
+                    "actor_user_id", "session_id", "turn_id", "request_id", "channel",
+                    "component", "endpoint", "model", "tool_name", "mcp_server", "status",
+                    "error_code", "incident_id",
+                )
+            },
+        },
+        "additionalProperties": False,
+    }
+
+    def __init__(self, workspace, *, actor: ActorContext, diagnostics):
+        super().__init__(workspace)
+        self.actor = actor
+        self.diagnostics = diagnostics
+
+    def _execute(self, args: dict[str, Any]) -> ToolResult:
+        if not self.actor.has_permission("diagnostics.system.use"):
+            return ToolResult(
+                output="System diagnostics permission is required.",
+                is_error=True,
+                metadata={"code": "AUTH_PERMISSION_DENIED"},
+            )
+        payload = self.diagnostics.diagnose(args)
+        return ToolResult(
+            output=json.dumps(payload, ensure_ascii=False, indent=2),
+            metadata={
+                "diagnostic": True,
+                "system": True,
+                "incident_count": int(payload.get("summary", {}).get("incidents", 0)),
+            },
+        )

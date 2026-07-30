@@ -209,6 +209,176 @@ def test_failover_provider_uses_smallest_enabled_endpoint_input_budget():
     assert response.metadata["input_token_limit"] == 14336
 
 
+def test_failover_provider_retries_retryable_error_and_records_attempts():
+    """Transient failures should retry the same endpoint with bounded evidence."""
+
+    calls: list[str] = []
+    clock = _FakeClock()
+    provider = EndpointFailoverProvider(
+        [_endpoint("primary", "model", max_attempts=2, retry_backoff_seconds=0.5)],
+        provider_factory=_sequenced_factory(
+            calls,
+            [
+                LLMProviderError("temporary", code="NETWORK_ERROR", retryable=True),
+                LLMResponse(content="ok"),
+            ],
+        ),
+        clock=clock,
+        sleep=clock.sleep,
+        random_source=lambda: 0.5,
+    )
+
+    response = provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert calls == ["primary", "primary"]
+    assert clock.now == 0.5
+    assert [item["result"] for item in response.metadata["provider_attempts"]] == [
+        "error",
+        "success",
+    ]
+    assert response.metadata["provider_attempts"][0]["error_code"] == "NETWORK_ERROR"
+    assert response.metadata["provider_attempts"][0]["backoff_ms"] == 500
+
+
+def test_failover_provider_does_not_retry_non_retryable_error():
+    """Authentication failures should fail over immediately instead of retrying in place."""
+
+    calls: list[str] = []
+    provider = EndpointFailoverProvider(
+        [
+            _endpoint("primary", "model-a", max_attempts=3),
+            _endpoint("backup", "model-b"),
+        ],
+        provider_factory=_per_endpoint_factory(
+            calls,
+            errors={
+                "primary": LLMProviderError(
+                    "auth failed", code="AUTH_FAILED", http_status=401, retryable=False
+                )
+            },
+            success={"backup": "ok"},
+        ),
+    )
+
+    response = provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert response.content == "ok"
+    assert calls == ["primary", "backup"]
+    assert response.metadata["provider_attempts"][0]["http_status"] == 401
+
+
+def test_failover_provider_honors_retry_after():
+    """A valid Retry-After value should take precedence over exponential backoff."""
+
+    clock = _FakeClock()
+    provider = EndpointFailoverProvider(
+        [_endpoint("primary", "model", max_attempts=2)],
+        provider_factory=_sequenced_factory(
+            [],
+            [
+                LLMProviderError(
+                    "limited",
+                    code="RATE_LIMITED",
+                    retryable=True,
+                    retry_after_seconds=3,
+                ),
+                LLMResponse(content="ok"),
+            ],
+        ),
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    response = provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert clock.now == 3
+    assert response.metadata["provider_attempts"][0]["backoff_ms"] == 3000
+
+
+def test_failover_provider_retries_invalid_response_at_most_once():
+    """Malformed responses should not consume an arbitrarily high configured attempt count."""
+
+    calls: list[str] = []
+    clock = _FakeClock()
+    provider = EndpointFailoverProvider(
+        [_endpoint("primary", "model", max_attempts=5)],
+        provider_factory=_sequenced_factory(
+            calls,
+            [
+                LLMProviderError("invalid", code="INVALID_RESPONSE", retryable=True),
+                LLMProviderError("invalid", code="INVALID_RESPONSE", retryable=True),
+                LLMResponse(content="should-not-run"),
+            ],
+        ),
+        clock=clock,
+        sleep=clock.sleep,
+        random_source=lambda: 0.5,
+    )
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert calls == ["primary", "primary"]
+    assert len(exc_info.value.attempts) == 2
+
+
+def test_failover_provider_total_deadline_stops_new_endpoint_attempts():
+    """No new endpoint request should start after the shared deadline expires."""
+
+    calls: list[str] = []
+    clock = _FakeClock()
+
+    def factory(endpoint):
+        return _ClockAdvancingFailure(endpoint, calls, clock)
+
+    provider = EndpointFailoverProvider(
+        [
+            _endpoint("primary", "model-a", max_attempts=1),
+            _endpoint("backup", "model-b", max_attempts=1),
+        ],
+        provider_factory=factory,
+        clock=clock,
+        sleep=clock.sleep,
+        total_deadline_seconds=1,
+    )
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert calls == ["primary"]
+    assert exc_info.value.attempts[-1]["skip_reason"] == "total_deadline_exceeded"
+
+
+def test_failover_provider_skips_endpoint_during_cooldown():
+    """An exhausted transient endpoint should be skipped until its cooldown ends."""
+
+    calls: list[str] = []
+    clock = _FakeClock()
+    provider = EndpointFailoverProvider(
+        [
+            _endpoint("primary", "model-a", max_attempts=1, cooldown_seconds=10),
+            _endpoint("backup", "model-b", max_attempts=1),
+        ],
+        provider_factory=_per_endpoint_factory(
+            calls,
+            errors={
+                "primary": LLMProviderError(
+                    "offline", code="NETWORK_ERROR", retryable=True
+                )
+            },
+            success={"backup": "ok"},
+        ),
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    provider.chat(messages=[{"role": "user", "content": "first"}])
+    second = provider.chat(messages=[{"role": "user", "content": "second"}])
+
+    assert calls == ["primary", "backup", "backup"]
+    assert second.metadata["provider_attempts"][0]["skip_reason"] == "cooldown"
+
+
 def _endpoint(
     name: str,
     model: str,
@@ -219,6 +389,9 @@ def _endpoint(
     supported_models: tuple[str, ...] = (),
     context_window: int = 32768,
     max_tokens: int = 4096,
+    max_attempts: int = 2,
+    retry_backoff_seconds: float = 0.5,
+    cooldown_seconds: float = 30.0,
 ) -> LLMEndpoint:
     return LLMEndpoint(
         name=name,
@@ -231,6 +404,9 @@ def _endpoint(
         priority=priority,
         enabled=enabled,
         supported_models=supported_models,
+        max_attempts=max_attempts,
+        retry_backoff_seconds=retry_backoff_seconds,
+        cooldown_seconds=cooldown_seconds,
     )
 
 
@@ -272,3 +448,57 @@ class _RecordingProvider:
         if self.endpoint.name not in self.success:
             raise LLMProviderError(f"{self.endpoint.api_key} failed")
         return LLMResponse(content=self.success[self.endpoint.name])
+
+
+def _sequenced_factory(calls, outcomes):
+    remaining = list(outcomes)
+
+    def create(endpoint):
+        class Provider:
+            def chat(self, messages, tools=None):
+                calls.append(endpoint.name)
+                outcome = remaining.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        return Provider()
+
+    return create
+
+
+def _per_endpoint_factory(calls, *, errors, success):
+    def create(endpoint):
+        class Provider:
+            def chat(self, messages, tools=None):
+                calls.append(endpoint.name)
+                if endpoint.name in errors:
+                    raise errors[endpoint.name]
+                return LLMResponse(content=success[endpoint.name])
+
+        return Provider()
+
+    return create
+
+
+class _FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class _ClockAdvancingFailure:
+    def __init__(self, endpoint, calls, clock):
+        self.endpoint = endpoint
+        self.calls = calls
+        self.clock = clock
+
+    def chat(self, messages, tools=None):
+        self.calls.append(self.endpoint.name)
+        self.clock.now += 2
+        raise LLMProviderError("timeout", code="TIMEOUT", retryable=True)

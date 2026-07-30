@@ -4,12 +4,12 @@ import json
 from datetime import datetime
 
 from agent.auth.activity import SqliteRuntimeActivitySink
-from agent.auth.diagnostics import RecentActivityDiagnostics
+from agent.auth.diagnostics import RecentActivityDiagnostics, SystemDiagnosticsService
 from agent.auth.store import SQLiteAuthStore
 from agent.protocols.activity import RuntimeActivityEvent
 from agent.protocols.auth import ActorContext
 from agent.protocols.diagnostics import DiagnosticContext
-from agent.tools.diagnostics import DiagnoseRecentActivityTool
+from agent.tools.diagnostics import DiagnoseRecentActivityTool, DiagnoseSystemActivityTool
 
 
 def test_diagnostics_tool_hides_subagent_cause_from_ordinary_user(tmp_path):
@@ -222,6 +222,66 @@ def test_diagnostics_never_crosses_actor_or_session_scope(tmp_path):
 
     assert report["status"] == "insufficient_evidence"
     assert "other-turn" not in json.dumps(report)
+
+
+def test_system_diagnostics_aggregates_cross_user_errors_and_redacts_trace(tmp_path):
+    store, actor = _store_and_actor(tmp_path)
+    other = store.create_user("other", "Other", "other-password", role_keys=["viewer"])
+    other_actor = store.actor_for_user(other.id, channel="web")
+    activity = SqliteRuntimeActivitySink(store)
+    _record_delegate_failure(activity, other_actor, "other-failed")
+    _write_trace(
+        tmp_path,
+        [{
+            "event": "llm.error",
+            "actor_user_id": other.id,
+            "session_id": "session-a",
+            "turn_id": "other-failed",
+            "endpoint": "primary",
+            "error_code": "RATE_LIMITED",
+            "error_message": "Authorization: Bearer private-token",
+            "api_key": "must-not-escape",
+        }],
+    )
+
+    report = SystemDiagnosticsService(store, tmp_path / "logs").diagnose(
+        {"actor_user_id": other.id, "minutes": 30}
+    )
+
+    serialized = json.dumps(report)
+    assert report["summary"]["incidents"] >= 1
+    assert any(item["code"] == "RATE_LIMITED" for item in report["incidents"])
+    assert "private-token" not in serialized
+    assert "must-not-escape" not in serialized
+    assert "api_key" not in serialized
+    assert actor.user_id not in serialized
+
+
+def test_system_diagnostics_tool_requires_explicit_permission(tmp_path):
+    _, actor = _store_and_actor(tmp_path)
+    denied = DiagnoseSystemActivityTool(
+        tmp_path,
+        actor=ActorContext(**{**actor.__dict__, "permission_keys": frozenset()}),
+        diagnostics=_SystemDiagnostics(),
+    ).execute({})
+    allowed = DiagnoseSystemActivityTool(
+        tmp_path,
+        actor=ActorContext(
+            **{**actor.__dict__, "permission_keys": frozenset({"diagnostics.system.use"})}
+        ),
+        diagnostics=_SystemDiagnostics(),
+    ).execute({})
+
+    assert denied.is_error is True
+    assert denied.metadata["code"] == "AUTH_PERMISSION_DENIED"
+    assert allowed.is_error is False
+    assert allowed.metadata["system"] is True
+
+
+class _SystemDiagnostics:
+    def diagnose(self, filters):
+        del filters
+        return {"status": "ok", "summary": {"incidents": 0}, "incidents": [], "timeline": []}
 
 
 def test_diagnostics_follows_parent_turn_to_child_terminal_failure(tmp_path):

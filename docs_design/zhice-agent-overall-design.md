@@ -277,11 +277,11 @@ ZhiCe-Agent（CLI + Web + QQ + 微信）：
 能完成无工具聊天和工具调用循环，
 能按 actor、Profile、RBAC、Hook 和确认策略过滤并执行 Tool，
 能通过 OpenAI-compatible 或 LiteLLM Provider 调用模型，
-能按 endpoint priority 做轻量 failover，并按所有 enabled 候选 endpoint 的最小有效输入上限控制上下文，
+能按 endpoint priority 做结构化 failover，并对 retryable 错误执行受总 deadline 约束的有限重试、退避和 cooldown，同时保留安全 attempts 证据，
 能用 /model 管理当前 Session 的 endpoint/model 偏好，
 能通过 `zcagent gateway` 启动本地 FastAPI gateway，
 能提供 REST/SSE 兼容 API、WebSocket 主聊天通道和静态 Web UI，
-能在 Web 端管理本人会话、模型、账号、渠道绑定和运行诊断，
+能在 Web 端管理本人会话、模型、账号、渠道绑定和运行诊断，并让显式授权管理员查询确定性系统事故与跨组件脱敏时间线，
 能用稳定 `turn_id` / `turn_index` 串起一轮用户请求、WebSocket 事件和 JSONL 会话消息，
 能在预算内携带完整 Session 历史，并在长会话中组合确定性历史证据、结构化 compaction、混合检索旧 Turn 与最近连续 Turn，
 能用 SQLite FTS5/BM25、可选 embedding 精确 cosine、entity、anchor 和 recency 生成可解释 ContextPlan，
@@ -292,26 +292,25 @@ ZhiCe-Agent（CLI + Web + QQ + 微信）：
 能让 CLI 与 Owner 共用 workspace Memory、普通用户使用私有 Memory，
 能通过 memory_read 按需检索，通过用户对话授权后的 memory_write 修改长期 Memory，
 能在 Session 空闲后提取具有多 Turn 证据的高可信长期 Memory，
-能接入 stdio、Streamable HTTP 和 SSE MCP Server，并归一化 Tool、elicitation、OAuth 与 artifact，
+能接入 stdio、Streamable HTTP 和 SSE MCP Server，归一化 Tool、elicitation、OAuth 与 artifact，并动态刷新 Catalog、重连 Server 和取消活动调用，
 能通过受限 pre/post Tool Hook 扩展策略和展示元数据，
 能通过 `delegate_tasks` 运行有界并行 child，并由父 Agent fan-in 归纳，
 能用 `/subagent` 管理当前 Session 的 auto/off/once 语义，
 能通过中性 Channel 协议接入 QQ 与微信，而不让平台 SDK 进入 AgentLoop，
 能把 QQ/微信外部身份绑定到内部用户，并持久维护 conversation route、receipt、限流和渠道生命周期，
 能在 CLI、Web、QQ 和微信之间复用 Session、Memory、Tool、MCP、Hook、Subagent 与模型偏好语义，
+能在单 Gateway、单 worker、单 workspace writer 边界内恢复遗留 Turn 并从 Session 真值重建派生状态，
+能通过 `deploy/` 私有覆盖层、Dockerfile、compose 和运维脚本组装私有运行镜像，
 能通过 `zcagent init` 生成运行时文件。
 ```
 
 这就是当前代码基线。ZhiCe-Agent 已经不是聊天原型，而是具备身份、权限、长期 Memory、外部 Tool、运行扩展、子任务编排和多渠道接入的完整本地优先 Agent Runtime。
 
-### 3.2 未来扩展方向
+### 3.2 后续扩展方向
 
-当前代码已经完成到 Part 16；未来扩展只保留尚未实现的部分：
+当前代码已经完成到 Part 17。Part 17 的 Provider retry、事故诊断、MCP 动态可靠性、状态恢复和私有部署链已经落地；由于当前 Docker Desktop daemon 未运行，真实镜像 smoke、registry push 与云端 deploy 仍属于待关闭的生产部署验收。
 
-1. Part 17 运行可靠性、系统级诊断、生产部署与发布：补齐 Provider retry、事故诊断、容器、反向代理、Secret 注入、健康检查和发布产物。
-2. Part 18 Skill Runtime、CLI 与本地运维优化：独立承接 SkillExecutor、`skill.*` 与 ProgressSink。
-
-Part 16 已把原生静态 Web 收敛为稳定 Vue 产品面，完整实现见 `docs_design/zhice-agent-part16-web-product-design.md`；Part 17 接着把运行可靠性、系统级诊断和生产部署数据接入该展示面；Part 18 继续 Skill Runtime 与本地运维优化。
+未来核心扩展只保留 Part 18 Skill Runtime、CLI 与本地运维优化，独立承接 SkillExecutor、`skill.*` 与 ProgressSink。Part 17 当前实现见 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，Part 18 继续复用其诊断服务、部署状态和单进程边界。
 
 ### 3.3 当前目录结构
 
@@ -1360,14 +1359,19 @@ llm.chat(messages, tools)
 
 ## 14. 配置设计
 
-### 14.1 `config/.env.example`
+### 14.1 默认 workspace 与运行态 env
 
-```env
-ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
-ZHICE_LLM_OPENAI_API_KEY=your-api-key
+默认 workspace 由 `Path.home() / ".zhice"` 计算：Windows 是 `C:\Users\<user>\.zhice`，Linux/macOS 是 `~/.zhice`，Docker 镜像内是 `/home/zhice/.zhice`。
+
+workspace 解析优先级固定为：
+
+```text
+CLI --workspace
+  > 进程 ZHICE_AGENT_WORKSPACE
+  > Path.home() / ".zhice"
 ```
 
-当前 CLI 会优先加载项目目录下的 `config/.env`，也支持通过进程级 `--env-file` 指定其它 dotenv 文件。`ZHICE_AGENT_WORKSPACE` 必须显式提供；没有 workspace 时，`zcagent` 会直接提示用户初始化配置，而不是把源码目录误当作运行工作区。
+普通启动在 workspace 确定后加载 `${workspace}/config/.env`。这个运行态 env 不得反向定义 `ZHICE_AGENT_WORKSPACE`，避免 dotenv 改写已经确定的工作区。显式 `--env-file` 是兼容入口，可以在没有 `--workspace` 时提供 `ZHICE_AGENT_WORKSPACE`；源码项目 `config/.env` 只作为遗留迁移 fallback，不再是默认主路径。
 
 运行态文件由 `zcagent init` 生成到 workspace 下：
 
@@ -1399,45 +1403,53 @@ ${ZHICE_AGENT_WORKSPACE}/
 - 不做复杂部署编排配置。
 - 不做复杂 Pydantic schema。
 - 不把模型 key 写进代码。
+- 默认工作目录是 `Path.home() / ".zhice"`；部署和本地启动使用同一解析协议，不以源码目录充当运行工作区。
+- workspace 优先级是 `--workspace > ZHICE_AGENT_WORKSPACE > 默认目录`；`${workspace}/config/.env` 只能提供运行变量，不能反向定义 workspace。
+- 显式 `--env-file` 可兼容提供 workspace；项目 `config/.env` 只保留遗留迁移 fallback。
 - 仓库只提交 `config/llm_endpoints.example.json`，不提交真实 `llm_endpoints.json`。
 - 本地运行态 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 统一使用 `api_key` 字段，可写直接本地值，也可写 `${ENV_VAR}` 占位。
 - endpoint 支持可选 `context_window`、输出侧 `max_tokens`、`priority`、`enabled`、`role`、`supported_models`，并支持 keyed object 与 `"endpoints": [...]` 两种配置形态；`context_window` 缺失时默认 `131072`。
 - 顶层 `"default": "endpoint_name"` 或 `"default": {"ref": "endpoint_name"}` 只作为别名，不是必须存在的真实 endpoint。
 - `zcagent init` 完成提示必须区分核心与可选配置：LLM endpoint 是聊天前置条件；预算字段已有默认值；Skill source、MCP、Subagent 和 Hook 只在显式启用时配置。已有非法 endpoint 文件应提示直接编辑，普通 `init` 不会覆盖现有文件。
+- 普通 `zcagent init` 默认从唯一公开模板 `config/.env.example` 补齐 `${workspace}/config/.env`；已有 env 保留，`--force` 覆盖，`--write-env` 仅作为兼容参数且不再改变生成结果。
 - `channels.yml`、`mcp.json`、`subagents.yml` 和 `hooks.yml` 位于 workspace `config/`，未配置表示对应可选能力未启用。
 - `context.yml` 缺失时使用安全默认值；`embedding_endpoints.json` 缺失时上下文 capability 标记为 degraded，但完整历史、确定性历史查询、compaction 和 FTS/BM25 继续工作。
-- QQ AppID/AppSecret、微信凭证和其它 Secret 从 `config/.env`、进程环境或部署平台 Secret 注入；配置文件只保存环境变量引用或非敏感字段。
+- QQ AppID/AppSecret、微信凭证和其它 Secret 从 `${workspace}/config/.env`、进程环境或部署平台 Secret 注入；配置文件只保存环境变量引用或非敏感字段。
 
 ---
 
-## 15. 未来部分设计
+## 15. 当前 Part 17 基线与未来 Part 18
 
-本章只记录尚未实现的 Part 17～18。Part 12 生命周期事件/Hook Runtime、Part 13 Subagent、Part 14 QQ/微信渠道、Part 15 完整 Session 上下文工程、Part 16 Vue Web 产品面和 Capability Selection 已进入当前代码基线，其事实和边界分别维护在对应 Part 活文档，不再占用未来设计章节。
+Part 12～17 和 Capability Selection 已进入当前代码基线，其事实和边界分别维护在对应 Part 活文档。Part 17 仍保留在本章用于说明已经稳定的运行可靠性与部署边界；尚未实现的核心路线只剩 Part 18。
 
 ```text
-Part 17 运行可靠性、系统级诊断、生产部署与发布（下一项）
-  -> Part 18 Skill Runtime、CLI 与本地运维优化
+Part 17 运行可靠性、系统级诊断、生产部署与发布（实现完成，生产部署验收待关闭）
+  -> Part 18 Skill Runtime、CLI 与本地运维优化（下一项）
 ```
 
 ### 15.1 Part 17：运行可靠性、系统级诊断、生产部署与发布
 
-Part 17 在 Part 16 稳定前端产品面和 Part 15 上下文派生状态之上，把当前本地运行方式收敛为可诊断、可部署、可发布的生产形态：
+Part 17 已在 Part 16 稳定前端产品面和 Part 15 上下文派生状态之上，把本地运行方式收敛为可诊断、可恢复、可构建私有镜像并部署到云端的生产形态。当前活文档是 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案与实施说明见 `docs_design/2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`。
 
-- 为 LLMProviderError 增加稳定错误码、HTTP 状态、retryable 和安全用户提示。
-- 区分鉴权失败、模型不存在、限流、网络错误、无效响应和其它 Provider 错误。
-- 对可重试错误增加受总超时约束的同 endpoint 有限重试、退避和 cooldown；模型重试不能重复执行 Tool。
-- trace 记录 endpoint 尝试、重试、跳过原因、最终实际模型和 LLM/Tool/Session 耗时，不记录 Secret 或完整请求。
-- 增加系统级诊断引擎、事故聚合、Turn/request/tool/context 时间线和用户/组件/时间范围筛选。
-- 增加 `diagnostics.system.use` 特权和系统级 `diagnose_system_activity` Tool；普通用户仍只能诊断本人当前 Session。
-- 扩展 CLI/Web stopped/error Turn 查询、MCP tools/list_changed、Catalog 原子刷新、连接重建和活动调用取消。
-- 增强 MCP Server 健康、连接历史、Tool 延迟/错误统计、OAuth 状态、artifact 预览/版本/保留和大文件流式导入。
-- 提供 Dockerfile、最小运行镜像、docker compose/进程守护或云部署清单；Kubernetes 只在确有需求时增加。
-- 固化 workspace/context index volume、env/config mount、Secret 注入、多环境配置、HTTPS、反向代理和公网暴露边界。
-- 增加镜像健康检查、优雅退出、启动诊断、备份/恢复、索引重建和发布包校验。
-- 明确多进程 active turn、后台 compaction/index worker 和共享状态边界；需要水平扩展时再引入共享队列与外部向量后端。
-- 发布产物不得包含本地 workspace、真实密钥、用户数据库、Session、compaction 或索引数据。
+当前实现事实：
 
-部署层继续保持 app -> core -> protocols，core 不依赖容器、反向代理、向量数据库或平台 SDK。Part 17 的诊断数据接入 Part 16 已有管理页面，不建立第二套 Web。
+- 为 `LLMProviderError` 增加稳定错误码、HTTP 状态、retryable、安全用户提示和有界 attempts。
+- 区分鉴权失败、模型不存在、限流、网络错误、超时、无效响应和 Provider 不可用。
+- 对 retryable 错误增加受总 deadline 约束的同 endpoint 有限重试、`Retry-After`、退避和进程内 cooldown；Provider 重试不能重复执行 Tool。
+- trace/Activity 记录 endpoint 尝试、重试、跳过原因、最终实际模型和 LLM/Tool/Session/Context/MCP 耗时，不记录 Secret 或完整请求。
+- 增加系统级诊断引擎、确定性事故聚合、Turn/request/provider/tool/context/MCP 时间线和用户/组件/时间范围筛选。
+- 增加 `diagnostics.system.use` 特权和 `diagnose_system_activity` Tool；普通用户仍只能诊断本人当前 Session。
+- 扩展 stopped/error Turn 查询、MCP `tools/list_changed`、Catalog 原子刷新、连接重建、活动调用取消和 Server 运行统计。
+- 增加遗留 running Turn 恢复、备份/恢复、索引重建和单进程生产拓扑约束。
+- 第一版固定单 Gateway 进程、单 worker、单 workspace writer；不引入共享队列、外部向量后端、Kubernetes 或多环境 overlay。
+- 新建公开可见的 `deploy/` 编排与脚本目录；本机真实 `deploy/.env`、`config.yml`、`models.json` 是不提交 Git 的私有覆盖层，不复制完整 workspace。
+- 镜像构建直接使用仓库已有代码、Prompt、Skill source、Vue build 和可复现微信 sidecar build，并把三个私有配置放入固定容器 workspace。
+- 本机完成 build、最终镜像烟测和 push；云端按不可变 digest 直接运行私有镜像，只为 contexts/state/logs/extends 等运行数据挂 volume。
+- 公开 Git、公开 wheel、公开镜像和构建日志不得包含真实 Secret 或本地用户数据；受控私有部署镜像可以按操作者明确选择携带真实配置，其 registry 拉取权限按 Secret 权限管理。
+
+部署层继续保持 `app -> core -> protocols`，core 不依赖容器、反向代理、向量数据库或平台 SDK。Part 17 的诊断数据接入 Part 16 已有管理页面，不建立第二套 Web。
+
+当前验证结果为 Python 全量 `796 passed, 1 skipped`，Ruff、前端 `29` 项测试、lint/typecheck/build、deploy 静态检查和 compose 校验均通过。Docker Desktop daemon 当前未运行，因此真实 image build/run smoke、registry push 和云端 deploy 尚未执行；Part 17 代码实现已经完成，生产部署验收尚未关闭。
 
 ### 15.2 Part 18：Skill Runtime、CLI 与本地运维优化
 
@@ -1489,7 +1501,7 @@ tests/unit_test/context_engineering/
 - CLI 启动时缺少或未正确填写 `llm_endpoints.json` 会阻断聊天入口，而缺少 `skill_sources.yml` 表示 Skill source 未启用，静默跳过同步。
 - AgentLoop 遇到 provider 错误时保存 `user -> assistant(error)`，如果错误发生在工具调用之后，也保留之前的 `assistant(tool_calls)` 和 `tool` 消息。
 
-Part 17 Provider 错误分类需要继续覆盖：
+Part 17 Provider 错误分类已覆盖：
 
 - HTTP 401/403 转为 `AUTH_FAILED`，并且不泄露 secret。
 - HTTP 404 转为 `MODEL_NOT_FOUND`。
@@ -1601,7 +1613,7 @@ AgentLoop.run_turn
 
 - Provider 抛出 `LLMProviderError` / `LLMConfigurationError`。
 - AgentLoop 保存失败轮次为 `assistant` error marker，不让 CLI 崩溃。
-- 当前错误分类仍较轻量，完整错误码、retryable 元信息和同 endpoint 重试留给 Part 17。
+- Part 17 已补齐完整错误码、retryable 元信息、同 endpoint 有限重试、总 deadline、退避、cooldown 和 attempts 证据。
 
 ### Milestone 2：工具调用（已实现）
 
@@ -1665,7 +1677,7 @@ create_llm_provider_chain
 当前取舍：
 
 - `/model` 已按当前 Session 持久化；CLI、Web、REST、SSE 和 WebSocket 每个 Turn 都使用 call-scoped provider。
-- failover 已支持 endpoint 级顺序尝试；同 endpoint 重试、错误分类、circuit breaker 和 cooldown 留给 Part 17。
+- failover 已支持 endpoint 级顺序尝试；Part 17 已补齐同 endpoint 有限重试、错误分类、总 deadline、退避和 cooldown。
 - call-scoped selection 携带所有 enabled endpoint 的 failover-safe `ContextBudget`。
 
 ### Milestone 5：Skill 加载（已实现）
@@ -1796,7 +1808,7 @@ MCP health、trace 与错误归一化
 当前边界：
 
 - 已进入当前代码基线；Windows OS 级 stdio 强读取隔离仍待后续硬化。
-- MCP reload/cancellation、OAuth 管理和更完整运行诊断归入 Part 17。
+- Part 17 已补齐 MCP reload/cancellation、OAuth 状态、Catalog 刷新和更完整运行诊断。
 
 当前实现依据：`docs_design/zhice-agent-part11-mcp-design.md`。
 
@@ -1910,18 +1922,21 @@ Web 渠道绑定管理
 
 以上六项均已落地。Vue 已成为唯一正式 Web 前端，包内 production build 可由 Gateway 直接服务；系统监控只聚合现有 Gateway/Capability/Activity 真值，Security Audit 保持独立并支持筛选、游标分页和导出。Part 16 未改变 AgentLoop、Session、RBAC、Channel 或现有 REST/WS 语义。当前实现依据：`docs_design/zhice-agent-part16-web-product-design.md`。
 
-### Milestone 17：运行可靠性、系统级诊断、生产部署与发布
+### Milestone 17：运行可靠性、系统级诊断、生产部署与发布（实现完成，生产部署验收待关闭）
 
 依赖顺序：
 
-1. Provider 错误分类、retryable、有限重试、退避、cooldown 和 failover 诊断。
-2. MCP reload/cancellation、系统级诊断、事故聚合和 stopped/error Turn 查询。
-3. 上下文 compaction/index 的备份、恢复、重建和多进程边界。
-4. Dockerfile、compose/进程守护、workspace volume、Secret 注入和多环境配置。
-5. HTTPS、反向代理、公网暴露、健康检查、优雅退出和发布包校验。
-6. 真实部署冒烟、故障恢复和不携带本地用户数据的发布验收。
+1. Provider 错误协议、分类、retryable、有限重试、总 deadline、退避、cooldown 和 failover 证据。
+2. 系统诊断权限、服务、Tool、事故聚合、时间线、stopped/error Turn 查询和 Part 16 管理页面接入。
+3. MCP `tools/list_changed`、Catalog 原子刷新、reload/reconnect、活动调用取消和运行统计。
+4. 遗留 running Turn 恢复、context compaction/index 备份与重建、单进程/单 writer 边界。
+5. `deploy/` 私有配置覆盖层、Dockerfile、compose、固定镜像路径和可复现 Vue/微信 sidecar build。
+6. 本地 build/push/run smoke 与云端 deploy/stop/status/logs 脚本。
+7. 真实云端部署、健康检查、优雅退出、volume 升级恢复和公开仓库/私有镜像数据边界验收。
 
-Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费其稳定协议、持久化边界和前端组件。
+依赖顺序中的 1～6 已完成代码、脚本和不依赖 Docker daemon 的验证；Python 全量 `796 passed, 1 skipped`，Ruff、前端 `29` 项测试、lint/typecheck/build、deploy 静态检查和 compose 校验均通过。第 7 项尚未关闭：当前 Docker Desktop daemon 未运行，真实 image build/run smoke、registry push、云端 deploy、真实 volume 升级恢复和生产健康检查未执行。
+
+Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费其稳定协议、持久化边界和前端组件。部署不复制完整本地 workspace；只有三个真实配置进入私有镜像，运行数据留在云端 volume。
 
 ### Milestone 18：Skill Runtime、CLI 与本地运维优化
 
@@ -2281,14 +2296,13 @@ Tool 执行经过 actor/Profile、RBAC、确认、Hook、workspace guard、Runti
 Secret、完整外部标识、原始请求和敏感 Tool 参数不得进入普通日志与用户错误提示。
 ```
 
-当前代码基线已经完成到 Part 15；后续只列尚未实现的核心 Part：
+当前代码基线已经完成到 Part 17；后续只列尚未实现的核心 Part：
 
 ```text
-Part 17 运行可靠性、系统级诊断、生产部署与发布（下一项）
-Part 18 Skill Runtime、CLI 与本地运维优化
+Part 18 Skill Runtime、CLI 与本地运维优化（下一项）
 ```
 
-Part 15 已稳定预算内完整历史、确定性历史查询、compaction、本地混合检索和派生状态生命周期，Part 16 已完成 Vue Web 产品面和可发布静态产物。Part 17 下一步处理 Provider retry、运行可靠性和生产部署，并把 context index/compaction 纳入备份、恢复、重建与多进程边界。Part 15 当前实现见 `docs_design/zhice-agent-part15-context-engineering-design.md`，Part 16 当前实现见 `docs_design/zhice-agent-part16-web-product-design.md`。
+Part 15 已稳定预算内完整历史、确定性历史查询、compaction、本地混合检索和派生状态生命周期，Part 16 已完成 Vue Web 产品面和可发布静态产物，Part 17 已完成 Provider retry、系统诊断、MCP 动态可靠性、恢复边界和私有镜像部署代码。Part 17 当前实现见 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`；真实 image smoke、registry push 和云端 deploy 因 Docker daemon 未运行而作为生产部署验收待关闭。下一核心实现阶段为 Part 18。
 
 这样做的好处是：
 

@@ -12,13 +12,13 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 - 输入：显式 workspace、endpoint、base_url、api_key、model 等参数。
 - 预期：在 workspace 下生成运行时配置和 prompts。
-- 检查点：默认不生成`.env`；只生成`config/models.json`、`config/config.yml`和Prompts；已有文件默认保留；显式env file可提供workspace；不会生成旧分散配置文件。
+- 检查点：默认生成`config/.env`、`models.json`、`config.yml`和Prompts；已有文件默认保留，`--force`覆盖；`--write-env`作为deprecated兼容no-op继续可用；显式env file可提供workspace；不会生成旧分散配置文件。
 
-### Case 2: 缺少 workspace
+### Case 2: 默认 workspace
 
 - 输入：没有 `ZHICE_AGENT_WORKSPACE`，也没有有效 `--workspace`。
-- 预期：命令返回失败并提示如何创建 `config/.env`。
-- 检查点：提示中包含 `zcagent init`、`zcagent`、`zcagent gateway` 的启动路径。
+- 预期：使用 `Path.home() / ".zhice"`，`zcagent init`直接初始化该目录。
+- 检查点：显式`--workspace`仍优先，并在主配置解析前加载该workspace的`config/.env`。
 
 ### Case 3: `zcagent gateway --check`
 

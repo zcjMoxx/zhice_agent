@@ -7,6 +7,7 @@ import type {
   PublicUser,
   Role,
   SessionSummary,
+  SystemDiagnosticsSnapshot,
 } from "./types";
 
 export class ApiError extends Error {
@@ -83,6 +84,7 @@ export const api = {
   roles: () => request<{ roles: Role[]; permissions: string[] }>("/api/admin/roles"),
   updateRole: (id: string, permissionKeys: string[]) => request<Role>(`/api/admin/roles/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ permission_keys: permissionKeys }) }),
   monitor: () => request<MonitorSnapshot>("/api/admin/monitor"),
+  diagnostics: (query: URLSearchParams) => request<SystemDiagnosticsSnapshot>(`/api/admin/diagnostics?${query}`),
   audit: (query: URLSearchParams) => request<AuditPage>(`/api/audit/events?${query}`),
   confirmation: (id: string, approved: boolean) => request(`/api/tool-confirmations/${encodeURIComponent(id)}/${approved ? "approve" : "deny"}`, { method: "POST" }),
 };

@@ -2,12 +2,12 @@
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
 from agent.config import (
     InitConfigurationError,
-    MissingWorkspaceError,
     bootstrap_dotenv,
     init_runtime_files,
     load_config,
@@ -84,10 +84,52 @@ def test_load_config_allows_environment_overrides(tmp_path, monkeypatch):
     assert config.config_dir == (tmp_path / "custom_config").resolve()
 
 
-def test_load_config_requires_explicit_workspace(monkeypatch):
+def test_load_config_defaults_to_home_dot_zhice(tmp_path, monkeypatch):
     _clear_zhice_env(monkeypatch)
-    with pytest.raises(MissingWorkspaceError, match="ZHICE_AGENT_WORKSPACE"):
-        load_config()
+    monkeypatch.setattr("agent.config.Path.home", lambda: tmp_path)
+    config = load_config()
+    assert config.workspace == (tmp_path / ".zhice").resolve()
+
+
+def test_public_runtime_env_template_has_required_empty_keys_and_no_workspace_locator():
+    template = (Path(__file__).resolve().parents[3] / "config" / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    assignments = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in template.splitlines()
+        if line and not line.startswith("#") and "=" in line
+    }
+
+    assert {
+        "ZHICE_LLM_OPENAI_API_KEY",
+        "ZHICE_EMBEDDING_API_KEY",
+        "ZHICE_AGENT_SETUP_TOKEN",
+        "QQBOT_APP_ID",
+        "QQBOT_APP_SECRET",
+    } <= assignments.keys()
+    assert "ZHICE_AGENT_WORKSPACE" not in assignments
+    assert set(assignments.values()) == {""}
+
+
+def test_bootstrap_dotenv_loads_workspace_env_without_allowing_workspace_rebind(
+    tmp_path, monkeypatch
+):
+    _clear_zhice_env(monkeypatch)
+    workspace = tmp_path / "workspace"
+    config_dir = workspace / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / ".env").write_text(
+        f"ZHICE_AGENT_WORKSPACE={tmp_path / 'wrong'}\nLOCAL_ONLY=value\n",
+        encoding="utf-8",
+    )
+
+    assert bootstrap_dotenv(workspace=workspace, project_root=tmp_path / "project") == (
+        config_dir / ".env"
+    )
+    assert "ZHICE_AGENT_WORKSPACE" not in os.environ
+    assert os.environ["LOCAL_ONLY"] == "value"
+    assert load_config(workspace).workspace == workspace.resolve()
 
 
 def test_bootstrap_dotenv_supports_utf16_and_preserves_shell_value(tmp_path, monkeypatch):
@@ -245,7 +287,7 @@ def test_runtime_requires_models_json_and_ignores_old_filename(tmp_path):
         load_llm_endpoints(config_dir)
 
 
-def test_init_generates_only_two_main_config_files_and_prompts(tmp_path, monkeypatch):
+def test_init_generates_standard_config_files_and_prompts(tmp_path, monkeypatch):
     _clear_zhice_env(monkeypatch)
     config = load_config(tmp_path)
     written = init_runtime_files(
@@ -257,6 +299,12 @@ def test_init_generates_only_two_main_config_files_and_prompts(tmp_path, monkeyp
     )
     assert config.config_dir / "models.json" in written
     assert config.config_dir / "config.yml" in written
+    env_path = config.config_dir / ".env"
+    assert env_path in written
+    assert env_path.read_text(encoding="utf-8") == (
+        Path(__file__).resolve().parents[3] / "config" / ".env.example"
+    ).read_text(encoding="utf-8")
+    assert "ZHICE_AGENT_WORKSPACE=" not in env_path.read_text(encoding="utf-8")
     assert not (config.config_dir / "llm_endpoints.json").exists()
     assert not (config.config_dir / "context.yml").exists()
     payload = json.loads((config.config_dir / "models.json").read_text(encoding="utf-8"))
@@ -272,9 +320,11 @@ def test_init_preserves_existing_two_main_files_without_force(tmp_path, monkeypa
     config.config_dir.mkdir(parents=True)
     (config.config_dir / "models.json").write_text("{}", encoding="utf-8")
     (config.config_dir / "config.yml").write_text("schema_version: 1\n", encoding="utf-8")
+    (config.config_dir / ".env").write_text("EXISTING=1\n", encoding="utf-8")
     init_runtime_files(config)
     assert (config.config_dir / "models.json").read_text(encoding="utf-8") == "{}"
     assert (config.config_dir / "config.yml").read_text(encoding="utf-8") == "schema_version: 1\n"
+    assert (config.config_dir / ".env").read_text(encoding="utf-8") == "EXISTING=1\n"
 
 
 def test_init_force_replaces_two_main_files(tmp_path, monkeypatch):
@@ -283,9 +333,45 @@ def test_init_force_replaces_two_main_files(tmp_path, monkeypatch):
     config.config_dir.mkdir(parents=True)
     (config.config_dir / "models.json").write_text("{}", encoding="utf-8")
     (config.config_dir / "config.yml").write_text("bad", encoding="utf-8")
+    (config.config_dir / ".env").write_text("EXISTING=1\n", encoding="utf-8")
     init_runtime_files(config, force=True)
     assert json.loads((config.config_dir / "models.json").read_text(encoding="utf-8"))["schema_version"] == 1
     assert (config.config_dir / "config.yml").read_text(encoding="utf-8").startswith("schema_version: 1")
+    assert "EXISTING=1" not in (config.config_dir / ".env").read_text(encoding="utf-8")
+
+
+def test_init_env_compatibility_flag_cannot_disable_standard_generation(tmp_path):
+    config = load_config(tmp_path)
+
+    written = init_runtime_files(
+        config,
+        create_env=False,
+        create_llm_config=False,
+        create_skill_sources_config=False,
+        create_channels_config=False,
+        create_context_config=False,
+        create_embedding_config=False,
+        create_prompts=False,
+    )
+
+    assert written == [config.config_dir / ".env"]
+
+
+def test_init_reports_missing_public_env_template(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    monkeypatch.setattr("agent.config._project_root", lambda: project)
+    config = load_config(tmp_path / "workspace")
+
+    with pytest.raises(InitConfigurationError, match="Runtime env template is missing"):
+        init_runtime_files(
+            config,
+            create_llm_config=False,
+            create_skill_sources_config=False,
+            create_channels_config=False,
+            create_context_config=False,
+            create_embedding_config=False,
+            create_prompts=False,
+        )
 
 
 @pytest.mark.parametrize(

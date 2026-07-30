@@ -24,7 +24,7 @@ class LiteLLMProvider:
 
         self.endpoint = endpoint
         self._completion = completion
-        self._timeout = timeout
+        self._timeout = min(timeout, endpoint.request_timeout_seconds)
 
     def chat(
         self,
@@ -54,11 +54,20 @@ class LiteLLMProvider:
         try:
             raw = completion(**kwargs)
         except Exception as exc:  # noqa: BLE001 - provider boundary must redact and normalize.
-            raise LLMProviderError(
-                f"LiteLLM request failed: {_safe_litellm_error(str(exc), api_key)}"
-            ) from exc
+            raise _classify_litellm_error(exc, self.endpoint, api_key) from exc
 
-        return _parse_litellm_response(raw, request_model)
+        try:
+            return _parse_litellm_response(raw, request_model)
+        except LLMProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize malformed SDK response objects.
+            raise LLMProviderError(
+                "LLM response was invalid.",
+                code="INVALID_RESPONSE",
+                retryable=True,
+                endpoint=self.endpoint.name,
+                model=self.endpoint.model,
+            ) from exc
 
 
 def _load_litellm_completion() -> CompletionCallable:
@@ -85,8 +94,20 @@ def _parse_litellm_response(raw: Any, fallback_model: str) -> LLMResponse:
 
     data = _response_to_dict(raw)
     choices = _get(data, "choices") or []
+    if not isinstance(choices, list) or not choices:
+        raise LLMProviderError(
+            "LLM response did not contain a valid choice.",
+            code="INVALID_RESPONSE",
+            retryable=True,
+        )
     first_choice = choices[0] if choices else {}
     message = _get(first_choice, "message") or {}
+    if not isinstance(_response_to_dict(message), dict):
+        raise LLMProviderError(
+            "LLM response did not contain a valid assistant message.",
+            code="INVALID_RESPONSE",
+            retryable=True,
+        )
     content = _get(message, "content") or ""
     tool_calls = _get(message, "tool_calls") or []
     metadata: dict[str, Any] = {
@@ -144,3 +165,72 @@ def _safe_litellm_error(message: str, api_key: str) -> str:
     if api_key:
         safe = safe.replace(api_key, "[redacted]")
     return safe[:500]
+
+
+def _classify_litellm_error(
+    exc: Exception,
+    endpoint: LLMEndpoint,
+    api_key: str,
+) -> LLMProviderError:
+    """Normalize LiteLLM and upstream SDK exceptions using stable semantics."""
+
+    status = _exception_status(exc)
+    name = type(exc).__name__.lower()
+    message = _safe_litellm_error(str(exc), api_key).lower()
+    if status in {401, 403} or "authentication" in name:
+        code, retryable, safe = "AUTH_FAILED", False, "LLM provider authentication failed."
+    elif status == 404 or "notfound" in name:
+        code, retryable, safe = "MODEL_NOT_FOUND", False, "LLM model or endpoint was not found."
+    elif status == 429 or "ratelimit" in name:
+        code, retryable, safe = "RATE_LIMITED", True, "LLM provider rate limit was reached."
+    elif status in {408, 504} or "timeout" in name or "timed out" in message:
+        code, retryable, safe = "TIMEOUT", True, "LLM request timed out."
+    elif status is not None and 500 <= status <= 599:
+        code, retryable, safe = (
+            "PROVIDER_UNAVAILABLE",
+            True,
+            "LLM provider is temporarily unavailable.",
+        )
+    elif any(token in name for token in ("connection", "network")):
+        code, retryable, safe = "NETWORK_ERROR", True, "LLM network request failed."
+    elif any(token in name for token in ("json", "decode", "responsevalidation")):
+        code, retryable, safe = "INVALID_RESPONSE", True, "LLM response was invalid."
+    else:
+        code, retryable = "PROVIDER_ERROR", False
+        safe = "LiteLLM provider request failed."
+    return LLMProviderError(
+        safe,
+        code=code,
+        http_status=status,
+        retryable=retryable,
+        endpoint=endpoint.name,
+        model=endpoint.model,
+        retry_after_seconds=_exception_retry_after(exc),
+    )
+
+
+def _exception_status(exc: Exception) -> int | None:
+    for attribute in ("status_code", "http_status", "status"):
+        value = getattr(exc, attribute, None)
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            continue
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _exception_retry_after(exc: Exception) -> float | None:
+    value = getattr(exc, "retry_after", None)
+    if value is None:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", {}) or {}
+        value = headers.get("Retry-After")
+    try:
+        return max(0.0, min(float(value), 300.0)) if value is not None else None
+    except (TypeError, ValueError):
+        return None

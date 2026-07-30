@@ -25,6 +25,7 @@
 - Compaction 降级：SessionStore、Prompt 或 LLM 不可用而无法压缩时，不套用 15% raw 目标；应在最终输入硬预算内尽量保留连续近期原文。
 - 配置边界：`config.yml.context`明确拒绝旧`target_budget_ratio`和歧义水位；价格只来自实际Chat端点，Embedding批次只来自实际Embedding端点，不能在Context重复配置。
 - SQLite 生命周期：每次索引操作必须显式 commit/rollback 并关闭连接；Windows 下完成检索后索引文件不能继续被遗留句柄占用。
+- 派生 Context SQLite 损坏时隔离原文件并创建空索引，随后可从 Session JSONL 生成的 TurnDocument 重建，不修改会话真值。
 - 启动反馈：缺少 Part 15 Prompt、embedding 配置、可用端点或凭据时，CLI 明示 degraded，Web/渠道 capability status 与 trace 使用同一安全状态；不得记录 Secret 或环境变量名。
 
 ## 关键检查点

@@ -6,24 +6,32 @@ import concrete implementations from tools, sessions, LLM providers, or skills.
 
 from agent.protocols.mcp import (
     McpCatalogSnapshot,
+    McpConnectionEvent,
     McpInteractionRequest,
     McpInteractionResponse,
     McpOAuthSpec,
+    McpOAuthStatus,
     McpRuntimeFacade,
+    McpRuntimeStatsSnapshot,
     McpServerSpec,
     McpServerStatus,
     McpToolDescriptor,
+    McpToolStats,
 )
 
 __all__ = [
     "McpCatalogSnapshot",
+    "McpConnectionEvent",
     "McpInteractionRequest",
     "McpInteractionResponse",
     "McpOAuthSpec",
+    "McpOAuthStatus",
     "McpRuntimeFacade",
+    "McpRuntimeStatsSnapshot",
     "McpServerSpec",
     "McpServerStatus",
     "McpToolDescriptor",
+    "McpToolStats",
 ]
 from agent.protocols.channel import (
     ChannelAttachment,

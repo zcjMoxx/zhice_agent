@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -36,6 +37,14 @@ async def request_code(ctx: Context) -> str:
     if result.action != "accept":
         return result.action
     return f"code:{result.data.code}"
+
+
+@server.tool()
+async def slow_echo(text: str, delay_seconds: float = 2.0) -> str:
+    """Wait before returning so client cancellation can be verified."""
+
+    await asyncio.sleep(delay_seconds)
+    return f"slow:{text}"
 
 
 if __name__ == "__main__":

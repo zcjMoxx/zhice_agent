@@ -194,6 +194,6 @@ Part 16 完成时：
 
 ## 11. 后续 Part
 
-Part 17 负责运行可靠性、系统级诊断、生产部署与发布；它复用 Part 16 的 Vue 页面和组件，不建立第二套管理界面。
+Part 17 负责运行可靠性、系统级诊断、MCP 动态可靠性和私有镜像部署；它复用 Part 16 的 Vue 页面和组件，不建立第二套管理界面。当前设计见 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`。
 
 Part 18 负责 Skill Runtime、CLI 和本地运维优化；Skill source 状态页复用 Part 16 的管理后台结构。

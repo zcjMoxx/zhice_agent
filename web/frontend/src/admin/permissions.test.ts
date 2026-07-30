@@ -5,6 +5,7 @@ import { PERMISSION_META, permissionLabel } from "./permissions";
 const BUILTIN_KEYS = [
   "auth.users.read", "auth.users.manage", "auth.admin.manage", "auth.roles.read",
   "auth.roles.manage", "session.manage.any", "chat.stop.any", "turn.read.any",
+  "diagnostics.system.use",
   "tool.exec.dangerous", "skill.sync", "audit.read", "audit.export",
 ];
 

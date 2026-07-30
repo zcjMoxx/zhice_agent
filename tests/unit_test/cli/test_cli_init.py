@@ -2,6 +2,8 @@
 
 import builtins
 import json
+import os
+from pathlib import Path
 
 import pytest
 import yaml
@@ -65,6 +67,9 @@ def test_cli_init_generates_runtime_files(tmp_path, capsys, monkeypatch):
     assert "context_window" not in output
     assert "api_key" not in output
     assert not (tmp_path / ".env").exists()
+    assert (tmp_path / "config" / ".env").read_text(encoding="utf-8") == (
+        Path(__file__).resolve().parents[3] / "config" / ".env.example"
+    ).read_text(encoding="utf-8")
     assert (tmp_path / "config" / "models.json").is_file()
     endpoint = json.loads(
         (tmp_path / "config" / "models.json").read_text(encoding="utf-8")
@@ -82,17 +87,41 @@ def test_cli_init_preserves_existing_files_and_fills_missing(tmp_path, capsys, m
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".env").write_text("EXISTING=1\n", encoding="utf-8")
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text("EXISTING=1\n", encoding="utf-8")
 
     result = main(["init", "--workspace", str(tmp_path), "--write-env"])
 
     output = capsys.readouterr().out
     assert result == 0
     assert "created:" in output
-    assert (tmp_path / ".env").read_text(encoding="utf-8") == "EXISTING=1\n"
+    assert (config_dir / ".env").read_text(encoding="utf-8") == "EXISTING=1\n"
     assert (tmp_path / "config" / "models.json").is_file()
     assert (tmp_path / "config" / "config.yml").is_file()
     assert (tmp_path / "prompts" / "identity.md").is_file()
+
+
+def test_cli_init_write_env_is_compatibility_no_op_and_force_still_overwrites(
+    tmp_path, capsys, monkeypatch
+):
+    _clear_zhice_env(monkeypatch)
+    plain = tmp_path / "plain"
+    compatibility = tmp_path / "compatibility"
+
+    assert main(["init", "--workspace", str(plain)]) == 0
+    capsys.readouterr()
+    assert main(["init", "--workspace", str(compatibility), "--write-env"]) == 0
+    capsys.readouterr()
+    assert (plain / "config" / ".env").read_bytes() == (
+        compatibility / "config" / ".env"
+    ).read_bytes()
+
+    env_path = compatibility / "config" / ".env"
+    env_path.write_text("EXISTING=1\n", encoding="utf-8")
+    assert main(["init", "--workspace", str(compatibility), "--write-env", "--force"]) == 0
+    capsys.readouterr()
+    assert "EXISTING=1" not in env_path.read_text(encoding="utf-8")
 
 
 def test_cli_init_reports_when_everything_already_exists(tmp_path, capsys, monkeypatch):
@@ -128,22 +157,27 @@ def test_cli_init_uses_explicit_env_file_workspace(tmp_path, capsys, monkeypatch
     assert result == 0
     assert "created:" in output
     assert not (workspace / ".env").exists()
+    assert (workspace / "config" / ".env").is_file()
     assert (workspace / "config" / "models.json").is_file()
     assert (workspace / "config" / "config.yml").is_file()
 
 
-def test_cli_reports_missing_workspace_when_no_env_exists(tmp_path, capsys, monkeypatch):
-    """Missing workspace should explain how to create a local .env."""
+def test_cli_init_uses_default_home_workspace_when_no_env_exists(
+    tmp_path, capsys, monkeypatch
+):
+    """A clean install should initialize ~/.zhice without a bootstrap env."""
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("agent.config.Path.home", lambda: tmp_path)
 
     result = main(["--env-file", str(tmp_path / "missing.env"), "init"])
 
     output = capsys.readouterr().out
-    assert result == 1
-    assert "ZHICE_AGENT_WORKSPACE is not set" in output
-    assert "Create config/.env" in output
+    assert result == 0
+    assert "created:" in output
+    assert (tmp_path / ".zhice" / "config" / ".env").is_file()
+    assert (tmp_path / ".zhice" / "config" / "models.json").is_file()
 
 
 def test_cli_gateway_check_uses_configured_workspace(tmp_path, capsys, monkeypatch):
@@ -206,18 +240,32 @@ def test_cli_gateway_rejects_removed_legacy_log_flags(capsys):
     assert "unrecognized arguments" in capsys.readouterr().err
 
 
-def test_cli_gateway_reports_missing_workspace(tmp_path, capsys, monkeypatch):
-    """Gateway startup should share the same workspace setup guard as chat."""
+def test_cli_gateway_uses_default_home_workspace(tmp_path, capsys, monkeypatch):
+    """Gateway check should resolve the same ~/.zhice default as init and chat."""
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("agent.config.Path.home", lambda: tmp_path)
 
     result = main(["--env-file", str(tmp_path / "missing.env"), "gateway", "--check"])
 
     output = capsys.readouterr().out
-    assert result == 1
-    assert "ZHICE_AGENT_WORKSPACE is not set" in output
-    assert "zcagent gateway" in output
+    assert result == 0
+    assert str((tmp_path / ".zhice").resolve()) in output
+
+
+def test_cli_workspace_hint_loads_that_workspaces_runtime_env(tmp_path, capsys, monkeypatch):
+    _clear_zhice_env(monkeypatch)
+    workspace = tmp_path / "selected"
+    config_dir = workspace / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / ".env").write_text("WORKSPACE_RUNTIME_VALUE=loaded\n", encoding="utf-8")
+
+    result = main(["init", "--workspace", str(workspace)])
+
+    capsys.readouterr()
+    assert result == 0
+    assert os.environ["WORKSPACE_RUNTIME_VALUE"] == "loaded"
 
 
 def test_cli_chat_reports_missing_runtime_prompts(tmp_path, capsys, monkeypatch):

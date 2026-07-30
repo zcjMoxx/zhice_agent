@@ -1,0 +1,25 @@
+services:
+  zcagent:
+    image: ${ZHICE_IMAGE:-zhice-agent:local}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        ZHICE_VERSION: ${ZHICE_VERSION:-dev}
+        ZHICE_REVISION: ${ZHICE_REVISION:-unknown}
+        ZHICE_BUILD_DATE: ${ZHICE_BUILD_DATE:-unknown}
+    restart: unless-stopped
+    ports:
+      - "${ZHICE_PORT:-10086}:10086"
+    volumes:
+      - zhice-contexts:/home/zhice/.zhice/contexts
+      - zhice-state:/home/zhice/.zhice/state
+      - zhice-logs:/home/zhice/.zhice/logs
+      - zhice-extends:/home/zhice/.zhice/extends
+    init: true
+
+volumes:
+  zhice-contexts:
+  zhice-state:
+  zhice-logs:
+  zhice-extends:

@@ -259,17 +259,20 @@ class LLMProvider(Protocol):
 - 从 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 读取 endpoint
 - 解析 `api_key`
 - 初始化本地运行时文件
-- 加载项目级 `config/.env`
+- 在 workspace 确定后加载 `${workspace}/config/.env`
 
 关键点：
 
-- 项目目录下的 `config/.env` 用于启动配置，尤其是 `ZHICE_AGENT_WORKSPACE`
+- workspace 解析优先级固定为 `CLI --workspace > 进程 ZHICE_AGENT_WORKSPACE > Path.home() / ".zhice"`
+- 默认 workspace 在 Windows 是 `C:\Users\<user>\.zhice`，在 Docker 是 `/home/zhice/.zhice`
+- `${workspace}/config/.env` 只提供运行变量，不得反向定义 `ZHICE_AGENT_WORKSPACE`
+- 显式 `--env-file` 可以兼容提供 workspace；项目 `config/.env` 仅作为遗留迁移 fallback
 - 真实 endpoint 配置放在工作目录，不放在仓库中
 - `zcagent init` 会在工作目录生成：
   - `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`
   - `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`
   - `${ZHICE_AGENT_WORKSPACE}/prompts/*.md`
-  - 可选 `${ZHICE_AGENT_WORKSPACE}/.env`
+  - `${ZHICE_AGENT_WORKSPACE}/config/.env`
 - `zcagent init` 可重复执行：已存在的本地文件默认保留，缺失文件会自动补齐；只有显式传 `--force` 才覆盖已有文件。
 
 ### 4.6 `agent/cli.py`
@@ -278,8 +281,9 @@ CLI 是第二部分对话链路的真实入口。
 
 启动职责：
 
-- 先处理全局 `--env-file`
-- 自动加载项目 `config/.env`
+- 先处理全局 `--env-file` 和 `--workspace`
+- 按 `--workspace > 进程 ZHICE_AGENT_WORKSPACE > 默认目录` 确定 workspace
+- 普通路径加载 `${workspace}/config/.env`；仅迁移场景 fallback 到项目 `config/.env`
 - 解析 `init`、`gateway`、默认 chat 子路径
 - 组装 `PromptLoader`、`JsonlSessionStore`、`ContextBuilder`、`LLMProvider`、`AgentLoop`
 
@@ -304,15 +308,11 @@ chat 路径职责：
 
 ## 5. 配置与运行时文件
 
-### 5.1 项目级配置
+### 5.1 workspace 与 env 解析
 
-项目根目录中的 `config/.env` 用于启动时确定工作目录等参数。
+默认 workspace 是 `Path.home() / ".zhice"`，因此普通用户无需先设置环境变量即可运行 `zcagent init`。Windows 默认路径为 `C:\Users\<user>\.zhice`，Docker 默认路径为 `/home/zhice/.zhice`。
 
-最小示例：
-
-```env
-ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
-```
+显式选择 workspace 时，优先级是 CLI `--workspace`、进程 `ZHICE_AGENT_WORKSPACE`、默认目录。普通运行态 env 位于 `${workspace}/config/.env`；它不能定义 workspace。只有显式 `--env-file` 可以在没有 `--workspace` 时兼容提供 `ZHICE_AGENT_WORKSPACE`。项目 `config/.env` 不再是主入口，只保留遗留迁移 fallback。
 
 ### 5.2 工作目录配置
 
@@ -350,10 +350,7 @@ ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
 
 `context_window` 缺失时默认 `131072`；`max_tokens` 缺失时沿用当前默认输出上限，并且只表示单次最大输出 token。输入预算固定按二者差值计算，不再提供第三个输入预算配置字段。
 
-对应环境变量可来自：
-
-1. 当前 shell / 系统环境
-2. 项目 `config/.env`
+对应环境变量优先来自当前 shell / 系统环境，其次来自 `${workspace}/config/.env`；显式 `--env-file` 和项目 `config/.env` fallback 只承担兼容场景。
 
 ### 5.3 `zcagent init`
 
@@ -365,6 +362,8 @@ zcagent init
 
 默认行为：
 
+- 未显式指定时在 `Path.home() / ".zhice"` 初始化
+- 默认从公开 `config/.env.example` 生成 `${ZHICE_AGENT_WORKSPACE}/config/.env`
 - 在 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 创建 endpoint 配置
 - 在 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 创建 Skill source 配置
 - 复制默认 prompts
@@ -375,7 +374,8 @@ zcagent init
 可选行为：
 
 - `--force`：覆盖已存在本地文件
-- `--write-env`：在工作目录额外生成 `.env` 模板
+- `--workspace`：显式选择初始化目录，优先于进程环境和默认目录
+- `--write-env`：保留为兼容参数；普通 init 已默认生成 env，因此该参数不再改变文件结果
 
 ---
 
@@ -498,7 +498,10 @@ sequenceDiagram
 
 - `zcagent init` 能生成运行时文件
 - `zcagent gateway --check` 可用
-- 缺少 workspace 时能打印设置提示
+- 未设置 workspace 时使用 `Path.home() / ".zhice"`
+- `--workspace`、进程 `ZHICE_AGENT_WORKSPACE` 和默认目录严格按优先级解析
+- 普通 `zcagent init` 默认生成 `config/.env`；已有文件保留，`--force` 覆盖，`--write-env` 与普通 init 结果一致
+- `${workspace}/config/.env` 不能反向改变 workspace，显式 `--env-file` 可以兼容提供 workspace
 - 缺少启动 prompts 时能引导用户执行 `zcagent init`
 - 缺少或未正确填写 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 时，`zcagent` 聊天入口直接失败并提示配置；因为 LLM 是聊天运行必需能力
 - 缺少 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 时静默跳过 Skill 同步并视为 disabled；因为 Skill source 是可选扩展能力，只有显式配置后非法或同步失败才记录 warning

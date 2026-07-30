@@ -20,6 +20,7 @@ class McpToolAdapter:
         *,
         actor: ActorContext,
         files_dir: Path,
+        session_id: str = "",
         interaction_notifier: McpInteractionNotifier | None = None,
     ) -> None:
         self.name = descriptor.local_name
@@ -29,6 +30,7 @@ class McpToolAdapter:
         self._runtime = runtime
         self._actor = actor
         self._files_dir = files_dir
+        self._session_id = session_id
         self._interaction_notifier = interaction_notifier
 
     def execute(self, args: dict[str, Any]) -> ToolResult:
@@ -39,5 +41,6 @@ class McpToolAdapter:
             args,
             actor=self._actor,
             files_dir=self._files_dir,
+            session_id=self._session_id,
             interaction_notifier=self._interaction_notifier,
         )

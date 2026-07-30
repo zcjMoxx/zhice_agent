@@ -651,6 +651,45 @@ def test_monitor_requires_turn_read_any_permission(tmp_path):
     assert response.json()["error"]["details"]["required_permission"] == "turn.read.any"
 
 
+def test_system_diagnostics_requires_explicit_permission_and_owner_can_query(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_owner("owner", "Owner", "password-123")
+    store.create_user("viewer", "Viewer", "viewer-password")
+    runtime = _AuthRuntime(AuthService(store))
+    runtime.system_diagnostics = _FakeSystemDiagnostics()
+    viewer_client = _client(tmp_path, runtime)
+    viewer_client.post("/api/auth/login", json={"username": "viewer", "password": "viewer-password"})
+
+    denied = viewer_client.get("/api/admin/diagnostics")
+    viewer_client.post("/api/auth/logout")
+    viewer_client.post("/api/auth/login", json={"username": "owner", "password": "password-123"})
+    allowed = viewer_client.get("/api/admin/diagnostics?component=llm&error_code=RATE_LIMITED")
+
+    assert denied.status_code == 403
+    assert denied.json()["error"]["details"]["required_permission"] == "diagnostics.system.use"
+    assert allowed.status_code == 200
+    assert allowed.json()["summary"]["incidents"] == 1
+    assert runtime.system_diagnostics.filters["component"] == "llm"
+    assert runtime.system_diagnostics.filters["error_code"] == "RATE_LIMITED"
+
+
+class _FakeSystemDiagnostics:
+    def __init__(self):
+        self.filters = {}
+
+    def diagnose(self, filters):
+        self.filters = filters
+        return {
+            "status": "ok",
+            "window_minutes": 60,
+            "filters": {"component": filters.get("component", "")},
+            "summary": {"incidents": 1},
+            "incidents": [{"incident_id": "inc-1", "code": "RATE_LIMITED"}],
+            "timeline": [],
+            "limitations": [],
+        }
+
+
 def test_audit_filter_cursor_pagination_and_csv_export_are_backward_compatible(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     owner = store.initialize_owner("owner", "Owner", "password-123")

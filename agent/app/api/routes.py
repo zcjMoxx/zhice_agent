@@ -48,6 +48,7 @@ from agent.app.api.schemas import (
     SessionResponse,
     SessionsResponse,
     SessionSummaryResponse,
+    SystemDiagnosticsResponse,
     ToolConfirmationResponse,
     ToolConfirmationsResponse,
     WeixinBindingAttemptResponse,
@@ -917,6 +918,74 @@ def read_admin_monitor(request: Request, limit: int = 50) -> AdminMonitorRespons
         capabilities=capabilities,
         activity=MonitorActivityResponse(**activity),
     )
+
+
+@router.get("/admin/diagnostics", response_model=SystemDiagnosticsResponse)
+def read_system_diagnostics(
+    request: Request,
+    minutes: int = 60,
+    limit: int = 100,
+    actor_user_id: str = "",
+    session_id: str = "",
+    turn_id: str = "",
+    request_id: str = "",
+    channel: str = "",
+    component: str = "",
+    endpoint: str = "",
+    model: str = "",
+    tool_name: str = "",
+    mcp_server: str = "",
+    status: str = "",
+    error_code: str = "",
+    incident_id: str = "",
+) -> SystemDiagnosticsResponse:
+    """Return deterministic incidents and a safe cross-component timeline."""
+
+    actor = _actor(request, "diagnostics.system.use", channel="rest")
+    diagnostics = getattr(_runtime(request), "system_diagnostics", None)
+    if diagnostics is None:
+        raise ApiError(
+            "DIAGNOSTICS_UNAVAILABLE",
+            "System diagnostics is unavailable",
+            status_code=503,
+        )
+    payload = diagnostics.diagnose(
+        {
+            "minutes": minutes,
+            "limit": limit,
+            "actor_user_id": actor_user_id,
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "request_id": request_id,
+            "channel": channel,
+            "component": component,
+            "endpoint": endpoint,
+            "model": model,
+            "tool_name": tool_name,
+            "mcp_server": mcp_server,
+            "status": status,
+            "error_code": error_code,
+            "incident_id": incident_id,
+        }
+    )
+    auth = _auth_service(request, required=True)
+    if auth.audit_sink is not None:
+        auth.audit_sink.record(
+            AuditEvent(
+                action="diagnostics.system.read",
+                resource_type="runtime_diagnostics",
+                actor=actor,
+                request_id=_request_id(request),
+                channel="rest",
+                route=request.url.path,
+                decision="allow",
+                metadata={
+                    "window_minutes": int(payload.get("window_minutes") or 0),
+                    "incident_count": int(payload.get("summary", {}).get("incidents", 0)),
+                },
+            )
+        )
+    return SystemDiagnosticsResponse(**payload)
 
 
 @router.get("/audit/events", response_model=AuditEventsResponse)

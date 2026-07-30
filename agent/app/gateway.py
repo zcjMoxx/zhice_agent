@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from agent.app.api.routes import ApiError, router
 from agent.app.api.ws import router as ws_router
 from agent.app.auth import AuthHttpError
+from agent.app.instance_lock import WorkspaceGatewayLock
 from agent.app.logging import (
     DeferredGatewayTerminalLogs,
     GatewayLogOptions,
@@ -158,17 +159,25 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        manager = getattr(runtime, "channel_manager", None)
-        if manager is not None:
-            manager.start()
-        _log_external_channel_startup(runtime)
+        instance_lock = WorkspaceGatewayLock(config.workspace)
+        instance_lock.acquire()
         try:
-            yield
+            startup = getattr(runtime, "startup", None)
+            if callable(startup):
+                startup()
+            manager = getattr(runtime, "channel_manager", None)
+            if manager is not None:
+                manager.start()
+            _log_external_channel_startup(runtime)
+            try:
+                yield
+            finally:
+                shutdown = getattr(runtime, "shutdown", None)
+                if callable(shutdown):
+                    shutdown()
+                _log_channel_shutdown(runtime)
         finally:
-            shutdown = getattr(runtime, "shutdown", None)
-            if callable(shutdown):
-                shutdown()
-            _log_channel_shutdown(runtime)
+            instance_lock.release()
 
     app = FastAPI(
         title="ZhiCe-Agent Gateway",

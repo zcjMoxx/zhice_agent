@@ -11,6 +11,7 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
     "session.manage.any": ("Manage all sessions", "session"),
     "chat.stop.any": ("Stop any turn", "chat"),
     "turn.read.any": ("Read all turn summaries", "turn"),
+    "diagnostics.system.use": ("Use cross-user system diagnostics", "diagnostics"),
     "tool.exec.dangerous": ("Request confirmed high-risk exec", "tool"),
     "skill.sync": ("Synchronize Skill sources", "skill"),
     "audit.read": ("Read audit events", "audit"),

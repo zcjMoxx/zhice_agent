@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到 Part 16 Web 产品体验与 Vue 前端工程。主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到 Part 17 运行可靠性、系统级诊断与私有镜像部署实现。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -46,7 +46,7 @@ Tool capability selection 已从原可靠性路线提前进入当前基线。每
 - 第十四部分实现二微信 ClawBot 已落地，当前口径见 `docs_design/zhice-agent-part14-external-channel-design.md`，完整取舍和真实 POC 证据见 `docs_design/2026-07-24-weixin-clawbot-channel-design.md`。一个 Web 用户独立拥有一个微信 AI 账号，共享 Node Transport sidecar 接入现有 Channel Runtime，不引入第二套 AgentLoop。2026-07-24 已用真实微信验证 AI 标识、扫码、direct text 收发、context token、游标恢复和 notifyStop；双真实账号并发仍需第二名用户验收。
 - Part 15 完整 Session 上下文工程已进入当前代码基线，设计入口是 `docs_design/zhice-agent-part15-context-engineering-design.md`。本地第一实现不要求独立向量数据库服务：用户隔离 SQLite 保存 FTS5 文档、metadata 和 float32 embedding BLOB，Session 内用精确 cosine 与 RRF 混合排序；embedding 未配置时 health 诚实标记 degraded，但完整历史、历史查询、compaction 和 FTS 继续工作。
 - Part 16 Web 产品体验与 Vue 前端工程已实现并进入当前基线，当前活文档是 `docs_design/zhice-agent-part16-web-product-design.md`，完整方案记录见 `docs_design/2026-07-27-web-product-experience-and-vue-frontend-design.md`。Vue 3/Vite/TypeScript 源码位于 `web/frontend`，构建产物位于 `agent/web/static` 并随 Python wheel 发布；登录、聊天、Session、五栏设置、渠道连接和中文管理后台共用明暗曜石主题，同时保持现有 API、WebSocket、Session 与 RBAC 兼容。
-- Part 17 顺延承接运行可靠性、系统级诊断、生产部署与发布；它复用 Part 16 的前端工程和监控页面，不建立第二套 Web。
+- Part 17 代码与测试已进入当前基线：Provider 错误分类/有限重试/deadline/cooldown/failover 证据、系统级诊断、MCP 动态可靠性、重启恢复和 `deploy/` 私有镜像部署链均已落地。当前活文档是 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案记录见 `docs_design/2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`。全量 Python `796 passed, 1 skipped`，Ruff、前端 `29` 项测试、lint/typecheck/build、deploy 静态检查与 compose 校验均通过；因本机 Docker Desktop daemon 未运行，真实 image build/run smoke、registry push 与云端 deploy 的生产验收尚未关闭。
 - 按需 Tool 发现与动态 Capability Selection 已提前落地，设计记录见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md`；它是通用运行时能力，不归入 Part 13 的业务委派判断。
 
 Subagent运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`subagents`分区，仓库模板为`config/config.example.yml`。缺少分区时功能默认关闭；启用后可用裸`/subagent`查看当前模式和Profile。能力不可用时，CLI、本地操作者和Owner会看到真实原因与修复建议；普通Web用户只会看到能力暂时不可用并联系管理员，不暴露内部配置。
@@ -60,11 +60,11 @@ Subagent运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`subage
 ```bash
 # 进入 zhice_agent 项目所在文件夹
 python -m pip install -e .
-copy config\.env.example config\.env
-# 编辑 config\.env，设置 ZHICE_AGENT_WORKSPACE
 zcagent init
 zcagent
 ```
+
+未指定工作区时，`zcagent init` 使用当前用户主目录下的 `.zhice`：Windows 为 `C:\Users\<user>\.zhice`，Linux/macOS 为 `~/.zhice`。需要其它目录时使用 `--workspace` 或进程环境变量 `ZHICE_AGENT_WORKSPACE`。
 
 输入 `/exit` 可以退出 CLI。
 
@@ -104,19 +104,30 @@ npm run build
 
 ## 工作区初始化
 
-ZhiCe-Agent 会自动加载源码项目目录下的 `config/.env`。这个 `.env` 主要用于项目启动配置，例如：
+默认 workspace 是 `Path.home() / ".zhice"`：
 
-```env
-ZHICE_AGENT_WORKSPACE=C:\Users\you\ZhiCe-Agent-Workspace
+```text
+Windows: C:\Users\<user>\.zhice
+Docker:  /home/zhice/.zhice
+Linux:   ~/.zhice
 ```
 
-执行一次 `zcagent init` 后，会在 `ZHICE_AGENT_WORKSPACE` 下生成运行时文件：
+工作区解析优先级固定为：
 
+1. CLI `--workspace`
+2. 当前进程的 `ZHICE_AGENT_WORKSPACE`
+3. 默认目录 `Path.home() / ".zhice"`
+
+执行一次 `zcagent init` 后，会在解析出的 workspace 下生成运行时文件：
+
+- `${ZHICE_AGENT_WORKSPACE}/config/.env`
 - `${ZHICE_AGENT_WORKSPACE}/config/models.json`
 - `${ZHICE_AGENT_WORKSPACE}/config/config.yml`
 - `${ZHICE_AGENT_WORKSPACE}/prompts/*.md`
 
-`zcagent init` 可以重复执行：已有文件默认保留，缺失文件会自动补齐；确实要刷新覆盖已有模板时再加 `--force`。
+运行态环境变量默认从 `${workspace}/config/.env` 加载。该文件不能反向定义 `ZHICE_AGENT_WORKSPACE`，避免 workspace 解析形成循环；如需由 dotenv 兼容提供 workspace，必须显式传入 `--env-file`。源码项目的 `config/.env` 只保留为旧版本迁移 fallback，不再是正常启动主路径。
+
+`zcagent init` 默认生成 `config/.env`、`config.yml`、`models.json` 和 Prompt，可以重复执行：已有文件默认保留，缺失文件会自动补齐；确实要刷新覆盖已有模板时再加 `--force`。`--write-env` 仅作为旧命令兼容参数保留，与普通 init 结果相同，不再是生成 env 的前提。
 
 如果启动`zcagent`时缺少`models.json`，CLI会阻断聊天并引导运行`zcagent init`；文件已经存在但内容非法时，CLI会优先引导编辑现有文件。聊天至少需要一个enabled Chat endpoint，并配置与真实服务一致的protocol、base URL/provider、model和api_key。没有可用LLM时聊天无法继续。
 
@@ -130,7 +141,7 @@ Skill source、MCP 和 Subagent 都是可选扩展：未配置时作为 disabled
 python -m pip install -e ".[qq]"
 ```
 
-运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`channels`分区，模板为`config/config.example.yml`。本地项目`config/.env`提供`QQBOT_APP_ID`和`QQBOT_APP_SECRET`，业务配置只保留环境变量引用。每个QQ账号的`http_timeout_seconds`默认15秒，可在1~60秒内调整；未确认投递不会误把WebSocket渠道标记为断线，也不会盲目重发相同`msg_id + msg_seq`。
+运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`channels`分区，模板为`config/config.example.yml`。运行态`${ZHICE_AGENT_WORKSPACE}/config/.env`提供`QQBOT_APP_ID`和`QQBOT_APP_SECRET`，业务配置只保留环境变量引用。每个QQ账号的`http_timeout_seconds`默认15秒，可在1~60秒内调整；未确认投递不会误把WebSocket渠道标记为断线，也不会盲目重发相同`msg_id + msg_seq`。
 
 查看状态；CLI 绑定码命令保留为管理/故障恢复入口：
 
@@ -231,10 +242,7 @@ ${ZHICE_AGENT_WORKSPACE}/config/models.json
 
 Session上下文策略位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`context`分区；Embedding端点与路由位于`models.json`。未配置有效Embedding endpoint时不会阻断聊天，`/api/health`中`context_engineering`标记为`degraded`。Owner/CLI的派生状态位于`contexts/context/`，普通用户位于`contexts/users/{user_id}/context/`；compaction与`context_index.sqlite3`均可由Session JSONL重建，`/clear`和Session delete会同步失效。
 
-如果使用 `${ENV_VAR}` 占位符，ZhiCe-Agent 会从当前进程环境中解析。项目 `config/.env` 的加载不会覆盖已有环境变量，所以优先级是：
-
-1. 当前 shell 或系统环境变量
-2. 项目 `config/.env`
+如果使用 `${ENV_VAR}` 占位符，ZhiCe-Agent 会从当前进程环境中解析。普通启动先确定 workspace，再加载 `${workspace}/config/.env`，且 dotenv 不覆盖当前 shell 或系统环境变量。显式 `--env-file` 用于兼容外部 dotenv，并可在未提供 `--workspace` 时提供 `ZHICE_AGENT_WORKSPACE`；项目 `config/.env` 仅作为遗留迁移 fallback。
 
 `protocol="openai"` 会直接调用 `base_url` 指向的 OpenAI-compatible 模型网关。`protocol="litellm"` 会在 ZhiCe-Agent 进程内调用 `litellm.completion(...)`；`base_url` 对 LiteLLM 是可选字段，只在你要走自定义 `api_base` 时填写。
 

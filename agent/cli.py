@@ -27,7 +27,6 @@ from agent.channels.weixin.startup import check_weixin_startup
 from agent.config import (
     DotenvConfigurationError,
     InitConfigurationError,
-    MissingWorkspaceError,
     bootstrap_dotenv,
     init_runtime_files,
     load_config,
@@ -89,8 +88,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     env_file, argv_list = _extract_env_file(argv_list)
+    workspace_hint = _extract_workspace_hint(argv_list)
     try:
-        bootstrap_dotenv(env_file)
+        bootstrap_dotenv(env_file, workspace=workspace_hint)
     except DotenvConfigurationError as exc:
         print(console.error(str(exc)))
         print(console.warning("Save config/.env as UTF-8, or recreate it from config/.env.example."))
@@ -122,11 +122,7 @@ def _run_auth(argv: Sequence[str]) -> int:
     reset_password.add_argument("username")
 
     args = parser.parse_args(argv)
-    try:
-        config = load_config(args.workspace)
-    except MissingWorkspaceError as exc:
-        _print_workspace_error(str(exc))
-        return 1
+    config = load_config(args.workspace)
     if not _ensure_runtime_dirs(config):
         return 1
     store = SQLiteAuthStore(config.auth_db_path)
@@ -225,7 +221,6 @@ def _run_channels(argv: Sequence[str]) -> int:
         print(f"expires_at: {link.expires_at}")
         return 0
     except (
-        MissingWorkspaceError,
         ChannelConfigurationError,
         AuthSetupError,
         AuthStoreError,
@@ -253,11 +248,7 @@ def _run_chat(argv: Sequence[str]) -> int:
     args = parser.parse_args(argv)
     session_id = args.session or _default_session_id()
 
-    try:
-        config = load_config(args.workspace)
-    except MissingWorkspaceError as exc:
-        _print_workspace_error(str(exc))
-        return 1
+    config = load_config(args.workspace)
     if not _ensure_runtime_dirs(config):
         return 1
     try:
@@ -689,11 +680,7 @@ def _run_gateway(argv: Sequence[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    try:
-        config = load_config(args.workspace)
-    except MissingWorkspaceError as exc:
-        _print_workspace_error(str(exc))
-        return 1
+    config = load_config(args.workspace)
     if args.check:
         if not _ensure_runtime_dirs(config):
             return 1
@@ -740,7 +727,7 @@ def _run_init(argv: Sequence[str]) -> int:
     parser.add_argument(
         "--write-env",
         action="store_true",
-        help="Also generate a .env template inside the runtime workspace.",
+        help="Deprecated compatibility option; runtime config/.env is always initialized.",
     )
     parser.add_argument("--endpoint", default="default", help="Endpoint name to generate.")
     parser.add_argument("--protocol", default="openai", choices=["openai", "litellm"])
@@ -766,15 +753,10 @@ def _run_init(argv: Sequence[str]) -> int:
     parser.add_argument("--temperature", type=float, default=0.7)
     args = parser.parse_args(argv)
 
-    try:
-        config = load_config(args.workspace)
-    except MissingWorkspaceError as exc:
-        _print_workspace_error(str(exc))
-        return 1
+    config = load_config(args.workspace)
     try:
         written = init_runtime_files(
             config,
-            create_env=args.write_env,
             endpoint_name=args.endpoint,
             protocol=args.protocol,
             base_url=args.base_url,
@@ -811,7 +793,12 @@ def _ensure_runtime_dirs(config) -> bool:
         config.ensure_dirs()
     except OSError as exc:
         print(console.error(f"Cannot create runtime workspace directories: {exc}"))
-        print(console.warning("Check ZHICE_AGENT_WORKSPACE in config/.env, or choose a writable directory."))
+        print(
+            console.warning(
+                "Check --workspace, the process ZHICE_AGENT_WORKSPACE, or write access to "
+                "the default ~/.zhice directory."
+            )
+        )
         return False
     return True
 
@@ -878,6 +865,19 @@ def _extract_env_file(argv: list[str]) -> tuple[str | None, list[str]]:
     return env_file, cleaned
 
 
+def _extract_workspace_hint(argv: list[str]) -> str | None:
+    """Read a command-local --workspace value before loading its runtime dotenv."""
+
+    for index, item in enumerate(argv):
+        if item == "--workspace":
+            if index + 1 >= len(argv):
+                return None
+            return argv[index + 1]
+        if item.startswith("--workspace="):
+            return item.split("=", 1)[1]
+    return None
+
+
 def _new_session_id() -> str:
     """Return a new session id for an explicit /new command."""
 
@@ -888,26 +888,6 @@ def _default_session_id() -> str:
     """Return the implicit local chat session for today's date."""
 
     return "chat-" + datetime.now().strftime("%Y%m%d")
-
-
-def _print_workspace_error(message: str) -> None:
-    """Print first-run workspace setup guidance after config discovery fails."""
-
-    env_example = "ZHICE_AGENT_WORKSPACE=C:\\Users\\you\\ZhiCe-Agent-Workspace"
-    powershell_override = '$env:ZHICE_AGENT_WORKSPACE="C:\\Users\\you\\ZhiCe-Agent-Workspace"'
-
-    print(console.error(message))
-    print()
-    print(f"Create {console.bold('config/.env')} under the project config directory, for example:")
-    print("  " + console.command(env_example))
-    print()
-    print("Then run:")
-    print(f"  {console.command('zcagent init')}")
-    print(f"  {console.command('zcagent')}")
-    print(f"  {console.command('zcagent gateway')}")
-    print()
-    print("PowerShell override:")
-    print("  " + console.command(powershell_override))
 
 
 def _load_startup_prompts(prompt_loader: PromptLoader) -> bool:

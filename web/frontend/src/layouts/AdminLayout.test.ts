@@ -24,6 +24,8 @@ describe("AdminLayout", () => {
       const url = String(input);
       if (url.startsWith("/api/admin/roles") && init?.method === "PATCH") return Promise.resolve(response({ id: "role-dev", key: "developer", name: "Developer", description: "", is_builtin: true, permission_keys: ["audit.read"] }));
       if (url.startsWith("/api/admin/roles")) return Promise.resolve(response({ roles, permissions: ["audit.read"] }));
+      if (url.startsWith("/api/admin/diagnostics")) return Promise.resolve(response({ status: "ok", window_minutes: 60, filters: {}, summary: { incidents: 1 }, incidents: [{ incident_id: "inc-1", component: "llm", code: "RATE_LIMITED", subject: "primary", count: 2, last_seen_at: "2026-07-29T00:00:00Z", rule: "same_component_code_subject_within_query_window" }], timeline: [{ evidence_id: "evt-1", ts: "2026-07-29T00:00:00Z", component: "llm", event: "llm.error", code: "RATE_LIMITED" }], limitations: [] }));
+      if (url.startsWith("/api/admin/monitor")) return Promise.resolve(response({ gateway: { status: "ok", current_model: "default/model" }, capabilities: {}, activity: { summary: {}, recent_turns: [], recent_tools: [] } }));
       if (url.startsWith("/api/audit/events")) return Promise.resolve(response({ events: [{ id: "audit-1", ts: "2026-07-27T00:00:00Z", action: "role.updated", decision: "allow" }], next_cursor: "", has_more: false }));
       return Promise.resolve(response({}));
     }));
@@ -34,7 +36,7 @@ describe("AdminLayout", () => {
     setActivePinia(pinia);
     const auth = useAuthStore();
     auth.user = { id: "actor", username: "actor", display_name: "Actor", status: "active", roles: userRoles, can_manage_admins: userRoles.includes("owner") };
-    auth.permissions = ["auth.roles.read", "auth.roles.manage", "audit.read", "audit.export", "turn.read.any"];
+    auth.permissions = ["auth.roles.read", "auth.roles.manage", "audit.read", "audit.export", "turn.read.any", "diagnostics.system.use"];
     const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/", component: { template: "<div />" } }] });
     const mounted = mount(AdminLayout, { global: { plugins: [pinia, router] } });
     await flushPromises();
@@ -102,5 +104,16 @@ describe("AdminLayout", () => {
     await mounted.get(".audit-list details").trigger("click");
     expect(mounted.get(".audit-list details").element).toBeTruthy();
     expect(mounted.get('.audit-filters a[href*="/api/audit/events/export"]').element).toBeTruthy();
+  });
+
+  it("shows deterministic incidents and the redacted system timeline", async () => {
+    const mounted = await wrapper();
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "系统监控")!.trigger("click");
+    await flushPromises();
+
+    expect(mounted.text()).toContain("RATE_LIMITED");
+    expect(mounted.text()).toContain("same_component_code_subject_within_query_window");
+    expect(mounted.text()).toContain("llm.error");
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/admin/diagnostics?"), expect.anything());
   });
 });
