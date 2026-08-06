@@ -4,7 +4,7 @@ import { computed, onMounted, ref } from "vue";
 
 import { uiText, type UiLanguage } from "@/i18n";
 import { useAuthStore } from "@/stores/auth";
-import { useChannelStore } from "@/stores/channels";
+import { isWeixinAttemptTerminal, useChannelStore } from "@/stores/channels";
 import { errorMessage } from "@/stores/chat";
 import { useUiStore, type ColorModePreference, type ThemeFamily } from "@/stores/ui";
 import UserAvatar from "./UserAvatar.vue";
@@ -43,6 +43,32 @@ const themeFamilies = computed(() => [
   { key: "aurora" as ThemeFamily, label: tr("雾紫极光", "Aurora Violet") },
   { key: "amber" as ThemeFamily, label: tr("琥珀暖砂", "Amber Sand") },
 ]);
+const qqBindings = computed(() => channels.bindings.filter((item) => item.channel === "qq"));
+const weixinQrSource = computed(() => {
+  const value = channels.weixinAttempt?.qr_data || "";
+  return /^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(value) ? value : "";
+});
+const weixinAttemptTerminal = computed(() => (
+  channels.weixinAttempt ? isWeixinAttemptTerminal(channels.weixinAttempt) : false
+));
+const weixinAttemptLabel = computed(() => {
+  const labels: Record<string, [string, string]> = {
+    creating_qr: ["正在生成二维码", "Creating QR code"],
+    waiting_scan: ["等待微信扫码", "Waiting for Weixin scan"],
+    scanned_pending_confirm: ["已扫码，请在微信中确认", "Scanned; confirm in Weixin"],
+    connected: ["连接成功", "Connected"],
+    expired: ["二维码已过期", "QR code expired"],
+    cancelled: ["扫码已取消", "Scan cancelled"],
+    account_conflict: ["微信账号冲突", "Weixin account conflict"],
+    already_bound: ["该微信账号已被绑定", "This Weixin account is already connected"],
+    verification_failed: ["微信验证失败", "Weixin verification failed"],
+    upstream_unavailable: ["微信服务暂不可用", "Weixin service unavailable"],
+    persist_failed: ["绑定信息保存失败", "Failed to save binding"],
+  };
+  const statusValue = channels.weixinAttempt?.status || "";
+  const label = labels[statusValue];
+  return label ? tr(label[0], label[1]) : statusValue;
+});
 
 onMounted(() => { if (ui.settingsSection === "channels") void channels.refresh(); });
 
@@ -112,8 +138,32 @@ function chooseLanguage(language: UiLanguage) { ui.setLanguage(language, userId(
         </form>
         <section v-else class="setting-section channel-settings">
           <p v-if="channels.error" class="form-error">{{ channels.error }}</p>
-          <div class="channel-card"><div><span class="channel-icon qq">QQ</span><span><strong>QQ 机器人</strong><small>{{ channels.bindings.filter((item) => item.channel === 'qq').length ? '已连接' : '未连接' }}</small></span></div><button @click="channels.generateQqCode">生成绑定码</button><pre v-if="channels.qqCommand">{{ channels.qqCommand }}</pre><div v-if="qqToken" class="inline-bind"><input v-model="qqToken" /><button class="primary-button" @click="authorizeQq">完成授权</button></div><div v-for="binding in channels.bindings.filter((item) => item.channel === 'qq')" :key="binding.binding_id" class="binding-row"><span>{{ binding.display_name || 'QQ 身份' }}</span><button class="danger-text" @click="channels.unlink(binding.binding_id)">解绑</button></div></div>
-          <div class="channel-card"><div><span class="channel-icon weixin">微</span><span><strong>微信</strong><small>{{ channels.weixin.status }}</small></span></div><img v-if="channels.weixinAttempt?.qr_data" class="weixin-qr" :src="channels.weixinAttempt.qr_data" alt="微信绑定二维码" /><p v-if="['unavailable','disabled'].includes(channels.weixin.status)" class="muted">当前 Gateway 未启用微信连接。</p><div class="channel-actions"><button v-if="!['active','connected','bound','unavailable','disabled'].includes(channels.weixin.status) && !channels.weixinAttempt" @click="channels.startWeixin">扫码连接</button><button v-if="channels.weixinAttempt" @click="channels.cancelWeixin">取消扫码</button><button v-if="channels.weixin.status === 'reconnect_required'" @click="channels.reconnectWeixin">重新连接</button><button v-if="['active','connected','bound','reconnect_required'].includes(channels.weixin.status)" class="danger-text" @click="channels.unlinkWeixin">解绑</button></div></div>
+          <div class="channel-card">
+            <div><span class="channel-icon qq">QQ</span><span><strong>{{ tr('QQ 机器人', 'QQ bot') }}</strong><small>{{ qqBindings.length ? tr('已连接', 'Connected') : tr('未连接', 'Not connected') }}</small></span></div>
+            <p class="muted">{{ tr('群聊：先 @机器人，再发送生成的 /bind 命令。私聊：直接发送该命令。', 'Group chat: @mention the bot first, then send the generated /bind command. Direct chat: send the command directly.') }}</p>
+            <button @click="channels.generateQqCode">{{ tr('生成绑定码', 'Generate binding code') }}</button>
+            <template v-if="channels.qqCommand">
+              <pre>{{ channels.qqCommand }}</pre>
+              <small>{{ tr('绑定码为一次性短期凭据，请勿转发给他人。', 'The binding code is a short-lived one-time credential. Do not share it.') }}</small>
+            </template>
+            <div v-if="qqToken" class="inline-bind"><input v-model="qqToken" /><button class="primary-button" @click="authorizeQq">{{ tr('完成授权', 'Complete authorization') }}</button></div>
+            <div v-for="binding in qqBindings" :key="binding.binding_id" class="binding-row"><span>{{ binding.display_name || tr('QQ 身份', 'QQ identity') }}</span><button class="danger-text" @click="channels.unlink(binding.binding_id)">{{ tr('解绑', 'Unlink') }}</button></div>
+          </div>
+          <div class="channel-card">
+            <div><span class="channel-icon weixin">微</span><span><strong>{{ tr('微信', 'Weixin') }}</strong><small>{{ channels.weixin.status }}</small></span></div>
+            <img v-if="weixinQrSource" class="weixin-qr" :src="weixinQrSource" :alt="tr('微信绑定二维码', 'Weixin binding QR code')" />
+            <p v-if="channels.weixinAttempt" :class="{ 'form-error': weixinAttemptTerminal && channels.weixinAttempt.status !== 'connected' && channels.weixinAttempt.status !== 'cancelled' }">{{ weixinAttemptLabel }}</p>
+            <p v-if="channels.weixinAttempt?.error_code" class="form-error"><code>{{ channels.weixinAttempt.error_code }}</code></p>
+            <p v-if="channels.weixinError" class="form-error"><code>{{ channels.weixinError.code }}</code> · {{ channels.weixinError.message }}</p>
+            <p v-if="['unavailable','disabled'].includes(channels.weixin.status)" class="muted">{{ tr('当前 Gateway 未启用微信连接。', 'Weixin is not enabled on this Gateway.') }}</p>
+            <div class="channel-actions">
+              <button v-if="!['active','connected','bound','unavailable','disabled'].includes(channels.weixin.status) && !channels.weixinAttempt" :disabled="channels.weixinBusy" @click="channels.startWeixin">{{ tr('扫码连接', 'Connect by QR code') }}</button>
+              <button v-if="channels.weixinAttempt && !weixinAttemptTerminal" :disabled="channels.weixinBusy" @click="channels.cancelWeixin">{{ tr('取消扫码', 'Cancel scan') }}</button>
+              <button v-if="channels.weixinError || (weixinAttemptTerminal && channels.weixinAttempt?.status !== 'connected')" :disabled="channels.weixinBusy" @click="channels.retryWeixin">{{ tr('重试扫码', 'Retry scan') }}</button>
+              <button v-if="channels.weixin.status === 'reconnect_required'" :disabled="channels.weixinBusy" @click="channels.reconnectWeixin">{{ tr('重新连接', 'Reconnect') }}</button>
+              <button v-if="['active','connected','bound','reconnect_required'].includes(channels.weixin.status)" class="danger-text" :disabled="channels.weixinBusy" @click="channels.unlinkWeixin">{{ tr('解绑', 'Unlink') }}</button>
+            </div>
+          </div>
         </section>
       </main>
     </section>

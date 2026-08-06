@@ -1,0 +1,9 @@
+{
+  "Registry": "阿里云镜像仓库路径",
+  "SshHost": "云服务器地址",
+  "SshUser": "云服务器登录用户名",
+  "SshPassword": "云服务器SSH登录密码",
+  "RemoteOpsDir": "云服务器运维脚本目录",
+  "PublicUrl": "公网访问地址",
+  "Port": 10086
+}

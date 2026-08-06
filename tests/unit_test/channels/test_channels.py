@@ -13,7 +13,11 @@ import pytest
 from agent.auth.session_access import SessionAccessService
 from agent.auth.store import SQLiteAuthStore
 from agent.auth.user_context import FilesystemUserContextResolver
-from agent.channels.config import ChannelConfigurationError, load_channel_configuration
+from agent.channels.config import (
+    ChannelConfigurationError,
+    QQAccountConfig,
+    load_channel_configuration,
+)
 from agent.channels.conversation import ChannelConversationService
 from agent.channels.dedup import ChannelDedupService
 from agent.channels.identity import ExternalIdentityService
@@ -61,6 +65,7 @@ channels:
       - key: main
         app_id: ${QQ_APP}
         app_secret: ${QQ_SECRET}
+        web_base_url: https://agent.zouzhou.xyz
 """,
         encoding="utf-8",
     )
@@ -69,9 +74,15 @@ channels:
 
     assert config.qq.accounts[0].app_id == "app-123"
     assert config.qq.accounts[0].app_secret == "secret-456"
-    assert config.qq.accounts[0].web_base_url == "http://127.0.0.1:10086"
+    assert config.qq.accounts[0].web_base_url == "https://agent.zouzhou.xyz"
     assert config.qq.accounts[0].http_timeout_seconds == 15
     assert "secret-456" not in repr(config.qq.accounts[0])
+
+
+def test_qq_account_default_web_base_url_remains_loopback():
+    account = QQAccountConfig(key="main", app_id="app", app_secret="secret")
+
+    assert account.web_base_url == "http://127.0.0.1:10086"
 
 
 def test_channel_config_preserves_declared_external_channel_order(tmp_path):
@@ -329,7 +340,7 @@ def test_qq_bare_bind_returns_web_authorization_link(tmp_path):
     runtime = _FakeChannelRuntime()
     transport = _FakeTransport()
     adapter = QQChannelAdapter(
-        _Account(),
+        _Account(web_base_url="https://agent.zouzhou.xyz"),
         transport,
         ExternalIdentityService(store),
         ChannelConversationService(store, sessions),
@@ -341,10 +352,10 @@ def test_qq_bare_bind_returns_web_authorization_link(tmp_path):
 
     assert runtime.calls == []
     outbound = transport.rich[0]
-    assert "[登录并绑定智策 Agent](http://127.0.0.1:10086/?channel_bind=" in outbound.markdown
+    assert "[登录并绑定智策 Agent](https://agent.zouzhou.xyz/?channel_bind=" in outbound.markdown
     assert outbound.buttons[0].label == "登录并绑定"
     assert outbound.buttons[0].action == "url"
-    assert outbound.buttons[0].data.startswith("http://127.0.0.1:10086/?channel_bind=")
+    assert outbound.buttons[0].data.startswith("https://agent.zouzhou.xyz/?channel_bind=")
 
 
 def test_qq_manual_bind_code_still_binds_directly(tmp_path):

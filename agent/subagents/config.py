@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -51,7 +51,9 @@ class SubagentConfig:
     max_subagents_per_parent_turn: int = DEFAULT_MAX_SUBAGENTS_PER_PARENT_TURN
     max_batches_per_parent_turn: int = DEFAULT_MAX_BATCHES_PER_PARENT_TURN
     max_batch_result_chars: int = DEFAULT_MAX_BATCH_RESULT_CHARS
-    profiles: Mapping[str, SubagentProfile] = MappingProxyType({})
+    profiles: Mapping[str, SubagentProfile] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def list_profiles(self) -> tuple[SubagentProfile, ...]:
         """Return Profiles in stable YAML order."""

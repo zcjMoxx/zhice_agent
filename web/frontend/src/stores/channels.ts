@@ -1,15 +1,39 @@
 import { defineStore } from "pinia";
 
-import { api } from "@/api/client";
+import { ApiError, api } from "@/api/client";
+import type { ChannelBinding, WeixinBindingAttempt, WeixinChannelStatus } from "@/api/types";
+
+const WEIXIN_TERMINAL_STATUSES = new Set([
+  "connected",
+  "expired",
+  "cancelled",
+  "account_conflict",
+  "already_bound",
+  "verification_failed",
+  "upstream_unavailable",
+  "persist_failed",
+]);
+
+export function isWeixinAttemptTerminal(attempt: WeixinBindingAttempt): boolean {
+  return WEIXIN_TERMINAL_STATUSES.has(attempt.status) || Boolean(attempt.error_code);
+}
+
+function requestFailure(error: unknown, fallback: string): { code: string; message: string } {
+  if (error instanceof ApiError) return { code: error.code, message: error.message };
+  if (error instanceof Error) return { code: "REQUEST_FAILED", message: error.message };
+  return { code: "REQUEST_FAILED", message: fallback };
+}
 
 export const useChannelStore = defineStore("channels", {
   state: () => ({
-    bindings: [] as Array<{ binding_id: string; channel: string; display_name: string; linked_at: string }>,
-    weixin: { status: "unknown", linked_at: "" },
-    weixinAttempt: null as null | { attempt_id: string; status: string; expires_at: string; qr_data: string; error_code: string },
+    bindings: [] as ChannelBinding[],
+    weixin: { status: "unknown", linked_at: "" } as WeixinChannelStatus,
+    weixinAttempt: null as WeixinBindingAttempt | null,
+    weixinError: null as { code: string; message: string } | null,
     qqCode: "",
     qqCommand: "",
     busy: false,
+    weixinBusy: false,
     error: "",
     pollTimer: 0,
   }),
@@ -17,16 +41,19 @@ export const useChannelStore = defineStore("channels", {
     async refresh() {
       this.busy = true;
       this.error = "";
-      const [bindings, weixin] = await Promise.allSettled([api.bindings(), api.weixinStatus()]);
-      if (bindings.status === "fulfilled") this.bindings = bindings.value.bindings;
-      else this.error = bindings.reason instanceof Error ? bindings.reason.message : "渠道绑定读取失败";
-      if (weixin.status === "fulfilled") this.weixin = weixin.value;
-      else {
-        this.weixin = { status: "unavailable", linked_at: "" };
-        const message = weixin.reason instanceof Error ? weixin.reason.message : "微信状态读取失败";
-        this.error = [this.error, message].filter(Boolean).join("；");
+      try {
+        const [bindings, weixin] = await Promise.allSettled([api.bindings(), api.weixinStatus()]);
+        if (bindings.status === "fulfilled") this.bindings = bindings.value.bindings;
+        else this.error = bindings.reason instanceof Error ? bindings.reason.message : "渠道绑定读取失败";
+        if (weixin.status === "fulfilled") this.weixin = weixin.value;
+        else {
+          this.weixin = { status: "unavailable", linked_at: "" };
+          const message = weixin.reason instanceof Error ? weixin.reason.message : "微信状态读取失败";
+          this.error = [this.error, message].filter(Boolean).join("；");
+        }
+      } finally {
+        this.busy = false;
       }
-      this.busy = false;
     },
     async generateQqCode() {
       const result = await api.qqCode();
@@ -36,24 +63,71 @@ export const useChannelStore = defineStore("channels", {
     async authorizeQq(token: string) { await api.qqAuthorize(token); await this.refresh(); },
     async unlink(id: string) { await api.unlinkBinding(id); await this.refresh(); },
     async startWeixin() {
-      this.weixinAttempt = await api.startWeixin();
-      this.schedulePoll();
+      window.clearTimeout(this.pollTimer);
+      this.weixinBusy = true;
+      this.weixinError = null;
+      try {
+        this.weixinAttempt = await api.startWeixin();
+        await this.afterWeixinAttempt();
+      } catch (error) {
+        this.weixinError = requestFailure(error, "微信扫码启动失败");
+      } finally {
+        this.weixinBusy = false;
+      }
     },
     schedulePoll() {
       window.clearTimeout(this.pollTimer);
-      if (!this.weixinAttempt || !["pending", "scanning"].includes(this.weixinAttempt.status)) return;
-      this.pollTimer = window.setTimeout(async () => {
-        if (!this.weixinAttempt) return;
-        this.weixinAttempt = await api.pollWeixin(this.weixinAttempt.attempt_id);
-        if (this.weixinAttempt.status === "bound") { this.weixinAttempt = null; await this.refresh(); }
-        else this.schedulePoll();
-      }, 1500);
+      if (!this.weixinAttempt || isWeixinAttemptTerminal(this.weixinAttempt)) return;
+      this.pollTimer = window.setTimeout(() => { void this.pollWeixinNow(); }, 1500);
+    },
+    async pollWeixinNow() {
+      const attemptId = this.weixinAttempt?.attempt_id;
+      if (!attemptId) return;
+      this.weixinBusy = true;
+      this.weixinError = null;
+      try {
+        const attempt = await api.pollWeixin(attemptId);
+        if (this.weixinAttempt?.attempt_id !== attemptId) return;
+        this.weixinAttempt = attempt;
+        await this.afterWeixinAttempt();
+      } catch (error) {
+        this.weixinError = requestFailure(error, "微信扫码状态读取失败");
+      } finally {
+        this.weixinBusy = false;
+      }
+    },
+    async afterWeixinAttempt() {
+      if (!this.weixinAttempt) return;
+      if (this.weixinAttempt.status === "connected") {
+        window.clearTimeout(this.pollTimer);
+        await this.refresh();
+        return;
+      }
+      if (!isWeixinAttemptTerminal(this.weixinAttempt)) this.schedulePoll();
+      else window.clearTimeout(this.pollTimer);
+    },
+    async retryWeixin() {
+      this.weixinError = null;
+      if (this.weixinAttempt && !isWeixinAttemptTerminal(this.weixinAttempt)) {
+        await this.pollWeixinNow();
+        return;
+      }
+      this.weixinAttempt = null;
+      await this.startWeixin();
     },
     async cancelWeixin() {
-      if (!this.weixinAttempt) return;
-      await api.cancelWeixin(this.weixinAttempt.attempt_id);
-      this.weixinAttempt = null;
+      const attemptId = this.weixinAttempt?.attempt_id;
+      if (!attemptId) return;
       window.clearTimeout(this.pollTimer);
+      this.weixinBusy = true;
+      this.weixinError = null;
+      try {
+        this.weixinAttempt = await api.cancelWeixin(attemptId);
+      } catch (error) {
+        this.weixinError = requestFailure(error, "取消微信扫码失败");
+      } finally {
+        this.weixinBusy = false;
+      }
     },
     async unlinkWeixin() { await api.unlinkWeixin(); await this.refresh(); },
     async reconnectWeixin() { await api.reconnectWeixin(); await this.refresh(); },

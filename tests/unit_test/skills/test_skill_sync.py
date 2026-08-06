@@ -1,10 +1,25 @@
 """Tests for configured Skill source synchronization."""
 
 import shutil
+from pathlib import Path
 
 import pytest
 
 from agent.skills.sync import SkillSourceSync, SkillSyncError
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_default_config_uses_only_the_builtin_local_skill_source():
+    """The public default must not contain a fake remote fallback URL."""
+
+    template = (ROOT / "config" / "config.example.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'local_dir: "${ZHICE_AGENT_SKILL_REPO}"' in template
+    assert "https://example.com/skills.git" not in template
+    assert "git_url:" not in template
 
 
 def _write_skills_section(config_dir, body):
@@ -110,11 +125,12 @@ def test_local_source_mirrors_complete_repo_under_extends_source(tmp_path):
     ]
 
 
-def test_skill_repo_placeholder_points_to_repo_root(tmp_path):
+def test_skill_repo_placeholder_points_to_repo_root(tmp_path, monkeypatch):
     """${ZHICE_AGENT_SKILL_REPO} should point at a source repo root."""
 
     workspace = tmp_path / "workspace"
     skill_repo = tmp_path / "skill-repo"
+    monkeypatch.setenv("ZHICE_AGENT_SKILL_REPO", str(tmp_path / "ignored-env-repo"))
     _write_skill(skill_repo / "skills", "demo")
     config_dir = workspace / "config"
     config_dir.mkdir(parents=True)
@@ -146,6 +162,53 @@ sources:
     assert [(root.source, root.root) for root in sync.skill_roots()] == [
         ("official", (workspace / "extends" / "official" / "skills").resolve())
     ]
+
+
+def test_skill_repo_environment_overrides_builtin_default(tmp_path, monkeypatch):
+    """The dotenv-backed environment should override the packaged Skill repo."""
+
+    workspace = tmp_path / "workspace"
+    skill_repo = tmp_path / "environment-skill-repo"
+    _write_skill(skill_repo / "skills", "demo")
+    config_dir = workspace / "config"
+    config_dir.mkdir(parents=True)
+    _write_skills_section(
+        config_dir,
+        """
+sync:
+  on_startup: never
+sources:
+  - name: official
+    sync: true
+    local_dir: "${ZHICE_AGENT_SKILL_REPO}"
+""",
+    )
+    monkeypatch.setenv("ZHICE_AGENT_SKILL_REPO", str(skill_repo))
+    sync = SkillSourceSync(
+        workspace=workspace,
+        config_dir=config_dir,
+        extends_dir=workspace / "extends",
+    )
+
+    result = sync.sync()
+
+    assert sync.skill_repo == skill_repo.resolve()
+    assert result.sources[0].new == ["demo"]
+    assert (workspace / "extends" / "official" / "skills" / "demo" / "SKILL.md").is_file()
+
+
+def test_empty_skill_repo_environment_uses_builtin_default(tmp_path, monkeypatch):
+    """An empty dotenv value should behave like an omitted override."""
+
+    monkeypatch.setenv("ZHICE_AGENT_SKILL_REPO", "  ")
+
+    sync = SkillSourceSync(
+        workspace=tmp_path / "workspace",
+        config_dir=tmp_path / "workspace" / "config",
+        extends_dir=tmp_path / "workspace" / "extends",
+    )
+
+    assert sync.skill_repo == (Path(__file__).resolve().parents[3] / "skill_repo").resolve()
 
 
 def test_default_skill_repo_points_to_repo_root():

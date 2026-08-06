@@ -61,8 +61,8 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 ### Case 7.1: `/memory`
 
 - 输入：`/memory`，以及已经删除的 `/memory session`、list、extract、summarize 子命令。
-- 预期：默认提取当前 Session 长期 Memory；list 展示当前 Memory；指定 Session 提取和 Summary 作为 Tip 中的高级入口。
-- 检查点：命令不进入普通聊天；provider 或格式失败时不覆盖旧摘要。
+- 预期：裸 `/memory` 展示当前 actor 的长期 Memory；任何附加参数只返回 `Usage: /memory`，不恢复已删除的手动提取或 Session Summary。
+- 检查点：命令不进入普通聊天，也不调用提取 Provider；自动提取只由 Web Session 空闲调度器触发。
 
 ### Case 8: Fake LLM 对话
 

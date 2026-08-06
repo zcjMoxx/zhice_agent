@@ -8,6 +8,7 @@ services:
         ZHICE_VERSION: ${ZHICE_VERSION:-dev}
         ZHICE_REVISION: ${ZHICE_REVISION:-unknown}
         ZHICE_BUILD_DATE: ${ZHICE_BUILD_DATE:-unknown}
+        APT_MIRROR: ${ZHICE_APT_MIRROR:-}
     restart: unless-stopped
     ports:
       - "${ZHICE_PORT:-10086}:10086"
@@ -16,6 +17,7 @@ services:
       - zhice-state:/home/zhice/.zhice/state
       - zhice-logs:/home/zhice/.zhice/logs
       - zhice-extends:/home/zhice/.zhice/extends
+      - zhice-weixin-credentials:/home/zhice/.zhice/config/channels/weixin/accounts
     init: true
 
 volumes:
@@ -23,3 +25,4 @@ volumes:
   zhice-state:
   zhice-logs:
   zhice-extends:
+  zhice-weixin-credentials:

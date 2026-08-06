@@ -156,12 +156,6 @@ sources:
     # Local source repository root. Preferred when it exists.
     # Repository layout is fixed as local_dir/skills/{skill_name}/SKILL.md.
     local_dir: "${ZHICE_AGENT_SKILL_REPO}"
-
-    # Remote fallback when local_dir is absent or missing.
-    git_url: "https://example.com/skills.git"
-
-    # Git branch. Defaults to master.
-    target: "master"
 ```
 
 字段说明：
@@ -174,8 +168,10 @@ sources:
 - `sources[].name`：source 名称，用于日志、命名空间、`/skills sync <name>` 和 `source/name` 限定名。
 - `sources[].sync`：是否同步该 source。
 - `sources[].local_dir`：本地技能仓库根目录。存在时优先使用，不参与展示、调用或运行时目录命名。
-- `sources[].git_url`：远端 git 技能仓库兜底地址。
+- `sources[].git_url`：可选的真实远端 git 技能仓库地址；默认本地 source 模板不填写虚假兜底地址。
 - `sources[].target`：Git branch，默认 `master`。
+
+`${ZHICE_AGENT_SKILL_REPO}` 是本地 source 仓库根目录变量，不接受 Git URL。显式构造参数优先于该环境变量；环境变量未配置或为空时，运行时自动定位随项目或镜像提供的 `skill_repo/`。
 
 git source 示例：
 

@@ -22,7 +22,7 @@ skills  -> no agent imports
 规则：
 
 - `agent/protocols/` 只放接口和数据结构，禁止 import 具体实现。
-- `agent/loop.py` 消费能力时走 `LLMProvider`、`ToolProvider`、`SkillProvider`、`SessionStore`。
+- `agent/core/loop.py` 消费能力时走 `LLMProvider`、`ToolProvider`、`SkillProvider`、`SessionStore`。
 - `agent/tools/` 内的 LLM 可调用工具禁止互相 import；公共逻辑放 `base.py` 或明确的 shared helper。
 - `skills/*/scripts/` 禁止 import `agent.*`，建议通过 `--params`、环境变量、文件或外部 API 通信。
 
@@ -38,8 +38,8 @@ skills  -> no agent imports
 - 所有运行路径从 `ZHICE_AGENT_WORKSPACE` 派生。
 - 运行态配置文件统一放在 `${ZHICE_AGENT_WORKSPACE}/config/`；仓库 `config/` 只放模板或启动用示例。
 - 仓库不提交真实 Secret；仓库只提交 `config/.env.example` 和不含真实 key 的示例配置。
-- 本地开发可在 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 写入 `api_key`，因为工作目录不属于仓库。
-- Docker、云部署、CI 等环境优先通过 `.env`、env-file 或平台 Secret 注入 Secret；`${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 里仍统一使用 `api_key`，可写明文，也可写 `${ENV_VAR}` 占位。
+- 本地开发可在 `${ZHICE_AGENT_WORKSPACE}/config/models.json` 写入 `api_key`，因为工作目录不属于仓库。
+- Docker、云部署、CI 等环境优先通过 `.env`、env-file 或平台 Secret 注入 Secret；`${ZHICE_AGENT_WORKSPACE}/config/models.json` 里仍统一使用 `api_key`，可写明文，也可写 `${ENV_VAR}` 占位。
 - 文件、工具、exec 默认限制在 workspace 内，禁止默认访问 workspace 外路径。
 
 ## 5. Tool 规范
@@ -51,7 +51,7 @@ skills  -> no agent imports
 
 ## 6. Skill 规范
 
-Skill source 内的 Skill 最小结构：
+核心 `SkillLoader` 的识别下限是 `{skill_name}/SKILL.md`，其中 frontmatter 必须包含 `description`；`name` 缺失时会使用目录名并记录 warning，`scripts/` 不是发现 Skill 的必要条件。仓库内正式维护、需要执行脚本的 Skill 采用更严格结构：
 
 ```text
 skills/{skill_name}/
@@ -59,7 +59,7 @@ skills/{skill_name}/
   scripts/{entry}.py
 ```
 
-`SKILL.md` 必须包含：
+仓库内正式 Skill 的 `SKILL.md` 必须包含：
 
 - frontmatter：`name`、`description`
 - 参数表
@@ -113,13 +113,14 @@ python -m pytest
 
 如果后续设计已经改变了旧日期设计记录的方案，只在旧文档标题下方补一段 `> 说明：...`，说明当前代码采用什么、旧方案哪里不再适用、应参考哪份新文档或当前活文档；旧文档正文保持当时方案原貌。
 
-## 9. 暂不纳入第一阶段的内容
+## 9. 当前轻量边界
 
-ZhiCe-Agent 第一阶段先保持轻量，暂不纳入：
+ZhiCe-Agent 已包含本地多用户、QQ/微信外部渠道和私有镜像部署，但仍保持轻量，暂不纳入：
 
-- 多用户和多渠道隔离。
-- Skill 市场、审批流、自进化。
-- 复杂容器编排、发布流水线、多环境 overlay。
+- 面向公网的 OAuth/SSO、组织/租户和多 workspace 隔离。
+- 跨 Turn 后台 Agent Job、`depth > 1` 的递归 Subagent 和自动 worktree merge。
+- Skill 市场、审批流和自进化。
+- 多节点容器编排、完整发布平台和多环境 overlay。
 - 重型 E2E 覆盖率硬指标。
 - 多层扩展仓库和用户私有覆盖优先级。
 

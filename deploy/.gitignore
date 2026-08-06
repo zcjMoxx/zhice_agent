@@ -1,3 +1,2 @@
-.env
-config.yml
-models.json
+private/*
+!private/cloud-target.example.json

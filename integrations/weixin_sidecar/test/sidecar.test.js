@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import test from "node:test";
 import { PassThrough } from "node:stream";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { blockedDriver, createSidecar, PROTOCOL_VERSION } from "../src/main.js";
 
@@ -37,6 +39,48 @@ test("binding stops at the explicit POC boundary", async () => {
       code: "WEIXIN_TRANSPORT_POC_REQUIRED",
     },
   );
+});
+
+test("direct process entry serves hello, health, and QR binding on Linux-compatible URLs", async () => {
+  const entry = fileURLToPath(new URL("../src/main.js", import.meta.url));
+  const fixture = pathToFileURL(
+    fileURLToPath(new URL("./process-fetch-fixture.js", import.meta.url)),
+  ).href;
+  const child = spawn(process.execPath, [entry], {
+    env: { ...process.env, NODE_OPTIONS: `--import=${fixture}` },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const frames = [];
+  let stdoutBuffer = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdoutBuffer += chunk;
+    const lines = stdoutBuffer.split("\n");
+    stdoutBuffer = lines.pop() || "";
+    for (const line of lines) if (line) frames.push(JSON.parse(line));
+  });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const exited = new Promise((resolve) => child.once("exit", (code) => resolve(code)));
+  const send = (frame) => child.stdin.write(
+    `${JSON.stringify({ protocol_version: PROTOCOL_VERSION, ...frame })}\n`,
+  );
+
+  try {
+    send({ type: "hello", request_id: "process-hello" });
+    send({ type: "health.get", request_id: "process-health" });
+    send({ type: "binding.start", request_id: "process-binding", attempt_id: "process-attempt" });
+    await waitForFrames(frames, ["hello.ok", "health.status", "binding.qr", "binding.connected"]);
+
+    assert.equal(frames.find((frame) => frame.type === "health.status")?.status, "available");
+    assert.match(frames.find((frame) => frame.type === "binding.qr")?.qr_data || "", /^data:image\/png;base64,/);
+    send({ type: "shutdown", request_id: "process-shutdown" });
+    await waitForFrames(frames, ["shutdown.ok"]);
+    assert.equal(await exited, 0, stderr);
+  } finally {
+    if (child.exitCode === null) child.kill();
+  }
 });
 
 test("injected driver keeps accounts isolated", async () => {
@@ -81,3 +125,13 @@ test("restarting one account stops the previous poller before replacement", asyn
   assert.deepEqual(stopped, [1]);
   assert.deepEqual(sent, [2]);
 });
+
+async function waitForFrames(frames, requiredTypes, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const types = new Set(frames.map((frame) => frame.type));
+    if (requiredTypes.every((type) => types.has(type))) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`timed out waiting for frames: ${requiredTypes.join(", ")}`);
+}

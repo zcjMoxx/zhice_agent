@@ -21,8 +21,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gateway = [
+    "websockets>=12.0,<16",
+]
 qq = [
     "qq-botpy>=1.2.1,<2",
+]
+deploy = [
+    "paramiko>=2.8.0,<4",
 ]
 dev = [
     "pytest>=8.0.0",

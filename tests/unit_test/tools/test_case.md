@@ -70,5 +70,5 @@
 ### Case 10: Memory 工具
 
 - 输入：绑定 actor MemoryContext 的 `memory_read(mode=list/search)` 与用户对话授权后的 `memory_write`。
-- 预期：列表按固定类别整理并返回分页数量，搜索要求具体 query，摘要读取要求 session id；写入支持 add/replace/delete。
+- 预期：列表按固定类别整理并返回分页数量，搜索要求具体 query；读取只支持 `list/search`，写入支持 add/replace/delete。
 - 检查点：敏感内容拒绝时不回显原文；ToolResult metadata 只包含 id/category/mode/count 等安全字段。

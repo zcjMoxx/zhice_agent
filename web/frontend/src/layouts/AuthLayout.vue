@@ -17,7 +17,9 @@ const username = ref("");
 const password = ref("");
 const confirmation = ref("");
 const setupToken = ref("");
-const visible = ref(false);
+const passwordVisible = ref(false);
+const confirmationVisible = ref(false);
+const setupTokenVisible = ref(false);
 const busy = ref(false);
 const failure = ref("");
 function tr(chinese: string, english: string): string { return uiText(ui.language, chinese, english); }
@@ -43,6 +45,9 @@ function switchMode(next: "login" | "register") {
   mode.value = next;
   password.value = "";
   confirmation.value = "";
+  passwordVisible.value = false;
+  confirmationVisible.value = false;
+  setupTokenVisible.value = false;
   failure.value = "";
 }
 </script>
@@ -54,9 +59,9 @@ function switchMode(next: "login" | "register") {
       <div class="auth-brand-panel">
         <div class="brand-lockup"><img :src="'/static/zhice-logo-a.png'" alt="" /><strong>ZhiCe-Agent</strong></div>
         <div class="auth-brand-copy">
-          <span class="eyebrow"><Sparkles :size="16" /> {{ tr('明亮曜石', 'Light Obsidian') }}</span>
+          <span class="eyebrow"><Sparkles :size="16" /> {{ tr('松雾晨光', 'Pine Mist Dawn') }}</span>
           <h1>{{ setup ? tr('建立你的本地智能工作台', 'Build your local intelligent workspace') : mode === 'login' ? tr('继续与智能同行', 'Continue with intelligence') : tr('从一个清晰的对话开始', 'Start with a clear conversation') }}</h1>
-          <p>{{ setup ? tr('此入口只在 Owner 尚未创建且配置了初始化凭据时可用。', 'This entry is available only before the Owner exists and with setup credentials configured.') : tr('会话、Memory、Tool 与渠道连接都留在清晰可控的本地边界中。', 'Sessions, Memory, Tools, and channel connections stay within a clear, controllable local boundary.') }}</p>
+          <p>{{ setup ? tr('此入口只在 Owner 尚未创建且配置了初始化凭据时可用。', 'This entry is available only before the Owner exists and with setup credentials configured.') : tr('让每一次对话，都离完成更近一步。', 'Let every conversation bring you one step closer to completion.') }}</p>
         </div>
         <button v-if="!setup" class="ghost-inverse" type="button" @click="switchMode(mode === 'login' ? 'register' : 'login')">
           {{ mode === 'login' ? tr('创建账号', 'Create account') : tr('已有账号', 'I have an account') }} <ArrowRight :size="17" />
@@ -66,16 +71,16 @@ function switchMode(next: "login" | "register") {
       <form class="auth-form-panel" @submit.prevent="submit">
         <div class="auth-form-heading">
           <span class="form-icon"><ShieldCheck :size="21" /></span>
-          <div><h2>{{ panelTitle }}</h2><p>{{ setup ? tr('Owner 用户名固定为 owner', 'The Owner username is fixed as owner') : mode === 'login' ? tr('使用本地账号登录', 'Sign in with your local account') : tr('新账号默认拥有普通用户角色', 'New accounts receive the standard user role') }}</p></div>
+          <div><h2>{{ panelTitle }}</h2><p>{{ setup ? tr('Owner 用户名固定为 owner', 'The Owner username is fixed as owner') : mode === 'login' ? tr('登录你的 ZhiCe-Agent 账号', 'Sign in to your ZhiCe-Agent account') : tr('新账号默认拥有普通用户角色', 'New accounts receive the standard user role') }}</p></div>
         </div>
         <label v-if="!setup"><span>{{ tr('用户名', 'Username') }}</span><input v-model="username" autocomplete="username" required :placeholder="tr('例如 zhangsan', 'e.g. alex')" /></label>
         <label v-else><span>{{ tr('用户名', 'Username') }}</span><input value="owner" disabled /></label>
         <label>
           <span>{{ setup || mode === 'register' ? tr('新密码', 'New password') : tr('密码', 'Password') }}</span>
-          <span class="password-field"><input v-model="password" :type="visible ? 'text' : 'password'" :autocomplete="mode === 'login' && !setup ? 'current-password' : 'new-password'" minlength="8" required /><button type="button" :aria-label="visible ? tr('隐藏密码', 'Hide password') : tr('显示密码', 'Show password')" @click="visible = !visible"><EyeOff v-if="visible" :size="18" /><Eye v-else :size="18" /></button></span>
+          <span class="password-field"><input v-model="password" :type="passwordVisible ? 'text' : 'password'" :autocomplete="mode === 'login' && !setup ? 'current-password' : 'new-password'" minlength="8" required /><button type="button" tabindex="-1" :aria-label="passwordVisible ? tr('隐藏密码', 'Hide password') : tr('显示密码', 'Show password')" @click="passwordVisible = !passwordVisible"><EyeOff v-if="passwordVisible" :size="18" /><Eye v-else :size="18" /></button></span>
         </label>
-        <label v-if="mode === 'register' && !setup"><span>{{ tr('确认密码', 'Confirm password') }}</span><input v-model="confirmation" :type="visible ? 'text' : 'password'" autocomplete="new-password" minlength="8" required /></label>
-        <label v-if="setup"><span>{{ tr('初始化凭据', 'Setup credential') }}</span><input v-model="setupToken" :type="visible ? 'text' : 'password'" autocomplete="off" required /></label>
+        <label v-if="mode === 'register' && !setup"><span>{{ tr('确认密码', 'Confirm password') }}</span><span class="password-field"><input v-model="confirmation" :type="confirmationVisible ? 'text' : 'password'" autocomplete="new-password" minlength="8" required /><button type="button" tabindex="-1" :aria-label="confirmationVisible ? tr('隐藏确认密码', 'Hide confirmation password') : tr('显示确认密码', 'Show confirmation password')" @click="confirmationVisible = !confirmationVisible"><EyeOff v-if="confirmationVisible" :size="18" /><Eye v-else :size="18" /></button></span></label>
+        <label v-if="setup"><span>{{ tr('初始化凭据', 'Setup credential') }}</span><span class="password-field"><input v-model="setupToken" :type="setupTokenVisible ? 'text' : 'password'" autocomplete="off" required /><button type="button" tabindex="-1" :aria-label="setupTokenVisible ? tr('隐藏初始化凭据', 'Hide setup credential') : tr('显示初始化凭据', 'Show setup credential')" @click="setupTokenVisible = !setupTokenVisible"><EyeOff v-if="setupTokenVisible" :size="18" /><Eye v-else :size="18" /></button></span></label>
         <p v-if="failure" class="form-error" role="alert">{{ failure }}</p>
         <button class="primary-button auth-submit" :disabled="busy" type="submit">{{ busy ? tr('处理中…', 'Working…') : setup ? tr('创建 Owner 并登录', 'Create Owner and sign in') : mode === 'login' ? tr('登录', 'Sign in') : tr('创建并登录', 'Create and sign in') }}</button>
         <button v-if="!setup" class="mobile-mode-switch" type="button" @click="switchMode(mode === 'login' ? 'register' : 'login')">{{ mode === 'login' ? tr('没有账号？立即创建', 'No account? Create one') : tr('已有账号？返回登录', 'Already have an account? Sign in') }}</button>

@@ -308,7 +308,7 @@ ZhiCe-Agent（CLI + Web + QQ + 微信）：
 
 ### 3.2 后续扩展方向
 
-当前代码已经完成到 Part 17。Part 17 的 Provider retry、事故诊断、MCP 动态可靠性、状态恢复和私有部署链已经落地；由于当前 Docker Desktop daemon 未运行，真实镜像 smoke、registry push 与云端 deploy 仍属于待关闭的生产部署验收。
+当前代码已经完成到 Part 17。Part 17 的 Provider retry、事故诊断、MCP 动态可靠性、状态恢复和私有部署链已经落地；本地镜像 smoke、阿里云 ACR push、腾讯云按 Digest deploy、Caddy HTTPS 和持久化恢复均已完成真实生产部署验收。2026-08-04 又将日常操作收敛为本地部署、已有镜像上云和源码完整上云三个入口。
 
 未来核心扩展只保留 Part 18 Skill Runtime、CLI 与本地运维优化，独立承接 SkillExecutor、`skill.*` 与 ProgressSink。Part 17 当前实现见 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，Part 18 继续复用其诊断服务、部署状态和单进程边界。
 
@@ -1423,7 +1423,7 @@ ${ZHICE_AGENT_WORKSPACE}/
 Part 12～17 和 Capability Selection 已进入当前代码基线，其事实和边界分别维护在对应 Part 活文档。Part 17 仍保留在本章用于说明已经稳定的运行可靠性与部署边界；尚未实现的核心路线只剩 Part 18。
 
 ```text
-Part 17 运行可靠性、系统级诊断、生产部署与发布（实现完成，生产部署验收待关闭）
+Part 17 运行可靠性、系统级诊断、生产部署与发布（实现与生产部署验收完成）
   -> Part 18 Skill Runtime、CLI 与本地运维优化（下一项）
 ```
 
@@ -1442,14 +1442,14 @@ Part 17 已在 Part 16 稳定前端产品面和 Part 15 上下文派生状态之
 - 扩展 stopped/error Turn 查询、MCP `tools/list_changed`、Catalog 原子刷新、连接重建、活动调用取消和 Server 运行统计。
 - 增加遗留 running Turn 恢复、备份/恢复、索引重建和单进程生产拓扑约束。
 - 第一版固定单 Gateway 进程、单 worker、单 workspace writer；不引入共享队列、外部向量后端、Kubernetes 或多环境 overlay。
-- 新建公开可见的 `deploy/` 编排与脚本目录；本机真实 `deploy/.env`、`config.yml`、`models.json` 是不提交 Git 的私有覆盖层，不复制完整 workspace。
+- 新建公开可见的 `deploy/` 编排与脚本目录；根目录只保留三个 CMD 用户入口和容器定义，本机真实 `.env`、`config.yml`、`models.json` 与云目标统一放在 Git 忽略的 `deploy/private/`，PowerShell 编排放在 `deploy/pipelines/`，底层步骤放在 `deploy/scripts/`，不复制完整 workspace。
 - 镜像构建直接使用仓库已有代码、Prompt、Skill source、Vue build 和可复现微信 sidecar build，并把三个私有配置放入固定容器 workspace。
 - 本机完成 build、最终镜像烟测和 push；云端按不可变 digest 直接运行私有镜像，只为 contexts/state/logs/extends 等运行数据挂 volume。
 - 公开 Git、公开 wheel、公开镜像和构建日志不得包含真实 Secret 或本地用户数据；受控私有部署镜像可以按操作者明确选择携带真实配置，其 registry 拉取权限按 Secret 权限管理。
 
 部署层继续保持 `app -> core -> protocols`，core 不依赖容器、反向代理、向量数据库或平台 SDK。Part 17 的诊断数据接入 Part 16 已有管理页面，不建立第二套 Web。
 
-当前验证结果为 Python 全量 `796 passed, 1 skipped`，Ruff、前端 `29` 项测试、lint/typecheck/build、deploy 静态检查和 compose 校验均通过。Docker Desktop daemon 当前未运行，因此真实 image build/run smoke、registry push 和云端 deploy 尚未执行；Part 17 代码实现已经完成，生产部署验收尚未关闭。
+代码落地时的验证结果为 Python 全量 `796 passed, 1 skipped`，Ruff、前端 `29` 项测试、lint/typecheck/build、deploy 静态检查和 compose 校验均通过。随后已完成本地 image build/run smoke、阿里云 ACR push、腾讯云按不可变 Digest deploy、Caddy HTTPS、公网健康、认证初始化和容器重启持久化验收。2026-08-04 新增的三入口发布自动化已通过专项单测与 Windows PowerShell 5.1 解析验证；它复用已验收链路，不把真实目标配置或凭证提交到仓库。
 
 ### 15.2 Part 18：Skill Runtime、CLI 与本地运维优化
 
@@ -1922,7 +1922,7 @@ Web 渠道绑定管理
 
 以上六项均已落地。Vue 已成为唯一正式 Web 前端，包内 production build 可由 Gateway 直接服务；系统监控只聚合现有 Gateway/Capability/Activity 真值，Security Audit 保持独立并支持筛选、游标分页和导出。Part 16 未改变 AgentLoop、Session、RBAC、Channel 或现有 REST/WS 语义。当前实现依据：`docs_design/zhice-agent-part16-web-product-design.md`。
 
-### Milestone 17：运行可靠性、系统级诊断、生产部署与发布（实现完成，生产部署验收待关闭）
+### Milestone 17：运行可靠性、系统级诊断、生产部署与发布（实现与生产部署验收完成）
 
 依赖顺序：
 
@@ -1931,10 +1931,11 @@ Web 渠道绑定管理
 3. MCP `tools/list_changed`、Catalog 原子刷新、reload/reconnect、活动调用取消和运行统计。
 4. 遗留 running Turn 恢复、context compaction/index 备份与重建、单进程/单 writer 边界。
 5. `deploy/` 私有配置覆盖层、Dockerfile、compose、固定镜像路径和可复现 Vue/微信 sidecar build。
-6. 本地 build/push/run smoke 与云端 deploy/stop/status/logs 脚本。
+6. 本地 build/push/run smoke 与云端 deploy/stop/status/logs/restart 五个 Shell 运维脚本，以及负责 versioned release、`sh -n` 校验和 `RemoteOpsDir/current` 原子切换的 Paramiko remote ops helper。
 7. 真实云端部署、健康检查、优雅退出、volume 升级恢复和公开仓库/私有镜像数据边界验收。
+8. 将本地部署、已有镜像上云、源码完整上云收敛为三个稳定入口，统一自动标签、精确 Digest、Paramiko 密码 SSH、known_hosts 主机密钥拒绝策略、五脚本原子同步与公网 health 检查；`SshPassword` 只允许保存在 Git 忽略的本机私有 JSON，并通过 sudo stdin 使用和输出脱敏。
 
-依赖顺序中的 1～6 已完成代码、脚本和不依赖 Docker daemon 的验证；Python 全量 `796 passed, 1 skipped`，Ruff、前端 `29` 项测试、lint/typecheck/build、deploy 静态检查和 compose 校验均通过。第 7 项尚未关闭：当前 Docker Desktop daemon 未运行，真实 image build/run smoke、registry push、云端 deploy、真实 volume 升级恢复和生产健康检查未执行。
+依赖顺序中的 1～8 均已关闭：代码、脚本、Python/前端/deploy 静态检查已通过，本地 image build/run smoke、registry push、云端 deploy、真实 volume 持久化和公网生产健康检查也已完成。三入口自动化不仅通过 fake SSH/SFTP 单测与兼容性验证，也已逐一真实执行且退出码均为 `0`：本地入口完成 build/smoke/Compose healthy，已有镜像入口完成 push/Paramiko 原子同步/sudo deploy/远端公网 health，源码完整入口完成 build/smoke/push/deploy 全链。PowerShell 5.1 RepoDigest JSON 数组展开、Paramiko 2.8 warning stderr 和发布端 TUN fake DNS `198.18.1.0` 引发的本机 TLS 假阴性均已在真实验收中修复；当前以云服务器侧公网 health 为强判定，本机 health 只作附加诊断。
 
 Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费其稳定协议、持久化边界和前端组件。部署不复制完整本地 workspace；只有三个真实配置进入私有镜像，运行数据留在云端 volume。
 
@@ -2302,7 +2303,7 @@ Secret、完整外部标识、原始请求和敏感 Tool 参数不得进入普�
 Part 18 Skill Runtime、CLI 与本地运维优化（下一项）
 ```
 
-Part 15 已稳定预算内完整历史、确定性历史查询、compaction、本地混合检索和派生状态生命周期，Part 16 已完成 Vue Web 产品面和可发布静态产物，Part 17 已完成 Provider retry、系统诊断、MCP 动态可靠性、恢复边界和私有镜像部署代码。Part 17 当前实现见 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`；真实 image smoke、registry push 和云端 deploy 因 Docker daemon 未运行而作为生产部署验收待关闭。下一核心实现阶段为 Part 18。
+Part 15 已稳定预算内完整历史、确定性历史查询、compaction、本地混合检索和派生状态生命周期，Part 16 已完成 Vue Web 产品面和可发布静态产物，Part 17 已完成 Provider retry、系统诊断、MCP 动态可靠性、恢复边界、私有镜像部署代码与真实云端验收。Part 17 当前实现见 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，三入口发布流水线见 `docs_design/2026-08-04-private-registry-cloud-release-pipeline-design.md`。下一核心实现阶段为 Part 18。
 
 这样做的好处是：
 

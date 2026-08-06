@@ -10,6 +10,8 @@
 
 - 输入：运行态`config/config.yml`不存在或`subagents`分区缺失。
   - 预期：Subagent 是正常 disabled 状态，不影响应用启动。
+- 输入：在 Python 3.11/3.12 中直接构造默认 `SubagentConfig`。
+  - 预期：每个实例获得独立、空且不可变的 `profiles` mapping，不因 dataclass mutable-default 检查而导入失败。
 - 输入：Subagent 配置无效或必需 Prompt 缺失。
   - 预期：仅 Subagent capability 标记为 unavailable，返回稳定错误码和修复提示，不抛出启动异常。
 - 输入：子 Agent 构建上下文时缺失 `subagent.md`。

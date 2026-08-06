@@ -1,8 +1,10 @@
 import { createPinia, setActivePinia } from "pinia";
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { nextTick } from "vue";
+import { describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/stores/auth";
+import { useChannelStore } from "@/stores/channels";
 import { useUiStore } from "@/stores/ui";
 import SettingsCenter from "./SettingsCenter.vue";
 
@@ -75,5 +77,36 @@ describe("SettingsCenter", () => {
     expect(ui.themeFamily).toBe("obsidian");
     expect(localStorage.getItem("zhice.ui.u-legacy.colorMode")).toBe("dark");
     expect(localStorage.getItem("zhice.ui.u-legacy.theme")).toBeNull();
+  });
+
+  it("shows bilingual QQ instructions and real Weixin QR terminal details", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.user = { id: "u-channel", username: "alice", display_name: "Alice", status: "active", roles: ["viewer"], can_manage_admins: false };
+    const ui = useUiStore();
+    ui.settingsSection = "channels";
+    ui.language = "zh-CN";
+    const channels = useChannelStore();
+    vi.spyOn(channels, "refresh").mockResolvedValue();
+    channels.weixin = { status: "unbound", linked_at: "" };
+    channels.weixinAttempt = {
+      attempt_id: "wxbind-1",
+      status: "waiting_scan",
+      expires_at: "later",
+      qr_data: "data:image/png;base64,c2FmZQ==",
+      error_code: "",
+    };
+
+    const wrapper = mount(SettingsCenter, { global: { plugins: [pinia] } });
+
+    expect(wrapper.text()).toContain("群聊：先 @机器人，再发送生成的 /bind 命令。私聊：直接发送该命令。");
+    expect(wrapper.get(".weixin-qr").attributes("src")).toBe("data:image/png;base64,c2FmZQ==");
+    expect(wrapper.text()).toContain("等待微信扫码");
+
+    ui.setLanguage("en", "u-channel");
+    await nextTick();
+    expect(wrapper.text()).toContain("Group chat: @mention the bot first, then send the generated /bind command. Direct chat: send the command directly.");
+    expect(wrapper.text()).toContain("Waiting for Weixin scan");
   });
 });

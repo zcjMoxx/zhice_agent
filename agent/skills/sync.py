@@ -153,7 +153,16 @@ class SkillSourceSync:
         self.workspace = Path(workspace).expanduser().resolve()
         self.config_dir = Path(config_dir).expanduser().resolve()
         self.extends_dir = Path(extends_dir).expanduser().resolve()
-        self.skill_repo = Path(skill_repo).expanduser().resolve() if skill_repo else _default_skill_repo()
+        configured_skill_repo = skill_repo
+        if configured_skill_repo is None:
+            configured_skill_repo = os.environ.get("ZHICE_AGENT_SKILL_REPO")
+        if isinstance(configured_skill_repo, str) and not configured_skill_repo.strip():
+            configured_skill_repo = None
+        self.skill_repo = (
+            Path(configured_skill_repo).expanduser().resolve()
+            if configured_skill_repo is not None
+            else _default_skill_repo()
+        )
         self.config_path = self.config_dir / "config.yml"
 
     def sync_on_startup(self) -> SkillSyncResult | None:

@@ -37,8 +37,6 @@ skills:
     - name: zhice-official
       sync: true
       local_dir: "${ZHICE_AGENT_SKILL_REPO}"
-      git_url: "https://example.com/skills.git"
-      target: master
 
 subagents:
   enabled: false
@@ -55,6 +53,9 @@ channels:
     enabled: false
     transport: websocket
     # Each account may set http_timeout_seconds: 15 (allowed range: 1..60).
+    # Public deployments must explicitly set web_base_url for every enabled account.
+    # Example account field: web_base_url: https://agent.example.com
+    # Keep accounts empty until real credentials and the real reachable URL are configured.
     accounts: []
   weixin:
     enabled: false

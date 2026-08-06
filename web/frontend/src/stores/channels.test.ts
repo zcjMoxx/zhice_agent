@@ -1,15 +1,37 @@
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "@/api/client";
+import { ApiError, api } from "@/api/client";
 import { useChannelStore } from "./channels";
 
-vi.mock("@/api/client", () => ({
-  api: { bindings: vi.fn(), weixinStatus: vi.fn() },
-}));
+vi.mock("@/api/client", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/api/client")>();
+  return {
+    ...original,
+    api: {
+      bindings: vi.fn(),
+      weixinStatus: vi.fn(),
+      startWeixin: vi.fn(),
+      pollWeixin: vi.fn(),
+      cancelWeixin: vi.fn(),
+    },
+  };
+});
+
+const waitingAttempt = {
+  attempt_id: "wxbind-1",
+  status: "waiting_scan",
+  expires_at: "later",
+  qr_data: "data:image/png;base64,c2FmZQ==",
+  error_code: "",
+};
 
 describe("channel store", () => {
-  beforeEach(() => setActivePinia(createPinia()));
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+  afterEach(() => vi.useRealTimers());
 
   it("keeps QQ truth while Weixin degrades independently", async () => {
     vi.mocked(api.bindings).mockResolvedValue({ bindings: [{ binding_id: "qq-1", channel: "qq", display_name: "QQ", linked_at: "now" }] });
@@ -21,5 +43,52 @@ describe("channel store", () => {
     expect(store.bindings).toHaveLength(1);
     expect(store.weixin.status).toBe("unavailable");
     expect(store.error).toContain("Weixin is unavailable");
+  });
+
+  it("polls real pending statuses and preserves the connected terminal state", async () => {
+    vi.useFakeTimers();
+    vi.mocked(api.startWeixin).mockResolvedValue(waitingAttempt);
+    vi.mocked(api.pollWeixin).mockResolvedValue({ ...waitingAttempt, status: "connected", qr_data: "" });
+    vi.mocked(api.bindings).mockResolvedValue({ bindings: [] });
+    vi.mocked(api.weixinStatus).mockResolvedValue({ status: "active", linked_at: "now" });
+    const store = useChannelStore();
+
+    await store.startWeixin();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(api.pollWeixin).toHaveBeenCalledWith("wxbind-1");
+    expect(store.weixinAttempt?.status).toBe("connected");
+    expect(store.weixin.status).toBe("active");
+    expect(store.weixinError).toBeNull();
+  });
+
+  it("keeps an attempt retryable when polling fails with an API error", async () => {
+    vi.mocked(api.pollWeixin).mockRejectedValue(new ApiError(503, "CHANNEL_WEIXIN_UNAVAILABLE", "Sidecar unavailable"));
+    const store = useChannelStore();
+    store.weixinAttempt = waitingAttempt;
+
+    await store.pollWeixinNow();
+
+    expect(store.weixinAttempt).toEqual(waitingAttempt);
+    expect(store.weixinError).toEqual({ code: "CHANNEL_WEIXIN_UNAVAILABLE", message: "Sidecar unavailable" });
+    expect(store.weixinBusy).toBe(false);
+  });
+
+  it("retains failed and cancelled terminal responses with their error state", async () => {
+    vi.mocked(api.startWeixin).mockResolvedValue({
+      ...waitingAttempt,
+      status: "verification_failed",
+      qr_data: "",
+      error_code: "WEIXIN_VERIFY_CODE_REQUIRED",
+    });
+    vi.mocked(api.cancelWeixin).mockResolvedValue({ ...waitingAttempt, status: "cancelled", qr_data: "" });
+    const store = useChannelStore();
+
+    await store.startWeixin();
+    expect(store.weixinAttempt?.error_code).toBe("WEIXIN_VERIFY_CODE_REQUIRED");
+
+    store.weixinAttempt = waitingAttempt;
+    await store.cancelWeixin();
+    expect(store.weixinAttempt?.status).toBe("cancelled");
   });
 });

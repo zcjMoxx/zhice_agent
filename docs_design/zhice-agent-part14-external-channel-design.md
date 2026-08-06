@@ -318,6 +318,8 @@ channels:
         max_attachment_bytes: 20971520
 ```
 
+`web_base_url` 是账号级绑定入口。`http://127.0.0.1:10086` 只作为未显式配置时的本地开发默认值；公网启用 QQ 时，每个账号都必须在实际部署配置中显式填写真实 HTTPS 地址。当前云端 `main` 账号使用 `https://agent.zouzhou.xyz`。Adapter 不从全局部署目标推导该字段，也不改变本地默认语义。
+
 ### 9.2 Secret 规则
 
 - 仓库禁止提交真实 AppID / AppSecret；
@@ -422,6 +424,8 @@ Web 个人设置只提供一个“生成 QQ 一次性绑定码”按钮，显示
 4. 登录成功后自动消费授权请求，把 QQ identity 绑定到当前内部 `user_id`；
 5. 已登录用户打开链接时直接完成绑定；
 6. token 只保存 hash，默认 10 分钟过期、单次消费，URL 不包含 OpenID、AppID 或内部用户 id。
+
+生产部署必须保证生成链接中的 `web_base_url` 是 QQ 用户设备可访问的公网 HTTPS origin。若云端账号遗漏该字段，配置加载会回退到本地 loopback 默认值，链接虽然格式正确却无法从手机访问。当前修复保持 Adapter 直接消费账号配置，仅在云端私有账号配置中显式设置公网地址；详细记录见 `docs_design/2026-08-04-qq-public-binding-url-deployment-fix.md`。
 
 QQ 提示语义固定为：
 

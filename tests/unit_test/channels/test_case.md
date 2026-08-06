@@ -22,7 +22,7 @@
 - QQ 私聊消息经 Fake transport 得到 runtime 最终回复。
 - QQ 群聊回答使用普通文本引用触发者原消息，避免 Markdown 引用在真实客户端不展示以及多人连续提问时回答归属不清。
 - 普通未绑定提示附带自动发送 `/bind` 的“绑定”指令按钮。
-- QQ 私聊裸 `/bind` 返回包含 `${web_base_url}/?channel_bind=<token>` 的 Markdown 超链接和 URL 按钮。
+- QQ 账号显式 HTTPS `web_base_url` 能从配置加载；未配置时本地默认仍为 `http://127.0.0.1:10086`。QQ 私聊裸 `/bind` 使用显式公网账号返回 `https://agent.zouzhou.xyz/?channel_bind=<token>` 的 Markdown 超链接和 URL 按钮。
 - `/bind <code>` 在私聊和群聊都直接绑定当前消息发送者；群聊裸 `/bind` 只引导私聊网页授权。
 - QQ 私聊不能通过 `/sessions` 浏览、重命名或删除 Web/CLI Session，只能使用当前 route 和 `/new`。
 

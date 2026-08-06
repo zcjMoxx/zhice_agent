@@ -26,7 +26,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - 中性 Channel 协议、外部身份绑定、持久 conversation route/event receipt，以及 QQ 私聊/群聊 `@` WebSocket adapter
 - 微信 `channel_accounts` 所有权、本人扫码 API/UI、stdio NDJSON Node sidecar、基于腾讯 `2.4.6` 审计来源的 direct-text Transport 和多用户隔离
 
-当前仍保持轻量边界：用户系统只面向本地开发，不等于生产级公网鉴权；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、远程部署、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge 或市集。MCP Runtime 直接读取常见 `mcpServers` 配置，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Part 12 已完成 turn/context/LLM/tool RuntimeEvent、WebSocket/SSE/CLI 与前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime；Hook 只能增加业务阻断、修改后重新走核心校验或补充安全 display/ui_metadata，不能降低 RBAC、危险确认、workspace guard、timeout、脱敏或 SSRF。Part 13 在此基线上增加同步 Provider 下的有界线程并行、父能力交集、独立 child 运行态和 workspace lease。SkillExecutor、`skill.*` 和 ProgressSink 属于未来 Skill Runtime / Part 18。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
+当前仍保持轻量边界：已有本地多用户、QQ/微信渠道和私有镜像部署，但不等于生产级公网鉴权或托管平台；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge 或 Skill 市集。MCP Runtime 从 `config.yml` 的 `mcp.servers` 读取常见 MCP server 字段，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Part 12 已完成 turn/context/LLM/tool RuntimeEvent、WebSocket/SSE/CLI 与前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime；Hook 只能增加业务阻断、修改后重新走核心校验或补充安全 display/ui_metadata，不能降低 RBAC、危险确认、workspace guard、timeout、脱敏或 SSRF。Part 13 在此基线上增加同步 Provider 下的有界线程并行、父能力交集、独立 child 运行态和 workspace lease。SkillExecutor、`skill.*` 和 ProgressSink 属于未来 Skill Runtime / Part 18。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
 
 Tool capability selection 已从原可靠性路线提前进入当前基线。每个 CLI/Web/child Turn 首次只向模型提供 `discover_tools`；模型判断需要真实能力时先查询并激活最小 Tool 集合，下一模型步才收到这些具体 schema。Catalog 在 actor RBAC 和 Subagent Profile 过滤之后生成，未激活 Tool 即使被编造也返回 `TOOL_NOT_ACTIVATED`；实际 Tool 仍经过确认、Hook、workspace guard 和审计。Session JSONL 保存完整历史真值；CLI、Web、external WebSocket、QQ 和微信共用同一 `ContextBuilder/ContextPlanner`：预算允许时携带全部完整 Turn，明确历史元问题确定性扫描当前 Session，超长历史使用结构化 compaction、连续 recent raw Turn 和 SQLite FTS5/BM25 + embedding BLOB 精确 cosine + entity/anchor/recency 混合召回。每次初始/工具结果 LLM 调用前都把实际 Tool schema 纳入 failover-safe endpoint token 预算。child 使用新鲜独立 Session 上下文，不能读取父 Session 索引，但继承父 Turn 的同一输入预算。
 
@@ -46,7 +46,7 @@ Tool capability selection 已从原可靠性路线提前进入当前基线。每
 - 第十四部分实现二微信 ClawBot 已落地，当前口径见 `docs_design/zhice-agent-part14-external-channel-design.md`，完整取舍和真实 POC 证据见 `docs_design/2026-07-24-weixin-clawbot-channel-design.md`。一个 Web 用户独立拥有一个微信 AI 账号，共享 Node Transport sidecar 接入现有 Channel Runtime，不引入第二套 AgentLoop。2026-07-24 已用真实微信验证 AI 标识、扫码、direct text 收发、context token、游标恢复和 notifyStop；双真实账号并发仍需第二名用户验收。
 - Part 15 完整 Session 上下文工程已进入当前代码基线，设计入口是 `docs_design/zhice-agent-part15-context-engineering-design.md`。本地第一实现不要求独立向量数据库服务：用户隔离 SQLite 保存 FTS5 文档、metadata 和 float32 embedding BLOB，Session 内用精确 cosine 与 RRF 混合排序；embedding 未配置时 health 诚实标记 degraded，但完整历史、历史查询、compaction 和 FTS 继续工作。
 - Part 16 Web 产品体验与 Vue 前端工程已实现并进入当前基线，当前活文档是 `docs_design/zhice-agent-part16-web-product-design.md`，完整方案记录见 `docs_design/2026-07-27-web-product-experience-and-vue-frontend-design.md`。Vue 3/Vite/TypeScript 源码位于 `web/frontend`，构建产物位于 `agent/web/static` 并随 Python wheel 发布；登录、聊天、Session、五栏设置、渠道连接和中文管理后台共用明暗曜石主题，同时保持现有 API、WebSocket、Session 与 RBAC 兼容。
-- Part 17 代码与测试已进入当前基线：Provider 错误分类/有限重试/deadline/cooldown/failover 证据、系统级诊断、MCP 动态可靠性、重启恢复和 `deploy/` 私有镜像部署链均已落地。当前活文档是 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案记录见 `docs_design/2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`。全量 Python `796 passed, 1 skipped`，Ruff、前端 `29` 项测试、lint/typecheck/build、deploy 静态检查与 compose 校验均通过；因本机 Docker Desktop daemon 未运行，真实 image build/run smoke、registry push 与云端 deploy 的生产验收尚未关闭。
+- Part 17 代码与测试已进入当前基线：Provider 错误分类/有限重试/deadline/cooldown/failover 证据、系统级诊断、MCP 动态可靠性、重启恢复和 `deploy/` 私有镜像部署链均已落地。当前活文档是 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案记录见 `docs_design/2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`；本地构建、隔离 smoke、阿里云 ACR 推送、腾讯云按 Digest 运行、Caddy HTTPS、公网健康、认证初始化和容器重启持久化均已真实验收。2026-08-04 又按 `docs_design/2026-08-04-private-registry-cloud-release-pipeline-design.md` 收敛为本地、已有镜像上云和源码完整上云三个入口；新增自动化入口已通过静态与脚本兼容性验证，首次真实执行仍由操作者使用本机私有配置触发。
 - 按需 Tool 发现与动态 Capability Selection 已提前落地，设计记录见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md`；它是通用运行时能力，不归入 Part 13 的业务委派判断。
 
 Subagent运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`subagents`分区，仓库模板为`config/config.example.yml`。缺少分区时功能默认关闭；启用后可用裸`/subagent`查看当前模式和Profile。能力不可用时，CLI、本地操作者和Owner会看到真实原因与修复建议；普通Web用户只会看到能力暂时不可用并联系管理员，不暴露内部配置。
@@ -78,10 +78,16 @@ zcagent
 python -m pip install -e .
 ```
 
-之后新开的终端里通常可以直接运行：
+之后新开的终端里通常可以直接运行 CLI：
 
 ```bash
 zcagent
+```
+
+运行 Web Gateway 需要安装 WebSocket extra：
+
+```bash
+python -m pip install -e ".[gateway]"
 zcagent gateway
 ```
 
@@ -100,7 +106,7 @@ npm run build
 
 `npm run build` 使用 `/static/` base，并覆盖生成 `agent/web/static`。仓库提交 production build，前端改动必须同时提交源码、`package-lock.json` 和最新构建产物。
 
-命令会被安装到当前 Python 环境对应的 `Scripts` 目录。你这台机器当前是全局 Anaconda 环境在承接这个命令。`.venv` 仍然适合做隔离，但不是这套参考式工作流的必需条件。
+命令会被安装到当前 Python 环境对应的可执行目录；Windows 通常是该环境的 `Scripts`。可以使用现有 Python 环境，也可以用 `.venv` 做隔离。
 
 ## 工作区初始化
 
@@ -138,7 +144,7 @@ Skill source、MCP 和 Subagent 都是可选扩展：未配置时作为 disabled
 安装可选 SDK：
 
 ```bash
-python -m pip install -e ".[qq]"
+python -m pip install -e ".[gateway,qq]"
 ```
 
 运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`channels`分区，模板为`config/config.example.yml`。运行态`${ZHICE_AGENT_WORKSPACE}/config/.env`提供`QQBOT_APP_ID`和`QQBOT_APP_SECRET`，业务配置只保留环境变量引用。每个QQ账号的`http_timeout_seconds`默认15秒，可在1~60秒内调整；未确认投递不会误把WebSocket渠道标记为断线，也不会盲目重发相同`msg_id + msg_seq`。
@@ -208,6 +214,13 @@ ${ZHICE_AGENT_WORKSPACE}/config/models.json
       "context_window": 131072,
       "max_tokens": 16384,
       "temperature": 0.7,
+      "request_timeout_seconds": 60,
+      "max_attempts": 2,
+      "total_deadline_seconds": 120,
+      "retry_backoff_seconds": 0.5,
+      "retry_backoff_max_seconds": 8,
+      "retry_jitter_ratio": 0.1,
+      "cooldown_seconds": 30,
       "priority": 1,
       "enabled": true,
       "role": "default",
@@ -238,6 +251,8 @@ ${ZHICE_AGENT_WORKSPACE}/config/models.json
 - `context_window` 是 endpoint/model 的总上下文窗口；未填写时默认 `131072`，并且必须大于 `max_tokens`。
 - `max_tokens` 是单次响应允许生成的最大输出 token，不是输入上限或总窗口；它同时用于本地预留输出空间和实际 Provider 请求。
 - 本地输入预算固定按 `context_window - max_tokens` 计算，不再提供第三个输入上限配置字段。
+- `request_timeout_seconds` 限制单次 Provider 请求；`max_attempts`、退避字段和 `total_deadline_seconds` 共同限制同一 endpoint 的重试总量与总时长。
+- `cooldown_seconds` 是进程内 endpoint 冷却窗口；失败切换和冷却不会修改 Session 保存的首选 endpoint/model。
 - `routing.chat/compaction/embedding`分别指定回答、压缩和向量模型；只写endpoint使用默认模型，写`endpoint/model`时模型必须命中`supported_models`。
 
 Session上下文策略位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`context`分区；Embedding端点与路由位于`models.json`。未配置有效Embedding endpoint时不会阻断聊天，`/api/health`中`context_engineering`标记为`degraded`。Owner/CLI的派生状态位于`contexts/context/`，普通用户位于`contexts/users/{user_id}/context/`；compaction与`context_index.sqlite3`均可由Session JSONL重建，`/clear`和Session delete会同步失效。
@@ -265,13 +280,14 @@ ${ZHICE_AGENT_WORKSPACE}/config/config.yml  # skills分区
 默认配置把官方 Skill 仓库根作为本地 source：
 
 ```yaml
-name: zhice-official
-local_dir: "${ZHICE_AGENT_SKILL_REPO}"
-git_url: "https://example.com/skills.git"
-target: "master"
+skills:
+  sources:
+    - name: zhice-official
+      sync: true
+      local_dir: "${ZHICE_AGENT_SKILL_REPO}"
 ```
 
-内置 `${ZHICE_AGENT_SKILL_REPO}` 默认指向项目根目录下的 `skill_repo/`。仓库结构固定为 `skills/{skill_name}/SKILL.md`。同步后完整仓库会落到：
+`${ZHICE_AGENT_SKILL_REPO}` 表示本地 Skill source 仓库根目录，不能填写 Git URL；显式配置时使用该路径，未配置或为空时自动指向项目根目录下的 `skill_repo/`。默认模板只配置该真实本地 source，不附带虚假的远端兜底地址。仓库结构固定为 `skills/{skill_name}/SKILL.md`。同步后完整仓库会落到：
 
 ```text
 ${ZHICE_AGENT_WORKSPACE}/extends/zhice-official/
@@ -293,8 +309,8 @@ hooks:
       tools: [exec]
       exempt_roles: [owner]
       exempt_permissions: [tool.exec.dangerous]
-    timeout_seconds: 2
-    max_output_chars: 16384
+      timeout_seconds: 2
+      max_output_chars: 16384
 ```
 
 脚本路径解析后必须位于 `ZHICE_AGENT_WORKSPACE` 内。Runner 使用当前 Python、`shell=False`、workspace cwd、最小环境、短 timeout 和有界 stdin/stdout/stderr；stdin/stdout 均为单个 UTF-8 JSON object。`pre_tooluse` 支持 `continue/block/modify`，修改后的参数会重新经过 Tool schema、RBAC、危险确认和具体 Tool guard；`post_tooluse` 支持 `continue/enrich`，只能补充受限 `display/ui_metadata`，不能修改 ToolResult 的成功失败事实。`exempt_roles` / `exempt_permissions` 是可选的单 Hook 豁免：owner 可显式按角色跳过，admin 根据已生效的角色权限或直接授权匹配权限跳过；缺省时所有身份都执行 Hook，豁免后仍经过全部核心安全检查。完整协议和错误策略见 `docs_design/zhice-agent-part12-hooks-design.md`，角色/权限作用域设计见 `docs_design/2026-07-21-hook-role-scope-design.md`。
@@ -322,8 +338,10 @@ CLI 内可用命令：
 - `/prompts`：列出已加载的 prompt 文件
 - `/tools`：列出已注册的工具
 - `/skills`：列出已同步到 workspace `extends` 下的 Skill
-- `/model`：查看或切换当前首选 LLM endpoint
-- `/memory`：立即从当前 session 提取长期 Memory；详细子命令见执行结果中的 Tip
+- `/model`：查看或切换当前 Session 持久化的 LLM endpoint/model 偏好
+- `/subagent`：查看或控制当前 Session 的 Subagent 委派模式
+- `/memory`：展示当前账号的长期 Memory
+- `/mcp`：展示当前可用 MCP 能力
 - `/help`：查看可用斜杠命令
 - `/exit`：退出 CLI
 
@@ -370,7 +388,7 @@ zcagent gateway --http-access-log off
 zcagent gateway --http-server-log-level warning
 ```
 
-gateway 仍只面向本地开发。已有本地用户名密码鉴权和 RBAC，但不包含生产公网安全方案、OAuth/SSO、多租户或后台服务编排。
+Gateway 可用于本地运行或私有镜像部署，但不能直接作为生产公网安全边界。当前已有本地用户名密码鉴权和 RBAC，不包含 OAuth/SSO、多租户、可信代理治理或后台服务编排；公网入口必须另行提供 TLS、访问控制和可信代理配置。
 
 非阻塞检查：
 
@@ -404,9 +422,9 @@ zcagent auth reset-password admin
 /model reset
 ```
 
-`/model <endpoint>` 会切到该 endpoint 的默认模型。`/model <endpoint>/<model>` 会在该 endpoint 上临时使用指定 model；该 model 必须等于 endpoint 的默认 `model`，或命中 `supported_models`。`supported_models` 支持精确模型名和简单 glob，例如 `gpt-*`。
+`/model <endpoint>` 会切到该 endpoint 的默认模型。`/model <endpoint>/<model>` 会为当前 Session 选择指定 model；该 model 必须等于 endpoint 的默认 `model`，或命中 `supported_models`。`supported_models` 支持精确模型名和简单 glob，例如 `gpt-*`。
 
-ZhiCe-Agent 不支持裸 `/model <model>` 自动猜测 endpoint。`/model` 切换只在本次 `zcagent` 进程内生效；退出后会重新使用启动参数 `--endpoint`、`default` 别名或 priority 顺序。
+ZhiCe-Agent 不支持裸 `/model <model>` 自动猜测 endpoint。`/model` 偏好按 Session 写入当前 actor 上下文对应的 `sessions_meta/{session_id}.json`，进程重启后继续生效；`/model reset` 删除该 Session 的模型字段并恢复启动参数 `--endpoint`、`default` 路由或 priority 顺序。
 
 ### `/memory`
 

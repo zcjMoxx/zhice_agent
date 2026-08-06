@@ -4,6 +4,7 @@ import pytest
 
 from agent.subagents.config import (
     HARD_MAX_PARALLEL,
+    SubagentConfig,
     SubagentConfigurationError,
     load_subagent_config,
 )
@@ -24,6 +25,16 @@ def test_missing_config_disables_subagents(tmp_path):
     assert config.list_profiles() == ()
     assert dict(config.profiles) == {}
     assert config.get_profile("explorer") is None
+
+
+def test_default_profiles_are_immutable_and_not_shared():
+    first = SubagentConfig()
+    second = SubagentConfig()
+
+    assert dict(first.profiles) == {}
+    assert first.profiles is not second.profiles
+    with pytest.raises(TypeError):
+        first.profiles["explorer"] = object()  # type: ignore[index]
 
 
 def test_loads_profiles_and_preserves_order(tmp_path):

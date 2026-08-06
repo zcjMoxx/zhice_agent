@@ -81,6 +81,26 @@ export interface MonitorSnapshot {
   };
 }
 
+export interface ChannelBinding {
+  binding_id: string;
+  channel: string;
+  display_name: string;
+  linked_at: string;
+}
+
+export interface WeixinChannelStatus {
+  status: string;
+  linked_at: string;
+}
+
+export interface WeixinBindingAttempt {
+  attempt_id: string;
+  status: string;
+  expires_at: string;
+  qr_data: string;
+  error_code: string;
+}
+
 export interface SystemDiagnosticsSnapshot {
   status: string;
   window_minutes: number;

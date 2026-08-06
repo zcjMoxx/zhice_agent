@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import { pathToFileURL } from "node:url";
 
 import { officialDriver } from "./official-driver.js";
 
@@ -169,6 +170,6 @@ function safeErrorCode(error) {
 
 export const blockedDriver = Object.freeze({ available: false });
 
-if (process.argv[1] && import.meta.url === new URL(`file:///${process.argv[1].replaceAll("\\", "/")}`).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   createSidecar({ driver: officialDriver });
 }

@@ -50,23 +50,29 @@
 
 ### Case 8: `${ZHICE_AGENT_SKILL_REPO}` 占位符
 
-- 输入：`config.yml.skills`使用`local_dir: "${ZHICE_AGENT_SKILL_REPO}"`。
-- 预期：占位符展开到技能仓库根目录。
-- 检查点：运行时 Skill 根目录为 `extends/{source}/skills`。
+- 输入：`config.yml.skills`使用`local_dir: "${ZHICE_AGENT_SKILL_REPO}"`，分别显式传入构造参数、设置环境变量、设置空环境变量。
+- 预期：显式构造参数优先，其次使用环境变量；环境变量缺失或为空时自动定位项目内置技能仓库根目录。
+- 检查点：环境变量可以覆盖内置默认路径但不能覆盖显式构造参数，运行时 Skill 根目录仍为 `extends/{source}/skills`。
 
-### Case 9: 同步状态变化
+### Case 9: 默认模板不包含虚假远端 Skill 地址
+
+- 输入：读取公开 `config/config.example.yml`。
+- 预期：默认 source 只配置 `${ZHICE_AGENT_SKILL_REPO}` 本地仓库，不附带 `example.com` 或其他虚假 `git_url`。
+- 检查点：本地默认 Skill source 仍可用；需要远端 source 时由用户显式填写真实地址。
+
+### Case 10: 同步状态变化
 
 - 输入：重复同步、修改 Skill、删除 Skill。
 - 预期：同步结果能区分 `new`、`changed`、`removed`、`unchanged` 和 `up_to_date`。
 - 检查点：目标目录内容与 source 保持一致，删除的 Skill 会从运行时目录移除。
 
-### Case 10: 启动同步策略
+### Case 11: 启动同步策略
 
 - 输入：`sync.on_startup=always`、`never` 或旧值 `if_missing`。
 - 预期：`always` 会刷新已有运行时 Skill；`never` 跳过；`if_missing` 被拒绝。
 - 检查点：只支持设计文档确认的启动策略。
 
-### Case 11: 配置边界与错误
+### Case 12: 配置边界与错误
 
 - 输入：未知 source 名、`sync=false`、旧字段 `enabled`/`type`/`path`/`skills_subdir`/`target_type`、空 source 目录、workspace 外 extends_dir。
 - 预期：返回结构化失败、跳过或抛出配置错误。
