@@ -25,7 +25,7 @@
 - `zhice-agent-part13-subagent-design.md`：Part 13，已实现并进入当前代码基线；包含有界并行 `delegate_tasks`、独立 child AgentLoop/Session/RuntimeEvent scope、能力 Profile 与 shared-readonly/worktree/shared-exclusive 隔离。
 - `zhice-agent-part14-external-channel-design.md`：Part 14 唯一活文档；QQ 实现一和微信 ClawBot 实现二已进入当前代码基线。包含中性 Channel 协议、身份绑定、conversation route、跨渠道 Session、QQ 私聊/群聊，以及微信一名 Web 用户一个 AI 账号、Node Transport sidecar、扫码绑定和私聊文本实现。
 - `zhice-agent-part15-context-engineering-design.md`：Part 15 已实现并进入当前代码基线，覆盖预算内完整历史、确定性 Session 历史查询、结构化 compaction、FTS/BM25 + embedding 混合召回、本地向量存储和选择 trace。
-- `zhice-agent-part16-web-product-design.md`：Part 16 已实现并关闭；Vue 3/Vite/TypeScript 已成为唯一正式 Web 前端，包含六套主题家族与独立明暗模式、登录/聊天/Session、五栏设置、渠道连接、系统监控与安全审计，并以 `agent/web/static` 随 Python wheel 发布。
+- `zhice-agent-part16-web-product-design.md`：Part 16 已实现并关闭；Vue 3/Vite/TypeScript 已成为唯一正式 Web 前端，包含六套主题家族与独立明暗模式、登录/聊天/Session、五栏设置、渠道连接，以及失败优先的运行诊断；安全审计作为敏感操作账本收在高级设置中，并以 `agent/web/static` 随 Python wheel 发布。
 
 第九部分用户、登录与权限执行边界已经落地：登录用户的账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 是基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。基础能力收敛见 `2026-07-16-authenticated-user-baseline-capabilities-design.md`；当前自助诊断和 Runtime Activity / Security Audit 拆分见 `2026-07-16-self-diagnostics-activity-audit-separation-design.md`。
 

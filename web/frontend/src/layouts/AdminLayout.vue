@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { Activity, ArrowLeft, ChevronDown, Download, FileClock, Gauge, LockKeyhole, RefreshCw, Shield, Trash2, Users } from "@lucide/vue";
-import { computed, onMounted, reactive, ref } from "vue";
+import { Activity, ArrowLeft, ChevronDown, Download, FileClock, Gauge, LockKeyhole, RefreshCw, Settings2, Shield, Trash2, Users } from "@lucide/vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 
 import { baseCapabilities, groupedPermissions, permissionLabel, roleName } from "@/admin/permissions";
 import QuickPreferences from "@/components/QuickPreferences.vue";
+import DateTimePicker from "@/components/DateTimePicker.vue";
 import { uiText } from "@/i18n";
 import { useAdminStore } from "@/stores/admin";
 import { useAuthStore } from "@/stores/auth";
@@ -18,10 +19,16 @@ const router = useRouter();
 const ui = useUiStore();
 const tab = ref("overview");
 const failure = ref("");
+const recentRunStatus = ref("error");
+const timelineScope = ref<"errors" | "all">("errors");
+const openRunRecords = ref<Record<string, boolean>>({});
+const openTimelineEvents = ref<Record<string, boolean>>({});
+const diagnosticBusy = ref(false);
+const diagnosticUpdatedAt = ref("");
 const selectedRole = ref("");
 const technicalOpen = ref<Record<string, boolean>>({});
-const auditFilters = reactive({ action: "", actor_user_id: "", decision: "", from_ts: "", to_ts: "" });
-const diagnosticFilters = reactive({ actor_user_id: "", session_id: "", component: "", error_code: "", status: "" });
+const auditFilters = reactive({ event_type: "", actor_user_id: "", outcome: "", from_ts: "", to_ts: "" });
+const diagnosticFilters = reactive({ actor_user_id: "", session_id: "", component: "", error_code: "", status: "", minutes: "1440" });
 const newUser = reactive({ username: "", display_name: "", password: "", roles: ["viewer"] });
 const deletingUser = ref<PublicUser | null>(null);
 const deleteConfirmation = ref("");
@@ -32,11 +39,65 @@ function tr(chinese: string, english: string): string { return uiText(ui.languag
 
 const tabs = computed(() => [
   { key: "overview", label: tr("概览", "Overview"), icon: Gauge, visible: true },
-  { key: "users", label: tr("用户管理", "Users"), icon: Users, visible: auth.can("auth.users.read") },
+  { key: "users", label: tr("账号管理", "Accounts"), icon: Users, visible: auth.can("auth.users.read") },
   { key: "roles", label: tr("角色与权限", "Roles & permissions"), icon: Shield, visible: auth.can("auth.roles.read") },
-  { key: "monitor", label: tr("系统监控", "System monitor"), icon: Activity, visible: auth.can("turn.read.any") || auth.can("diagnostics.system.use") },
-  { key: "audit", label: tr("安全审计", "Security audit"), icon: FileClock, visible: auth.can("audit.read") },
+  { key: "monitor", label: tr("运行诊断", "Runtime diagnostics"), icon: Activity, visible: auth.can("turn.read.any") || auth.can("diagnostics.system.use") },
+  { key: "advanced", label: tr("高级设置", "Advanced"), icon: Settings2, visible: auth.can("audit.read") },
 ].filter((item) => item.visible));
+const auditActionOptions = computed(() => [
+  ["login", tr("登录", "Login")],
+  ["logout", tr("退出登录", "Logout")],
+  ["registration", tr("账号注册", "Account registration")],
+  ["password", tr("密码修改", "Password change")],
+  ["profile", tr("个人资料修改", "Profile change")],
+  ["access", tr("访问请求", "Access request")],
+  ["user", tr("账号管理", "Account management")],
+  ["role", tr("角色权限", "Role permissions")],
+  ["audit", tr("安全审计", "Security audit")],
+  ["diagnostics", tr("系统诊断", "System diagnostics")],
+  ["external_identity", tr("外部账号绑定", "External account linking")],
+] as const);
+const auditActorOptions = computed(() => admin.users.map((user) => ({
+  id: user.id,
+  label: `${user.display_name || user.username} (@${user.username})`,
+})));
+const diagnosticActorOptions = computed(() => {
+  const users = [...admin.users];
+  if (auth.user && !users.some((user) => user.id === auth.user?.id)) users.unshift(auth.user);
+  return users.map((user) => ({ id: user.id, label: `${user.display_name || user.username} (@${user.username})` }));
+});
+const diagnosticSessionOptions = computed(() => {
+  const options = new Map<string, string>();
+  for (const turn of admin.monitor?.activity.recent_turns || []) {
+    const id = String(turn.session_id || "");
+    if (id) options.set(id, String(turn.session_title || id));
+  }
+  if (diagnosticFilters.session_id && !options.has(diagnosticFilters.session_id)) options.set(diagnosticFilters.session_id, diagnosticFilters.session_id);
+  return [...options].map(([id, label]) => ({ id, label }));
+});
+const diagnosticComponentOptions = computed(() => {
+  const values = new Set<string>();
+  for (const item of [...(admin.diagnostics?.incidents || []), ...(admin.diagnostics?.timeline || [])]) {
+    if (item.component) values.add(String(item.component));
+  }
+  if (diagnosticFilters.component) values.add(diagnosticFilters.component);
+  return [...values].sort().map((value) => ({ value, label: componentLabel(value) }));
+});
+const diagnosticErrorCodeOptions = computed(() => {
+  const values = new Set<string>();
+  for (const item of [...(admin.diagnostics?.incidents || []), ...(admin.diagnostics?.timeline || [])]) {
+    if (item.code) values.add(String(item.code));
+  }
+  if (diagnosticFilters.error_code) values.add(diagnosticFilters.error_code);
+  return [...values].sort();
+});
+const displayedDiagnosticTimeline = computed(() => {
+  const timeline = admin.diagnostics?.timeline || [];
+  return timelineScope.value === "all"
+    ? timeline
+    : timeline.filter(eventIsError);
+});
+const diagnosticHasResults = computed(() => Object.values(admin.diagnostics?.summary || {}).some((value) => Number(value) > 0));
 const selectedRoleValue = computed(() => admin.roles.find((role) => role.id === selectedRole.value));
 const roleOrder: Record<string, number> = { owner: 0, admin: 1, developer: 2, auditor: 3, viewer: 4 };
 const orderedRoles = computed(() => [...admin.roles].sort((left, right) =>
@@ -48,6 +109,17 @@ const canEditSelectedRole = computed(() => auth.can("auth.roles.manage") && !own
 const permissionGroups = computed(() => groupedPermissions(admin.permissions, ui.language));
 const visibleBaseCapabilities = computed(() => baseCapabilities(ui.language));
 const auditExportUrl = computed(() => `/api/audit/events/export?${new URLSearchParams(Object.entries(auditFilters).filter(([, value]) => value)).toString()}`);
+const availableCapabilityCount = computed(() => Object.values(admin.monitor?.capabilities || {}).filter((item) => item.state === "available").length);
+const diagnosticSummaryLabels = computed<Record<string, string>>(() => ({
+  turns: tr("运行记录", "Runs"),
+  tools: tr("工具调用", "Tool calls"),
+  trace_events: tr("时间线事件", "Timeline events"),
+  incidents: tr("确定性事故", "Incidents"),
+  errors: tr("错误事件", "Errors"),
+}));
+watch(() => auditFilters.from_ts, (value) => {
+  if (value && auditFilters.to_ts && auditFilters.to_ts < value) auditFilters.to_ts = value;
+});
 
 onMounted(async () => { await loadTab("overview"); });
 
@@ -55,13 +127,26 @@ async function loadTab(next: string) {
   tab.value = next;
   failure.value = "";
   try {
+    if (next === "overview") {
+      const loads: Promise<unknown>[] = [];
+      if (auth.can("turn.read.any")) loads.push(admin.loadMonitor("error"));
+      if (auth.can("diagnostics.system.use")) loads.push(admin.loadDiagnostics());
+      await Promise.all(loads);
+    }
     if (next === "users") await admin.loadUsers();
     if (next === "roles") { await admin.loadRoles(); selectedRole.value ||= orderedRoles.value[0]?.id || ""; }
     if (next === "monitor") {
-      if (auth.can("turn.read.any")) await admin.loadMonitor();
-      if (auth.can("diagnostics.system.use")) await admin.loadDiagnostics(diagnosticFilters);
+      const loads: Promise<unknown>[] = [];
+      if (auth.can("turn.read.any")) loads.push(admin.loadMonitor(recentRunStatus.value));
+      if (auth.can("diagnostics.system.use")) loads.push(admin.loadDiagnostics(diagnosticFilters));
+      if (auth.can("auth.users.read")) loads.push(admin.loadUsers());
+      await Promise.all(loads);
     }
-    if (next === "audit") await admin.loadAudit(auditFilters);
+    if (next === "advanced") {
+      const loads: Promise<unknown>[] = [admin.loadAudit(auditFilters)];
+      if (auth.can("auth.users.read")) loads.push(admin.loadUsers());
+      await Promise.all(loads);
+    }
   } catch (error) { failure.value = errorMessage(error); }
 }
 async function createUser() {
@@ -72,6 +157,19 @@ async function updateUser(id: string, payload: Record<string, unknown>) {
   try { await import("@/api/client").then(({ api }) => api.updateUser(id, payload)); await admin.loadUsers(); }
   catch (error) { failure.value = errorMessage(error); }
 }
+async function loadRecentRuns() {
+  try { await admin.loadMonitor(recentRunStatus.value); }
+  catch (error) { failure.value = errorMessage(error); }
+}
+async function runDiagnostics() {
+  diagnosticBusy.value = true;
+  failure.value = "";
+  try {
+    await admin.loadDiagnostics(diagnosticFilters);
+    diagnosticUpdatedAt.value = fmt(new Date().toISOString());
+  } catch (error) { failure.value = errorMessage(error); }
+  finally { diagnosticBusy.value = false; }
+}
 function openDeleteUser(user: PublicUser) {
   deletingUser.value = user;
   deleteConfirmation.value = "";
@@ -81,7 +179,7 @@ function openDeleteUser(user: PublicUser) {
 async function confirmDeleteUser() {
   if (!deletingUser.value) return;
   if (deleteConfirmation.value !== deletingUser.value.username) {
-    deleteConfirmationError.value = tr("用户名不一致，请重新输入", "Username does not match. Try again.");
+    deleteConfirmationError.value = tr("账号不一致，请重新输入", "Account does not match. Try again.");
     return;
   }
   deleteConfirmationError.value = "";
@@ -102,7 +200,104 @@ async function togglePermission(key: string, enabled: boolean) {
   try { await admin.updateRole(role.id, [...new Set(keys)]); }
   catch (error) { failure.value = errorMessage(error); }
 }
-function fmt(value: unknown): string { return value ? new Date(String(value)).toLocaleString() : "—"; }
+function fmt(value: unknown): string {
+  if (!value) return "—";
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) return String(value);
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+function fmtDuration(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "—";
+  if (milliseconds < 1000) return `${milliseconds.toFixed(2)} ${tr("毫秒", "ms")}`;
+  if (milliseconds < 60_000) return `${(milliseconds / 1000).toFixed(2)} ${tr("秒", "sec")}`;
+  if (milliseconds < 3_600_000) return `${(milliseconds / 60_000).toFixed(2)} ${tr("分钟", "min")}`;
+  return `${(milliseconds / 3_600_000).toFixed(2)} ${tr("小时", "hr")}`;
+}
+function statusLabel(value: unknown): string {
+  return ({ error: tr("失败", "Failed"), completed: tr("完成", "Completed"), started: tr("运行中", "Running"), stopped: tr("已停止", "Stopped") } as Record<string, string>)[String(value)] || String(value || "—");
+}
+function channelLabel(value: unknown): string {
+  return ({ web: tr("网页", "Web"), cli: tr("命令行", "CLI"), qq: "QQ", weixin: tr("微信", "WeChat") } as Record<string, string>)[String(value)] || String(value || "—");
+}
+function componentLabel(value: string): string {
+  return ({ agent: tr("Agent 运行时", "Agent runtime"), gateway: "Gateway", turn: tr("对话运行", "Turn runtime"), llm: tr("模型服务", "Model service"), tool: tr("工具调用", "Tool calls"), channel: tr("外部渠道", "Channels"), mcp: "MCP", session: tr("会话", "Sessions"), context: tr("上下文", "Context"), memory: "Memory", subagent: tr("子智能体", "Subagents") } as Record<string, string>)[value] || value;
+}
+function diagnosticGuide(value: unknown): { title: string; explanation: string; impact: string; action: string } {
+  const code = String(value || "RUNTIME_ERROR");
+  const exact: Record<string, { title: string; explanation: string; impact: string; action: string }> = {
+    WEIXIN_TOKEN_STALE: {
+      title: tr("微信连接凭据已失效", "Weixin credentials expired"),
+      explanation: tr("系统中某个已经绑定的微信账号令牌被微信服务判定为失效，系统已停止继续使用旧凭据。这不表示无人连接；无人绑定时不会产生该事故。", "Weixin marked the token of an already-bound account as stale, so the system stopped using it. This does not mean nobody is connected; an unbound system does not produce this incident."),
+      impact: tr("仅该微信账号暂时不能收发消息；Web、CLI 和其他渠道不受影响。跨用户诊断按隐私边界不显示账号归属。", "Only that Weixin account cannot send or receive messages. Web, CLI, and other channels are unaffected. Cross-user diagnostics intentionally hide account ownership."),
+      action: tr("需要该微信账号所属用户在自己的“设置 → 渠道连接”中重新连接并扫码。管理员无法代替其他用户完成个人微信授权。", "The account owner must reconnect and scan the QR code in their own Settings → Channel connections. An administrator cannot complete another user's personal Weixin authorization."),
+    },
+    GATEWAY_RESTART_INTERRUPTED: {
+      title: tr("运行被 Gateway 重启中断", "Run interrupted by a Gateway restart"),
+      explanation: tr("这条运行开始后，Gateway 在完成前退出或重启，因此没有正常结束。", "The Gateway exited or restarted before this run could finish."),
+      impact: tr("只影响这一次尚未完成的运行，不表示会话数据损坏。", "Only this unfinished run was affected; it does not indicate session data corruption."),
+      action: tr("确认 Gateway 已稳定运行后重新发送该请求。", "Confirm the Gateway is stable, then retry the request."),
+    },
+    RATE_LIMITED: {
+      title: tr("模型服务触发限流", "Model provider rate limit"),
+      explanation: tr("模型服务拒绝了短时间内过多的请求。", "The model provider rejected too many requests in a short period."),
+      impact: tr("相关模型调用失败或被延迟，其他服务通常不受影响。", "Related model calls may fail or be delayed; other services are usually unaffected."),
+      action: tr("稍后重试，并检查模型端点的限额、并发配置和备用模型状态。", "Retry later and check endpoint limits, concurrency, and fallback model status."),
+    },
+  };
+  if (exact[code]) return exact[code];
+  if (code.includes("TIMEOUT")) return { title: tr("调用等待超时", "Request timed out"), explanation: tr("目标组件未在限定时间内返回结果。", "The target component did not respond within the allowed time."), impact: tr("当前请求没有完成。", "The current request did not complete."), action: tr("检查对应组件的连通性和负载后重试。", "Check the component's connectivity and load, then retry.") };
+  if (code.includes("AUTH") || code.includes("TOKEN") || code.includes("CREDENTIAL")) return { title: tr("认证凭据不可用", "Credentials unavailable"), explanation: tr("目标服务拒绝或无法读取当前凭据。", "The target service rejected or could not read the current credentials."), impact: tr("依赖该凭据的功能暂时不可用。", "Features using these credentials are temporarily unavailable."), action: tr("检查相应服务的账号绑定或密钥配置。", "Check the account binding or credential configuration for the service.") };
+  return { title: tr("运行组件报告错误", "Runtime component reported an error"), explanation: tr(`组件返回错误码 ${code}，当前证据不足以进一步自动判断根因。`, `The component returned ${code}; current evidence is insufficient to determine a deeper root cause.`), impact: tr("影响范围请结合下方技术证据中的组件、会话和请求标识判断。", "Use the component, session, and request identifiers below to determine the affected scope."), action: tr("展开技术证据，按错误码、会话或请求标识继续筛选。", "Expand the technical evidence and filter by code, session, or request ID.") };
+}
+function diagnosticEventLabel(event: Record<string, unknown>): string {
+  const name = String(event.event || event.tool_name || event.status || "");
+  return ({
+    "channel.start_failed": tr("渠道启动失败", "Channel failed to start"),
+    "channel.ready": tr("渠道已就绪", "Channel ready"),
+    "channel.enabled": tr("渠道已启用", "Channel enabled"),
+    "channel.stop": tr("渠道已停止", "Channel stopped"),
+    "channel.weixin.reconnect_required": tr("微信账号需要重新连接", "Weixin account requires reconnection"),
+    "mcp.runtime_closed": tr("MCP 运行时已关闭", "MCP runtime closed"),
+    "memory.scheduler.stop": tr("Memory 调度器已停止", "Memory scheduler stopped"),
+    "llm.error": tr("模型调用失败", "Model call failed"),
+  } as Record<string, string>)[name] || tr("运行事件", "Runtime event");
+}
+function diagnosticEventKey(event: Record<string, unknown>): string {
+  return String(event.event || event.tool_name || event.status || event.kind || "runtime.event");
+}
+function eventIsError(event: Record<string, unknown>): boolean {
+  return Boolean(event.is_error || event.code || event.error_code || event.reason_code);
+}
+function diagnosticFieldLabel(value: string): string {
+  return ({ error_message: tr("错误消息", "Error message"), reason_code: tr("原因代码", "Reason code"), status: tr("状态", "Status"), route: tr("请求路径", "Route"), session_id: "Session ID", turn_id: "Turn ID", request_id: "Request / Trace ID", model: tr("模型", "Model"), endpoint: tr("模型端点", "Endpoint"), duration_ms: tr("耗时（毫秒）", "Duration (ms)") } as Record<string, string>)[value] || value;
+}
+function diagnosticWindowLabel(value: unknown): string {
+  const minutes = Number(value);
+  if (minutes < 60) return tr(`${minutes} 分钟`, `${minutes} minutes`);
+  if (minutes < 1440) return tr(`${minutes / 60} 小时`, `${minutes / 60} hours`);
+  return tr(`${minutes / 1440} 天`, `${minutes / 1440} days`);
+}
+function incidentRuleLabel(value: unknown): string {
+  return String(value) === "same_component_code_subject_within_query_window"
+    ? tr("同一组件、错误码和对象在当前查询时间范围内合并为一项事故", "Events with the same component, code, and subject are grouped in this query window")
+    : String(value || "—");
+}
+function incidentEvidence(incident: Record<string, unknown>): Record<string, unknown>[] {
+  return Array.isArray(incident.evidence)
+    ? incident.evidence.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    : [];
+}
+function toggleRunRecord(turnId: unknown) {
+  const key = String(turnId || "unknown");
+  openRunRecords.value[key] = !openRunRecords.value[key];
+}
+function toggleTimelineEvent(evidenceId: unknown) {
+  const key = String(evidenceId || "unknown");
+  openTimelineEvents.value[key] = !openTimelineEvents.value[key];
+}
 </script>
 
 <template>
@@ -114,17 +309,23 @@ function fmt(value: unknown): string { return value ? new Date(String(value)).to
       <button class="back-chat" @click="router.push('/')"><ArrowLeft :size="17" />{{ tr('返回聊天', 'Back to chat') }}</button>
     </aside>
     <main class="admin-main">
-      <header class="admin-header"><div><span class="eyebrow">Administration</span><h1>{{ tabs.find((item) => item.key === tab)?.label }}</h1></div><div class="admin-header-actions"><QuickPreferences /><button v-if="tab !== 'overview'" class="icon-button" :title="tr('刷新', 'Refresh')" @click="loadTab(tab)"><RefreshCw :size="18" /></button></div></header>
+      <header class="admin-header"><div><span class="eyebrow">{{ tr('管理后台', 'Administration') }}</span><h1>{{ tabs.find((item) => item.key === tab)?.label }}</h1></div><div class="admin-header-actions"><QuickPreferences /><button v-if="tab !== 'overview'" class="icon-button" :title="tr('刷新', 'Refresh')" @click="loadTab(tab)"><RefreshCw :size="18" /></button></div></header>
       <p v-if="failure" class="form-error">{{ failure }}</p>
 
       <section v-if="tab === 'overview'" class="admin-overview">
-        <div class="overview-hero"><div><span class="eyebrow">{{ tr('本地优先 Agent Runtime', 'Local-first Agent Runtime') }}</span><h2>{{ tr('欢迎', 'Welcome') }}，{{ auth.user?.display_name }}</h2><p>{{ tr('这里汇总账号治理、角色能力、运行真值和安全审计。深层根因诊断将在 Part 17 接入同一界面。', 'Account governance, role capabilities, runtime truth, and security audit are collected here. Part 17 will add deeper diagnostics to this interface.') }}</p></div><Gauge :size="52" /></div>
-        <div class="overview-grid"><button v-for="item in tabs.filter((item) => item.key !== 'overview')" :key="item.key" @click="loadTab(item.key)"><component :is="item.icon" :size="22" /><strong>{{ item.label }}</strong><span>{{ { users: tr('账号状态与角色分配', 'Account status and role assignment'), roles: tr('能力域与技术 key', 'Capability domains and technical keys'), monitor: 'Gateway, Capability & Activity', audit: tr('安全和管理事件', 'Security and administration events') }[item.key] }}</span></button></div>
+        <div class="overview-hero"><div><span class="eyebrow">{{ tr('系统运行概览', 'System overview') }}</span><h2>{{ (admin.diagnostics?.summary.incidents || admin.monitor?.activity.summary.failed) ? tr('发现需要关注的运行问题', 'Runtime issues need attention') : tr('系统运行正常', 'System is operating normally') }}</h2><p>{{ tr('先看服务、模型和近期异常；需要排查时进入运行诊断查看事故证据与跨组件时间线。', 'Review services, model, and recent failures first. Open Runtime diagnostics for incident evidence and the cross-component timeline.') }}</p></div><Activity :size="52" /></div>
+        <div class="overview-status-grid">
+          <article><span>Gateway</span><strong>{{ admin.monitor?.gateway.status || tr('无权限', 'Unavailable') }}</strong><small>ZhiCe-Agent</small></article>
+          <article><span>{{ tr('当前模型', 'Current model') }}</span><strong class="overview-model">{{ admin.monitor?.gateway.current_model || '—' }}</strong><small>{{ tr(`${availableCapabilityCount} 项能力可用`, `${availableCapabilityCount} capabilities available`) }}</small></article>
+          <article :class="{ attention: Number(admin.monitor?.activity.summary.failed || 0) > 0 }"><span>{{ tr('近期失败', 'Recent failures') }}</span><strong>{{ admin.monitor?.activity.summary.failed ?? '—' }}</strong><small>{{ tr('结构化运行记录', 'Structured run records') }}</small></article>
+          <article :class="{ attention: Number(admin.diagnostics?.summary.incidents || 0) > 0 }"><span>{{ tr('当前事故', 'Current incidents') }}</span><strong>{{ admin.diagnostics?.summary.incidents ?? '—' }}</strong><small>{{ tr('近 60 分钟确定性聚合', 'Deterministic, last 60 minutes') }}</small></article>
+        </div>
+        <div class="overview-grid"><button v-for="item in tabs.filter((item) => item.key !== 'overview')" :key="item.key" @click="loadTab(item.key)"><component :is="item.icon" :size="22" /><strong>{{ item.label }}</strong><span>{{ { users: tr('账号状态与角色分配', 'Account status and role assignment'), roles: tr('能力域与技术 key', 'Capability domains and technical keys'), monitor: tr('事故、失败运行与诊断时间线', 'Incidents, failed runs, and diagnostic timeline'), advanced: tr('低频安全审计与导出', 'Low-frequency security audit and export') }[item.key] }}</span></button></div>
       </section>
 
       <section v-else-if="tab === 'users'" class="admin-section">
-        <form v-if="auth.can('auth.users.manage')" class="admin-create-form" autocomplete="off" @submit.prevent="createUser"><h2>{{ tr('创建用户', 'Create user') }}</h2><input v-model="newUser.username" name="admin-new-username" autocomplete="off" required :placeholder="tr('新用户名', 'New username')" /><input v-model="newUser.display_name" name="admin-new-display-name" autocomplete="off" :placeholder="tr('新用户显示名称（可选）', 'New user display name (optional)')" /><input v-model="newUser.password" name="admin-new-password" type="password" autocomplete="new-password" minlength="8" required :placeholder="tr('设置初始密码', 'Set initial password')" /><select v-model="newUser.roles[0]"><option v-for="role in ['viewer','developer','auditor','admin']" :key="role" :value="role">{{ roleName(role, ui.language) }}</option></select><button class="primary-button">{{ tr('创建', 'Create') }}</button></form>
-        <div class="data-table user-table"><div class="table-head"><span>{{ tr('用户', 'User') }}</span><span>{{ tr('角色', 'Role') }}</span><span>{{ tr('状态', 'Status') }}</span><span>{{ tr('管理', 'Actions') }}</span></div><div v-for="user in admin.users" :key="user.id" class="table-row"><span><strong>{{ user.display_name }}</strong><small>@{{ user.username }}</small></span><span><select v-if="auth.can('auth.users.manage') && !user.roles.includes('owner')" :value="user.roles[0]" @change="updateUser(user.id, { roles: [($event.target as HTMLSelectElement).value] })"><option v-for="role in ['viewer','developer','auditor','admin']" :key="role" :value="role">{{ roleName(role, ui.language) }}</option></select><template v-else>{{ user.roles.map((role) => roleName(role, ui.language)).join('、') }}</template></span><span><i :class="`status-dot ${user.status}`"></i>{{ user.status === 'active' ? tr('启用', 'Active') : tr('停用', 'Disabled') }}</span><span class="row-actions"><button v-if="auth.can('auth.users.manage') && !user.roles.includes('owner')" @click="updateUser(user.id, { status: user.status === 'active' ? 'disabled' : 'active' })">{{ user.status === 'active' ? tr('停用', 'Disable') : tr('启用', 'Enable') }}</button><button v-if="auth.can('auth.admin.manage') && user.roles.includes('admin')" @click="updateUser(user.id, { can_manage_admins: !user.can_manage_admins })">{{ user.can_manage_admins ? tr('撤销委派', 'Revoke delegation') : tr('委派管理', 'Delegate management') }}</button><button v-if="auth.user?.roles.includes('owner') && user.status === 'disabled' && !user.roles.includes('owner')" class="danger-text-button" @click="openDeleteUser(user)"><Trash2 :size="14" />{{ tr('永久删除', 'Delete permanently') }}</button><span v-if="user.roles.includes('owner')" class="readonly-pill">{{ tr('固定只读', 'Read-only') }}</span></span></div></div>
+        <form v-if="auth.can('auth.users.manage')" class="admin-create-form" autocomplete="off" @submit.prevent="createUser"><h2>{{ tr('创建账号', 'Create account') }}</h2><input v-model="newUser.username" name="admin-new-username" autocomplete="off" required :placeholder="tr('新账号', 'New account')" /><input v-model="newUser.display_name" name="admin-new-display-name" autocomplete="off" :placeholder="tr('昵称（可选）', 'Nickname (optional)')" /><input v-model="newUser.password" name="admin-new-password" type="password" autocomplete="new-password" minlength="8" required :placeholder="tr('设置初始密码', 'Set initial password')" /><select v-model="newUser.roles[0]"><option v-for="role in ['viewer','developer','auditor','admin']" :key="role" :value="role">{{ roleName(role, ui.language) }}</option></select><button class="primary-button">{{ tr('创建', 'Create') }}</button></form>
+        <div class="data-table user-table"><div class="table-head"><span>{{ tr('账号', 'Account') }}</span><span>{{ tr('角色', 'Role') }}</span><span>{{ tr('状态', 'Status') }}</span><span>{{ tr('管理', 'Actions') }}</span></div><div v-for="user in admin.users" :key="user.id" class="table-row"><span><strong>{{ user.display_name }}</strong><small>@{{ user.username }}</small></span><span><select v-if="auth.can('auth.users.manage') && !user.roles.includes('owner')" :value="user.roles[0]" @change="updateUser(user.id, { roles: [($event.target as HTMLSelectElement).value] })"><option v-for="role in ['viewer','developer','auditor','admin']" :key="role" :value="role">{{ roleName(role, ui.language) }}</option></select><template v-else>{{ user.roles.map((role) => roleName(role, ui.language)).join('、') }}</template></span><span><i :class="`status-dot ${user.status}`"></i>{{ user.status === 'active' ? tr('启用', 'Active') : tr('停用', 'Disabled') }}</span><span class="row-actions"><button v-if="auth.can('auth.users.manage') && !user.roles.includes('owner')" @click="updateUser(user.id, { status: user.status === 'active' ? 'disabled' : 'active' })">{{ user.status === 'active' ? tr('停用', 'Disable') : tr('启用', 'Enable') }}</button><button v-if="auth.can('auth.admin.manage') && user.roles.includes('admin')" @click="updateUser(user.id, { can_manage_admins: !user.can_manage_admins })">{{ user.can_manage_admins ? tr('撤销委派', 'Revoke delegation') : tr('委派管理', 'Delegate management') }}</button><button v-if="auth.user?.roles.includes('owner') && user.status === 'disabled' && !user.roles.includes('owner')" class="danger-text-button" @click="openDeleteUser(user)"><Trash2 :size="14" />{{ tr('永久删除', 'Delete permanently') }}</button><span v-if="user.roles.includes('owner')" class="readonly-pill">{{ tr('固定只读', 'Read-only') }}</span></span></div></div>
       </section>
 
       <section v-else-if="tab === 'roles'" class="roles-layout">
@@ -133,31 +334,36 @@ function fmt(value: unknown): string { return value ? new Date(String(value)).to
       </section>
 
       <section v-else-if="tab === 'monitor'" class="monitor-section">
-        <div class="truth-banner"><Activity :size="22" /><span><strong>{{ tr('运行真值与系统诊断', 'Runtime truth and system diagnostics') }}</strong><small>{{ tr('事故由确定性规则聚合；时间线仅包含白名单脱敏字段，不写入模型推断。', 'Incidents use deterministic rules; timelines contain only allowlisted redacted fields and never persist model inference.') }}</small></span></div>
-        <template v-if="auth.can('turn.read.any')">
-        <div class="monitor-grid"><article><span>Gateway</span><strong>{{ admin.monitor?.gateway.status || 'unknown' }}</strong><small>{{ admin.monitor?.gateway.current_model }}</small></article><article v-for="(value, key) in admin.monitor?.activity.summary" :key="key"><span>{{ key }}</span><strong>{{ value }}</strong><small>近期结构化记录</small></article></div>
-        <h2>Capability</h2><div class="capability-grid"><article v-for="(capability, key) in admin.monitor?.capabilities" :key="key"><i :class="`status-dot ${capability.state}`"></i><div><strong>{{ capability.name }}</strong><small>{{ capability.message }}</small><code>{{ capability.code }}</code></div></article></div>
-        <h2>{{ tr('近期 Turn Activity', 'Recent Turn Activity') }}</h2><div class="data-table activity-table"><div class="table-head"><span>{{ tr('状态', 'Status') }}</span><span>{{ tr('渠道', 'Channel') }}</span><span>{{ tr('开始', 'Started') }}</span><span>{{ tr('耗时', 'Duration') }}</span></div><div v-for="turn in admin.monitor?.activity.recent_turns" :key="String(turn.turn_id)" class="table-row"><span>{{ turn.status }}</span><span>{{ turn.channel }}</span><span>{{ fmt(turn.started_at) }}</span><span>{{ turn.duration_ms ? `${turn.duration_ms} ms` : '—' }}</span></div></div>
-        </template>
+        <div class="truth-banner"><Activity :size="22" /><span><strong>{{ tr('定位系统哪里出错，以及为什么出错', 'Find where the system failed and why') }}</strong><small>{{ tr('事故由确定性规则聚合；时间线仅包含白名单脱敏字段，不写入模型推断。', 'Incidents use deterministic rules; timelines contain only allowlisted redacted fields and never persist model inference.') }}</small></span></div>
         <section v-if="auth.can('diagnostics.system.use')" class="diagnostics-panel">
-          <h2>{{ tr('系统事故与时间线', 'System incidents and timeline') }}</h2>
-          <form class="diagnostic-filters" @submit.prevent="admin.loadDiagnostics(diagnosticFilters)"><input v-model="diagnosticFilters.actor_user_id" :placeholder="tr('用户 ID', 'User ID')" /><input v-model="diagnosticFilters.session_id" :placeholder="tr('Session ID', 'Session ID')" /><input v-model="diagnosticFilters.component" :placeholder="tr('组件', 'Component')" /><input v-model="diagnosticFilters.error_code" :placeholder="tr('错误码', 'Error code')" /><select v-model="diagnosticFilters.status"><option value="">{{ tr('全部状态', 'All statuses') }}</option><option value="error">error</option><option value="stopped">stopped</option><option value="completed">completed</option></select><button class="primary-button">{{ tr('诊断', 'Diagnose') }}</button></form>
-          <div class="monitor-grid"><article v-for="(value, key) in admin.diagnostics?.summary" :key="key"><span>{{ key }}</span><strong>{{ value }}</strong><small>{{ tr('当前查询窗口', 'Current query window') }}</small></article></div>
-          <div class="incident-list"><details v-for="incident in admin.diagnostics?.incidents" :key="String(incident.incident_id)"><summary><span><strong>{{ incident.code }}</strong><small>{{ incident.component }} · {{ incident.subject || tr('无特定对象', 'No subject') }}</small></span><span>{{ incident.count }} ×</span><span>{{ fmt(incident.last_seen_at) }}</span></summary><code>{{ incident.incident_id }}</code><p>{{ incident.rule }}</p></details><p v-if="!admin.diagnostics?.incidents.length" class="empty-note">{{ tr('当前筛选范围没有确定性事故记录。', 'No deterministic incidents in the selected window.') }}</p></div>
-          <h3>{{ tr('跨组件时间线', 'Cross-component timeline') }}</h3><div class="data-table diagnostic-timeline"><div class="table-head"><span>{{ tr('时间', 'Time') }}</span><span>{{ tr('组件', 'Component') }}</span><span>{{ tr('事件', 'Event') }}</span><span>{{ tr('代码', 'Code') }}</span></div><div v-for="event in admin.diagnostics?.timeline" :key="String(event.evidence_id)" class="table-row"><span>{{ fmt(event.ts) }}</span><span>{{ event.component || event.kind }}</span><span>{{ event.event || event.tool_name || event.status }}</span><span><code>{{ event.code || '—' }}</code></span></div></div>
+          <h2>{{ tr('事故与错误证据', 'Incidents and error evidence') }}</h2>
+          <form class="diagnostic-filters" @submit.prevent="runDiagnostics"><select v-model="diagnosticFilters.actor_user_id" :aria-label="tr('账号', 'Account')"><option value="">{{ tr('全部账号', 'All accounts') }}</option><option v-for="actor in diagnosticActorOptions" :key="actor.id" :value="actor.id">{{ actor.label }}</option></select><select v-model="diagnosticFilters.session_id" :aria-label="tr('会话', 'Session')"><option value="">{{ tr('全部会话', 'All sessions') }}</option><option v-for="session in diagnosticSessionOptions" :key="session.id" :value="session.id">{{ session.label }}</option></select><select v-model="diagnosticFilters.component" :aria-label="tr('组件', 'Component')"><option value="">{{ tr('全部组件', 'All components') }}</option><option v-for="component in diagnosticComponentOptions" :key="component.value" :value="component.value">{{ component.label }}</option></select><select v-model="diagnosticFilters.error_code" :aria-label="tr('错误码', 'Error code')"><option value="">{{ tr('全部错误码', 'All error codes') }}</option><option v-for="code in diagnosticErrorCodeOptions" :key="code" :value="code">{{ code }}</option></select><select v-model="diagnosticFilters.status" :aria-label="tr('状态', 'Status')"><option value="">{{ tr('全部状态', 'All statuses') }}</option><option value="error">{{ tr('失败', 'Failed') }}</option><option value="stopped">{{ tr('已停止', 'Stopped') }}</option><option value="completed">{{ tr('完成', 'Completed') }}</option></select><select v-model="diagnosticFilters.minutes" :aria-label="tr('时间范围', 'Time range')"><option value="60">{{ tr('最近 1 小时', 'Last hour') }}</option><option value="360">{{ tr('最近 6 小时', 'Last 6 hours') }}</option><option value="1440">{{ tr('最近 24 小时', 'Last 24 hours') }}</option><option value="10080">{{ tr('最近 7 天', 'Last 7 days') }}</option></select><button class="primary-button" :disabled="diagnosticBusy">{{ diagnosticBusy ? tr('诊断中…', 'Diagnosing…') : tr('诊断', 'Diagnose') }}</button></form>
+          <div class="monitor-grid"><article v-for="(value, key) in admin.diagnostics?.summary" :key="key"><span>{{ diagnosticSummaryLabels[String(key)] || key }}</span><strong>{{ value }}</strong><small>{{ tr('查询范围', 'Window') }}：{{ diagnosticWindowLabel(admin.diagnostics?.window_minutes || diagnosticFilters.minutes) }}</small></article></div>
+          <p v-if="diagnosticUpdatedAt && diagnosticHasResults" class="diagnostic-feedback success">{{ tr(`诊断已更新 · ${diagnosticUpdatedAt} · 最近 ${diagnosticWindowLabel(admin.diagnostics?.window_minutes || diagnosticFilters.minutes)}`, `Diagnostics updated · ${diagnosticUpdatedAt} · Last ${diagnosticWindowLabel(admin.diagnostics?.window_minutes || diagnosticFilters.minutes)}`) }}</p><div v-else-if="diagnosticUpdatedAt" class="diagnostic-feedback empty"><strong>{{ tr('当前筛选和时间范围内没有匹配记录', 'No records match the current filters and time range') }}</strong><span>{{ diagnosticFilters.actor_user_id ? tr('账号筛选只覆盖能关联到该账号的运行记录；Gateway、渠道启动等系统事件通常没有用户归属。请选择“全部账号”后重新诊断。', 'Account filters only cover activity correlated to that account. Gateway and channel startup events often have no user owner. Select All accounts and diagnose again.') : tr('可以切换到更长的时间范围，或放宽 Session、组件、错误码和状态条件后重新诊断。', 'Choose a longer time range or broaden the session, component, error-code, and status filters, then diagnose again.') }}</span></div>
+          <div class="incident-list"><details v-for="incident in admin.diagnostics?.incidents" :key="String(incident.incident_id)"><summary><span><strong>{{ diagnosticGuide(incident.code).title }}</strong><small>{{ componentLabel(String(incident.component || '')) }} · <code>{{ incident.code }}</code><template v-if="incident.subject"> · {{ incident.subject }}</template></small></span><span>{{ incident.count }} ×</span><span>{{ fmt(incident.last_seen_at) }}</span><ChevronDown :size="18" /></summary><div class="incident-detail"><div class="diagnosis-copy"><article><strong>{{ tr('发生了什么', 'What happened') }}</strong><p>{{ diagnosticGuide(incident.code).explanation }}</p></article><article><strong>{{ tr('影响', 'Impact') }}</strong><p>{{ diagnosticGuide(incident.code).impact }}</p></article><article><strong>{{ tr('建议处理', 'Recommended action') }}</strong><p>{{ diagnosticGuide(incident.code).action }}</p></article></div><details class="technical-evidence"><summary>{{ tr('查看技术证据', 'View technical evidence') }} <ChevronDown :size="15" /></summary><dl><dt>{{ tr('事故标识', 'Incident ID') }}</dt><dd><code>{{ incident.incident_id }}</code></dd><dt>{{ tr('首次发生', 'First seen') }}</dt><dd>{{ fmt(incident.first_seen_at) }}</dd><dt>{{ tr('最后发生', 'Last seen') }}</dt><dd>{{ fmt(incident.last_seen_at) }}</dd><dt>{{ tr('聚合规则', 'Grouping rule') }}</dt><dd>{{ incidentRuleLabel(incident.rule) }}</dd></dl><div v-for="evidence in incidentEvidence(incident)" :key="String(evidence.evidence_id || evidence.ts)" class="evidence-event"><strong>{{ diagnosticEventLabel(evidence) }}</strong><span>{{ fmt(evidence.ts) }} · {{ componentLabel(String(evidence.component || evidence.kind || '')) }}</span><p v-if="evidence.error_message">{{ evidence.error_message }}</p><code>{{ evidence.code || evidence.error_code || evidence.reason_code || '—' }}</code></div></details></div></details><p v-if="!admin.diagnostics?.incidents.length" class="empty-note">{{ tr('当前筛选范围没有确定性事故记录。', 'No deterministic incidents in the selected window.') }}</p></div>
+          <div class="diagnostic-timeline-heading"><div><h3>{{ tr('诊断证据时间线', 'Diagnostic evidence timeline') }}</h3><p>{{ tr('按时间排列各组件留下的证据，用于还原错误发生前后的过程；证据标识只是日志关联编号，不代表错误原因。', 'Evidence from each component is ordered by time to reconstruct what happened. An evidence ID is only a log correlation identifier, not an error cause.') }}</p></div><label><span>{{ tr('显示范围', 'Scope') }}</span><select v-model="timelineScope"><option value="errors">{{ tr('仅异常证据', 'Errors only') }}</option><option value="all">{{ tr('全部上下文', 'All context') }}</option></select></label></div><div class="data-table diagnostic-timeline"><div class="table-head"><span>{{ tr('时间 / 状态', 'Time / status') }}</span><span>{{ tr('组件', 'Component') }}</span><span>{{ tr('事件含义 / 内部标识', 'Meaning / internal key') }}</span><span>{{ tr('错误码', 'Error code') }}</span><span></span></div><div v-for="event in displayedDiagnosticTimeline" :key="String(event.evidence_id)" class="timeline-event" :class="{ open: openTimelineEvents[String(event.evidence_id)], error: eventIsError(event), normal: !eventIsError(event) }"><div class="table-row" role="button" tabindex="0" @click="toggleTimelineEvent(event.evidence_id)" @keydown.enter="toggleTimelineEvent(event.evidence_id)" @keydown.space.prevent="toggleTimelineEvent(event.evidence_id)"><span><strong>{{ fmt(event.ts) }}</strong><small class="evidence-status"><i :class="`status-dot ${eventIsError(event) ? 'error' : 'completed'}`"></i>{{ eventIsError(event) ? tr('异常', 'Error') : tr('正常', 'Normal') }}</small></span><span><strong>{{ componentLabel(String(event.component || event.kind || '')) }}</strong><code>{{ event.component || event.kind || '—' }}</code></span><span><strong>{{ diagnosticEventLabel(event) }}</strong><code>{{ diagnosticEventKey(event) }}</code></span><span><code>{{ event.code || '—' }}</code></span><span class="timeline-chevron" :title="openTimelineEvents[String(event.evidence_id)] ? tr('收起证据', 'Collapse evidence') : tr('展开证据', 'Expand evidence')"><ChevronDown :size="18" /></span></div><dl v-if="openTimelineEvents[String(event.evidence_id)]"><template v-for="key in ['error_message','reason_code','status','route','session_id','turn_id','request_id','model','endpoint','duration_ms']" :key="key"><template v-if="event[key]"><dt>{{ diagnosticFieldLabel(key) }}</dt><dd><code v-if="key.endsWith('_id') || key.endsWith('_code')">{{ event[key] }}</code><span v-else>{{ event[key] }}</span></dd></template></template><dt>{{ tr('证据标识', 'Evidence ID') }}</dt><dd><code>{{ event.evidence_id }}</code><small>{{ tr('用于在诊断结果和脱敏日志中唯一定位这条事件', 'Uniquely identifies this event across diagnostics and redacted logs') }}</small></dd></dl></div><p v-if="!displayedDiagnosticTimeline.length" class="empty-note timeline-empty">{{ tr('当前范围没有异常证据，可切换到“全部上下文”查看正常生命周期事件。', 'No error evidence in this scope. Switch to All context to view normal lifecycle events.') }}</p></div>
         </section>
+        <template v-if="auth.can('turn.read.any')">
+          <section class="recent-runs-section">
+            <header><div><h2>{{ tr('近期运行记录', 'Recent runs') }}</h2><p>{{ tr('默认只看失败；需要时再切换到运行中、已停止或全部记录。', 'Failures are shown by default. Switch to running, stopped, completed, or all runs when needed.') }}</p></div><label><span>{{ tr('运行状态', 'Run status') }}</span><select v-model="recentRunStatus" @change="loadRecentRuns"><option value="error">{{ tr('失败', 'Failed') }}</option><option value="started">{{ tr('运行中', 'Running') }}</option><option value="stopped">{{ tr('已停止', 'Stopped') }}</option><option value="completed">{{ tr('完成', 'Completed') }}</option><option value="">{{ tr('全部记录', 'All runs') }}</option></select></label></header>
+            <div class="data-table activity-table"><div class="table-head"><span>{{ tr('Session 会话标题 / 账号', 'Session title / account') }}</span><span>{{ tr('状态 / 错误', 'Status / error') }}</span><span>{{ tr('渠道', 'Channel') }}</span><span>{{ tr('开始时间', 'Started') }}</span><span>{{ tr('耗时', 'Duration') }}</span><span></span></div><div v-for="turn in admin.monitor?.activity.recent_turns" :key="String(turn.turn_id)" class="run-record" :class="{ open: openRunRecords[String(turn.turn_id)] }"><div class="table-row"><span><small class="record-kind">{{ tr('Session 会话标题', 'Session title') }}</small><strong>{{ turn.session_title || tr('未命名会话', 'Untitled session') }}</strong><small>{{ tr('账号', 'Account') }}：{{ turn.actor_display_name || turn.actor_username || turn.actor_user_id }}<template v-if="turn.actor_username"> · @{{ turn.actor_username }}</template></small></span><span><strong><i :class="`status-dot ${turn.status}`"></i>{{ statusLabel(turn.status) }}</strong><code v-if="turn.error_code">{{ turn.error_code }}</code></span><span :data-label="tr('渠道', 'Channel')">{{ channelLabel(turn.channel) }}</span><span :data-label="tr('开始', 'Started')">{{ fmt(turn.started_at) }}</span><span :data-label="tr('耗时', 'Duration')">{{ fmtDuration(turn.duration_ms) }}</span><button class="record-toggle" type="button" @click="toggleRunRecord(turn.turn_id)"><span>{{ openRunRecords[String(turn.turn_id)] ? tr('收起', 'Collapse') : tr('查看诊断', 'View diagnosis') }}</span><ChevronDown :size="17" /></button></div><div v-if="openRunRecords[String(turn.turn_id)]" class="run-detail"><div v-if="turn.error_code" class="diagnosis-copy"><article><strong>{{ tr('发生了什么', 'What happened') }}</strong><p>{{ diagnosticGuide(turn.error_code).explanation }}</p></article><article><strong>{{ tr('影响', 'Impact') }}</strong><p>{{ diagnosticGuide(turn.error_code).impact }}</p></article><article><strong>{{ tr('建议处理', 'Recommended action') }}</strong><p>{{ diagnosticGuide(turn.error_code).action }}</p></article></div><dl><dt>Session ID</dt><dd><code>{{ turn.session_id || '—' }}</code></dd><dt>Turn ID</dt><dd><code>{{ turn.turn_id || '—' }}</code></dd><dt>Request / Trace ID</dt><dd><code>{{ turn.request_id || '—' }}</code></dd><dt>{{ tr('账号 ID', 'Account ID') }}</dt><dd><code>{{ turn.actor_user_id || '—' }}</code></dd><dt>{{ tr('结束时间', 'Finished') }}</dt><dd>{{ fmt(turn.finished_at) }}</dd><dt>{{ tr('错误码', 'Error code') }}</dt><dd><code>{{ turn.error_code || '—' }}</code></dd></dl></div></div></div>
+            <p v-if="!admin.monitor?.activity.recent_turns.length" class="empty-note">{{ tr('当前状态下没有运行记录。', 'No runs match this status.') }}</p>
+          </section>
+          <section class="runtime-health-section"><h2>{{ tr('服务与能力状态', 'Services and capabilities') }}</h2><div class="monitor-grid"><article><span>Gateway</span><strong>{{ admin.monitor?.gateway.status || 'unknown' }}</strong><small>{{ admin.monitor?.gateway.current_model }}</small></article><article v-for="(value, key) in admin.monitor?.activity.summary" :key="key"><span>{{ { turns: tr('总运行数', 'Total runs'), running: tr('运行中', 'Running'), failed: tr('失败', 'Failed'), stopped: tr('已停止', 'Stopped'), tool_errors: tr('工具错误', 'Tool errors') }[String(key)] || key }}</span><strong>{{ value }}</strong><small>{{ tr('结构化运行记录', 'Structured activity') }}</small></article></div><div class="capability-grid"><article v-for="(capability, key) in admin.monitor?.capabilities" :key="key"><i :class="`status-dot ${capability.state}`"></i><div><strong>{{ capability.name }}</strong><small>{{ capability.message }}</small><code>{{ capability.code }}</code></div></article></div></section>
+        </template>
       </section>
 
-      <section v-else class="audit-section">
-        <form class="audit-filters" @submit.prevent="admin.loadAudit(auditFilters)"><input v-model="auditFilters.action" :placeholder="tr('事件类型', 'Event type')" /><input v-model="auditFilters.actor_user_id" :placeholder="tr('操作者 ID', 'Actor ID')" /><select v-model="auditFilters.decision"><option value="">{{ tr('全部结果', 'All decisions') }}</option><option value="allow">{{ tr('允许', 'Allow') }}</option><option value="deny">{{ tr('拒绝', 'Deny') }}</option></select><input v-model="auditFilters.from_ts" type="datetime-local" /><input v-model="auditFilters.to_ts" type="datetime-local" /><button class="primary-button">{{ tr('筛选', 'Filter') }}</button><a v-if="auth.can('audit.export')" class="button-link" :href="auditExportUrl"><Download :size="16" />{{ tr('导出 CSV', 'Export CSV') }}</a></form>
-        <div class="audit-list"><details v-for="event in admin.auditEvents" :key="String(event.id)"><summary><span><i :class="`status-dot ${event.decision || 'neutral'}`"></i><strong>{{ event.action }}</strong></span><span>{{ event.channel || '—' }}</span><span>{{ fmt(event.ts) }}</span></summary><dl><template v-for="(value, key) in event" :key="key"><dt>{{ key }}</dt><dd><code v-if="typeof value === 'object'">{{ JSON.stringify(value) }}</code><span v-else>{{ value || '—' }}</span></dd></template></dl></details></div><button v-if="admin.auditHasMore" class="load-more" @click="admin.loadAudit(auditFilters, true)">{{ tr('加载更多', 'Load more') }}</button>
+      <section v-else-if="tab === 'advanced'" class="audit-section">
+        <div class="advanced-heading"><FileClock :size="22" /><div><h2>{{ tr('安全审计', 'Security audit') }}</h2><p>{{ tr('这里只记录登录异常、账号与权限变更、外部身份绑定、跨账号访问和危险操作等敏感事件；普通运行错误请到运行诊断查看。', 'This ledger only contains sensitive events such as authentication anomalies, account and permission changes, identity linking, cross-account access, and dangerous operations. Use Runtime diagnostics for ordinary failures.') }}</p></div></div>
+        <form class="audit-filters" @submit.prevent="admin.loadAudit(auditFilters)"><label class="audit-filter-field"><span>{{ tr('事件类型', 'Event type') }}</span><select v-model="auditFilters.event_type"><option value="">{{ tr('全部事件', 'All events') }}</option><option v-for="([key, label]) in auditActionOptions" :key="key" :value="key">{{ label }}</option></select><small>{{ tr('选择登录、账号管理或系统诊断等事件', 'Choose login, account management, diagnostics, or another event') }}</small></label><label class="audit-filter-field"><span>{{ tr('操作者账号', 'Actor account') }}</span><select v-model="auditFilters.actor_user_id"><option value="">{{ tr('全部账号', 'All accounts') }}</option><option v-for="actor in auditActorOptions" :key="actor.id" :value="actor.id">{{ actor.label }}</option></select><small>{{ auditActorOptions.length ? tr('按账号筛选操作记录', 'Filter activity by account') : tr('当前权限下没有可选账号', 'No accounts are available with current permissions') }}</small></label><label class="audit-filter-field"><span>{{ tr('执行结果', 'Outcome') }}</span><select v-model="auditFilters.outcome"><option value="">{{ tr('全部结果', 'All outcomes') }}</option><option value="success">{{ tr('成功', 'Success') }}</option><option value="failure">{{ tr('失败', 'Failure') }}</option></select><small>{{ tr('按状态码和错误决策筛选成功或失败记录', 'Filter successful or failed records by status and error decision') }}</small></label><DateTimePicker v-model="auditFilters.from_ts" :label="tr('开始时间', 'From')" :language="ui.language" /><DateTimePicker v-model="auditFilters.to_ts" :label="tr('结束时间', 'To')" :language="ui.language" :min-value="auditFilters.from_ts" /><button class="primary-button">{{ tr('筛选', 'Filter') }}</button><a v-if="auth.can('audit.export')" class="button-link" :href="auditExportUrl"><Download :size="16" />{{ tr('导出 CSV', 'Export CSV') }}</a></form>
+        <div class="audit-list"><details v-for="event in admin.auditEvents" :key="String(event.id)"><summary><span><i :class="`status-dot ${event.decision || 'neutral'}`"></i><strong>{{ event.action }}</strong></span><span>{{ event.channel || '—' }}</span><span>{{ fmt(event.ts) }}</span></summary><dl><template v-for="(value, key) in event" :key="key"><dt>{{ key }}</dt><dd><code v-if="typeof value === 'object'">{{ JSON.stringify(value) }}</code><span v-else>{{ value || '—' }}</span></dd></template></dl></details></div><nav class="audit-pagination" :aria-label="tr('安全审计分页', 'Security audit pagination')"><button type="button" :disabled="admin.auditPageIndex === 0" @click="admin.loadAudit(auditFilters, 'previous')">{{ tr('上一页', 'Previous') }}</button><span>{{ tr(`第 ${admin.auditPageIndex + 1} 页`, `Page ${admin.auditPageIndex + 1}`) }}</span><button type="button" :disabled="!admin.auditHasMore" @click="admin.loadAudit(auditFilters, 'next')">{{ tr('下一页', 'Next') }}</button></nav>
       </section>
     </main>
     <div v-if="deletingUser" class="modal-backdrop" @click.self="deletingUser = null">
       <form class="dialog-card compact-dialog" @submit.prevent="confirmDeleteUser">
         <h2>{{ tr('永久删除账号？', 'Permanently delete account?') }}</h2>
         <p>{{ tr('账号、QQ 绑定、登录状态、Session、Memory 和用户文件将永久删除。此操作无法撤销。', 'The account, QQ binding, login state, sessions, memory, and user files will be permanently deleted. This cannot be undone.') }}</p>
-        <label><span>{{ tr(`请输入用户名 ${deletingUser.username} 确认`, `Type ${deletingUser.username} to confirm`) }}</span><input v-model="deleteConfirmation" name="delete-user-confirmation" autocomplete="off" autofocus required :aria-invalid="Boolean(deleteConfirmationError)" @input="deleteConfirmationError = ''" /></label>
+        <label><span>{{ tr(`请输入账号 ${deletingUser.username} 确认`, `Type account ${deletingUser.username} to confirm`) }}</span><input v-model="deleteConfirmation" name="delete-user-confirmation" autocomplete="off" autofocus required :aria-invalid="Boolean(deleteConfirmationError)" @input="deleteConfirmationError = ''" /></label>
         <p v-if="deleteConfirmationError" class="form-error" role="alert">{{ deleteConfirmationError }}</p>
         <div class="dialog-actions"><button type="button" @click="deletingUser = null">{{ tr('取消', 'Cancel') }}</button><button class="danger-button" :disabled="deleteBusy">{{ deleteBusy ? tr('删除中…', 'Deleting…') : tr('确认永久删除', 'Delete permanently') }}</button></div>
       </form>

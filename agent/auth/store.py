@@ -20,6 +20,23 @@ from agent.protocols.auth import ActorContext, AuditEvent, AuthLogin, UserAccoun
 DEFAULT_AUTH_TTL = timedelta(days=7)
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,64}$")
 _STATUS_VALUES = {"active", "disabled"}
+_AUDIT_EVENT_TYPE_ACTIONS: dict[str, tuple[str, ...]] = {
+    "login": ("auth.login_success", "auth.login_failed"),
+    "logout": ("auth.logout",),
+    "registration": (
+        "auth.bootstrap_completed",
+        "auth.user_registered",
+        "auth.registration_failed",
+    ),
+    "password": ("auth.password_changed", "auth.password_change_failed"),
+    "profile": ("auth.profile_updated",),
+    "access": ("auth.request_denied",),
+    "user": ("user.%",),
+    "role": ("role.%",),
+    "audit": ("audit.%",),
+    "diagnostics": ("diagnostics.%",),
+    "external_identity": ("external_identity.%",),
+}
 
 
 class AuthSetupError(RuntimeError):
@@ -1795,7 +1812,9 @@ class SQLiteAuthStore:
         session_id: str = "",
         turn_id: str = "",
         action: str = "",
+        event_type: str = "",
         decision: str = "",
+        outcome: str = "",
         from_ts: str = "",
         to_ts: str = "",
         cursor: str = "",
@@ -1816,9 +1835,29 @@ class SQLiteAuthStore:
         if action:
             clauses.append("action=?")
             values.append(action)
+        if event_type:
+            event_actions = _AUDIT_EVENT_TYPE_ACTIONS.get(event_type, ())
+            if event_actions:
+                event_clauses: list[str] = []
+                for event_action in event_actions:
+                    if event_action.endswith("%"):
+                        event_clauses.append("action LIKE ?")
+                    else:
+                        event_clauses.append("action=?")
+                    values.append(event_action)
+                clauses.append("(" + " OR ".join(event_clauses) + ")")
         if decision:
             clauses.append("decision=?")
             values.append(decision)
+        if outcome == "success":
+            clauses.append(
+                "(status_code BETWEEN 200 AND 399 OR "
+                "(status_code IS NULL AND decision IN ('allow','approved','revoked','success')))"
+            )
+        elif outcome == "failure":
+            clauses.append(
+                "(status_code>=400 OR decision IN ('deny','error','failed'))"
+            )
         if from_ts:
             clauses.append("ts>=?")
             values.append(from_ts)
@@ -1844,20 +1883,39 @@ class SQLiteAuthStore:
                 row["metadata"] = {}
         return rows
 
-    def list_monitor_activity(self, *, limit: int = 50) -> dict[str, Any]:
+    def list_monitor_activity(
+        self,
+        *,
+        limit: int = 50,
+        status: str = "",
+    ) -> dict[str, Any]:
         """Return bounded cross-user Runtime Activity facts for the admin monitor."""
 
         bounded = max(1, min(int(limit), 200))
+        normalized_status = str(status).strip().lower()
+        turn_where = "WHERE tr.status=?" if normalized_status else ""
+        turn_values: tuple[Any, ...] = (
+            (normalized_status, bounded) if normalized_status else (bounded,)
+        )
         with self._connect() as connection:
             recent_turns = [
                 dict(row)
                 for row in connection.execute(
-                    """
-                    SELECT turn_id, session_id, channel, status, started_at, finished_at,
-                           duration_ms, error_code
-                    FROM turn_runs ORDER BY started_at DESC LIMIT ?
+                    f"""
+                    SELECT tr.turn_id, tr.session_id, tr.request_id, tr.actor_user_id,
+                           u.username AS actor_username,
+                           u.display_name AS actor_display_name,
+                           COALESCE(NULLIF(si.title, ''), NULLIF(si.preview, ''), tr.session_id)
+                             AS session_title,
+                           tr.channel, tr.status, tr.started_at, tr.finished_at,
+                           tr.duration_ms, tr.error_code
+                    FROM turn_runs tr
+                    LEFT JOIN users u ON u.id=tr.actor_user_id
+                    LEFT JOIN session_index si ON si.session_id=tr.session_id
+                    {turn_where}
+                    ORDER BY tr.started_at DESC LIMIT ?
                     """,
-                    (bounded,),
+                    turn_values,
                 ).fetchall()
             ]
             recent_tools = [

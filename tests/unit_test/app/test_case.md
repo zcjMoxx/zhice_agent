@@ -99,7 +99,7 @@
 - typed API client 保留稳定 HTTP error，typed WebSocket client 保留 hello/message/stop/confirmation/MCP elicitation frame；RuntimeEvent reducer 覆盖乱序、终态和 child 独立 sequence。
 - Session 窄侧栏不显示消息数；三点菜单支持 ESC 关闭、重命名和二次确认删除；外部群 Session 只读并可 fork 到 Web。
 - 设置中心包含常规、个性化、个人资料、账号与安全、渠道连接；主题按登录身份保存在 browser localStorage，支持系统/浅色/暗色曜石。
-- 管理后台按权限独立显示概览、用户、角色、系统监控和安全审计；所有内置 permission key 都有中文能力域映射，未知 key 回退技术名称，Owner 固定只读，Admin 角色权限仅允许 Owner 修改。
+- 管理后台按权限独立显示概览、账号、角色、运行诊断和高级设置；安全审计收在高级设置中，运行诊断默认展示带账号与 Session 标题的失败记录；所有内置 permission key 都有中文能力域映射，未知 key 回退技术名称，Owner 固定只读，Admin 角色权限仅允许 Owner 修改。
 - `GET /api/admin/monitor` 需要 `turn.read.any`，只聚合 Gateway、Capability 与结构化 Runtime Activity 真值，不返回根因诊断。
 - `GET /api/admin/diagnostics` 独立要求 `diagnostics.system.use`；Owner 默认可查，普通角色不能用 `turn.read.any` 替代该权限，并支持 component/error_code 等有界筛选。
 - `GET /api/audit/events` 保持旧 `limit/session_id/turn_id` 兼容，并增加事件、操作者、结果、时间和 cursor 筛选；`audit.export` 独立保护 CSV 导出。

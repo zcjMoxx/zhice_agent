@@ -140,7 +140,7 @@ function chooseLanguage(language: UiLanguage) { ui.setLanguage(language, userId(
         </section>
         <form v-else-if="ui.settingsSection === 'profile'" class="setting-section" @submit.prevent="saveProfile">
           <div class="profile-preview"><UserAvatar :name="displayName || auth.user?.username || ''" /><div><strong>{{ displayName || auth.user?.username }}</strong><small>@{{ auth.user?.username }}</small></div></div>
-          <label><span>{{ tr('用户名', 'Username') }}</span><input :value="auth.user?.username" disabled /></label><label><span>{{ tr('显示名称', 'Display name') }}</span><input v-model="displayName" maxlength="120" required /></label><button class="primary-button">{{ tr('保存资料', 'Save profile') }}</button>
+          <label><span>{{ tr('账号', 'Account') }}</span><input :value="auth.user?.username" disabled /></label><label><span>{{ tr('昵称', 'Nickname') }}</span><input v-model="displayName" maxlength="120" required /></label><button class="primary-button">{{ tr('保存资料', 'Save profile') }}</button>
         </form>
         <form v-else-if="ui.settingsSection === 'security'" class="setting-section" @submit.prevent="changePassword">
           <div class="security-note"><KeyRound :size="21" /><span><strong>{{ tr('修改密码后将退出当前账号', 'Changing your password signs you out') }}</strong><small>{{ tr('所有现有登录 Session 会被撤销，需要重新登录。', 'All active login sessions will be revoked.') }}</small></span></div>
