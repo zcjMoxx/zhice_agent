@@ -96,7 +96,7 @@ def test_deploy_readme_explains_cloud_fields_and_credential_storage() -> None:
     assert "known_hosts" in readme
     assert "明文 Secret" in readme
     assert "每个启用的 QQ `accounts` 项" in readme
-    assert "https://agent.zouzhou.xyz" in readme
+    assert "https://chat.zouzhou.xyz" in readme
     assert "不能依赖未配置时的本地默认值" in readme
 
 

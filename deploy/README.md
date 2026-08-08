@@ -151,7 +151,7 @@ Python 已安装 Paramiko，并已在 Windows `%USERPROFILE%\.ssh\known_hosts` �
 SSH 登录密码可用于该用户的 sudo；若两者不同，当前一键流程不适用
 ```
 
-云发布前还必须检查 `deploy/private/config.yml`：每个启用的 QQ `accounts` 项都要显式配置真实公网 HTTPS `web_base_url`。当前生产 `main` 账号应指向 `https://agent.zouzhou.xyz`；不能依赖未配置时的本地默认值 `http://127.0.0.1:10086`，否则 QQ 私聊裸 `/bind` 会向远端用户返回不可访问的 loopback 链接。本地和云端也不要同时运行同一 QQ Bot 账号，避免两个 WebSocket 实例竞争消息。
+云发布前还必须检查 `deploy/private/config.yml`：每个启用的 QQ `accounts` 项都要显式配置真实公网 HTTPS `web_base_url`。备案域名启用前，当前生产 `main` 账号应指向 Cloudflare Tunnel 地址 `https://chat.zouzhou.xyz`；不能依赖未配置时的本地默认值 `http://127.0.0.1:10086`，否则 QQ 私聊裸 `/bind` 会向远端用户返回不可访问的 loopback 链接。本地和云端也不要同时运行同一 QQ Bot 账号，避免两个 WebSocket 实例竞争消息。
 
 ### 密码与凭证保存在哪里
 

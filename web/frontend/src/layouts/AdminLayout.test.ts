@@ -22,6 +22,11 @@ describe("AdminLayout", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.startsWith("/api/admin/users/user-disabled") && init?.method === "DELETE") return Promise.resolve(response({ status: "deleted" }));
+      if (url.startsWith("/api/admin/users")) return Promise.resolve(response({ users: [
+        { id: "actor", username: "actor", display_name: "Actor", status: "active", roles: ["owner"], can_manage_admins: true },
+        { id: "user-disabled", username: "old-user", display_name: "Old User", status: "disabled", roles: ["viewer"], can_manage_admins: false },
+      ] }));
       if (url.startsWith("/api/admin/roles") && init?.method === "PATCH") return Promise.resolve(response({ id: "role-dev", key: "developer", name: "Developer", description: "", is_builtin: true, permission_keys: ["audit.read"] }));
       if (url.startsWith("/api/admin/roles")) return Promise.resolve(response({ roles, permissions: ["audit.read"] }));
       if (url.startsWith("/api/admin/diagnostics")) return Promise.resolve(response({ status: "ok", window_minutes: 60, filters: {}, summary: { incidents: 1 }, incidents: [{ incident_id: "inc-1", component: "llm", code: "RATE_LIMITED", subject: "primary", count: 2, last_seen_at: "2026-07-29T00:00:00Z", rule: "same_component_code_subject_within_query_window" }], timeline: [{ evidence_id: "evt-1", ts: "2026-07-29T00:00:00Z", component: "llm", event: "llm.error", code: "RATE_LIMITED" }], limitations: [] }));
@@ -36,7 +41,7 @@ describe("AdminLayout", () => {
     setActivePinia(pinia);
     const auth = useAuthStore();
     auth.user = { id: "actor", username: "actor", display_name: "Actor", status: "active", roles: userRoles, can_manage_admins: userRoles.includes("owner") };
-    auth.permissions = ["auth.roles.read", "auth.roles.manage", "audit.read", "audit.export", "turn.read.any", "diagnostics.system.use"];
+    auth.permissions = ["auth.users.read", "auth.users.manage", "auth.roles.read", "auth.roles.manage", "audit.read", "audit.export", "turn.read.any", "diagnostics.system.use"];
     const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/", component: { template: "<div />" } }] });
     const mounted = mount(AdminLayout, { global: { plugins: [pinia, router] } });
     await flushPromises();
@@ -115,5 +120,30 @@ describe("AdminLayout", () => {
     expect(mounted.text()).toContain("same_component_code_subject_within_query_window");
     expect(mounted.text()).toContain("llm.error");
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/admin/diagnostics?"), expect.anything());
+  });
+
+  it("prevents credential autofill and requires username confirmation for permanent deletion", async () => {
+    const mounted = await wrapper();
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "用户管理")!.trigger("click");
+    await flushPromises();
+
+    expect(mounted.get(".admin-create-form").attributes("autocomplete")).toBe("off");
+    expect(mounted.get('input[name="admin-new-password"]').attributes("autocomplete")).toBe("new-password");
+    await mounted.get(".danger-text-button").trigger("click");
+    expect(mounted.text()).toContain("永久删除账号？");
+    const confirmation = mounted.get('input[name="delete-user-confirmation"]');
+    await confirmation.setValue("user001");
+    await mounted.get(".dialog-card").trigger("submit");
+    expect(mounted.get('[role="alert"]').text()).toContain("用户名不一致，请重新输入");
+    expect(vi.mocked(fetch).mock.calls.some(([url, init]) => String(url).includes("user-disabled") && init?.method === "DELETE")).toBe(false);
+
+    await confirmation.setValue("old-user");
+    expect(mounted.find('[role="alert"]').exists()).toBe(false);
+    await mounted.get(".dialog-card").trigger("submit");
+    await flushPromises();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/admin/users/user-disabled",
+      expect.objectContaining({ method: "DELETE", body: JSON.stringify({ confirmation: "old-user" }) }),
+    );
   });
 });

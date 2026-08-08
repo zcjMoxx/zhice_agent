@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,6 +11,7 @@ from agent.app.gateway import create_app
 from agent.app.runtime import ModelState
 from agent.auth.audit import SqliteAuditSink
 from agent.auth.store import SQLiteAuthStore
+from agent.auth.user_context import FilesystemUserContextResolver
 from agent.channels.config import ChannelConfiguration, QQAccountConfig, QQChannelConfig
 from agent.channels.identity import ExternalIdentityService
 from agent.config import AppConfig
@@ -492,6 +494,52 @@ def test_current_user_can_generate_qq_code_and_consume_web_authorization(tmp_pat
     assert "external_identity.linked" in actions
 
 
+def test_web_authorization_rejects_second_qq_until_current_binding_is_unlinked(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("admin", "Admin", "password-123")
+    auth = AuthService(store, audit_sink=SqliteAuditSink(store))
+    runtime = _AuthRuntime(auth)
+    runtime.channel_identity = ExternalIdentityService(store)
+    runtime.channel_config = ChannelConfiguration(
+        qq=QQChannelConfig(
+            enabled=True,
+            accounts=(QQAccountConfig("main", "app", "secret"),),
+        )
+    )
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="openid-first",
+    )
+    authorization = runtime.channel_identity.create_authorization_request(
+        channel="qq",
+        account_key="main",
+        external_user_id="openid-second",
+    )
+    client = _client(tmp_path, runtime)
+    client.post("/api/auth/login", json={"username": "admin", "password": "password-123"})
+
+    response = client.post(
+        "/api/channels/qq/authorize",
+        json={"token": authorization.token},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CHANNEL_QQ_USER_ALREADY_BOUND"
+    assert response.json()["error"]["message"] == "当前账号已经绑定其他 QQ，请先在渠道连接中解绑。"
+    assert store.resolve_external_identity(
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="openid-first",
+    ).user_id == user.id
+    assert store.resolve_external_identity(
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="openid-second",
+    ) is None
+
+
 def test_current_user_can_list_and_unlink_only_own_qq_binding(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     owner = store.initialize_owner("admin", "Admin", "password-123")
@@ -718,11 +766,140 @@ def test_audit_filter_cursor_pagination_and_csv_export_are_backward_compatible(t
     assert exported.content.startswith(b"\xef\xbb\xbf")
 
 
+def test_owner_can_permanently_delete_disabled_user_and_isolated_context(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    owner = store.initialize_owner("owner", "Owner", "password-123")
+    target = store.create_user("delete-me", "Delete Me", "password-456")
+    store.link_external_identity(
+        user_id=target.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="openid-delete-me",
+    )
+    store.session_index_create(
+        session_id="session-delete-me", owner_user_id=target.id, channel="web"
+    )
+    store.update_user(target.id, status="disabled")
+    runtime = _AuthRuntime(AuthService(store, audit_sink=SqliteAuditSink(store)), tmp_path)
+    context = runtime.session_access.user_contexts.resolve(target.id)
+    context.files_dir.joinpath("private.txt").write_text("private", encoding="utf-8")
+    client = _client(tmp_path, runtime)
+    client.post("/api/auth/login", json={"username": owner.username, "password": "password-123"})
+
+    response = client.request(
+        "DELETE",
+        f"/api/admin/users/{target.id}",
+        json={"confirmation": target.username},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "deleted"
+    assert [user.username for user in store.list_users()] == ["owner"]
+    assert store.session_index_get("session-delete-me") is None
+    assert store.resolve_external_identity(
+        channel="qq", external_tenant_id="main", external_user_id="openid-delete-me"
+    ) is None
+    assert not context.root_dir.exists()
+    assert any(event["action"] == "user.deleted" for event in store.list_audit_events(limit=20))
+
+
+def test_user_deletion_requires_disabled_state_and_restores_context(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    owner = store.initialize_owner("owner", "Owner", "password-123")
+    target = store.create_user("still-active", "Still Active", "password-456")
+    runtime = _AuthRuntime(AuthService(store), tmp_path)
+    context = runtime.session_access.user_contexts.resolve(target.id)
+    marker = context.files_dir / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    client = _client(tmp_path, runtime)
+    client.post("/api/auth/login", json={"username": owner.username, "password": "password-123"})
+
+    response = client.request(
+        "DELETE",
+        f"/api/admin/users/{target.id}",
+        json={"confirmation": target.username},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "AUTH_USER_DELETE_REQUIRES_DISABLED"
+    assert store.get_user(target.id).username == target.username
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_user_deletion_rejects_wrong_confirmation_owner_and_bound_weixin(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    owner = store.initialize_owner("owner", "Owner", "password-123")
+    target = store.create_user("bound-user", "Bound User", "password-456")
+    store.create_channel_account(
+        channel="weixin",
+        account_key="wx-bound-user",
+        owner_user_id=target.id,
+        external_account_id="wx-account-bound-user",
+        external_user_id="wx-user-bound-user",
+        credential_ref="channels/weixin/accounts/wx-bound-user.json",
+    )
+    store.update_user(target.id, status="disabled")
+    client = _client(tmp_path, _AuthRuntime(AuthService(store), tmp_path))
+    client.post("/api/auth/login", json={"username": owner.username, "password": "password-123"})
+
+    wrong_confirmation = client.request(
+        "DELETE",
+        f"/api/admin/users/{target.id}",
+        json={"confirmation": "wrong-user"},
+    )
+    owner_delete = client.request(
+        "DELETE",
+        f"/api/admin/users/{owner.id}",
+        json={"confirmation": owner.username},
+    )
+    bound_weixin = client.request(
+        "DELETE",
+        f"/api/admin/users/{target.id}",
+        json={"confirmation": target.username},
+    )
+
+    assert wrong_confirmation.status_code == 400
+    assert wrong_confirmation.json()["error"]["code"] == "AUTH_USER_DELETE_CONFIRMATION_INVALID"
+    assert owner_delete.status_code == 403
+    assert owner_delete.json()["error"]["code"] == "AUTH_OWNER_ACCOUNT_PROTECTED"
+    assert bound_weixin.status_code == 409
+    assert bound_weixin.json()["error"]["code"] == "AUTH_USER_DELETE_CHANNELS_BOUND"
+    assert store.get_user(target.id).username == target.username
+
+
+def test_non_owner_admin_cannot_permanently_delete_user(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_owner("owner", "Owner", "password-123")
+    admin = store.create_user(
+        "admin-user", "Admin User", "password-456", role_keys=("admin",)
+    )
+    target = store.create_user("delete-me", "Delete Me", "password-789")
+    store.update_user(target.id, status="disabled")
+    client = _client(tmp_path, _AuthRuntime(AuthService(store), tmp_path))
+    client.post(
+        "/api/auth/login", json={"username": admin.username, "password": "password-456"}
+    )
+
+    response = client.request(
+        "DELETE",
+        f"/api/admin/users/{target.id}",
+        json={"confirmation": target.username},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "AUTH_PERMISSION_DENIED"
+    assert store.get_user(target.id).username == target.username
+
+
 class _AuthRuntime:
-    def __init__(self, auth):
+    def __init__(self, auth, tmp_path: Path | None = None):
         self.auth = auth
         self.session_actors = []
         self.model_calls = []
+        contexts_root = (tmp_path or Path.cwd()) / "contexts"
+        self.session_access = SimpleNamespace(
+            user_contexts=FilesystemUserContextResolver(contexts_root, workspace_dir=tmp_path)
+        )
 
     def list_sessions(self, actor):
         self.session_actors.append(actor)

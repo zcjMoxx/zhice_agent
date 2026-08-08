@@ -109,4 +109,22 @@ describe("SettingsCenter", () => {
     expect(wrapper.text()).toContain("Group chat: @mention the bot first, then send the generated /bind command. Direct chat: send the command directly.");
     expect(wrapper.text()).toContain("Waiting for Weixin scan");
   });
+
+  it("renders a full-width-ready retry action for a pending QQ web binding", () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.user = { id: "u-bind", username: "alice", display_name: "Alice", status: "active", roles: ["viewer"], can_manage_admins: false };
+    const ui = useUiStore();
+    ui.settingsSection = "channels";
+    const channels = useChannelStore();
+    vi.spyOn(channels, "refresh").mockResolvedValue();
+    channels.pendingQqToken = "bind-retry";
+
+    const wrapper = mount(SettingsCenter, { global: { plugins: [pinia] } });
+
+    const action = wrapper.get(".channel-bind-action");
+    expect(action.text()).toBe("完成绑定");
+    expect((wrapper.get(".inline-bind input").element as HTMLInputElement).value).toBe("bind-retry");
+  });
 });

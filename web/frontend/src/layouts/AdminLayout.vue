@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, ArrowLeft, ChevronDown, Download, FileClock, Gauge, LockKeyhole, RefreshCw, Shield, Users } from "@lucide/vue";
+import { Activity, ArrowLeft, ChevronDown, Download, FileClock, Gauge, LockKeyhole, RefreshCw, Shield, Trash2, Users } from "@lucide/vue";
 import { computed, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 
@@ -10,6 +10,7 @@ import { useAdminStore } from "@/stores/admin";
 import { useAuthStore } from "@/stores/auth";
 import { errorMessage } from "@/stores/chat";
 import { useUiStore } from "@/stores/ui";
+import type { PublicUser } from "@/api/types";
 
 const auth = useAuthStore();
 const admin = useAdminStore();
@@ -22,6 +23,10 @@ const technicalOpen = ref<Record<string, boolean>>({});
 const auditFilters = reactive({ action: "", actor_user_id: "", decision: "", from_ts: "", to_ts: "" });
 const diagnosticFilters = reactive({ actor_user_id: "", session_id: "", component: "", error_code: "", status: "" });
 const newUser = reactive({ username: "", display_name: "", password: "", roles: ["viewer"] });
+const deletingUser = ref<PublicUser | null>(null);
+const deleteConfirmation = ref("");
+const deleteConfirmationError = ref("");
+const deleteBusy = ref(false);
 
 function tr(chinese: string, english: string): string { return uiText(ui.language, chinese, english); }
 
@@ -67,6 +72,29 @@ async function updateUser(id: string, payload: Record<string, unknown>) {
   try { await import("@/api/client").then(({ api }) => api.updateUser(id, payload)); await admin.loadUsers(); }
   catch (error) { failure.value = errorMessage(error); }
 }
+function openDeleteUser(user: PublicUser) {
+  deletingUser.value = user;
+  deleteConfirmation.value = "";
+  deleteConfirmationError.value = "";
+  failure.value = "";
+}
+async function confirmDeleteUser() {
+  if (!deletingUser.value) return;
+  if (deleteConfirmation.value !== deletingUser.value.username) {
+    deleteConfirmationError.value = tr("用户名不一致，请重新输入", "Username does not match. Try again.");
+    return;
+  }
+  deleteConfirmationError.value = "";
+  deleteBusy.value = true;
+  try {
+    await import("@/api/client").then(({ api }) => api.deleteUser(deletingUser.value!.id, deleteConfirmation.value));
+    deletingUser.value = null;
+    deleteConfirmation.value = "";
+    deleteConfirmationError.value = "";
+    await admin.loadUsers();
+  } catch (error) { failure.value = errorMessage(error); }
+  finally { deleteBusy.value = false; }
+}
 async function togglePermission(key: string, enabled: boolean) {
   const role = selectedRoleValue.value;
   if (!role || !canEditSelectedRole.value) return;
@@ -95,8 +123,8 @@ function fmt(value: unknown): string { return value ? new Date(String(value)).to
       </section>
 
       <section v-else-if="tab === 'users'" class="admin-section">
-        <form v-if="auth.can('auth.users.manage')" class="admin-create-form" @submit.prevent="createUser"><h2>{{ tr('创建用户', 'Create user') }}</h2><input v-model="newUser.username" required :placeholder="tr('用户名', 'Username')" /><input v-model="newUser.display_name" :placeholder="tr('显示名称（可选）', 'Display name (optional)')" /><input v-model="newUser.password" type="password" minlength="8" required :placeholder="tr('初始密码', 'Initial password')" /><select v-model="newUser.roles[0]"><option v-for="role in ['viewer','developer','auditor','admin']" :key="role" :value="role">{{ roleName(role, ui.language) }}</option></select><button class="primary-button">{{ tr('创建', 'Create') }}</button></form>
-        <div class="data-table user-table"><div class="table-head"><span>{{ tr('用户', 'User') }}</span><span>{{ tr('角色', 'Role') }}</span><span>{{ tr('状态', 'Status') }}</span><span>{{ tr('管理', 'Actions') }}</span></div><div v-for="user in admin.users" :key="user.id" class="table-row"><span><strong>{{ user.display_name }}</strong><small>@{{ user.username }}</small></span><span><select v-if="auth.can('auth.users.manage') && !user.roles.includes('owner')" :value="user.roles[0]" @change="updateUser(user.id, { roles: [($event.target as HTMLSelectElement).value] })"><option v-for="role in ['viewer','developer','auditor','admin']" :key="role" :value="role">{{ roleName(role, ui.language) }}</option></select><template v-else>{{ user.roles.map((role) => roleName(role, ui.language)).join('、') }}</template></span><span><i :class="`status-dot ${user.status}`"></i>{{ user.status === 'active' ? tr('启用', 'Active') : tr('停用', 'Disabled') }}</span><span class="row-actions"><button v-if="auth.can('auth.users.manage') && !user.roles.includes('owner')" @click="updateUser(user.id, { status: user.status === 'active' ? 'disabled' : 'active' })">{{ user.status === 'active' ? tr('停用', 'Disable') : tr('启用', 'Enable') }}</button><button v-if="auth.can('auth.admin.manage') && user.roles.includes('admin')" @click="updateUser(user.id, { can_manage_admins: !user.can_manage_admins })">{{ user.can_manage_admins ? tr('撤销委派', 'Revoke delegation') : tr('委派管理', 'Delegate management') }}</button><span v-if="user.roles.includes('owner')" class="readonly-pill">{{ tr('固定只读', 'Read-only') }}</span></span></div></div>
+        <form v-if="auth.can('auth.users.manage')" class="admin-create-form" autocomplete="off" @submit.prevent="createUser"><h2>{{ tr('创建用户', 'Create user') }}</h2><input v-model="newUser.username" name="admin-new-username" autocomplete="off" required :placeholder="tr('新用户名', 'New username')" /><input v-model="newUser.display_name" name="admin-new-display-name" autocomplete="off" :placeholder="tr('新用户显示名称（可选）', 'New user display name (optional)')" /><input v-model="newUser.password" name="admin-new-password" type="password" autocomplete="new-password" minlength="8" required :placeholder="tr('设置初始密码', 'Set initial password')" /><select v-model="newUser.roles[0]"><option v-for="role in ['viewer','developer','auditor','admin']" :key="role" :value="role">{{ roleName(role, ui.language) }}</option></select><button class="primary-button">{{ tr('创建', 'Create') }}</button></form>
+        <div class="data-table user-table"><div class="table-head"><span>{{ tr('用户', 'User') }}</span><span>{{ tr('角色', 'Role') }}</span><span>{{ tr('状态', 'Status') }}</span><span>{{ tr('管理', 'Actions') }}</span></div><div v-for="user in admin.users" :key="user.id" class="table-row"><span><strong>{{ user.display_name }}</strong><small>@{{ user.username }}</small></span><span><select v-if="auth.can('auth.users.manage') && !user.roles.includes('owner')" :value="user.roles[0]" @change="updateUser(user.id, { roles: [($event.target as HTMLSelectElement).value] })"><option v-for="role in ['viewer','developer','auditor','admin']" :key="role" :value="role">{{ roleName(role, ui.language) }}</option></select><template v-else>{{ user.roles.map((role) => roleName(role, ui.language)).join('、') }}</template></span><span><i :class="`status-dot ${user.status}`"></i>{{ user.status === 'active' ? tr('启用', 'Active') : tr('停用', 'Disabled') }}</span><span class="row-actions"><button v-if="auth.can('auth.users.manage') && !user.roles.includes('owner')" @click="updateUser(user.id, { status: user.status === 'active' ? 'disabled' : 'active' })">{{ user.status === 'active' ? tr('停用', 'Disable') : tr('启用', 'Enable') }}</button><button v-if="auth.can('auth.admin.manage') && user.roles.includes('admin')" @click="updateUser(user.id, { can_manage_admins: !user.can_manage_admins })">{{ user.can_manage_admins ? tr('撤销委派', 'Revoke delegation') : tr('委派管理', 'Delegate management') }}</button><button v-if="auth.user?.roles.includes('owner') && user.status === 'disabled' && !user.roles.includes('owner')" class="danger-text-button" @click="openDeleteUser(user)"><Trash2 :size="14" />{{ tr('永久删除', 'Delete permanently') }}</button><span v-if="user.roles.includes('owner')" class="readonly-pill">{{ tr('固定只读', 'Read-only') }}</span></span></div></div>
       </section>
 
       <section v-else-if="tab === 'roles'" class="roles-layout">
@@ -125,5 +153,14 @@ function fmt(value: unknown): string { return value ? new Date(String(value)).to
         <div class="audit-list"><details v-for="event in admin.auditEvents" :key="String(event.id)"><summary><span><i :class="`status-dot ${event.decision || 'neutral'}`"></i><strong>{{ event.action }}</strong></span><span>{{ event.channel || '—' }}</span><span>{{ fmt(event.ts) }}</span></summary><dl><template v-for="(value, key) in event" :key="key"><dt>{{ key }}</dt><dd><code v-if="typeof value === 'object'">{{ JSON.stringify(value) }}</code><span v-else>{{ value || '—' }}</span></dd></template></dl></details></div><button v-if="admin.auditHasMore" class="load-more" @click="admin.loadAudit(auditFilters, true)">{{ tr('加载更多', 'Load more') }}</button>
       </section>
     </main>
+    <div v-if="deletingUser" class="modal-backdrop" @click.self="deletingUser = null">
+      <form class="dialog-card compact-dialog" @submit.prevent="confirmDeleteUser">
+        <h2>{{ tr('永久删除账号？', 'Permanently delete account?') }}</h2>
+        <p>{{ tr('账号、QQ 绑定、登录状态、Session、Memory 和用户文件将永久删除。此操作无法撤销。', 'The account, QQ binding, login state, sessions, memory, and user files will be permanently deleted. This cannot be undone.') }}</p>
+        <label><span>{{ tr(`请输入用户名 ${deletingUser.username} 确认`, `Type ${deletingUser.username} to confirm`) }}</span><input v-model="deleteConfirmation" name="delete-user-confirmation" autocomplete="off" autofocus required :aria-invalid="Boolean(deleteConfirmationError)" @input="deleteConfirmationError = ''" /></label>
+        <p v-if="deleteConfirmationError" class="form-error" role="alert">{{ deleteConfirmationError }}</p>
+        <div class="dialog-actions"><button type="button" @click="deletingUser = null">{{ tr('取消', 'Cancel') }}</button><button class="danger-button" :disabled="deleteBusy">{{ deleteBusy ? tr('删除中…', 'Deleting…') : tr('确认永久删除', 'Delete permanently') }}</button></div>
+      </form>
+    </div>
   </div>
 </template>

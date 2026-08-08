@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -94,6 +95,44 @@ def test_web_runtime_capability_statuses_are_generic(tmp_path):
         runtime.capability_statuses()["memory_extraction"].code
         == "MEMORY_EXTRACTION_PROMPT_NOT_FOUND"
     )
+
+
+@pytest.mark.parametrize(
+    ("account_states", "expected_state"),
+    [
+        (("available",), "available"),
+        (("available", "available"), "available"),
+        (("available", "unavailable"), "degraded"),
+        (("degraded",), "degraded"),
+        (("unavailable",), "unavailable"),
+        (("disabled",), "disabled"),
+    ],
+)
+def test_web_runtime_exposes_one_aggregated_qq_capability(
+    tmp_path, account_states, expected_state
+):
+    runtime = _runtime(tmp_path)
+    runtime.channel_status = CapabilityStatus(
+        "channel.qq", "available", "CHANNEL_QQ_AVAILABLE"
+    )
+    runtime.channel_manager = SimpleNamespace(
+        statuses=lambda: {
+            f"qq.account-{index}": CapabilityStatus(
+                f"qq.account-{index}",
+                state,
+                f"CHANNEL_QQ_{state.upper()}",
+            )
+            for index, state in enumerate(account_states)
+        }
+    )
+
+    statuses = runtime.capability_statuses()
+
+    assert statuses["channel.qq"].state == expected_state
+    assert statuses["channel.qq"].details == {
+        "account_count": len(account_states)
+    }
+    assert not [key for key in statuses if key.startswith("qq.")]
 
 
 def test_web_profile_rejects_history_command(tmp_path):

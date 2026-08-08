@@ -241,6 +241,12 @@ class AdminUserUpdateRequest(BaseModel):
     can_manage_admins: bool | None = None
 
 
+class AdminUserDeleteRequest(BaseModel):
+    """Confirm permanent deletion using the target username."""
+
+    confirmation: str
+
+
 class RoleResponse(BaseModel):
     """Role and permission assignment shown in the admin view."""
 

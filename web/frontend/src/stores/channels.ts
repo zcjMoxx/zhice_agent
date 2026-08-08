@@ -32,6 +32,8 @@ export const useChannelStore = defineStore("channels", {
     weixinError: null as { code: string; message: string } | null,
     qqCode: "",
     qqCommand: "",
+    pendingQqToken: "",
+    qqAuthorizationError: "",
     busy: false,
     weixinBusy: false,
     error: "",
@@ -60,7 +62,18 @@ export const useChannelStore = defineStore("channels", {
       this.qqCode = result.code;
       this.qqCommand = result.command;
     },
-    async authorizeQq(token: string) { await api.qqAuthorize(token); await this.refresh(); },
+    async authorizeQq(token?: string) {
+      const authorizationToken = token ?? this.pendingQqToken;
+      this.qqAuthorizationError = "";
+      try {
+        await api.qqAuthorize(authorizationToken);
+        this.pendingQqToken = "";
+        await this.refresh();
+      } catch (error) {
+        this.qqAuthorizationError = requestFailure(error, "QQ 绑定失败").message;
+        throw error;
+      }
+    },
     async unlink(id: string) { await api.unlinkBinding(id); await this.refresh(); },
     async startWeixin() {
       window.clearTimeout(this.pollTimer);

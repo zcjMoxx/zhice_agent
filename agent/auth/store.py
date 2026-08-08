@@ -30,6 +30,14 @@ class AuthStoreError(RuntimeError):
     """Raised for invalid auth store mutations."""
 
 
+class ExternalIdentityConflictError(AuthStoreError):
+    """Raised when one-to-one external identity ownership would be violated."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
 class SQLiteAuthStore:
     """Small SQLite store for the local Part 9 user system."""
 
@@ -103,6 +111,7 @@ class SQLiteAuthStore:
                     ), '')
                     """
                 )
+            _migrate_single_active_qq_identity(connection)
             for key, (description, category) in PERMISSIONS.items():
                 connection.execute(
                     """
@@ -383,6 +392,85 @@ class SQLiteAuthStore:
                     )
         return self.get_user(user_id)
 
+    def delete_user(self, user_id: str, *, expected_username: str) -> UserAccount:
+        """Permanently delete one disabled non-Owner user and its relational data."""
+
+        self._require_initialized()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if row is None:
+                raise AuthStoreError("user not found")
+            roles = self._role_keys(connection, user_id)
+            target = _user_from_row(row, roles)
+            if target.username != str(expected_username):
+                raise AuthStoreError("user deletion confirmation does not match")
+            if "owner" in roles:
+                raise AuthStoreError("owner account cannot be deleted")
+            if target.status != "disabled":
+                raise AuthStoreError("user must be disabled before deletion")
+            if connection.execute(
+                "SELECT 1 FROM channel_accounts WHERE owner_user_id=? LIMIT 1", (user_id,)
+            ).fetchone() is not None:
+                raise AuthStoreError("user channel accounts must be unlinked before deletion")
+
+            connection.execute(
+                """
+                DELETE FROM audit_events
+                WHERE actor_user_id=?
+                   OR (resource_type='user' AND resource_id=?)
+                   OR session_id IN (
+                       SELECT session_id FROM session_index WHERE owner_user_id=?
+                   )
+                """,
+                (user_id, user_id, user_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM tool_confirmations
+                WHERE actor_user_id=? OR decision_actor_user_id=?
+                   OR tool_call_record_id IN (
+                       SELECT id FROM tool_call_records
+                       WHERE actor_user_id=? OR session_id IN (
+                           SELECT session_id FROM session_index WHERE owner_user_id=?
+                       )
+                   )
+                """,
+                (user_id, user_id, user_id, user_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM tool_call_records
+                WHERE actor_user_id=? OR session_id IN (
+                    SELECT session_id FROM session_index WHERE owner_user_id=?
+                )
+                """,
+                (user_id, user_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM turn_runs
+                WHERE actor_user_id=? OR session_id IN (
+                    SELECT session_id FROM session_index WHERE owner_user_id=?
+                )
+                """,
+                (user_id, user_id),
+            )
+            connection.execute("DELETE FROM channel_conversations WHERE owner_user_id=?", (user_id,))
+            connection.execute("DELETE FROM session_index WHERE owner_user_id=?", (user_id,))
+            connection.execute(
+                "DELETE FROM external_identity_authorization_requests WHERE user_id=?", (user_id,)
+            )
+            connection.execute("DELETE FROM external_identity_link_tokens WHERE user_id=?", (user_id,))
+            connection.execute("DELETE FROM external_identities WHERE user_id=?", (user_id,))
+            connection.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
+            connection.execute("DELETE FROM user_permissions WHERE user_id=?", (user_id,))
+            connection.execute("DELETE FROM user_roles WHERE user_id=?", (user_id,))
+            cursor = connection.execute("DELETE FROM users WHERE id=?", (user_id,))
+            if cursor.rowcount != 1:
+                raise AuthStoreError("user not found")
+        return target
+
     def set_user_permission(self, user_id: str, permission_key: str, *, enabled: bool) -> None:
         """Set one direct permission grant used for Owner-controlled delegation."""
 
@@ -659,34 +747,65 @@ class SQLiteAuthStore:
     ) -> None:
         """Create or refresh one channel identity mapping."""
 
+        normalized_channel = str(channel).strip()
+        normalized_tenant = str(external_tenant_id).strip()
+        normalized_external_user = str(external_user_id).strip()
         now = _utc_now()
         identity_id = "external-" + uuid.uuid4().hex
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO external_identities(
-                  id, user_id, channel, external_tenant_id, external_user_id,
-                  external_display_name, linked_at, last_seen_at, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(channel, external_tenant_id, external_user_id) DO UPDATE SET
-                  user_id=excluded.user_id,
-                  external_display_name=excluded.external_display_name,
-                  status='active',
-                  last_seen_at=excluded.last_seen_at,
-                  metadata_json=excluded.metadata_json
-                """,
-                (
-                    identity_id,
-                    user_id,
-                    str(channel).strip(),
-                    str(external_tenant_id).strip(),
-                    str(external_user_id).strip(),
-                    str(external_display_name).strip()[:120],
-                    now,
-                    now,
-                    json.dumps(metadata or {}, ensure_ascii=False, separators=(",", ":")),
-                ),
-            )
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if normalized_channel == "qq":
+                    existing_identity = connection.execute(
+                        """
+                        SELECT user_id FROM external_identities
+                        WHERE channel='qq' AND external_tenant_id=? AND external_user_id=?
+                          AND status='active'
+                        """,
+                        (normalized_tenant, normalized_external_user),
+                    ).fetchone()
+                    if existing_identity is not None and str(existing_identity["user_id"]) != user_id:
+                        raise ExternalIdentityConflictError("identity_already_bound")
+                    existing_user_identity = connection.execute(
+                        """
+                        SELECT 1 FROM external_identities
+                        WHERE user_id=? AND channel='qq' AND status='active'
+                          AND NOT (external_tenant_id=? AND external_user_id=?)
+                        LIMIT 1
+                        """,
+                        (user_id, normalized_tenant, normalized_external_user),
+                    ).fetchone()
+                    if existing_user_identity is not None:
+                        raise ExternalIdentityConflictError("user_already_bound")
+                connection.execute(
+                    """
+                    INSERT INTO external_identities(
+                      id, user_id, channel, external_tenant_id, external_user_id,
+                      external_display_name, linked_at, last_seen_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(channel, external_tenant_id, external_user_id) DO UPDATE SET
+                      user_id=excluded.user_id,
+                      external_display_name=excluded.external_display_name,
+                      status='active',
+                      last_seen_at=excluded.last_seen_at,
+                      metadata_json=excluded.metadata_json
+                    """,
+                    (
+                        identity_id,
+                        user_id,
+                        normalized_channel,
+                        normalized_tenant,
+                        normalized_external_user,
+                        str(external_display_name).strip()[:120],
+                        now,
+                        now,
+                        json.dumps(metadata or {}, ensure_ascii=False, separators=(",", ":")),
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            if normalized_channel == "qq":
+                raise ExternalIdentityConflictError("user_already_bound") from exc
+            raise
 
     def create_channel_account(
         self,
@@ -1018,6 +1137,7 @@ class SQLiteAuthStore:
         """Atomically bind one pending Web authorization request to a DB user."""
 
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
                 SELECT * FROM external_identity_authorization_requests
@@ -1044,30 +1164,47 @@ class SQLiteAuthStore:
                     (consumed_at, str(row["id"])),
                 )
                 return None
+            if str(row["channel"]) == "qq":
+                existing_user_identity = connection.execute(
+                    """
+                    SELECT 1 FROM external_identities
+                    WHERE user_id=? AND channel='qq' AND status='active'
+                      AND NOT (external_tenant_id=? AND external_user_id=?)
+                    LIMIT 1
+                    """,
+                    (user_id, str(row["account_key"]), str(row["external_user_id"])),
+                ).fetchone()
+                if existing_user_identity is not None:
+                    raise ExternalIdentityConflictError("user_already_bound")
             identity_id = "external-" + uuid.uuid4().hex
-            connection.execute(
-                """
-                INSERT INTO external_identities(
-                  id, user_id, channel, external_tenant_id, external_user_id,
-                  external_display_name, linked_at, last_seen_at, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')
-                ON CONFLICT(channel, external_tenant_id, external_user_id) DO UPDATE SET
-                  user_id=excluded.user_id,
-                  external_display_name=excluded.external_display_name,
-                  status='active',
-                  last_seen_at=excluded.last_seen_at
-                """,
-                (
-                    identity_id,
-                    user_id,
-                    str(row["channel"]),
-                    str(row["account_key"]),
-                    str(row["external_user_id"]),
-                    str(row["external_display_name"]),
-                    consumed_at,
-                    consumed_at,
-                ),
-            )
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO external_identities(
+                      id, user_id, channel, external_tenant_id, external_user_id,
+                      external_display_name, linked_at, last_seen_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')
+                    ON CONFLICT(channel, external_tenant_id, external_user_id) DO UPDATE SET
+                      user_id=excluded.user_id,
+                      external_display_name=excluded.external_display_name,
+                      status='active',
+                      last_seen_at=excluded.last_seen_at
+                    """,
+                    (
+                        identity_id,
+                        user_id,
+                        str(row["channel"]),
+                        str(row["account_key"]),
+                        str(row["external_user_id"]),
+                        str(row["external_display_name"]),
+                        consumed_at,
+                        consumed_at,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                if str(row["channel"]) == "qq":
+                    raise ExternalIdentityConflictError("user_already_bound") from exc
+                raise
             cursor = connection.execute(
                 """
                 UPDATE external_identity_authorization_requests
@@ -2102,6 +2239,38 @@ class _ManagedConnection:
                 self.connection.rollback()
         finally:
             self.connection.close()
+
+
+def _migrate_single_active_qq_identity(connection: sqlite3.Connection) -> None:
+    """Keep the newest active QQ identity per user, then enforce that invariant."""
+
+    rows = connection.execute(
+        """
+        SELECT id, user_id FROM external_identities
+        WHERE channel='qq' AND status='active'
+        ORDER BY user_id, linked_at DESC, id DESC
+        """
+    ).fetchall()
+    seen_users: set[str] = set()
+    duplicate_ids: list[str] = []
+    for row in rows:
+        user_id = str(row["user_id"])
+        if user_id in seen_users:
+            duplicate_ids.append(str(row["id"]))
+        else:
+            seen_users.add(user_id)
+    if duplicate_ids:
+        connection.executemany(
+            "UPDATE external_identities SET status='disabled' WHERE id=?",
+            [(identity_id,) for identity_id in duplicate_ids],
+        )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_external_identities_active_qq_user
+        ON external_identities(user_id)
+        WHERE channel='qq' AND status='active'
+        """
+    )
 
 
 def _normalize_username(username: str) -> str:

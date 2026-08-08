@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent.auth.session_access import SessionAccessService
-from agent.auth.store import SQLiteAuthStore
+from agent.auth.store import ExternalIdentityConflictError, SQLiteAuthStore
 from agent.auth.user_context import FilesystemUserContextResolver
 from agent.channels.config import (
     ChannelConfigurationError,
@@ -22,6 +22,7 @@ from agent.channels.conversation import ChannelConversationService
 from agent.channels.dedup import ChannelDedupService
 from agent.channels.identity import ExternalIdentityService
 from agent.channels.limits import SlidingWindowRateLimiter
+from agent.channels.manager import ChannelManager
 from agent.channels.qq.adapter import QQChannelAdapter
 from agent.channels.qq.attachments import QQAttachmentError, _validate_public_http_url
 from agent.channels.qq.outbound import (
@@ -38,12 +39,50 @@ from agent.channels.qq.transport import (
     _BotpyConsoleHandler,
 )
 from agent.channels.runtime_adapter import ChannelRuntimeAdapter
+from agent.protocols.capability import CapabilityStatus
 from agent.protocols.channel import (
     ChannelCapabilities,
     ChannelExecutionContext,
     ChannelReplyTarget,
     InboundChannelEvent,
 )
+
+
+def test_channel_manager_clears_start_failure_after_adapter_recovers():
+    class RecoveringAdapter:
+        key = "channel.weixin"
+
+        def __init__(self):
+            self.current = CapabilityStatus(
+                self.key, "degraded", "CHANNEL_WEIXIN_DEGRADED"
+            )
+
+        def start(self):
+            raise FileNotFoundError("credential unavailable")
+
+        def stop(self):
+            pass
+
+        def status(self):
+            return self.current
+
+    adapter = RecoveringAdapter()
+    manager = ChannelManager((adapter,))
+
+    manager.start()
+
+    failed = manager.statuses()[adapter.key]
+    assert failed.state == "unavailable"
+    assert failed.code == "CHANNEL_START_FAILED"
+
+    adapter.current = CapabilityStatus(
+        adapter.key, "available", "CHANNEL_WEIXIN_AVAILABLE"
+    )
+
+    recovered = manager.statuses()[adapter.key]
+    assert recovered.state == "available"
+    assert recovered.code == "CHANNEL_WEIXIN_AVAILABLE"
+    assert manager.statuses()[adapter.key] == recovered
 
 
 def test_missing_channel_config_is_disabled(tmp_path):
@@ -189,6 +228,34 @@ def test_web_authorization_request_binds_current_user_once(tmp_path):
     assert service.authorize(request.token, actor) is True
     assert service.authorize(request.token, actor) is False
     assert service.resolve("qq", "main", "openid-web").user_id == user.id
+
+
+def test_web_authorization_requires_unlink_before_binding_another_qq(tmp_path):
+    store, user, _sessions = _services(tmp_path)
+    service = ExternalIdentityService(store)
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="openid-first",
+    )
+    request = service.create_authorization_request(
+        channel="qq",
+        account_key="main",
+        external_user_id="openid-second",
+    )
+    actor = store.actor_for_user(user.id, channel="rest")
+
+    with pytest.raises(ExternalIdentityConflictError) as exc_info:
+        service.authorize(request.token, actor)
+
+    assert exc_info.value.reason == "user_already_bound"
+    assert service.resolve("qq", "main", "openid-first").user_id == user.id
+    assert service.resolve("qq", "main", "openid-second") is None
+    binding = service.list_bindings(actor)[0]
+    assert service.unlink(actor, binding.binding_id)
+    assert service.authorize(request.token, actor) is True
+    assert service.resolve("qq", "main", "openid-second").user_id == user.id
 
 
 def test_web_authorization_request_expiry_fails_closed(tmp_path):
@@ -352,10 +419,10 @@ def test_qq_bare_bind_returns_web_authorization_link(tmp_path):
 
     assert runtime.calls == []
     outbound = transport.rich[0]
-    assert "[登录并绑定智策 Agent](https://agent.zouzhou.xyz/?channel_bind=" in outbound.markdown
+    assert "[登录并绑定智策 Agent](https://agent.zouzhou.xyz/bind/qq?token=" in outbound.markdown
     assert outbound.buttons[0].label == "登录并绑定"
     assert outbound.buttons[0].action == "url"
-    assert outbound.buttons[0].data.startswith("https://agent.zouzhou.xyz/?channel_bind=")
+    assert outbound.buttons[0].data.startswith("https://agent.zouzhou.xyz/bind/qq?token=")
 
 
 def test_qq_manual_bind_code_still_binds_directly(tmp_path):
@@ -381,6 +448,41 @@ def test_qq_manual_bind_code_still_binds_directly(tmp_path):
 
     assert transport.sent == ["QQ 身份绑定成功。"]
     assert identity.resolve("qq", "main", "openid").user_id == user.id
+
+
+def test_qq_manual_bind_requires_unlink_before_binding_another_qq(tmp_path):
+    store, user, sessions = _services(tmp_path)
+    identity = ExternalIdentityService(store)
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="already-bound-openid",
+    )
+    link = identity.create_link_code(user.id, "qq", "main")
+    runtime = _FakeChannelRuntime()
+    transport = _FakeTransport()
+    adapter = QQChannelAdapter(
+        _Account(),
+        transport,
+        identity,
+        ChannelConversationService(store, sessions),
+        ChannelDedupService(store),
+        runtime,
+    )
+
+    asyncio.run(
+        adapter.handle_event(
+            replace(_event("event-bind-conflict"), text=f"/bind {link.code}")
+        )
+    )
+
+    assert transport.sent == [
+        "当前 ZhiCe-Agent 账号已经绑定其他 QQ，请先在网页渠道连接中解绑。"
+    ]
+    assert identity.resolve("qq", "main", "already-bound-openid").user_id == user.id
+    assert identity.resolve("qq", "main", "openid") is None
+    assert runtime.calls == []
 
 
 def test_qq_group_manual_bind_code_binds_message_sender(tmp_path):

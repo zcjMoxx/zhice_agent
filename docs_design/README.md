@@ -133,6 +133,7 @@ Part 17 运行可靠性、系统级诊断与私有镜像部署的代码、测试
 - `2026-08-04-qq-public-binding-url-deployment-fix.md`
 - `2026-08-04-private-registry-cloud-release-pipeline-design.md`
 - `2026-08-06-weixin-credential-volume-design.md`
+- `2026-08-08-channel-capability-aggregation-design.md`
 - `2026-07-27-web-chat-layout-and-theme-correction-design.md`
 - `2026-07-27-web-product-experience-and-vue-frontend-design.md`
 - `2026-07-26-full-session-context-engineering-design.md`
@@ -215,6 +216,10 @@ Part 17 运行可靠性、系统级诊断与私有镜像部署的代码、测试
 - `2026-07-06-ws-client-profile-naming-design.md`
 - `2026-07-08-user-auth-permission-boundary-design.md`
 - `2026-07-10-session-model-preference-scope-design.md`
+- `2026-08-08-mobile-channel-binding-ux-design.md`
+- `2026-08-08-single-qq-identity-binding-design.md`
+- `2026-08-08-qq-return-and-user-deletion-design.md`
+- `2026-08-08-user-deletion-validation-and-qq-register-link-fix.md`
 
 ## 新设计写法
 

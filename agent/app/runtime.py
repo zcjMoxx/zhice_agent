@@ -208,7 +208,17 @@ class WebRuntime:
         if self.channel_statuses is not None:
             statuses.update(self.channel_statuses)
         if self.channel_manager is not None:
-            statuses.update(self.channel_manager.statuses())
+            manager_statuses = self.channel_manager.statuses()
+            qq_account_statuses = [
+                status for key, status in manager_statuses.items() if key.startswith("qq.")
+            ]
+            if qq_account_statuses:
+                statuses["channel.qq"] = _aggregate_qq_channel_status(qq_account_statuses)
+            statuses.update(
+                (key, status)
+                for key, status in manager_statuses.items()
+                if not key.startswith("qq.")
+            )
         return statuses
 
     def list_sessions(
@@ -1275,6 +1285,29 @@ class WebRuntime:
                 retryable=_is_retryable_memory_extraction_error,
             )
         return self.memory_scheduler
+
+
+def _aggregate_qq_channel_status(
+    account_statuses: list[CapabilityStatus],
+) -> CapabilityStatus:
+    """Collapse internal QQ account adapters into one public channel status."""
+
+    states = {status.state for status in account_statuses}
+    if states == {"available"}:
+        state = "available"
+    elif states == {"disabled"}:
+        state = "disabled"
+    elif states <= {"unavailable", "disabled"} and "unavailable" in states:
+        state = "unavailable"
+    else:
+        state = "degraded"
+    return CapabilityStatus(
+        name="channel.qq",
+        state=state,
+        code=f"CHANNEL_QQ_{state.upper()}",
+        message=f"QQ channel is {state}.",
+        details={"account_count": len(account_statuses)},
+    )
 
 
 def build_web_runtime(

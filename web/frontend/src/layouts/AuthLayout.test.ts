@@ -69,4 +69,20 @@ describe("AuthLayout", () => {
     expect(mountLayout().text()).toContain("登录你的 ZhiCe-Agent 账号");
     expect(mountLayout({ language: "en" }).text()).toContain("Pine Mist Dawn");
   });
+
+  it("uses the compact dedicated copy for QQ binding authentication", () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const wrapper = mount(AuthLayout, {
+      props: { flow: "qq-binding" },
+      global: { plugins: [pinia] },
+    });
+
+    expect(wrapper.get(".auth-slider").classes()).toContain("is-channel-binding");
+    expect(wrapper.text()).toContain("登录并绑定 QQ");
+    expect(wrapper.text()).toContain("完成后会自动绑定，无需再进入设置。");
+    expect(wrapper.get(".auth-submit").text()).toBe("登录并继续");
+    expect(wrapper.get(".mobile-mode-switch span").text()).toBe("没有账号？");
+    expect(wrapper.get(".mobile-mode-switch strong").text()).toBe("立即创建");
+  });
 });

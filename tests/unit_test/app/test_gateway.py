@@ -47,6 +47,23 @@ def test_gateway_serves_static_index(tmp_path):
     assert "Chat UI" in response.text
 
 
+def test_gateway_serves_dedicated_qq_binding_spa_route(tmp_path):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    static_dir.joinpath("index.html").write_text(
+        "<html><body>QQ Binding UI</body></html>", encoding="utf-8"
+    )
+    client = TestClient(
+        create_app(config=_config(tmp_path), runtime=_FakeRuntime(), static_dir=static_dir)
+    )
+
+    response = client.get("/bind/qq?token=opaque")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "QQ Binding UI" in response.text
+
+
 def test_gateway_logs_web_and_external_channel_lifecycle(tmp_path, caplog):
     static_dir = tmp_path / "static"
     static_dir.mkdir()

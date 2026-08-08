@@ -349,6 +349,68 @@ class AuthService:
         except AuthStoreError as exc:
             raise AuthHttpError(ErrorCode.REQUEST_VALIDATION_FAILED, str(exc), status_code=400) from exc
 
+    def delete_managed_user(
+        self,
+        actor: ActorContext,
+        user_id: str,
+        confirmation: str,
+        user_contexts,
+    ) -> UserAccount:
+        """Delete one disabled local account with filesystem rollback on DB failure."""
+
+        if "owner" not in actor.role_keys:
+            raise AuthHttpError(
+                ErrorCode.AUTH_PERMISSION_DENIED,
+                "Only Owner can permanently delete users",
+                status_code=403,
+                details={"required_role": "owner"},
+            )
+        try:
+            target = self.store.get_user(user_id)
+        except AuthStoreError as exc:
+            raise AuthHttpError(
+                ErrorCode.AUTH_USER_NOT_FOUND, "User not found", status_code=404
+            ) from exc
+        if "owner" in target.role_keys or actor.user_id == target.id:
+            raise AuthHttpError(
+                ErrorCode.AUTH_OWNER_ACCOUNT_PROTECTED,
+                "Owner account is protected",
+                status_code=403,
+            )
+        if str(confirmation) != target.username:
+            raise AuthHttpError(
+                ErrorCode.AUTH_USER_DELETE_CONFIRMATION_INVALID,
+                "输入的用户名与目标账号不一致",
+                status_code=400,
+            )
+
+        root_dir, quarantine = user_contexts.quarantine_for_delete(user_id)
+        try:
+            deleted = self.store.delete_user(user_id, expected_username=target.username)
+        except AuthStoreError as exc:
+            user_contexts.restore_quarantine(root_dir, quarantine)
+            message = str(exc)
+            if message == "user must be disabled before deletion":
+                raise AuthHttpError(
+                    ErrorCode.AUTH_USER_DELETE_REQUIRES_DISABLED,
+                    "请先停用该账号，再执行永久删除",
+                    status_code=409,
+                ) from exc
+            if message == "user channel accounts must be unlinked before deletion":
+                raise AuthHttpError(
+                    ErrorCode.AUTH_USER_DELETE_CHANNELS_BOUND,
+                    "该账号仍绑定微信，请先恢复账号并完成微信解绑",
+                    status_code=409,
+                ) from exc
+            raise AuthHttpError(
+                ErrorCode.REQUEST_VALIDATION_FAILED, message, status_code=400
+            ) from exc
+        except Exception:
+            user_contexts.restore_quarantine(root_dir, quarantine)
+            raise
+        user_contexts.purge_quarantine(quarantine)
+        return deleted
+
     def can_manage_admins(self, user: UserAccount) -> bool:
         """Return the effective admin-management flag shown by management APIs."""
 

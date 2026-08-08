@@ -2,7 +2,7 @@
 
 > 状态：QQ 实现一与微信 ClawBot 实现二已进入当前代码基线；微信单账号真实 POC 已通过，双真实账号并发待验收
 >
-> 日期设计记录：`docs_design/2026-07-23-qq-external-channel-boundary-design.md`、`docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`、`docs_design/2026-07-24-qq-binding-keyboard-rendering-fix.md`、`docs_design/2026-07-24-qq-group-manual-binding-design.md`、`docs_design/2026-07-24-clear-session-command-rename-design.md`、`docs_design/2026-07-24-qq-group-reply-attribution-design.md`、`docs_design/2026-07-24-qq-group-markdown-reference-compatibility-fix.md`、`docs_design/2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`、`docs_design/2026-07-24-qq-outbound-delivery-confirmation-design.md`、`docs_design/2026-07-24-weixin-clawbot-channel-design.md`、`docs_design/2026-07-25-weixin-qr-rendering-and-cancel-fix.md`
+> 日期设计记录：`docs_design/2026-07-23-qq-external-channel-boundary-design.md`、`docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`、`docs_design/2026-07-24-qq-binding-keyboard-rendering-fix.md`、`docs_design/2026-07-24-qq-group-manual-binding-design.md`、`docs_design/2026-07-24-clear-session-command-rename-design.md`、`docs_design/2026-07-24-qq-group-reply-attribution-design.md`、`docs_design/2026-07-24-qq-group-markdown-reference-compatibility-fix.md`、`docs_design/2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`、`docs_design/2026-07-24-qq-outbound-delivery-confirmation-design.md`、`docs_design/2026-07-24-weixin-clawbot-channel-design.md`、`docs_design/2026-07-25-weixin-qr-rendering-and-cancel-fix.md`、`docs_design/2026-08-08-channel-capability-aggregation-design.md`
 >
 > 承接文档：`docs_design/zhice-agent-part13-subagent-design.md`
 >
@@ -414,18 +414,22 @@ Web 个人设置只提供一个“生成 QQ 一次性绑定码”按钮，显示
 
 当前个人设置在此基础上增加最小自助管理：只显示“QQ 已绑定”和可选安全展示名，并提供“解除绑定”。不显示 account key、完整 OpenID、最后使用时间或管理员内部字段。解绑只禁用当前用户自己的 external identity，不删除历史 Session、conversation route 或审计记录。
 
+当前产品采用“一个内部账号只绑定一个 active QQ 身份”。数据库保留 disabled 历史记录，但通过应用事务检查和 partial unique index 双重保证每个 `user_id` 最多一条 active QQ identity；已绑定时再次绑定其它 QQ 必须先解绑，不允许静默顶替。历史重复 active 数据迁移时保留最新绑定并禁用其余记录。详细方案见 `docs_design/2026-08-08-single-qq-identity-binding-design.md`。
+
 ### 11.3.1 Web 登录授权链接
 
 未绑定 QQ 用户在私聊发送裸 `/bind` 时：
 
 1. Adapter 为当前 `(qq, account_key, external_user_id)` 创建一次性授权请求；
-2. 通过 Markdown 超链接和“登录并绑定”URL 按钮返回 `${web_base_url}/?channel_bind=<opaque-token>`；
+2. 通过 Markdown 超链接和“登录并绑定”URL 按钮返回移动优先的 `${web_base_url}/bind/qq?token=<opaque-token>` 独立绑定页；旧 `${web_base_url}/?channel_bind=<opaque-token>` 由首页兼容重定向；
 3. Web 未登录时先完成现有用户名/密码登录，并保留该 token；
-4. 登录成功后自动消费授权请求，把 QQ identity 绑定到当前内部 `user_id`；
+4. 独立绑定页持有 token，登录或新注册成功后监听认证状态自动消费授权请求，把 QQ identity 绑定到当前内部 `user_id`，不依赖认证子组件的一次事件；
 5. 已登录用户打开链接时直接完成绑定；
 6. token 只保存 hash，默认 10 分钟过期、单次消费，URL 不包含 OpenID、AppID 或内部用户 id。
 
-生产部署必须保证生成链接中的 `web_base_url` 是 QQ 用户设备可访问的公网 HTTPS origin。若云端账号遗漏该字段，配置加载会回退到本地 loopback 默认值，链接虽然格式正确却无法从手机访问。当前修复保持 Adapter 直接消费账号配置，仅在云端私有账号配置中显式设置公网地址；详细记录见 `docs_design/2026-08-04-qq-public-binding-url-deployment-fix.md`。
+生产部署必须保证生成链接中的 `web_base_url` 是 QQ 用户设备可访问的公网 HTTPS origin。若云端账号遗漏该字段，配置加载会回退到本地 loopback 默认值，链接虽然格式正确却无法从手机访问。当前修复保持 Adapter 直接消费账号配置，仅在云端私有账号配置中显式设置公网地址；临时 Cloudflare Tunnel 使用 `https://chat.zouzhou.xyz`，备案域名启用后再切回正式地址。详细记录见 `docs_design/2026-08-04-qq-public-binding-url-deployment-fix.md`。
+
+移动端绑定闭环采用独立 `/bind/qq` 页面持有 token、认证状态变化后自动消费的流程；成功与失败均原地给出任务结果，失败时保留大号重试入口。手机设置页继续使用单列全屏布局，绑定输入与按钮上下两行，详见 `docs_design/2026-08-08-mobile-channel-binding-ux-design.md`。
 
 QQ 提示语义固定为：
 
@@ -1229,6 +1233,12 @@ Gateway 不在启动时联网安装依赖。未启用微信时不检查 Node 或
 - Python、Node、契约与显式真实 E2E 测试完整。
 
 完整变更文件、状态机、异常码和验收细节见日期设计记录 `docs_design/2026-07-24-weixin-clawbot-channel-design.md`。
+
+### 39.1 当前 Capability 展示边界
+
+QQ `accounts[]`、账号级 Adapter、身份 namespace、Session route 和 receipt 隔离继续作为内部兼容能力保留；当前产品只使用一个共享 QQ Bot。公共 `/health`、管理监控和 Capability 页面只展示聚合后的 `channel.qq`，不展示 `qq.main` 等内部账号 key。聚合状态来自真实 Adapter：全部在线为 available，全部不可用为 unavailable，混合或重连中为 degraded。
+
+微信同样只展示 `channel.weixin`。`ChannelManager` 的启动失败只在 Adapter 未恢复时有效；重新扫码或轮询恢复使 Adapter 回到 available 后，历史启动失败必须自动清除，不能继续覆盖当前运行真值。完整方案见 `docs_design/2026-08-08-channel-capability-aggregation-design.md`。
 
 ## 40. 参考资料
 

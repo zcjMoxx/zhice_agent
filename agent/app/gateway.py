@@ -253,6 +253,13 @@ def create_app(
             return FileResponse(index_path)
         return Response(status_code=404)
 
+    @app.get("/bind/qq", include_in_schema=False)
+    def qq_binding_page():
+        index_path = resolved_static_dir / "index.html"
+        if index_path.is_file():
+            return FileResponse(index_path)
+        return Response(status_code=404)
+
     @app.get("/_setup", include_in_schema=False)
     def setup_owner():
         auth_service = getattr(app.state, "auth_service", None)

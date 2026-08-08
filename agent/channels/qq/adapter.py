@@ -7,6 +7,7 @@ import logging
 import uuid
 from urllib.parse import quote
 
+from agent.auth.store import ExternalIdentityConflictError
 from agent.channels.limits import SlidingWindowRateLimiter
 from agent.channels.qq.attachments import QQAttachmentService
 from agent.channels.qq.outbound import (
@@ -189,17 +190,26 @@ class QQChannelAdapter:
                 external_user_id=event.external_user_id,
                 external_display_name=event.external_display_name,
             )
-            link = f"{self.account.web_base_url}/?channel_bind={quote(request.token, safe='')}"
+            link = f"{self.account.web_base_url}/bind/qq?token={quote(request.token, safe='')}"
             await self._send_message(event, build_binding_authorization(link))
             return
         if text.lower().startswith("/bind "):
-            actor = self.identity.bind(
-                code=text.split(maxsplit=1)[1],
-                channel="qq",
-                account_key=self.account.key,
-                external_user_id=event.external_user_id,
-                external_display_name=event.external_display_name,
-            )
+            try:
+                actor = self.identity.bind(
+                    code=text.split(maxsplit=1)[1],
+                    channel="qq",
+                    account_key=self.account.key,
+                    external_user_id=event.external_user_id,
+                    external_display_name=event.external_display_name,
+                )
+            except ExternalIdentityConflictError as exc:
+                message = (
+                    "当前 ZhiCe-Agent 账号已经绑定其他 QQ，请先在网页渠道连接中解绑。"
+                    if exc.reason == "user_already_bound"
+                    else "当前 QQ 已绑定其他 ZhiCe-Agent 账号，请先在原账号中解绑。"
+                )
+                await self._send(event, message)
+                return
             await self._send(event, "QQ 身份绑定成功。" if actor else "绑定码无效、已过期或不属于此账号。")
             return
         if event.conversation_type != "c2c":

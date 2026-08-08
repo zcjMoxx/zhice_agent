@@ -84,6 +84,7 @@ export const api = {
   users: () => request<{ users: PublicUser[] }>("/api/admin/users"),
   createUser: (payload: Record<string, unknown>) => request<PublicUser>("/api/admin/users", json(payload)),
   updateUser: (id: string, payload: Record<string, unknown>) => request<PublicUser>(`/api/admin/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteUser: (id: string, confirmation: string) => request<{ status: string }>(`/api/admin/users/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirmation }) }),
   roles: () => request<{ roles: Role[]; permissions: string[] }>("/api/admin/roles"),
   updateRole: (id: string, permissionKeys: string[]) => request<Role>(`/api/admin/roles/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ permission_keys: permissionKeys }) }),
   monitor: () => request<MonitorSnapshot>("/api/admin/monitor"),

@@ -28,7 +28,11 @@ class ChannelManager:
 
     def statuses(self) -> dict[str, CapabilityStatus]:
         statuses = {key: adapter.status() for key, adapter in self.adapters.items()}
-        for key, error_code in self._failures.items():
+        for key, error_code in tuple(self._failures.items()):
+            current = statuses.get(key)
+            if current is not None and current.available:
+                del self._failures[key]
+                continue
             statuses[key] = CapabilityStatus(
                 name=key,
                 state="unavailable",

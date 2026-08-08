@@ -5,7 +5,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from agent.auth.store import AuthSetupError, AuthStoreError, SQLiteAuthStore
+from agent.auth.store import (
+    AuthSetupError,
+    AuthStoreError,
+    ExternalIdentityConflictError,
+    SQLiteAuthStore,
+)
 
 
 def test_initialize_schema_adds_session_conversation_type_to_legacy_database(tmp_path):
@@ -271,3 +276,96 @@ def test_external_identity_resolves_to_internal_actor(tmp_path):
     assert actor.channel == "feishu"
     assert actor.role_keys == frozenset({"developer"})
     assert actor.permission_keys == frozenset()
+
+
+def test_one_user_can_only_have_one_active_qq_identity(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("admin", "Admin", "password-123")
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="qq-first",
+    )
+
+    with pytest.raises(ExternalIdentityConflictError) as exc_info:
+        store.link_external_identity(
+            user_id=user.id,
+            channel="qq",
+            external_tenant_id="main",
+            external_user_id="qq-second",
+        )
+
+    assert exc_info.value.reason == "user_already_bound"
+    binding = store.list_external_identities_for_user(user.id)[0]
+    assert store.unlink_external_identity_for_user(
+        identity_id=str(binding["id"]), user_id=user.id
+    )
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="qq-second",
+    )
+    assert len(store.list_external_identities_for_user(user.id)) == 1
+
+
+def test_schema_migration_keeps_newest_active_qq_identity(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("admin", "Admin", "password-123")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("DROP INDEX uq_external_identities_active_qq_user")
+        for identity_id, external_user_id, linked_at in (
+            ("external-old", "qq-old", "2026-01-01T00:00:00+00:00"),
+            ("external-new", "qq-new", "2026-02-01T00:00:00+00:00"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO external_identities(
+                  id, user_id, channel, external_tenant_id, external_user_id,
+                  external_display_name, status, linked_at, last_seen_at, metadata_json
+                ) VALUES (?, ?, 'qq', 'main', ?, '', 'active', ?, ?, '{}')
+                """,
+                (identity_id, user.id, external_user_id, linked_at, linked_at),
+            )
+
+    store.initialize_schema()
+
+    with sqlite3.connect(store.path) as connection:
+        statuses = dict(
+            connection.execute(
+                "SELECT external_user_id, status FROM external_identities WHERE user_id=?",
+                (user.id,),
+            ).fetchall()
+        )
+        index = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' "
+            "AND name='uq_external_identities_active_qq_user'"
+        ).fetchone()
+    assert statuses == {"qq-old": "disabled", "qq-new": "active"}
+    assert index is not None
+
+
+def test_delete_user_removes_disabled_account_relations(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_owner("owner", "Owner", "password-123")
+    target = store.create_user("delete-me", "Delete Me", "password-456")
+    store.link_external_identity(
+        user_id=target.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="openid-delete-me",
+    )
+    store.session_index_create(
+        session_id="session-delete-me", owner_user_id=target.id, channel="web"
+    )
+    store.update_user(target.id, status="disabled")
+
+    deleted = store.delete_user(target.id, expected_username="delete-me")
+
+    assert deleted.id == target.id
+    assert store.get_user_by_username("delete-me") is None
+    assert store.session_index_get("session-delete-me") is None
+    assert store.resolve_external_identity(
+        channel="qq", external_tenant_id="main", external_user_id="openid-delete-me"
+    ) is None

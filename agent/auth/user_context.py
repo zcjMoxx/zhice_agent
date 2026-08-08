@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import shutil
+import uuid
 from pathlib import Path
 
 from agent.protocols.auth import UserContext
@@ -74,6 +76,39 @@ class FilesystemUserContextResolver:
             memory_dir=memory_dir,
             shared_readonly_dir=self.shared_readonly_dir,
         )
+
+    def quarantine_for_delete(self, user_id: str) -> tuple[Path, Path | None]:
+        """Move one isolated user root aside so a DB failure can restore it."""
+
+        root_dir = self._isolated_user_root(user_id)
+        if not root_dir.exists():
+            return root_dir, None
+        quarantine = (self.users_dir / f".deleting-{user_id}-{uuid.uuid4().hex}").resolve()
+        if not _is_relative_to(quarantine, self.users_dir):
+            raise ValueError("user deletion quarantine is outside contexts/users")
+        root_dir.replace(quarantine)
+        return root_dir, quarantine
+
+    def restore_quarantine(self, root_dir: Path, quarantine: Path | None) -> None:
+        """Restore a quarantined user root after a failed DB transaction."""
+
+        if quarantine is not None and quarantine.exists() and not root_dir.exists():
+            quarantine.replace(root_dir)
+
+    @staticmethod
+    def purge_quarantine(quarantine: Path | None) -> None:
+        """Permanently remove a successfully deleted user's quarantined files."""
+
+        if quarantine is not None and quarantine.exists():
+            shutil.rmtree(quarantine)
+
+    def _isolated_user_root(self, user_id: str) -> Path:
+        if not _USER_ID_RE.fullmatch(str(user_id)):
+            raise ValueError("invalid internal user id")
+        root_dir = (self.users_dir / user_id).resolve()
+        if not _is_relative_to(root_dir, self.users_dir):
+            raise ValueError("user context is outside contexts/users")
+        return root_dir
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:

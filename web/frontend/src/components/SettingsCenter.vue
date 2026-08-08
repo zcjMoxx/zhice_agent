@@ -18,7 +18,10 @@ const newPassword = ref("");
 const confirmPassword = ref("");
 const status = ref("");
 const failure = ref("");
-const qqToken = ref(new URLSearchParams(window.location.search).get("channel_bind") || "");
+const qqToken = computed({
+  get: () => channels.pendingQqToken,
+  set: (value: string) => { channels.pendingQqToken = value; },
+});
 
 function tr(chinese: string, english: string): string { return uiText(ui.language, chinese, english); }
 function userId(): string { return auth.user?.id || "pre-auth"; }
@@ -82,7 +85,14 @@ async function changePassword() {
   catch (error) { failure.value = errorMessage(error); }
 }
 async function authorizeQq() {
-  try { await channels.authorizeQq(qqToken.value); history.replaceState({}, "", window.location.pathname); qqToken.value = ""; status.value = tr("QQ 已绑定", "QQ connected"); }
+  try {
+    await channels.authorizeQq(qqToken.value);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("channel_bind");
+    url.searchParams.delete("token");
+    history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    status.value = tr("QQ 已绑定", "QQ connected");
+  }
   catch (error) { failure.value = errorMessage(error); }
 }
 function selectSection(key: string) { ui.settingsSection = key; if (key === "channels") void channels.refresh(); }
@@ -138,6 +148,7 @@ function chooseLanguage(language: UiLanguage) { ui.setLanguage(language, userId(
         </form>
         <section v-else class="setting-section channel-settings">
           <p v-if="channels.error" class="form-error">{{ channels.error }}</p>
+          <p v-if="channels.qqAuthorizationError" class="form-error">{{ channels.qqAuthorizationError }}</p>
           <div class="channel-card">
             <div><span class="channel-icon qq">QQ</span><span><strong>{{ tr('QQ 机器人', 'QQ bot') }}</strong><small>{{ qqBindings.length ? tr('已连接', 'Connected') : tr('未连接', 'Not connected') }}</small></span></div>
             <p class="muted">{{ tr('群聊：先 @机器人，再发送生成的 /bind 命令。私聊：直接发送该命令。', 'Group chat: @mention the bot first, then send the generated /bind command. Direct chat: send the command directly.') }}</p>
@@ -146,7 +157,7 @@ function chooseLanguage(language: UiLanguage) { ui.setLanguage(language, userId(
               <pre>{{ channels.qqCommand }}</pre>
               <small>{{ tr('绑定码为一次性短期凭据，请勿转发给他人。', 'The binding code is a short-lived one-time credential. Do not share it.') }}</small>
             </template>
-            <div v-if="qqToken" class="inline-bind"><input v-model="qqToken" /><button class="primary-button" @click="authorizeQq">{{ tr('完成授权', 'Complete authorization') }}</button></div>
+            <div v-if="qqToken" class="inline-bind"><input v-model="qqToken" /><button class="primary-button channel-bind-action" @click="authorizeQq">{{ tr('完成绑定', 'Complete binding') }}</button></div>
             <div v-for="binding in qqBindings" :key="binding.binding_id" class="binding-row"><span>{{ binding.display_name || tr('QQ 身份', 'QQ identity') }}</span><button class="danger-text" @click="channels.unlink(binding.binding_id)">{{ tr('解绑', 'Unlink') }}</button></div>
           </div>
           <div class="channel-card">

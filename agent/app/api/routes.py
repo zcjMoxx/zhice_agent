@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from agent.app.api.schemas import (
     AdminMonitorResponse,
     AdminUserCreateRequest,
+    AdminUserDeleteRequest,
     AdminUsersResponse,
     AdminUserUpdateRequest,
     AuditEventsResponse,
@@ -58,7 +59,7 @@ from agent.app.auth import AuthHttpError, local_operator_actor
 from agent.app.runtime import ChatTurnResult, ModelState
 from agent.auth.schema import PERMISSIONS
 from agent.auth.session_access import SessionAccessError
-from agent.auth.store import AuthStoreError
+from agent.auth.store import AuthStoreError, ExternalIdentityConflictError
 from agent.core.turns import new_turn_id
 from agent.message import Message
 from agent.protocols.auth import AuditEvent
@@ -276,7 +277,15 @@ def authorize_qq_identity(
     actor = _actor(request, channel="rest")
     runtime = _runtime(request)
     identity = _channel_identity(runtime)
-    if not identity.authorize(request_body.token, actor):
+    try:
+        authorized = identity.authorize(request_body.token, actor)
+    except ExternalIdentityConflictError as exc:
+        raise ApiError(
+            "CHANNEL_QQ_USER_ALREADY_BOUND",
+            "当前账号已经绑定其他 QQ，请先在渠道连接中解绑。",
+            status_code=409,
+        ) from exc
+    if not authorized:
         raise ApiError(
             "CHANNEL_BIND_TOKEN_INVALID",
             "QQ binding link is invalid, expired, or already used",
@@ -834,6 +843,44 @@ def update_user(
             )
         )
     return _public_user(user, auth)
+
+
+@router.delete("/admin/users/{user_id}", response_model=AuthMutationResponse)
+def delete_user(
+    user_id: str,
+    request_body: AdminUserDeleteRequest,
+    request: Request,
+) -> AuthMutationResponse:
+    """Permanently delete one disabled non-Owner local account."""
+
+    actor = _actor(request, "auth.users.manage", channel="rest")
+    runtime = _runtime(request)
+    auth = _auth_service(request, required=True)
+    session_access = getattr(runtime, "session_access", None)
+    user_contexts = getattr(session_access, "user_contexts", None)
+    if user_contexts is None:
+        raise ApiError(ErrorCode.AUTH_UNAVAILABLE, "User context storage is unavailable", 503)
+    try:
+        deleted = auth.delete_managed_user(
+            actor,
+            user_id,
+            request_body.confirmation,
+            user_contexts,
+        )
+    except AuthHttpError as exc:
+        raise _api_error_from_auth(exc) from exc
+    if auth.audit_sink is not None:
+        auth.audit_sink.record(
+            AuditEvent(
+                action="user.deleted",
+                resource_type="user",
+                actor=actor,
+                resource_id=deleted.id,
+                channel="rest",
+                decision="allow",
+            )
+        )
+    return AuthMutationResponse(status="deleted")
 
 
 @router.get("/admin/roles", response_model=RolesResponse)

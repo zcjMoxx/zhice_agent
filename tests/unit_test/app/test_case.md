@@ -7,6 +7,7 @@
 ## 用例覆盖
 
 - `/health` 和 `/api/health` 返回基础状态、当前模型、auth 初始化状态和安全的可选 capability 状态；Subagent unavailable 不改变 overall `status=ok`，且不暴露 workspace/session 路径。
+- QQ 账号级 Adapter 状态在 Runtime 内聚合成唯一 `channel.qq`；公共 health 和管理监控不暴露 `qq.main` 等内部账号 key，混合多账号状态降级为渠道级状态。
 - 聊天 Web 不渲染或主动请求 capability 启动横幅；health 状态保留给诊断、系统监控和自动化检查。
 - Gateway/CLI缺少`config.yml.skills`时按未启用的可选扩展静默处理；分区存在但非法时只记录一次结构化`skills.runtime_unavailable` WARNING，包含稳定code且不泄露绝对路径。
 - `/` 从可替换 `static_dir` 返回 SPA 首页；`/_setup` 和 `/admin` 继续返回同一 Vue 入口并保留服务端安全条件。
@@ -84,7 +85,11 @@
 - 普通成功 HTTP 请求不写 Security Audit；认证失败、特权拒绝和安全相关操作继续审计。
 - Web 个人设置只提供“生成 QQ 一次性绑定码”，返回 10 分钟单次使用的 `/bind <code>`；不增加渠道列表或管理员绑定管理。
 - Web 个人设置显示当前用户自己的极简 QQ 绑定状态并支持解绑；不暴露完整 OpenID、account key 或其他用户绑定。
-- QQ 裸 `/bind` 返回的 `channel_bind` 授权 token 在未登录时保留到登录完成，登录成功后自动调用授权 API；token 过期、重放或冲突返回稳定错误且不写入 identity。
+- QQ 绑定成功页提供“关闭并返回 QQ”主入口，浏览器拒绝自动关闭时显示右上角手动关闭提示，并保留进入 ZhiCe-Agent 的次入口。
+- 管理后台创建用户表单禁止把当前登录凭据自动填入新用户字段；已停用非 Owner 用户支持用户名二次确认永久删除，Owner、启用账号和仍绑定微信的账号拒绝删除。
+- 永久删除确认值不匹配时按钮仍可提交并显示明确行内错误；QQ 绑定认证页将“立即创建/返回登录”作为独立蓝色动作文本。
+- Gateway 为 `/bind/qq` 显式返回 SPA index，保证手机从 QQ 直接打开子路由不会 404；QQ 裸 `/bind` 返回的授权 token 进入该移动优先页面，在未登录时保留到登录或注册完成，认证成功后自动调用授权 API；旧 `/?channel_bind=` 链接重定向兼容，token 过期、重放或冲突返回稳定错误且不写入 identity。
+- 已绑定其它 QQ 的账号消费 Web 授权 token 时返回 HTTP 409 和稳定错误码 `CHANNEL_QQ_USER_ALREADY_BOUND`，不自动顶替原绑定。
 - Web Session 列表标明 Web、CLI、QQ 私聊、QQ群聊来源；QQ群聊在 Web 只读并可派生新的 Web Session。
 - 服务端拒绝 Web 直接向 QQ 群 Session 发送普通消息或 slash command，不能只依赖前端禁用输入框。
 

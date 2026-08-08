@@ -8,7 +8,7 @@
 >
 > 设计依据：`docs_design/2026-07-06-next-stage-sequencing-design.md`、`docs_design/2026-07-08-user-auth-permission-boundary-design.md`、`docs_design/2026-07-10-session-model-preference-scope-design.md`、`docs_design/2026-07-10-owner-admin-delegation-design.md`、`docs_design/2026-07-11-password-change-reauthentication-design.md`、`docs_design/2026-07-16-authenticated-user-baseline-capabilities-design.md`
 >
-> 当前状态：第九部分身份与特权边界已落地。登录用户默认拥有账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 等基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。Owner 是 CLI 本地 workspace operator 在 Web 端的登录身份：认证表示不同，但共用全局 workspace、sessions、metadata 和 Memory，不拥有独立的 `contexts/users/{owner_id}`。仍不包含通用审批流、OAuth/SSO、多租户或工程化前端。
+> 当前状态：第九部分身份与特权边界已落地。登录用户默认拥有账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 等基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。Owner 是 CLI 本地 workspace operator 在 Web 端的登录身份：认证表示不同，但共用全局 workspace、sessions、metadata 和 Memory，不拥有独立的 `contexts/users/{owner_id}`。当前用户管理支持已停用非 Owner 账号的用户名二次确认永久删除；删除覆盖独立用户目录和关联认证/Session/渠道/运行数据，仍绑定微信的账号必须先解绑。详细边界见 `docs_design/2026-08-08-qq-return-and-user-deletion-design.md`。仍不包含通用审批流、OAuth/SSO、多租户或工程化前端。
 
 ---
 
