@@ -16,7 +16,7 @@ if ($Smoke) {
     Write-Output "[1/2] Running optional isolated smoke test"
     & $smokeScript -Image $Image -Port 10087
 } else {
-    Write-Output "[1/2] Reusing operator-approved local image without smoke"
+    Write-Output "[1/2] Reusing operator-approved existing local image without smoke"
 }
 
 Write-Output "[2/2] Publishing existing image to cloud"

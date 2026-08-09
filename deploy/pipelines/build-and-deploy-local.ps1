@@ -64,7 +64,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Local Compose status check failed."
 }
 
-Write-Output "Local deployment passed"
+Write-Output "Build and local deployment passed"
 Write-Output "image: $imageRef"
 Write-Output "url: http://127.0.0.1:${publicPort}"
 Write-Output "data: existing deploy_zhice-* named volumes are preserved"

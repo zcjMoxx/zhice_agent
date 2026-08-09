@@ -87,7 +87,7 @@ export const api = {
   deleteUser: (id: string, confirmation: string) => request<{ status: string }>(`/api/admin/users/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirmation }) }),
   roles: () => request<{ roles: Role[]; permissions: string[] }>("/api/admin/roles"),
   updateRole: (id: string, permissionKeys: string[]) => request<Role>(`/api/admin/roles/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ permission_keys: permissionKeys }) }),
-  monitor: () => request<MonitorSnapshot>("/api/admin/monitor"),
+  monitor: (query = new URLSearchParams()) => request<MonitorSnapshot>(`/api/admin/monitor?${query}`),
   diagnostics: (query: URLSearchParams) => request<SystemDiagnosticsSnapshot>(`/api/admin/diagnostics?${query}`),
   audit: (query: URLSearchParams) => request<AuditPage>(`/api/audit/events?${query}`),
   confirmation: (id: string, approved: boolean) => request(`/api/tool-confirmations/${encodeURIComponent(id)}/${approved ? "approve" : "deny"}`, { method: "POST" }),

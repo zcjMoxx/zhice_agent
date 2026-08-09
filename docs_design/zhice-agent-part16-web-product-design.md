@@ -130,15 +130,15 @@ FastAPI 继续显式提供三个 SPA 入口。Vue Router 负责页面选择，AP
 
 ```text
 概览
-用户管理
+账号管理
 角色与权限
-系统监控
-安全审计
+运行诊断
+高级设置
 ```
 
 角色和权限按当前界面语言显示能力分组；内部 key 默认收起。普通用户基础能力不显示为“没有权限”。角色按系统所有者、管理员、开发者、审计员、普通用户排序。Owner 固定只读；Admin 权限只能由 Owner 修改，非 Owner 在前端不可操作且服务端继续作为最终权限边界。
 
-系统监控展示现有 Gateway、Channel、MCP、Subagent、Memory、Context 和 Activity 真值。安全审计展示登录、权限、角色和危险操作事件，并支持筛选、分页、详情与导出。
+概览直接展示 Gateway、当前模型、近期失败和当前事故，不再使用欢迎页占据主要空间。运行诊断展示确定性事故、脱敏跨组件时间线、失败优先的近期运行记录，以及 Gateway、Channel、MCP、Subagent、Memory、Context 和 Activity 真值。近期运行记录关联账号、昵称和 Session 标题，默认筛选失败状态。安全审计降为高级设置中的低频入口，只记录认证异常、账号与权限变更、外部身份绑定、跨账号访问、危险操作和审计导出等敏感事件，并保留筛选、分页、详情与导出；普通 Turn 和 Tool 运行事实不写入安全审计。
 
 ## 7. 组件边界
 
@@ -153,8 +153,9 @@ AdminLayout
 ├─ OverviewPage
 ├─ UsersPage
 ├─ RolesPage
-├─ MonitorPage
-└─ AuditPage
+├─ RuntimeDiagnosticsPage
+└─ AdvancedPage
+   └─ SecurityAudit
 ```
 
 常用低层组件包括 SessionActionMenu、AccountMenu、RuntimeStatus、ConfirmationDialog、MessageComposer、ThemeSelector 和 ChannelBindingPanel。
@@ -166,7 +167,7 @@ AdminLayout
 3. 聊天壳、Session 和模型选择。
 4. WebSocket、RuntimeEvent、confirmation 和 stop。
 5. 账号、设置和渠道绑定。
-6. 用户、角色、系统监控和安全审计。
+6. 账号、角色、运行诊断和高级设置中的安全审计。
 7. 测试、正式切换和删除旧原生前端。
 
 迁移期间旧页面只作为行为对照；最终不保留第二套生产入口。
@@ -188,7 +189,7 @@ Part 16 完成时：
 3. 登录、聊天、设置和管理后台统一消费六套主题的语义 token。
 4. 主题家族、跟随系统/浅色/暗色模式、响应式和 reduced motion 可用。
 5. Session 三点菜单、头像、设置中心和管理员信息架构按本文落地。
-6. 系统监控与安全审计职责明确。
+6. 运行诊断与安全审计职责明确，安全审计只保留敏感操作账本。
 7. 现有 API、WebSocket、Session、RBAC 和渠道行为没有被前端迁移改变。
 8. 旧 `web/static` 原生应用已删除。
 

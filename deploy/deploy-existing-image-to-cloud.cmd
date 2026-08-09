@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0pipelines\deploy-cloud-image.ps1"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0pipelines\deploy-existing-image-to-cloud.ps1"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.

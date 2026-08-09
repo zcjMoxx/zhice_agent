@@ -25,7 +25,7 @@
 - `zhice-agent-part13-subagent-design.md`：Part 13，已实现并进入当前代码基线；包含有界并行 `delegate_tasks`、独立 child AgentLoop/Session/RuntimeEvent scope、能力 Profile 与 shared-readonly/worktree/shared-exclusive 隔离。
 - `zhice-agent-part14-external-channel-design.md`：Part 14 唯一活文档；QQ 实现一和微信 ClawBot 实现二已进入当前代码基线。包含中性 Channel 协议、身份绑定、conversation route、跨渠道 Session、QQ 私聊/群聊，以及微信一名 Web 用户一个 AI 账号、Node Transport sidecar、扫码绑定和私聊文本实现。
 - `zhice-agent-part15-context-engineering-design.md`：Part 15 已实现并进入当前代码基线，覆盖预算内完整历史、确定性 Session 历史查询、结构化 compaction、FTS/BM25 + embedding 混合召回、本地向量存储和选择 trace。
-- `zhice-agent-part16-web-product-design.md`：Part 16 已实现并关闭；Vue 3/Vite/TypeScript 已成为唯一正式 Web 前端，包含六套主题家族与独立明暗模式、登录/聊天/Session、五栏设置、渠道连接、系统监控与安全审计，并以 `agent/web/static` 随 Python wheel 发布。
+- `zhice-agent-part16-web-product-design.md`：Part 16 已实现并关闭；Vue 3/Vite/TypeScript 已成为唯一正式 Web 前端，包含六套主题家族与独立明暗模式、登录/聊天/Session、五栏设置、渠道连接，以及失败优先的运行诊断；安全审计作为敏感操作账本收在高级设置中，并以 `agent/web/static` 随 Python wheel 发布。
 
 第九部分用户、登录与权限执行边界已经落地：登录用户的账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 是基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。基础能力收敛见 `2026-07-16-authenticated-user-baseline-capabilities-design.md`；当前自助诊断和 Runtime Activity / Security Audit 拆分见 `2026-07-16-self-diagnostics-activity-audit-separation-design.md`。
 
@@ -47,7 +47,7 @@ Part 15 完整 Session 上下文工程已进入当前代码基线，活文档见
 
 Part 16 Web 产品体验与 Vue 前端工程已进入当前代码基线，活文档见 `zhice-agent-part16-web-product-design.md`，主体日期设计记录见 `2026-07-27-web-product-experience-and-vue-frontend-design.md`，真实长 Session 暴露出的阅读位置、账号入口和滚动容器修正见 `2026-07-27-web-chat-layout-and-theme-correction-design.md`，浅色主题最终统一见 `2026-07-27-light-obsidian-palette-alignment-design.md`，雾银暗色曜石见 `2026-07-28-mist-silver-dark-obsidian-design.md`，菜单外部收起、Session 来源展示、中英快捷切换和系统角色保护修正见 `2026-07-28-web-interaction-localization-and-protected-role-ui-design.md`，六套主题家族与独立明暗模式见 `2026-07-28-six-theme-family-and-color-mode-design.md`。当前 FastAPI 同源 Gateway 直接服务包内 Vue build；typed stores/WS/RuntimeEvent、六套主题、登录注册滑动页、Session 侧栏、五栏设置和双语管理后台均已落地。Part 17 已在同一管理页面加入系统事故、筛选和跨组件脱敏时间线，基础 health/Activity 真值继续独立保留。
 
-Part 17 运行可靠性、系统级诊断与私有镜像部署的代码、测试和生产部署验收已进入当前基线。当前活文档见 `zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案与实施说明见 `2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`；三个日常发布入口的后续收敛与真实验收记录见 `2026-08-04-private-registry-cloud-release-pipeline-design.md`。Provider 结构化错误/重试/cooldown/attempts、系统诊断、MCP 动态刷新、重启恢复、单 worker 边界和 `deploy/` 私有覆盖层均已落地；默认 workspace 统一为 `Path.home() / ".zhice"`（Windows `C:\Users\<user>\.zhice`，Docker `/home/zhice/.zhice`），运行态 env 位于 `${workspace}/config/.env`，解析优先级为 `--workspace > ZHICE_AGENT_WORKSPACE > 默认目录`。普通 `zcagent init` 默认补齐 `config/.env`，已有文件保留、`--force` 覆盖，`--write-env` 仅作兼容参数。本地镜像 build/smoke、阿里云 ACR push、腾讯云按 Digest 部署、Caddy HTTPS、公网健康、认证初始化和重启持久化均已真实验证；三入口自动化使用 Git 忽略私有 JSON 中唯一允许的明文 `SshPassword`、Paramiko known_hosts 校验和 `RemoteOpsDir` 五脚本 versioned 原子同步，并已逐一完成真实端到端验收：本地入口 build/smoke/Compose healthy，已有镜像入口与源码完整入口均完成 push、远端原子同步、sudo 部署和云服务器侧公网 HTTPS health，三个入口退出码均为 `0`。
+Part 17 运行可靠性、系统级诊断与私有镜像部署的代码、测试和生产部署验收已进入当前基线。当前活文档见 `zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案与实施说明见 `2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`；三个日常发布入口的流水线与真实验收记录见 `2026-08-04-private-registry-cloud-release-pipeline-design.md`，当前显式命名见 `2026-08-08-deployment-entrypoint-naming-design.md`。Provider 结构化错误/重试/cooldown/attempts、系统诊断、MCP 动态刷新、重启恢复、单 worker 边界和 `deploy/` 私有覆盖层均已落地；默认 workspace 统一为 `Path.home() / ".zhice"`（Windows `C:\Users\<user>\.zhice`，Docker `/home/zhice/.zhice`），运行态 env 位于 `${workspace}/config/.env`，解析优先级为 `--workspace > ZHICE_AGENT_WORKSPACE > 默认目录`。普通 `zcagent init` 默认补齐 `config/.env`，已有文件保留、`--force` 覆盖，`--write-env` 仅作兼容参数。本地镜像 build/smoke、阿里云 ACR push、腾讯云按 Digest 部署、Caddy HTTPS、公网健康、认证初始化和重启持久化均已真实验证；三入口自动化使用 Git 忽略私有 JSON 中唯一允许的明文 `SshPassword`、Paramiko known_hosts 校验和 `RemoteOpsDir` 五脚本 versioned 原子同步，并已逐一完成真实端到端验收：本地入口 build/smoke/Compose healthy，已有镜像入口与源码完整入口均完成 push、远端原子同步、sudo 部署和云服务器侧公网 HTTPS health，三个入口退出码均为 `0`。
 
 维护规则：
 
@@ -132,6 +132,7 @@ Part 17 运行可靠性、系统级诊断与私有镜像部署的代码、测试
 
 - `2026-08-04-qq-public-binding-url-deployment-fix.md`
 - `2026-08-04-private-registry-cloud-release-pipeline-design.md`
+- `2026-08-08-deployment-entrypoint-naming-design.md`
 - `2026-08-06-weixin-credential-volume-design.md`
 - `2026-08-08-channel-capability-aggregation-design.md`
 - `2026-07-27-web-chat-layout-and-theme-correction-design.md`

@@ -49,13 +49,13 @@ git check-ignore deploy/private/.env deploy/private/config.yml deploy/private/mo
 Windows 资源管理器中可直接双击：
 
 ```text
-deploy\deploy-local.cmd
+deploy\build-and-deploy-local.cmd
 ```
 
 窗口会显示完整流水线输出，并在成功或失败后暂停，不会一闪而过。终端中则运行无参数 PowerShell 入口：
 
 ```powershell
-.\deploy\pipelines\deploy-local.ps1
+.\deploy\pipelines\build-and-deploy-local.ps1
 ```
 
 流水线固定使用阿里云 APT 镜像、`zhice-agent:local`、正式端口 `10086` 和隔离 smoke 端口 `10087`，依次完成 Docker 检查、构建、smoke、Compose 更新与健康等待。它不会删除 `deploy_zhice-*` 命名卷，也不会上传镜像。
@@ -92,30 +92,30 @@ HOME=/home/zhice
 
 | 入口 | 输入 | 行为 |
 | --- | --- | --- |
-| `deploy-local` | 当前源码与私有配置 | build、smoke、本地 Compose 部署 |
-| `deploy-cloud-image` | 已验证的本地 `zhice-agent:local` | 生成 release tag、推送 ACR、按 Digest 云端部署；默认不重复 smoke |
-| `deploy-cloud` | 当前源码与私有配置 | build、smoke、推送 ACR、按 Digest 云端部署 |
+| `build-and-deploy-local` | 当前源码与私有配置 | 重新构建镜像、smoke、本地 Compose 部署 |
+| `deploy-existing-image-to-cloud` | 已验证的本地 `zhice-agent:local` | 不构建镜像；生成 release tag、推送 ACR、按 Digest 云端部署；默认不重复 smoke |
+| `build-and-deploy-cloud` | 当前源码与私有配置 | 重新构建镜像、smoke、推送 ACR、按 Digest 云端部署 |
 
 Windows 资源管理器可以分别双击：
 
 ```text
-deploy\deploy-local.cmd
-deploy\deploy-cloud-image.cmd
-deploy\deploy-cloud.cmd
+deploy\build-and-deploy-local.cmd
+deploy\deploy-existing-image-to-cloud.cmd
+deploy\build-and-deploy-cloud.cmd
 ```
 
 终端入口分别为：
 
 ```powershell
-.\deploy\pipelines\deploy-local.ps1
-.\deploy\pipelines\deploy-cloud-image.ps1
-.\deploy\pipelines\deploy-cloud.ps1
+.\deploy\pipelines\build-and-deploy-local.ps1
+.\deploy\pipelines\deploy-existing-image-to-cloud.ps1
+.\deploy\pipelines\build-and-deploy-cloud.ps1
 ```
 
 已有镜像入口的契约是“操作者已经确认该本地镜像可发布”，因此默认不再次 smoke；来源不确定时可显式执行：
 
 ```powershell
-.\deploy\pipelines\deploy-cloud-image.ps1 -Smoke
+.\deploy\pipelines\deploy-existing-image-to-cloud.ps1 -Smoke
 ```
 
 完整云端入口不会调用本地 Compose，不会顺带重建本地正式容器。

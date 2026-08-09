@@ -244,8 +244,9 @@ def test_vue_source_uses_single_initials_node_and_part16_surfaces():
 
     assert '<span class="user-avatar" aria-hidden="true">{{ initials }}</span>' in avatar
     assert all(name in settings for name in ("常规", "个性化", "个人资料", "账号与安全", "渠道连接"))
-    assert all(name in admin for name in ("概览", "用户管理", "角色与权限", "系统监控", "安全审计"))
-    assert "根因诊断将在 Part 17" in admin
+    assert all(name in admin for name in ("概览", "账号管理", "角色与权限", "运行诊断", "高级设置"))
+    assert "近期运行记录" in admin
+    assert "普通运行错误请到运行诊断查看" in admin
 
 
 def test_owner_setup_page_is_only_served_while_secret_is_configured_and_owner_missing(tmp_path):

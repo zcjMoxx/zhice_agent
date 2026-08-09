@@ -1,5 +1,7 @@
 # ZhiCe-Agent 私有镜像云端发布流水线设计
 
+> 说明：本文保留 2026-08-04 的入口命名和真实验收记录。当前代码已将三个入口改为 `build-and-deploy-local`、`deploy-existing-image-to-cloud` 和 `build-and-deploy-cloud`，流水线行为不变；应参考 `2026-08-08-deployment-entrypoint-naming-design.md` 和 Part 17 活文档。
+
 > 2026-08-04 结构收敛：在代码尚未提交期间继续更新本文。`deploy/` 根目录只保留三个可双击 CMD 入口和容器定义；真实配置统一放入 `deploy/private/`，PowerShell 编排统一放入 `deploy/pipelines/`，底层构建、烟测、推送和远端 Shell 操作保留在 `deploy/scripts/`。云目标配置由不直观的 `cloud.local.psd1` 改为 `private/cloud-target.json`，公开示例使用中文待填写值。
 
 ## 背景

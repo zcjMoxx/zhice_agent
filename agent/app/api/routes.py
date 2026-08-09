@@ -933,13 +933,17 @@ def update_role(
 
 
 @router.get("/admin/monitor", response_model=AdminMonitorResponse)
-def read_admin_monitor(request: Request, limit: int = 50) -> AdminMonitorResponse:
+def read_admin_monitor(
+    request: Request,
+    limit: int = 50,
+    status: str = "",
+) -> AdminMonitorResponse:
     """Return current health/capability/Activity truth without inferring causes."""
 
     _actor(request, "turn.read.any", channel="rest")
     runtime = _runtime(request)
     auth = _auth_service(request, required=True)
-    activity = auth.store.list_monitor_activity(limit=limit)
+    activity = auth.store.list_monitor_activity(limit=limit, status=status)
     statuses_method = getattr(runtime, "capability_statuses", None)
     try:
         statuses = statuses_method() if callable(statuses_method) else {}
@@ -1042,8 +1046,10 @@ def list_audit_events(
     session_id: str = "",
     turn_id: str = "",
     action: str = "",
+    event_type: str = "",
     actor_user_id: str = "",
     decision: str = "",
+    outcome: str = "",
     from_ts: str = "",
     to_ts: str = "",
     cursor: str = "",
@@ -1058,8 +1064,10 @@ def list_audit_events(
         session_id=session_id,
         turn_id=turn_id,
         action=action,
+        event_type=event_type,
         actor_user_id=actor_user_id or None,
         decision=decision,
+        outcome=outcome,
         from_ts=from_ts,
         to_ts=to_ts,
         cursor=cursor,
@@ -1081,6 +1089,8 @@ def list_audit_events(
                     "limit": limit,
                     "session_filter": bool(session_id),
                     "turn_filter": bool(turn_id),
+                    "event_type_filter": bool(event_type),
+                    "outcome_filter": bool(outcome),
                     "result_count": len(visible_events),
                 },
             )
@@ -1098,8 +1108,10 @@ def export_audit_events(
     session_id: str = "",
     turn_id: str = "",
     action: str = "",
+    event_type: str = "",
     actor_user_id: str = "",
     decision: str = "",
+    outcome: str = "",
     from_ts: str = "",
     to_ts: str = "",
 ) -> Response:
@@ -1112,8 +1124,10 @@ def export_audit_events(
         session_id=session_id,
         turn_id=turn_id,
         action=action,
+        event_type=event_type,
         actor_user_id=actor_user_id or None,
         decision=decision,
+        outcome=outcome,
         from_ts=from_ts,
         to_ts=to_ts,
     )
@@ -1137,7 +1151,7 @@ def export_audit_events(
                 channel="rest",
                 route=request.url.path,
                 decision="allow",
-                metadata={"result_count": len(events), "filtered": any((session_id, turn_id, action, actor_user_id, decision, from_ts, to_ts))},
+                metadata={"result_count": len(events), "filtered": any((session_id, turn_id, action, event_type, actor_user_id, decision, outcome, from_ts, to_ts))},
             )
         )
     return Response(

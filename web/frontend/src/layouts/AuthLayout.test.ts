@@ -21,8 +21,31 @@ describe("AuthLayout", () => {
     expect(wrapper.text()).toContain("欢迎回来");
     await wrapper.get(".ghost-inverse").trigger("click");
     expect(wrapper.get(".auth-slider").classes()).toContain("is-register");
-    expect(wrapper.text()).toContain("创建本地账号");
+    expect(wrapper.text()).toContain("创建账号");
     expect(wrapper.find('input[autocomplete="new-password"]').exists()).toBe(true);
+    expect(wrapper.get('input[autocomplete="username"]').attributes("placeholder")).toBeUndefined();
+  });
+
+  it("shows registration validation against the backend credential rules", async () => {
+    const wrapper = mountLayout();
+    await wrapper.get(".ghost-inverse").trigger("click");
+    const username = wrapper.get('input[autocomplete="username"]');
+    const passwords = wrapper.findAll('input[autocomplete="new-password"]');
+
+    await username.setValue("张三");
+    expect(username.classes()).toContain("is-invalid");
+    expect(wrapper.text()).toContain("仅支持字母、数字、点、下划线和连字符");
+    await username.setValue("zhangsan");
+    expect(username.classes()).toContain("is-valid");
+
+    await passwords[0].setValue("short");
+    expect(passwords[0].classes()).toContain("is-invalid");
+    await passwords[0].setValue("password-123");
+    await passwords[1].setValue("password-456");
+    expect(wrapper.text()).toContain("与新密码不一致");
+    await passwords[1].setValue("password-123");
+    expect(wrapper.text()).toContain("两次密码一致");
+    expect(wrapper.get(".auth-submit").attributes("disabled")).toBeUndefined();
   });
 
   it("keeps the login eye button out of the tab order", async () => {

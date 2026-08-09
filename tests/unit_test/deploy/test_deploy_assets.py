@@ -16,12 +16,12 @@ def test_public_deploy_assets_are_complete() -> None:
         "README.md",
         ".gitignore",
         "private/cloud-target.example.json",
-        "deploy-cloud.cmd",
-        "deploy-cloud-image.cmd",
-        "deploy-local.cmd",
-        "pipelines/deploy-cloud.ps1",
-        "pipelines/deploy-cloud-image.ps1",
-        "pipelines/deploy-local.ps1",
+        "build-and-deploy-cloud.cmd",
+        "deploy-existing-image-to-cloud.cmd",
+        "build-and-deploy-local.cmd",
+        "pipelines/build-and-deploy-cloud.ps1",
+        "pipelines/deploy-existing-image-to-cloud.ps1",
+        "pipelines/build-and-deploy-local.ps1",
         "pipelines/invoke-cloud-release.ps1",
         "scripts/build-image.ps1",
         "scripts/push-image.ps1",
@@ -271,13 +271,13 @@ def test_local_smoke_removes_its_anonymous_volumes() -> None:
 
 
 def test_local_deploy_pipeline_has_one_no_argument_entrypoint() -> None:
-    script = (DEPLOY / "pipelines" / "deploy-local.ps1").read_text(
+    script = (DEPLOY / "pipelines" / "build-and-deploy-local.ps1").read_text(
         encoding="utf-8"
     )
     readme = (DEPLOY / "README.md").read_text(encoding="utf-8")
 
-    assert not (DEPLOY / "deploy-local.ps1").exists()
-    assert not (DEPLOY / "scripts" / "deploy-local.ps1").exists()
+    assert not (DEPLOY / "build-and-deploy-local.ps1").exists()
+    assert not (DEPLOY / "scripts" / "build-and-deploy-local.ps1").exists()
     assert "param()" in script
     assert '$deployRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path' in script
     assert '$scriptsRoot = Join-Path $deployRoot "scripts"' in script
@@ -292,33 +292,33 @@ def test_local_deploy_pipeline_has_one_no_argument_entrypoint() -> None:
     assert "docker compose" in script
     assert "docker volume rm" not in script
     assert "down -v" not in script
-    assert r".\deploy\pipelines\deploy-local.ps1" in readme
-    assert r".\deploy\scripts\deploy-local.ps1" not in readme
+    assert r".\deploy\pipelines\build-and-deploy-local.ps1" in readme
+    assert r".\deploy\scripts\build-and-deploy-local.ps1" not in readme
     assert "终端中则运行无参数 PowerShell 入口" in readme
 
 
 def test_local_deploy_cmd_is_a_thin_double_click_launcher() -> None:
-    launcher = (DEPLOY / "deploy-local.cmd").read_text(encoding="utf-8")
+    launcher = (DEPLOY / "build-and-deploy-local.cmd").read_text(encoding="utf-8")
     readme = (DEPLOY / "README.md").read_text(encoding="utf-8")
 
     assert launcher.startswith("@echo off")
     assert (
         'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File '
-        r'"%~dp0pipelines\deploy-local.ps1"'
+        r'"%~dp0pipelines\build-and-deploy-local.ps1"'
     ) in launcher
     assert 'set "EXIT_CODE=%ERRORLEVEL%"' in launcher
     assert "pause" in launcher
     assert "exit /b %EXIT_CODE%" in launcher
     assert "docker " not in launcher.lower()
-    assert r"deploy\deploy-local.cmd" in readme
+    assert r"deploy\build-and-deploy-local.cmd" in readme
     assert "资源管理器中可直接双击" in readme
 
 
 def test_cloud_entrypoints_separate_existing_image_and_full_release() -> None:
-    existing = (DEPLOY / "pipelines" / "deploy-cloud-image.ps1").read_text(
+    existing = (DEPLOY / "pipelines" / "deploy-existing-image-to-cloud.ps1").read_text(
         encoding="utf-8"
     )
-    full = (DEPLOY / "pipelines" / "deploy-cloud.ps1").read_text(
+    full = (DEPLOY / "pipelines" / "build-and-deploy-cloud.ps1").read_text(
         encoding="utf-8"
     )
     readme = (DEPLOY / "README.md").read_text(encoding="utf-8")
@@ -326,7 +326,7 @@ def test_cloud_entrypoints_separate_existing_image_and_full_release() -> None:
     assert '[string]$Image = "zhice-agent:local"' in existing
     assert "[switch]$Smoke" in existing
     assert "if ($Smoke)" in existing
-    assert "Reusing operator-approved local image without smoke" in existing
+    assert "Reusing operator-approved existing local image without smoke" in existing
     assert "build-image.ps1" not in existing
     assert "invoke-cloud-release.ps1" in existing
 
@@ -337,8 +337,8 @@ def test_cloud_entrypoints_separate_existing_image_and_full_release() -> None:
     assert "& $releaseScript" in full
     assert "docker compose" not in full
 
-    assert r".\deploy\pipelines\deploy-cloud-image.ps1" in readme
-    assert r".\deploy\pipelines\deploy-cloud.ps1" in readme
+    assert r".\deploy\pipelines\deploy-existing-image-to-cloud.ps1" in readme
+    assert r".\deploy\pipelines\build-and-deploy-cloud.ps1" in readme
     assert "默认不再次 smoke" in readme
 
 
@@ -420,7 +420,7 @@ def test_remote_operations_scripts_have_safe_maintenance_semantics() -> None:
 
 
 def test_cloud_cmd_files_are_thin_double_click_launchers() -> None:
-    for stem in ("deploy-cloud", "deploy-cloud-image"):
+    for stem in ("build-and-deploy-cloud", "deploy-existing-image-to-cloud"):
         launcher = (DEPLOY / f"{stem}.cmd").read_text(encoding="utf-8")
 
         assert launcher.startswith("@echo off")

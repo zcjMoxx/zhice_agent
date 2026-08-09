@@ -13,6 +13,8 @@ export const useAdminStore = defineStore("admin", {
     auditEvents: [] as Record<string, unknown>[],
     auditCursor: "",
     auditHasMore: false,
+    auditPageCursors: [""] as string[],
+    auditPageIndex: 0,
     loading: false,
     error: "",
   }),
@@ -23,15 +25,30 @@ export const useAdminStore = defineStore("admin", {
       const updated = await api.updateRole(id, keys);
       this.roles = this.roles.map((role) => role.id === id ? updated : role);
     },
-    async loadMonitor() { this.monitor = await api.monitor(); },
-    async loadDiagnostics(filters: Record<string, string> = {}) {
-      this.diagnostics = await api.diagnostics(new URLSearchParams({ minutes: "60", limit: "100", ...filters }));
+    async loadMonitor(status = "error") {
+      const query = new URLSearchParams({ limit: "50" });
+      if (status) query.set("status", status);
+      this.monitor = await api.monitor(query);
     },
-    async loadAudit(filters: Record<string, string> = {}, append = false) {
+    async loadDiagnostics(filters: Record<string, string> = {}) {
+      this.diagnostics = await api.diagnostics(new URLSearchParams({ minutes: "1440", limit: "100", ...filters }));
+    },
+    async loadAudit(filters: Record<string, string> = {}, direction: "reset" | "next" | "previous" = "reset") {
+      if (direction === "reset") {
+        this.auditPageCursors = [""];
+        this.auditPageIndex = 0;
+      } else if (direction === "next") {
+        if (!this.auditCursor) return;
+        this.auditPageCursors = [...this.auditPageCursors.slice(0, this.auditPageIndex + 1), this.auditCursor];
+        this.auditPageIndex += 1;
+      } else if (this.auditPageIndex > 0) {
+        this.auditPageIndex -= 1;
+      } else return;
       const query = new URLSearchParams({ limit: "50", ...filters });
-      if (append && this.auditCursor) query.set("cursor", this.auditCursor);
+      const pageCursor = this.auditPageCursors[this.auditPageIndex] || "";
+      if (pageCursor) query.set("cursor", pageCursor);
       const result = await api.audit(query);
-      this.auditEvents = append ? [...this.auditEvents, ...result.events] : result.events;
+      this.auditEvents = result.events;
       this.auditCursor = result.next_cursor ?? "";
       this.auditHasMore = Boolean(result.has_more);
     },

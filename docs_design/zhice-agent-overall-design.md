@@ -1917,10 +1917,10 @@ Web 渠道绑定管理
 2. 登录、注册、Owner 初始化和路由守卫。
 3. 聊天壳、Session、WebSocket、RuntimeEvent、confirmation 和 stop。
 4. 账号菜单、设置中心、QQ/微信绑定和明暗曜石主题。
-5. 用户、角色、基础系统监控和安全审计。
+5. 账号、角色、失败优先的运行诊断，以及高级设置中的安全审计。
 6. 前端测试、Gateway/API 测试、浏览器烟测、正式切换和旧静态应用删除。
 
-以上六项均已落地。Vue 已成为唯一正式 Web 前端，包内 production build 可由 Gateway 直接服务；系统监控只聚合现有 Gateway/Capability/Activity 真值，Security Audit 保持独立并支持筛选、游标分页和导出。Part 16 未改变 AgentLoop、Session、RBAC、Channel 或现有 REST/WS 语义。当前实现依据：`docs_design/zhice-agent-part16-web-product-design.md`。
+以上六项均已落地。Vue 已成为唯一正式 Web 前端，包内 production build 可由 Gateway 直接服务；概览展示 Gateway、模型、近期失败和当前事故，运行诊断关联 Activity、Session 与账号信息并默认聚焦失败记录。Security Audit 保持独立的数据边界，在 UI 中收进高级设置并支持筛选、游标分页和导出。Part 16 未改变 AgentLoop、Session、RBAC、Channel 或现有 REST/WS 语义。当前实现依据：`docs_design/zhice-agent-part16-web-product-design.md`。
 
 ### Milestone 17：运行可靠性、系统级诊断、生产部署与发布（实现与生产部署验收完成）
 

@@ -23,10 +23,10 @@
 - 本地 smoke 在启动前及 `finally` 清理中删除固定临时容器关联的匿名卷，不调用 `docker volume rm`，不影响 Compose 命名卷。
 - smoke 容器首次不存在时，脚本先用 `docker ps -a` 成功查询再决定是否清理，避免 Windows PowerShell 将 `docker rm` 的 `No such container` stderr 转为终止性 `NativeCommandError`。
 - `docker ps` 零条输出按空数组处理，并通过 `-contains` 判断固定名称，不对可能为 `$null` 的命令结果调用 `.Trim()`。
-- `deploy/deploy-local.cmd` 是根目录双击入口，实际无参数 PowerShell 编排位于 `deploy/pipelines/deploy-local.ps1`，`deploy/scripts/` 只保留底层脚本；流水线固定串联 Docker 检查、阿里云 APT 构建、`10087` smoke、Compose `--no-build` 更新和有界 health 等待，失败不删除命名卷，也不执行 registry push。
-- `deploy/deploy-local.cmd` 是 Windows 双击薄入口，只定位并调用同目录 PS1、保留退出码和暂停窗口，不复制 Docker 流程、不提升权限或修改系统 Execution Policy。
-- `deploy/pipelines/deploy-cloud-image.ps1` 复用已经存在的 `zhice-agent:local`，默认不重复 smoke；只有显式 `-Smoke` 才调用隔离烟测，然后进入共享云端发布。
-- `deploy/pipelines/deploy-cloud.ps1` 从源码 build、smoke 后调用共享云端发布，不调用本地 Compose；两个云端 CMD 都是指向 `pipelines/` 的双击薄入口。
+- `deploy/build-and-deploy-local.cmd` 是根目录双击入口，实际无参数 PowerShell 编排位于 `deploy/pipelines/build-and-deploy-local.ps1`，`deploy/scripts/` 只保留底层脚本；流水线固定串联 Docker 检查、阿里云 APT 构建、`10087` smoke、Compose `--no-build` 更新和有界 health 等待，失败不删除命名卷，也不执行 registry push。
+- `deploy/build-and-deploy-local.cmd` 是 Windows 双击薄入口，只定位并调用同名 pipeline、保留退出码和暂停窗口，不复制 Docker 流程、不提升权限或修改系统 Execution Policy。
+- `deploy/pipelines/deploy-existing-image-to-cloud.ps1` 复用已经存在的 `zhice-agent:local`，不执行 build，默认不重复 smoke；只有显式 `-Smoke` 才调用隔离烟测，然后进入共享云端发布。
+- `deploy/pipelines/build-and-deploy-cloud.ps1` 从当前源码 build、smoke 后调用共享云端发布，不调用本地 Compose；两个云端 CMD 都是指向同名 `pipelines/` 编排的双击薄入口。
 - `pipelines/invoke-cloud-release.ps1` 从 Paramiko helper 取得脱敏后的公开目标，固定镜像名、生成时间戳与 Git 短提交号标签，校验 `linux/amd64`、Docker、Python/Paramiko，精确取得 Digest，同步固定五个 shell 脚本，远端部署后验证公网 HTTPS `/health`。
 - `scripts/remote_ops.py` 自行读取私有 JSON 的 `SshPassword` 并强制要求 `RemoteOpsDir`；只加载 Windows `~/.ssh/known_hosts` 并使用 `RejectPolicy`，密码不进入参数、环境或输出，目录字段缺失时前置失败。
 - 五个脚本通过 SFTP 写入 versioned release，经 `sh -n` 后原子切换 `current`；`status` 对不存在容器友好并展示 image/status/health/created/restarts，`logs` 拒绝非正整数，`stop` 幂等，`restart` 明确检查容器，`deploy` 失败恢复旧容器。

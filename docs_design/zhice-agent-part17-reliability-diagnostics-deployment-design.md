@@ -163,10 +163,10 @@ Session、Memory、用户数据库、Context index、compaction、日志和测�
 ## 10. 部署脚本
 
 - `build-image.ps1`：校验私有文件，按需传入经过白名单检查的 APT 镜像主机，构建 Vue/微信 sidecar/运行镜像，写版本信息并扫描误带数据。
-- `deploy/*.cmd`：根目录三个 Windows 双击薄入口，分别进入本地、已有镜像上云和源码完整上云流程。
-- `deploy/pipelines/deploy-local.ps1`：固定使用阿里云 APT 镜像与标准镜像/端口，完成 build、隔离 smoke、Compose 更新和有界 health 验收。
-- `deploy/pipelines/deploy-cloud-image.ps1`：复用操作者确认过的 `zhice-agent:local`，默认不重复 smoke，自动生成发布标签、推送私有 registry 并按 Digest 部署云端。
-- `deploy/pipelines/deploy-cloud.ps1`：从源码 build、隔离 smoke 后进入同一云端发布模块，不调用本地 Compose。
+- `deploy/*.cmd`：根目录三个 Windows 双击薄入口，名称显式区分是否构建镜像与本地/云端目标。
+- `deploy/pipelines/build-and-deploy-local.ps1`：固定使用阿里云 APT 镜像与标准镜像/端口，完成当前源码 build、隔离 smoke、Compose 更新和有界 health 验收。
+- `deploy/pipelines/deploy-existing-image-to-cloud.ps1`：复用操作者确认过的 `zhice-agent:local`，不执行 build，默认不重复 smoke，自动生成发布标签、推送私有 registry 并按 Digest 部署云端。
+- `deploy/pipelines/build-and-deploy-cloud.ps1`：从当前源码 build、隔离 smoke 后进入同一云端发布模块，不调用本地 Compose。
 - `deploy/private/cloud-target.json`：Git 忽略的本机目标配置；`SshPassword` 是其中唯一允许的明文部署 Secret，只依赖本机文件权限和 Git ignore 保护，Token、其他 Secret 与私钥仍禁止进入。Paramiko 从该文件读取 SSH/sudo 共用密码，加载 `%USERPROFILE%/.ssh/known_hosts` 并以 `RejectPolicy` 校验主机密钥；sudo 密码只经 PTY 的 stdin 传入并在输出中脱敏。公开 example 的待填写值直接使用中文。
 - `deploy/pipelines/invoke-cloud-release.ps1` 与 `deploy/scripts/remote_ops.py`：前者校验固定镜像名与 `linux/amd64`、生成时间戳与 Git 短提交号标签并精确取得目标 RepoDigest；后者强制要求 `RemoteOpsDir`，将 `deploy/status/logs/stop/restart` 五个运维脚本上传到 `RemoteOpsDir/releases/<release>`，逐个 `sh -n` 后原子切换 `current`，再部署并从云服务器侧受控 curl 验证公网 HTTPS `status=ok`。本机 health 只作附加诊断，本机代理、TUN DNS 或 TLS 异常不再覆盖已通过的远端公网判定。
 - `push-image.ps1`：推送到私有 registry 并输出 digest，不回显 Secret。
@@ -216,4 +216,4 @@ Part 18 继续 Skill Runtime、CLI 和本地运维优化，复用 Part 17 的系
 - 微信 Sidecar Node 测试：`14 passed`，build 通过；真实子进程覆盖 hello、health、二维码连接与 shutdown。
 - 既有 Docker image build/run 基线：通过，镜像内 `websockets=15.0.1`，日志包含 `[weixin] channel ready`，Gateway routes 包含 `/ws`。2026-07-31 新增的可配置 APT 镜像参数已通过静态测试，真实参数化构建由本地部署教学流程继续验收。
 - 私有 registry push 与真实云端 deploy：已完成；云端镜像锁定不可变 Digest，Gateway 只在宿主机 loopback 暴露 10086，公网由 Caddy 80/443 提供 HTTPS。
-- 三入口真实端到端验收：全部退出码 `0`；`deploy-local` 完成 build/smoke/Compose healthy，`deploy-cloud-image` 与 `deploy-cloud` 均完成 ACR push、Paramiko 五脚本原子同步、sudo 部署、远端 running/healthy 和云服务器侧公网 HTTPS `status=ok`。
+- 三入口真实端到端验收：改名前的三条等价流水线全部退出码 `0`；当前 `build-and-deploy-local` 对应 build/smoke/Compose healthy，`deploy-existing-image-to-cloud` 与 `build-and-deploy-cloud` 对应 ACR push、Paramiko 五脚本原子同步、sudo 部署、远端 running/healthy 和云服务器侧公网 HTTPS `status=ok`。

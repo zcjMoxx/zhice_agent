@@ -16,7 +16,7 @@ $imageRef = "${imageName}:${imageTag}"
 $aptMirror = "mirrors.aliyun.com"
 $smokePort = 10087
 
-Write-Output "[1/3] Building private cloud release image $imageRef"
+Write-Output "[1/3] Building private cloud release image from current source: $imageRef"
 & $buildScript -Image $imageName -Tag $imageTag -AptMirror $aptMirror
 
 Write-Output "[2/3] Running isolated image smoke test on port $smokePort"

@@ -1,6 +1,6 @@
 # ZhiCe-Agent 本地部署入口层级调整设计
 
-> 说明：本文记录当时把 PowerShell 入口移出 `scripts/` 的方案。当前结构已于 2026-08-04 进一步收敛：根目录只保留 `deploy-local.cmd` 双击入口，实际 PowerShell 编排位于 `deploy/pipelines/deploy-local.ps1`；应参考 `2026-08-04-private-registry-cloud-release-pipeline-design.md` 和 Part 17 活文档。
+> 说明：本文记录当时把 PowerShell 入口移出 `scripts/` 的方案。当前本地入口为 `deploy/build-and-deploy-local.cmd`，实际 PowerShell 编排位于 `deploy/pipelines/build-and-deploy-local.ps1`；应参考 `2026-08-08-deployment-entrypoint-naming-design.md` 和 Part 17 活文档。
 
 ## 背景
 

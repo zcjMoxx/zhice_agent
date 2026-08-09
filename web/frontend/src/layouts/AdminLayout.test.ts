@@ -29,9 +29,13 @@ describe("AdminLayout", () => {
       ] }));
       if (url.startsWith("/api/admin/roles") && init?.method === "PATCH") return Promise.resolve(response({ id: "role-dev", key: "developer", name: "Developer", description: "", is_builtin: true, permission_keys: ["audit.read"] }));
       if (url.startsWith("/api/admin/roles")) return Promise.resolve(response({ roles, permissions: ["audit.read"] }));
-      if (url.startsWith("/api/admin/diagnostics")) return Promise.resolve(response({ status: "ok", window_minutes: 60, filters: {}, summary: { incidents: 1 }, incidents: [{ incident_id: "inc-1", component: "llm", code: "RATE_LIMITED", subject: "primary", count: 2, last_seen_at: "2026-07-29T00:00:00Z", rule: "same_component_code_subject_within_query_window" }], timeline: [{ evidence_id: "evt-1", ts: "2026-07-29T00:00:00Z", component: "llm", event: "llm.error", code: "RATE_LIMITED" }], limitations: [] }));
-      if (url.startsWith("/api/admin/monitor")) return Promise.resolve(response({ gateway: { status: "ok", current_model: "default/model" }, capabilities: {}, activity: { summary: {}, recent_turns: [], recent_tools: [] } }));
-      if (url.startsWith("/api/audit/events")) return Promise.resolve(response({ events: [{ id: "audit-1", ts: "2026-07-27T00:00:00Z", action: "role.updated", decision: "allow" }], next_cursor: "", has_more: false }));
+      if (url.startsWith("/api/admin/diagnostics")) return Promise.resolve(response({ status: "ok", window_minutes: 1440, filters: {}, summary: { incidents: 1 }, incidents: [{ incident_id: "inc-1", component: "agent", code: "WEIXIN_TOKEN_STALE", subject: "", count: 1, first_seen_at: "2026-07-29T00:00:00Z", last_seen_at: "2026-07-29T00:00:00Z", rule: "same_component_code_subject_within_query_window", evidence: [{ evidence_id: "evt-1", ts: "2026-07-29T00:00:00Z", component: "agent", event: "channel.weixin.reconnect_required", code: "WEIXIN_TOKEN_STALE", error_message: "The Weixin token is stale", request_id: "req-1" }] }], timeline: [{ evidence_id: "evt-1", ts: "2026-07-29T00:00:00Z", component: "agent", event: "channel.weixin.reconnect_required", code: "WEIXIN_TOKEN_STALE", is_error: true, error_message: "The Weixin token is stale", request_id: "req-1" }, { evidence_id: "evt-2", ts: "2026-07-29T00:00:01Z", component: "gateway", event: "channel.ready", code: "", is_error: false }], limitations: [] }));
+      if (url.startsWith("/api/admin/monitor")) return Promise.resolve(response({ gateway: { status: "ok", current_model: "default/model" }, capabilities: {}, activity: { summary: {}, recent_turns: [
+        { turn_id: "turn-sec", request_id: "req-turn-sec", session_id: "session-error", session_title: "排查模型错误", actor_user_id: "actor", actor_username: "actor", actor_display_name: "Actor", status: "error", error_code: "GATEWAY_RESTART_INTERRUPTED", channel: "web", started_at: "2026-08-08T14:00:00Z", duration_ms: null },
+        { turn_id: "turn-min", session_id: "session-minute", session_title: "一分钟任务", actor_user_id: "actor", actor_username: "actor", actor_display_name: "Actor", status: "completed", channel: "web", started_at: "2026-08-08T14:00:00Z", duration_ms: 60_000 },
+        { turn_id: "turn-hour", session_id: "session-hour", session_title: "一小时任务", actor_user_id: "actor", actor_username: "actor", actor_display_name: "Actor", status: "completed", channel: "web", started_at: "2026-08-08T14:00:00Z", duration_ms: 3_600_000 },
+      ], recent_tools: [] } }));
+      if (url.startsWith("/api/audit/events")) return Promise.resolve(response({ events: [{ id: "audit-1", ts: "2026-07-27T00:00:00Z", action: "role.updated", decision: "allow" }], next_cursor: "2026-07-27T00:00:00Z|audit-1", has_more: true }));
       return Promise.resolve(response({}));
     }));
   });
@@ -103,28 +107,86 @@ describe("AdminLayout", () => {
 
   it("filters and expands security audit details", async () => {
     const mounted = await wrapper();
-    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "安全审计")!.trigger("click");
+    expect(mounted.findAll(".admin-sidebar nav button").some((button) => button.text() === "安全审计")).toBe(false);
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "高级设置")!.trigger("click");
     await flushPromises();
+    expect(mounted.text()).toContain("安全审计");
     expect(mounted.text()).toContain("role.updated");
+    expect(mounted.findAll('.audit-filter-field select').at(0)?.text()).toContain("登录");
+    expect(mounted.findAll('.audit-filter-field select').at(0)?.text()).not.toContain("登录成功");
+    expect(mounted.findAll('.audit-filter-field select').at(1)?.text()).toContain("Actor (@actor)");
+    expect(mounted.findAll('.audit-filter-field select').at(2)?.text()).toContain("成功");
     await mounted.get(".audit-list details").trigger("click");
     expect(mounted.get(".audit-list details").element).toBeTruthy();
     expect(mounted.get('.audit-filters a[href*="/api/audit/events/export"]').element).toBeTruthy();
+    const pagination = mounted.get(".audit-pagination");
+    await pagination.findAll("button")[1].trigger("click");
+    await flushPromises();
+    expect(pagination.text()).toContain("第 2 页");
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("cursor=2026-07-27T00%3A00%3A00Z%7Caudit-1"), expect.anything());
+    await pagination.findAll("button")[0].trigger("click");
+    await flushPromises();
+    expect(pagination.text()).toContain("第 1 页");
   });
 
   it("shows deterministic incidents and the redacted system timeline", async () => {
     const mounted = await wrapper();
-    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "系统监控")!.trigger("click");
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "运行诊断")!.trigger("click");
     await flushPromises();
 
-    expect(mounted.text()).toContain("RATE_LIMITED");
-    expect(mounted.text()).toContain("same_component_code_subject_within_query_window");
-    expect(mounted.text()).toContain("llm.error");
+    expect(mounted.text()).toContain("微信连接凭据已失效");
+    expect(mounted.text()).toContain("WEIXIN_TOKEN_STALE");
+    expect(mounted.text()).toContain("微信账号需要重新连接");
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/admin/diagnostics?"), expect.anything());
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("minutes=1440"), expect.anything());
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/admin/monitor?limit=50&status=error"), expect.anything());
+    expect(mounted.text()).toContain("排查模型错误");
+    expect(mounted.text()).toContain("GATEWAY_RESTART_INTERRUPTED");
+    const diagnosticSelects = mounted.findAll(".diagnostic-filters select");
+    expect(diagnosticSelects[0].text()).toContain("Actor (@actor)");
+    expect(diagnosticSelects[1].text()).toContain("排查模型错误");
+    expect(diagnosticSelects[2].text()).toContain("Agent 运行时");
+    expect(diagnosticSelects[3].text()).toContain("WEIXIN_TOKEN_STALE");
+    expect(diagnosticSelects[5].text()).toContain("最近 24 小时");
+    await mounted.get(".incident-list > details > summary").trigger("click");
+    expect(mounted.text()).toContain("这不表示无人连接");
+    expect(mounted.text()).toContain("管理员无法代替其他用户");
+    expect(mounted.text()).not.toContain("前往渠道连接");
+    expect(mounted.get(".timeline-event").classes()).toContain("error");
+    expect(mounted.text()).not.toContain("查看证据");
+    await mounted.get(".timeline-event .table-row").trigger("click");
+    expect(mounted.text()).toContain("req-1");
+    expect(mounted.text()).toContain("用于在诊断结果和脱敏日志中唯一定位");
+    expect(mounted.get(".timeline-event").classes()).toContain("open");
+    expect(mounted.findAll(".timeline-event")).toHaveLength(1);
+    await mounted.get(".diagnostic-timeline-heading select").setValue("all");
+    expect(mounted.findAll(".timeline-event")).toHaveLength(2);
+    expect(mounted.findAll(".timeline-event")[1].classes()).toContain("normal");
+    expect(mounted.findAll(".timeline-event")[1].text()).toContain("正常");
+    expect(mounted.text()).toContain("渠道已就绪");
+    expect(mounted.text()).toContain("channel.ready");
+    await diagnosticSelects[2].setValue("agent");
+    await mounted.get(".diagnostic-filters").trigger("submit");
+    await flushPromises();
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("component=agent"), expect.anything());
+    expect(mounted.text()).toContain("诊断已更新");
+    const run = mounted.findAll(".run-record")[0];
+    expect(run.get(".record-toggle").text()).toContain("查看诊断");
+    await run.get(".record-toggle").trigger("click");
+    expect(run.classes()).toContain("open");
+    expect(run.get(".record-toggle").text()).toContain("收起");
+    expect(run.text()).toContain("session-error");
+    expect(run.text()).toContain("turn-sec");
+    expect(run.text()).toContain("req-turn-sec");
+    expect(run.text()).toContain("Gateway 在完成前退出或重启");
+    expect(run.text()).not.toContain("0.00 毫秒");
+    expect(mounted.text()).toContain("1.00 分钟");
+    expect(mounted.text()).toContain("1.00 小时");
   });
 
   it("prevents credential autofill and requires username confirmation for permanent deletion", async () => {
     const mounted = await wrapper();
-    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "用户管理")!.trigger("click");
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "账号管理")!.trigger("click");
     await flushPromises();
 
     expect(mounted.get(".admin-create-form").attributes("autocomplete")).toBe("off");
@@ -134,7 +196,7 @@ describe("AdminLayout", () => {
     const confirmation = mounted.get('input[name="delete-user-confirmation"]');
     await confirmation.setValue("user001");
     await mounted.get(".dialog-card").trigger("submit");
-    expect(mounted.get('[role="alert"]').text()).toContain("用户名不一致，请重新输入");
+    expect(mounted.get('[role="alert"]').text()).toContain("账号不一致，请重新输入");
     expect(vi.mocked(fetch).mock.calls.some(([url, init]) => String(url).includes("user-disabled") && init?.method === "DELETE")).toBe(false);
 
     await confirmation.setValue("old-user");

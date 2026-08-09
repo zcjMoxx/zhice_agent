@@ -653,6 +653,17 @@ def test_admin_monitor_reports_existing_health_capability_and_activity_truth(tmp
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     owner = store.initialize_owner("owner", "Owner", "password-123")
     actor = store.actor_for_user(owner.id, channel="web")
+    store.session_index_create(
+        session_id="session-a",
+        owner_user_id=owner.id,
+        channel="web",
+    )
+    store.session_index_update(
+        "session-a",
+        title="Diagnose model failure",
+        preview="Why did the model fail?",
+        message_count=2,
+    )
     store.record_activity(
         RuntimeActivityEvent(
             action="chat.turn_started",
@@ -682,8 +693,18 @@ def test_admin_monitor_reports_existing_health_capability_and_activity_truth(tmp
     assert payload["gateway"]["status"] == "ok"
     assert payload["capabilities"]["mcp"]["state"] == "disabled"
     assert payload["activity"]["summary"]["failed"] == 1
-    assert payload["activity"]["recent_turns"][0]["error_code"] == "LLM_ERROR"
+    recent_turn = payload["activity"]["recent_turns"][0]
+    assert recent_turn["error_code"] == "LLM_ERROR"
+    assert recent_turn["request_id"] == ""
+    assert recent_turn["actor_user_id"] == owner.id
+    assert recent_turn["actor_username"] == "owner"
+    assert recent_turn["actor_display_name"] == "Owner"
+    assert recent_turn["session_title"] == "Diagnose model failure"
     assert "diagnosis" not in payload
+
+    filtered = client.get("/api/admin/monitor?status=completed")
+    assert filtered.status_code == 200
+    assert filtered.json()["activity"]["recent_turns"] == []
 
 
 def test_monitor_requires_turn_read_any_permission(tmp_path):
@@ -745,6 +766,23 @@ def test_audit_filter_cursor_pagination_and_csv_export_are_backward_compatible(t
     sink = SqliteAuditSink(store)
     sink.record(AuditEvent(action="role.updated", resource_type="role", actor=actor, decision="allow"))
     sink.record(AuditEvent(action="user.disabled", resource_type="user", actor=actor, decision="allow"))
+    sink.record(
+        AuditEvent(
+            action="auth.login_success",
+            resource_type="auth_session",
+            actor=actor,
+            status_code=200,
+            decision="allow",
+        )
+    )
+    sink.record(
+        AuditEvent(
+            action="auth.login_failed",
+            resource_type="auth_session",
+            status_code=401,
+            decision="deny",
+        )
+    )
     client = _client(tmp_path, _AuthRuntime(AuthService(store, audit_sink=sink)))
     client.post("/api/auth/login", json={"username": "owner", "password": "password-123"})
 
@@ -754,12 +792,18 @@ def test_audit_filter_cursor_pagination_and_csv_export_are_backward_compatible(t
         params={"limit": 1, "decision": "allow", "cursor": first.json()["next_cursor"]},
     )
     filtered = client.get("/api/audit/events?action=role.updated")
-    exported = client.get("/api/audit/events/export?decision=allow")
+    failed_logins = client.get(
+        "/api/audit/events", params={"event_type": "login", "outcome": "failure"}
+    )
+    exported = client.get("/api/audit/events/export?event_type=login&outcome=success")
 
     assert first.status_code == second.status_code == filtered.status_code == 200
     assert first.json()["has_more"] is True
     assert first.json()["events"][0]["id"] != second.json()["events"][0]["id"]
     assert [event["action"] for event in filtered.json()["events"]] == ["role.updated"]
+    assert [event["action"] for event in failed_logins.json()["events"]] == [
+        "auth.login_failed"
+    ]
     assert exported.status_code == 200
     assert "text/csv" in exported.headers["content-type"]
     assert "zhice-security-audit.csv" in exported.headers["content-disposition"]

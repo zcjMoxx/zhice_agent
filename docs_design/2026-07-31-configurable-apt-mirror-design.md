@@ -1,6 +1,6 @@
 # ZhiCe-Agent 可配置 APT 镜像源与本地部署流水线设计
 
-> 说明：本地流水线能力保持不变，但日常入口已于 2026-08-01 从 `deploy/scripts/deploy-local.ps1` 移至 `deploy/deploy-local.ps1`，以区分用户入口与底层脚本。当前路径参考 `2026-08-01-local-deploy-entrypoint-layout-design.md` 和 Part 17 活文档；下文保留 2026-07-31 落地时的原始路径。
+> 说明：本文保留 2026-07-31 落地时的原始路径。当前本地入口已改为 `deploy/build-and-deploy-local.cmd` 与 `deploy/pipelines/build-and-deploy-local.ps1`，以显式表达从源码构建并部署到本地；应参考 `2026-08-08-deployment-entrypoint-naming-design.md` 和 Part 17 活文档。
 
 ## 背景
 
