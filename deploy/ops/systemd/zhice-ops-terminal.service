@@ -1,0 +1,32 @@
+[Unit]
+Description=ZhiCe restricted server operations terminal
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zhice-operator
+Group=zhice-operator
+EnvironmentFile=/etc/zhice-ops/ops.env
+ExecStart=/opt/zhice-ops/bin/ttyd --interface lo --port ${ZHICE_OPS_TERMINAL_PORT} --base-path /terminal --credential ${ZHICE_OPS_CREDENTIAL} --writable --check-origin --max-clients 1 --ping-interval 30 --client-option "titleFixed=ZhiCe Server Ops" --client-option "fontSize=14" --client-option "fontFamily=ui-monospace,SFMono-Regular,Consolas,monospace" --client-option "theme={\"background\":\"#111318\",\"foreground\":\"#e8ebf2\",\"cursor\":\"#7ba7ff\",\"selectionBackground\":\"#31507a\"}" /usr/local/bin/zhice-ops-shell
+Restart=always
+RestartSec=3
+# The non-root ttyd must invoke the exact sudoers wrapper; setting this true would break it.
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+ReadWritePaths=/var/lib/zhice-ops /etc/zhice-agent/runtime
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

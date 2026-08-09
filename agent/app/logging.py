@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
+from agent.log_paths import daily_trace_path
 from agent.logging_utils import redact_mapping
 
 _AGENT_LOGGER_NAME = "zcagent.agent"
@@ -18,6 +19,7 @@ _GATEWAY_LOGGER_NAME = "zcagent.gateway"
 _OWNED_LOGGER_NAMES = (_AGENT_LOGGER_NAME, _GATEWAY_LOGGER_NAME)
 _OUR_HANDLER_ATTR = "_zhice_gateway_logging_handler"
 _TERMINAL_HANDLER_ATTR = "_zhice_gateway_terminal_handler"
+_FORCE_TERMINAL_COLOR_ENV = "ZHICE_FORCE_TERMINAL_COLOR"
 _COLORAMA_FIXED = False
 _COLOR_RESET = "\033[0m"
 _TIME_COLOR = "32"
@@ -123,7 +125,7 @@ class JsonlTraceFormatter(logging.Formatter):
 
 
 class DailyTraceFileHandler(logging.Handler):
-    """Append JSONL trace events to logs/YYYY-MM-DD/trace.log."""
+    """Append trace events to the current logs/log-YYYY-MM-DD.jsonl file."""
 
     def __init__(self, logs_dir: Path):
         super().__init__()
@@ -133,7 +135,7 @@ class DailyTraceFileHandler(logging.Handler):
     def current_path(self) -> Path:
         """Return today's trace log path."""
 
-        return self.logs_dir / datetime.now().strftime("%Y-%m-%d") / "trace.log"
+        return daily_trace_path(self.logs_dir, datetime.now().astimezone().date())
 
     def emit(self, record: logging.LogRecord) -> None:
         """Write one formatted log record to the current daily trace file."""
@@ -442,8 +444,9 @@ def _is_duration_number(value: object) -> bool:
 def _stream_supports_color(stream: TextIO) -> bool:
     """Return whether ANSI color should be emitted to the terminal stream."""
 
-    if os.getenv("NO_COLOR"):
-        return False
+    override = terminal_color_override()
+    if override is not None:
+        return override
     isatty = getattr(stream, "isatty", None)
     if not callable(isatty) or not isatty():
         return False
@@ -452,6 +455,16 @@ def _stream_supports_color(stream: TextIO) -> bool:
     if _fix_windows_console_with_colorama():
         return True
     return _enable_windows_virtual_terminal(stream)
+
+
+def terminal_color_override() -> bool | None:
+    """Return an explicit terminal color choice, or None for TTY auto-detection."""
+
+    if os.getenv("NO_COLOR"):
+        return False
+    if os.getenv(_FORCE_TERMINAL_COLOR_ENV) == "1":
+        return True
+    return None
 
 
 def _fix_windows_console_with_colorama() -> bool:

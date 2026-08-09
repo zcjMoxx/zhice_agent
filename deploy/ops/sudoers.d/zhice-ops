@@ -1,0 +1,4 @@
+Defaults:zhice-operator env_reset
+Defaults:zhice-operator !setenv
+Defaults:zhice-operator secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+zhice-operator ALL=(root) NOPASSWD: /usr/bin/python3 -I /usr/local/libexec/zhice-ops/zhice_ops_root.py *

@@ -16,7 +16,7 @@ export const useAuthStore = defineStore("auth", {
     isOwner: (state) => state.user?.roles.includes("owner") ?? false,
     can: (state) => (permission: string) => state.permissions.includes(permission),
     canOpenAdmin(): boolean {
-      return ["auth.users.read", "auth.roles.read", "turn.read.any", "diagnostics.system.use", "audit.read"].some((permission) => this.permissions.includes(permission));
+      return ["auth.users.read", "auth.roles.read", "turn.read.any", "diagnostics.system.use", "audit.read", "skill.sources.read"].some((permission) => this.permissions.includes(permission)) || this.isOwner;
     },
   },
   actions: {

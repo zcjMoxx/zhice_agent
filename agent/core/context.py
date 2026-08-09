@@ -118,12 +118,17 @@ class ContextBuilder:
         tool_definitions: list[dict[str, Any]] | None = None,
         session_store: object | None = None,
         llm_provider: object | None = None,
+        skills_override: SkillProvider | None = None,
     ) -> list[dict[str, Any]]:
         """Return budget-first full-Session messages for one chat turn."""
 
         system_message = {
             "role": "system",
-            "content": self._build_system_prompt(workspace=workspace, session_id=session_id),
+            "content": self._build_system_prompt(
+                workspace=workspace,
+                session_id=session_id,
+                skills_override=skills_override,
+            ),
         }
         current_user = self._message_to_llm_dict(user_message)
         if current_user is None or current_user["role"] != "user":
@@ -475,7 +480,12 @@ class ContextBuilder:
             selected_turns = selected_turns[1:]
         return [message for group in selected_turns for message in group.messages]
 
-    def _build_system_prompt(self, workspace: Path, session_id: str) -> str:
+    def _build_system_prompt(
+        self,
+        workspace: Path,
+        session_id: str,
+        skills_override: SkillProvider | None = None,
+    ) -> str:
         """Combine runtime prompts with workspace/session facts for the LLM."""
 
         prompts = self.prompt_loader.load_many(DEFAULT_CONTEXT_PROMPTS)
@@ -512,7 +522,7 @@ class ContextBuilder:
                 continue
             if prompt_text:
                 parts.extend([f"# {prompt_name.replace('_', ' ').title()}", prompt_text])
-        skill_summary = self._build_available_skills_prompt()
+        skill_summary = self._build_available_skills_prompt(skills_override)
         if skill_summary:
             parts.extend(["# Available Skills", skill_summary])
         parts.extend(
@@ -592,13 +602,17 @@ class ContextBuilder:
         marker = "[truncated]"
         return f"{content[: self.max_message_chars]}{marker}"
 
-    def _build_available_skills_prompt(self) -> str:
+    def _build_available_skills_prompt(
+        self,
+        skills_override: SkillProvider | None = None,
+    ) -> str:
         """Return a compact list of available Skills for the system prompt."""
 
-        if self.skills is None or self.max_skill_summaries == 0:
+        skills_provider = skills_override or self.skills
+        if skills_provider is None or self.max_skill_summaries == 0:
             return ""
         try:
-            skills = self.skills.list_skills()
+            skills = skills_provider.list_skills()
         except Exception:  # noqa: BLE001 - bad Skill metadata should not block chat startup.
             return ""
         lines = []

@@ -53,6 +53,7 @@ from agent.memory.markdown_store import MarkdownMemoryStore
 from agent.memory.presentation import format_memory_list
 from agent.memory.safety import MemorySafetyPolicy
 from agent.message import Message
+from agent.operations import LocalOpsSupervisor
 from agent.presentation import markdown_to_plain_text
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.protocols.auth import AuditEvent
@@ -625,7 +626,13 @@ def _update_cli_runtime_status(spinner: Spinner, event: dict[str, object]) -> No
     if not is_runtime_event_payload(event) or event.get("status") not in {"started", "waiting"}:
         return
     display = event.get("display")
-    title = display.get("title") if isinstance(display, dict) else ""
+    if isinstance(display, dict) and display.get("visibility") == "internal":
+        return
+    title = (
+        display.get("detail") or display.get("title")
+        if isinstance(display, dict) and event.get("type") == "skill.progress"
+        else display.get("title") if isinstance(display, dict) else ""
+    )
     if isinstance(title, str) and title.strip():
         spinner.set_label(title)
 
@@ -678,6 +685,7 @@ def _run_gateway(argv: Sequence[str]) -> int:
         action="store_true",
         help="Validate gateway configuration and exit without serving.",
     )
+    parser.add_argument("--ops-child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     config = load_config(args.workspace)
@@ -688,6 +696,18 @@ def _run_gateway(argv: Sequence[str]) -> int:
         return 0
     if not _ensure_runtime_dirs(config):
         return 1
+    external_ops_mode = os.getenv("ZHICE_OPS_MODE", "").strip()
+    if not args.ops_child and external_ops_mode not in {"local_docker", "server_docker"}:
+        child_argv = _gateway_child_argv(args, config.workspace)
+        try:
+            return LocalOpsSupervisor(
+                state_dir=config.state_dir,
+                logs_dir=config.logs_dir,
+                child_argv=child_argv,
+            ).run()
+        except OSError as exc:
+            print(console.error(f"Local Ops failed to start: {exc}"))
+            return 1
     try:
         run_gateway(
             config,
@@ -703,6 +723,37 @@ def _run_gateway(argv: Sequence[str]) -> int:
         _print_llm_configuration_error(exc, config)
         return 1
     return 0
+
+
+def _gateway_child_argv(args, workspace) -> list[str]:
+    """Build the fixed child command owned by the local Ops supervisor."""
+
+    command = [
+        sys.executable,
+        "-m",
+        "agent.cli",
+        "gateway",
+        "--workspace",
+        str(workspace),
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
+        "--agent-log",
+        args.agent_log,
+        "--agent-log-level",
+        args.agent_log_level,
+        "--trace-log",
+        args.trace_log,
+        "--http-server-log",
+        args.http_server_log,
+        "--ops-child",
+    ]
+    if args.http_access_log is not None:
+        command.extend(("--http-access-log", args.http_access_log))
+    if args.http_server_log_level is not None:
+        command.extend(("--http-server-log-level", args.http_server_log_level))
+    return command
 
 
 def _gateway_log_options(args) -> GatewayLogOptions:
@@ -821,7 +872,7 @@ def _create_skill_loader(
     """Create a SkillLoader and print at most one accurate optional-capability warning."""
 
     if not skill_sync.has_config():
-        return SkillLoader([])
+        return SkillLoader([], cache_path=skill_sync.workspace / "state" / "skill_index.json")
     try:
         roots = skill_sync.skill_roots()
     except SkillSyncError as exc:
@@ -831,7 +882,7 @@ def _create_skill_loader(
                 f"({exc}). Fix the file, then restart."
             )
         )
-        return SkillLoader([])
+        return SkillLoader([], cache_path=skill_sync.workspace / "state" / "skill_index.json")
     if startup_error is not None:
         print(
             console.warning(
@@ -839,7 +890,10 @@ def _create_skill_loader(
                 f"({startup_error}). Run /skills sync --verbose to inspect and retry."
             )
         )
-    return SkillLoader(roots)
+    return SkillLoader(
+        roots,
+        cache_path=skill_sync.workspace / "state" / "skill_index.json",
+    )
 
 
 def _extract_env_file(argv: list[str]) -> tuple[str | None, list[str]]:

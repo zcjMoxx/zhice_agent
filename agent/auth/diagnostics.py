@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.auth.store import SQLiteAuthStore
+from agent.log_paths import daily_trace_path
 from agent.logging_utils import redact_value
 from agent.protocols.auth import ActorContext
 from agent.protocols.diagnostics import DiagnosticContext, SystemDiagnosticQuery
@@ -687,7 +688,7 @@ def _trace_paths(logs_dir: Path, since: datetime) -> list[Path]:
     today = datetime.now().astimezone().date()
     paths: list[Path] = []
     while current <= today:
-        path = logs_dir / current.isoformat() / "trace.log"
+        path = daily_trace_path(logs_dir, current)
         if path.is_file():
             paths.append(path)
         current += timedelta(days=1)

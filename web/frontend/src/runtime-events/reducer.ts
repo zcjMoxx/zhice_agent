@@ -13,6 +13,7 @@ export function applyRuntimeEvent(
   activeSessionId = "",
 ): RuntimeUiState {
   const event = (envelope.data ?? {}) as RuntimeEventData;
+  if (event.display?.visibility === "internal") return state;
   const sessionId = String(event.root_session_id || event.session_id || envelope.session_id || "");
   const turnId = String(event.root_turn_id || event.turn_id || envelope.turn_id || "");
   if (activeSessionId && sessionId && sessionId !== activeSessionId) return state;
@@ -22,7 +23,11 @@ export function applyRuntimeEvent(
   const scope = event.scope ?? {};
   const childKey = event.task_id || event.agent_id || scope.task_id || scope.agent_id || "";
   const eventName = String(event.type ?? event.event ?? "");
-  const title = String(event.display?.title ?? event.display?.detail ?? "");
+  const title = String(
+    eventName === "skill.progress"
+      ? event.display?.detail ?? event.display?.title ?? ""
+      : event.display?.title ?? event.display?.detail ?? "",
+  );
   const status = String(event.status ?? "");
 
   if (childKey) {

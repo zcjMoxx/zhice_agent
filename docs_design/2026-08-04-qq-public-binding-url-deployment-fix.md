@@ -1,5 +1,7 @@
 # QQ 公网绑定链接部署修复
 
+> 说明：本文涉及的真实部署域名已因公开仓库隐私要求替换为占位地址；当前主站只由 Git 忽略的私有 `PublicUrl` 提供，应参考 Part 18 活文档和当前部署配置。
+
 ## 背景
 
 QQ 私聊用户发送裸 `/bind` 时，`agent/channels/qq/adapter.py` 直接使用当前账号的 `account.web_base_url` 拼接 `/?channel_bind=<token>`。`agent/channels/config.py` 为未显式配置的账号保留本地开发默认值 `http://127.0.0.1:10086`。
@@ -10,7 +12,7 @@ QQ 私聊用户发送裸 `/bind` 时，`agent/channels/qq/adapter.py` 直接使�
 
 ## 目标
 
-- 云端 QQ `main` 账号的裸 `/bind` 链接固定生成 `https://agent.zouzhou.xyz/?channel_bind=<token>`。
+- 云端 QQ `main` 账号的裸 `/bind` 链接固定生成 `${PublicUrl}/?channel_bind=<token>`。
 - 公网启用 QQ 时，每个账号都在其实际部署配置中显式声明 `web_base_url`。
 - 保留本地未配置时默认 `http://127.0.0.1:10086` 的既有语义。
 - 文档、公开示例和回归测试明确区分本地默认值与公网部署值。
@@ -33,7 +35,7 @@ deploy/private/config.yml
   -> load_channel_configuration()
   -> QQAccountConfig.web_base_url
   -> QQChannelAdapter 裸 /bind
-  -> https://agent.zouzhou.xyz/?channel_bind=<opaque-token>
+  -> ${PublicUrl}/?channel_bind=<opaque-token>
 ```
 
 `config/config.example.yml` 只用注释和有效 URL 示例说明配置方法，不把中文占位字符串放入 YAML 值，避免用户复制后被当作有效 URL。云发布前检查 `deploy/private/config.yml` 中每个启用的 QQ 账号是否显式配置真实 HTTPS `web_base_url`。
@@ -55,13 +57,13 @@ deploy/private/config.yml
 
 - 加载带显式 HTTPS `web_base_url` 的 QQ 账号配置并断言原值保留。
 - 保留一个未配置账号的 loopback 默认值断言，防止把本地默认语义改成生产域名。
-- 使用显式公网账号触发私聊裸 `/bind`，验证 Markdown 链接和 URL 按钮均以 `https://agent.zouzhou.xyz/?channel_bind=` 开头。
+- 使用显式公网账号触发私聊裸 `/bind`，验证 Markdown 链接和 URL 按钮均以私有 `${PublicUrl}/?channel_bind=` 开头。
 - Deploy 静态测试只读取公开 README，验证云发布前检查口径；禁止读取真实 `deploy/private/config.yml`。
 - 运行 channels/deploy 相关 Pytest、Ruff 和 `git diff --check`。
 
 ## 验收标准
 
-- 云端私有配置的 QQ `main` 账号显式具有 `web_base_url: https://agent.zouzhou.xyz`，且任何 Secret 不被输出。
+- 云端私有配置的 QQ `main` 账号显式具有 `web_base_url: ${PublicUrl}`，且任何 Secret 不被输出。
 - 公网 QQ 裸 `/bind` 回归测试生成正确 HTTPS 域名链接。
 - 未显式配置的本地账号仍使用 `http://127.0.0.1:10086`。
 - 公开示例与部署 README 能阻止再次漏配账号级公网绑定地址。

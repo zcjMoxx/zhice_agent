@@ -1,0 +1,31 @@
+[Unit]
+Description=ZhiCe fixed-target operations dashboard adapter
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zhice-operator
+Group=zhice-operator
+EnvironmentFile=/etc/zhice-ops/ops.env
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/zhice-ops/zhice_ops_dashboard.py --port ${ZHICE_OPS_DASHBOARD_PORT}
+Restart=always
+RestartSec=3
+# The adapter invokes only the exact sudoers wrapper.
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

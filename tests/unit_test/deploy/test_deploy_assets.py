@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -31,7 +32,21 @@ def test_public_deploy_assets_are_complete() -> None:
         "scripts/status.sh",
         "scripts/logs.sh",
         "scripts/restart.sh",
+        "scripts/diagnose.sh",
+        "scripts/apply.sh",
         "scripts/remote_ops.py",
+        "ops/install.sh",
+        "ops/ttyd-version.env",
+        "ops/bin/zhice-ops-shell",
+        "ops/libexec/zhice_ops_root.py",
+        "ops/libexec/zhice_ops_dashboard.py",
+        "ops/systemd/zhice-ops.service",
+        "ops/systemd/zhice-ops-dashboard.service",
+        "ops/systemd/zhice-ops-terminal.service",
+        "ops/sudoers.d/zhice-ops",
+        "ops/config/Caddyfile",
+        "ops/config/ops.env.example",
+        "../agent/operations/static/ops.html",
     }
     assert all((DEPLOY / path).is_file() for path in expected)
     assert (ROOT / "config" / ".env.example").is_file()
@@ -60,10 +75,11 @@ def test_cloud_config_example_uses_chinese_placeholders_without_secrets() -> Non
     assert example["SshPassword"] == "云服务器SSH登录密码"
     assert example["RemoteOpsDir"] == "云服务器运维脚本目录"
     assert example["PublicUrl"] == "公网访问地址"
+    assert example["OpsUrl"] == "运维访问地址"
     assert example["Port"] == 10086
     assert not {"Token", "Secret", "PrivateKey"} & set(example)
     assert "suqianbei" not in example_text
-    assert "81.70.158.81" not in example_text
+    assert re.search(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", example_text) is None
 
 
 def test_deploy_readme_uses_current_workspace_config_and_marks_legacy_env() -> None:
@@ -91,12 +107,12 @@ def test_deploy_readme_explains_cloud_fields_and_credential_storage() -> None:
     assert "MobaXterm" not in readme
     assert "sudo" in readme
     assert "RemoteOpsDir" in readme
-    assert "不会上传整个 `deploy/`" in readme
+    assert "不会上传私有配置或整个 workspace" in readme
     assert "python -m pip install \".[deploy]\"" in readme
     assert "known_hosts" in readme
     assert "明文 Secret" in readme
     assert "每个启用的 QQ `accounts` 项" in readme
-    assert "https://chat.zouzhou.xyz" in readme
+    assert "私有 `PublicUrl`" in readme
     assert "不能依赖未配置时的本地默认值" in readme
 
 
@@ -187,7 +203,7 @@ def test_docker_and_cloud_deploy_persist_weixin_credentials() -> None:
     assert credential_path in dockerfile
     assert credential_path in script
     assert "zhice-weixin-credentials" in script
-    assert "docker run --rm --user root --entrypoint sh" in script
+    assert "/usr/bin/docker run --rm --user root --entrypoint sh" in script
     assert "chown -R zhice:zhice" in script
     assert "chmod 700" in script
     assert "docker volume rm" not in script
@@ -197,7 +213,7 @@ def test_cloud_deploy_requires_digest_and_single_container() -> None:
     script = (DEPLOY / "scripts" / "deploy.sh").read_text(encoding="utf-8")
     assert "@sha256:" in script
     assert "--restart unless-stopped" in script
-    assert "docker run -d" in script
+    assert "/usr/bin/docker run -d" in script
     assert '-p "127.0.0.1:${HOST_PORT}:10086"' in script
     assert '-p "${HOST_PORT}:10086"' not in script
     assert "--scale" not in script
@@ -358,7 +374,10 @@ def test_shared_cloud_release_uses_paramiko_digest_and_https() -> None:
     assert "inspect-config" in script
     assert "Import-PowerShellDataFile" not in script
     assert "Replace the Chinese placeholder" in script
-    assert '@("deploy.sh", "status.sh", "logs.sh", "stop.sh", "restart.sh")' in script
+    assert (
+        '@("deploy.sh", "apply.sh", "status.sh", "logs.sh", "stop.sh", "restart.sh", '
+        '"diagnose.sh")' in script
+    )
     assert script.index("Checking known_hosts") < script.index("Pushing release image")
     assert "remote_ops.py" in script
     assert 'python -c "import paramiko"' not in script
@@ -366,6 +385,7 @@ def test_shared_cloud_release_uses_paramiko_digest_and_https() -> None:
     assert "--help 2>&1" in script
     assert "Paramiko is unavailable" in script
     assert "--config $ConfigPath deploy" in script
+    assert "--ops-dir $opsRoot" in script
     assert "ssh @" not in script
     assert "scp @" not in script
     assert 'Invoke-RestMethod -UseBasicParsing -Uri "${publicUrl}/health"' in script
@@ -393,7 +413,7 @@ def test_remote_ops_helper_keeps_password_out_of_process_arguments() -> None:
     assert "get_pty()" in helper
     assert "sudo -S -p ''" in helper
     assert '.replace(password, "[REDACTED]")' in helper
-    assert 'SCRIPT_NAMES = ("deploy.sh", "status.sh", "logs.sh", "stop.sh", "restart.sh")' in helper
+    assert '"diagnose.sh",' in helper
     assert "sh -n" in helper
     assert "mv -Tf" in helper
     assert "def verify_public_health" in helper
@@ -414,7 +434,7 @@ def test_remote_operations_scripts_have_safe_maintenance_semantics() -> None:
     assert "positive integer" in logs
     assert "already absent" in stop
     assert "already stopped" in stop
-    assert "docker restart --time 30" in restart
+    assert '"$DOCKER" restart --time 30' in restart
     assert "rollback()" in deploy
     assert "restored previous container" in deploy
 

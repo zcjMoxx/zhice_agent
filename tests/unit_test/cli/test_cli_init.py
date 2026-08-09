@@ -185,6 +185,7 @@ def test_cli_gateway_check_uses_configured_workspace(tmp_path, capsys, monkeypat
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("ZHICE_OPS_MODE", "local_docker")
 
     result = main(["gateway", "--check", "--port", "19000"])
 
@@ -200,6 +201,7 @@ def test_cli_gateway_passes_log_options(tmp_path, capsys, monkeypatch):
 
     _clear_zhice_env(monkeypatch)
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("ZHICE_OPS_MODE", "local_docker")
     captured = {}
 
     def capture_gateway(config, **kwargs):
@@ -477,10 +479,22 @@ def test_cli_runtime_status_updates_spinner_only_for_active_events():
     }
 
     _update_cli_runtime_status(spinner, base)
+    _update_cli_runtime_status(
+        spinner,
+        {
+            **base,
+            "type": "skill.progress",
+            "display": {"title": "Skill 运行中", "detail": "正在生成报告"},
+        },
+    )
+    _update_cli_runtime_status(
+        spinner,
+        {**base, "display": {"title": "内部包装", "visibility": "internal"}},
+    )
     _update_cli_runtime_status(spinner, {**base, "type": "llm.completed", "status": "completed"})
     _update_cli_runtime_status(spinner, {"type": "text_delta", "content": "hello"})
 
-    assert spinner.labels == ["正在请求模型"]
+    assert spinner.labels == ["正在请求模型", "正在生成报告"]
 
 
 def test_cli_auto_endpoint_uses_default_alias_when_configured(tmp_path):
@@ -1090,6 +1104,39 @@ def test_cli_model_reset_returns_to_default_order(tmp_path, capsys, monkeypatch)
     assert "model preference reset" in output
     assert "current: default/model-a" in output
     assert switchable.preferred_endpoint == "default"
+
+
+def test_gateway_start_uses_local_ops_supervisor_by_default(tmp_path, monkeypatch):
+    _clear_zhice_env(monkeypatch)
+    captured = {}
+
+    class Supervisor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self):
+            return 23
+
+    monkeypatch.setattr("agent.cli.LocalOpsSupervisor", Supervisor)
+
+    result = main(["gateway", "--workspace", str(tmp_path), "--port", "12000"])
+
+    assert result == 23
+    assert captured["state_dir"] == tmp_path / "state"
+    assert captured["child_argv"][-1] == "--ops-child"
+    assert "12000" in captured["child_argv"]
+
+
+def test_gateway_external_docker_mode_skips_local_supervisor(tmp_path, monkeypatch):
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_OPS_MODE", "local_docker")
+    called = []
+    monkeypatch.setattr("agent.cli.run_gateway", lambda *_args, **_kwargs: called.append(True))
+
+    result = main(["gateway", "--workspace", str(tmp_path)])
+
+    assert result == 0
+    assert called == [True]
 
 
 def _write_runtime_prompts(workspace):

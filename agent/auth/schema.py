@@ -13,6 +13,7 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
     "turn.read.any": ("Read all turn summaries", "turn"),
     "diagnostics.system.use": ("Use cross-user system diagnostics", "diagnostics"),
     "tool.exec.dangerous": ("Request confirmed high-risk exec", "tool"),
+    "skill.sources.read": ("Read Skill source status", "skill"),
     "skill.sync": ("Synchronize Skill sources", "skill"),
     "audit.read": ("Read audit events", "audit"),
     "audit.export": ("Export audit events", "audit"),

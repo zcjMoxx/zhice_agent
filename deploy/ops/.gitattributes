@@ -1,0 +1,6 @@
+*.sh text eol=lf
+bin/* text eol=lf
+libexec/*.py text eol=lf
+systemd/* text eol=lf
+sudoers.d/* text eol=lf
+config/* text eol=lf

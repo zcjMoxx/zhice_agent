@@ -1,0 +1,2 @@
+import{c}from"./AuthLayout.vue_vue_type_script_setup_true_lang-DRfhPJf5.js";const e=[["path",{d:"M14 17H5",key:"gfn3mx"}],["path",{d:"M19 7h-9",key:"6i9tg"}],["circle",{cx:"17",cy:"17",r:"3",key:"18b49y"}],["circle",{cx:"7",cy:"7",r:"3",key:"dfmy0x"}]],n=c("settings-2",e);const t=[["path",{d:"M18 6 6 18",key:"1bl5f8"}],["path",{d:"m6 6 12 12",key:"d8bk6v"}]],y=c("x",t);export{n as S,y as X};
+//# sourceMappingURL=x-X4ZH3OBi.js.map

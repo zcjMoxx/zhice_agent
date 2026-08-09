@@ -1,0 +1,237 @@
+#!/usr/bin/python3 -I
+from __future__ import annotations
+
+import os
+import re
+import select
+import shlex
+import subprocess
+import sys
+import uuid
+from collections.abc import Callable
+
+ROOT_COMMAND = (
+    "/usr/bin/sudo",
+    "-n",
+    "/usr/bin/python3",
+    "-I",
+    "/usr/local/libexec/zhice-ops/zhice_ops_root.py",
+)
+CONFIG_NAMES = ("config.yml", "models.json", ".env")
+MAX_EDIT_BYTES = 262_144
+MAX_LOG_LINES = 500
+HELP = """ZhiCe restricted operations commands:
+  status
+  logs [1..500]
+  logs-follow
+  diagnose
+  config view <config.yml|models.json|.env>
+  config edit <config.yml|models.json|.env>
+  config validate
+  config diff
+  config backup
+  config restore <backup-id>
+  config apply
+  restart
+  help
+  exit
+
+This terminal does not provide Bash, sudo, arbitrary Docker, container, or path access.
+"""
+
+
+class CommandRejected(ValueError):
+    """Raised when input is outside the explicit operations command grammar."""
+
+
+class IdleTimeout(TimeoutError):
+    """Raised when the terminal receives no input before its hard limit."""
+
+
+def parse_command(line: str) -> tuple[str, ...]:
+    try:
+        parts = tuple(shlex.split(line, posix=True))
+    except ValueError as exc:
+        raise CommandRejected("invalid quoting") from exc
+    if not parts:
+        return ()
+    command = parts[0]
+    if command in {"help", "exit", "status", "logs-follow", "diagnose", "restart"}:
+        if len(parts) != 1:
+            raise CommandRejected(f"{command} does not accept arguments")
+        return parts
+    if command == "logs":
+        if len(parts) == 1:
+            return parts
+        if len(parts) != 2 or not parts[1].isdigit():
+            raise CommandRejected("logs accepts one numeric line count")
+        lines = int(parts[1])
+        if not 1 <= lines <= MAX_LOG_LINES:
+            raise CommandRejected(f"logs line count must be 1..{MAX_LOG_LINES}")
+        return parts
+    if command != "config" or len(parts) < 2:
+        raise CommandRejected("unknown command")
+    action = parts[1]
+    if action in {"validate", "diff", "backup", "apply"}:
+        if len(parts) != 2:
+            raise CommandRejected(f"config {action} does not accept arguments")
+        return parts
+    if action in {"view", "edit"}:
+        if len(parts) != 3 or parts[2] not in CONFIG_NAMES:
+            raise CommandRejected("config file must be config.yml, models.json, or .env")
+        return parts
+    if action == "restore":
+        if len(parts) != 3 or not re.fullmatch(
+            r"[0-9]{8}-[0-9]{6}-[a-f0-9]{6}", parts[2]
+        ):
+            raise CommandRejected("config restore requires one backup id")
+        return parts
+    raise CommandRejected("unknown config command")
+
+
+def _audit(event: str, *, result: str, session_id: str) -> None:
+    message = f"event={event} result={result} session_id={session_id} identity=access-gated"
+    try:
+        subprocess.run(
+            ["/usr/bin/logger", "-t", "zhice-ops", "--", message],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _readline_with_timeout(timeout_seconds: int) -> str | None:
+    sys.stdout.write("zhice-ops> ")
+    sys.stdout.flush()
+    ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+    if not ready:
+        return None
+    line = sys.stdin.readline()
+    if line == "":
+        raise EOFError
+    return line.rstrip("\r\n")
+
+
+def _input_with_timeout(prompt: str, timeout_seconds: int) -> str:
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+    if not ready:
+        raise IdleTimeout
+    line = sys.stdin.readline()
+    if line == "":
+        raise EOFError
+    return line.rstrip("\r\n")
+
+
+def _collect_edit(name: str, input_func: Callable[[str], str] = input) -> bytes | None:
+    print(f"Editing {name}. Enter complete content; use .save or .cancel on its own line.")
+    lines: list[str] = []
+    size = 0
+    while True:
+        line = input_func("")
+        if line == ".cancel":
+            print("Edit cancelled")
+            return None
+        if line == ".save":
+            return ("\n".join(lines) + "\n").encode("utf-8")
+        encoded_size = len(line.encode("utf-8")) + 1
+        size += encoded_size
+        if size > MAX_EDIT_BYTES:
+            raise CommandRejected(f"edited content exceeds {MAX_EDIT_BYTES} bytes")
+        lines.append(line)
+
+
+def _run_root(args: tuple[str, ...], *, input_bytes: bytes | None = None) -> int:
+    completed = subprocess.run(
+        [*ROOT_COMMAND, *args],
+        input=input_bytes,
+        check=False,
+        timeout=None,
+    )
+    return completed.returncode
+
+
+def execute_command(
+    command: tuple[str, ...],
+    *,
+    input_func: Callable[[str], str] = input,
+) -> bool:
+    if not command:
+        return True
+    if command[0] == "help":
+        print(HELP)
+        return True
+    if command[0] == "exit":
+        return False
+    if command[:2] == ("config", "edit"):
+        content = _collect_edit(command[2], input_func)
+        if content is None:
+            return True
+        _run_root(("config-stage", command[2]), input_bytes=content)
+        return True
+    if command[0] == "restart":
+        if input_func("Type 'restart' to confirm: ").strip() != "restart":
+            print("Restart cancelled")
+            return True
+        _run_root(("restart",))
+        return True
+    if command[0] == "logs-follow":
+        try:
+            result = _run_root(("logs-follow",))
+            if result == 124:
+                print("Session closed after the 15 minute input limit")
+                return False
+        except KeyboardInterrupt:
+            print("\nLog follow stopped")
+        return True
+    _run_root(command)
+    return True
+
+
+def main() -> int:
+    session_id = uuid.uuid4().hex[:16]
+    try:
+        idle_timeout = int(os.environ.get("ZHICE_OPS_IDLE_TIMEOUT_SECONDS", "900"))
+    except ValueError:
+        idle_timeout = 900
+    idle_timeout = max(60, min(idle_timeout, 900))
+    _audit("terminal.opened", result="success", session_id=session_id)
+    print("ZhiCe Server Ops - restricted mode")
+    print("Type 'help' for the fixed command list.")
+    _run_root(("status",))
+    try:
+        while True:
+            try:
+                line = _readline_with_timeout(idle_timeout)
+                if line is None:
+                    print("\nDisconnected after 15 minutes without input")
+                    break
+                command = parse_command(line)
+                if not execute_command(
+                    command,
+                    input_func=lambda prompt: _input_with_timeout(prompt, idle_timeout),
+                ):
+                    break
+            except IdleTimeout:
+                print("\nDisconnected after 15 minutes without input")
+                break
+            except CommandRejected as exc:
+                print(f"Rejected: {exc}", file=sys.stderr)
+                _audit("terminal.rejected", result="denied", session_id=session_id)
+            except (OSError, subprocess.SubprocessError):
+                print("Operation failed safely; inspect the ZhiCe Ops journal", file=sys.stderr)
+                _audit("terminal.operation_failed", result="failed", session_id=session_id)
+            except EOFError:
+                break
+    finally:
+        _audit("terminal.closed", result="success", session_id=session_id)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

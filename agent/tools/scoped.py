@@ -8,15 +8,16 @@ from typing import Any
 from agent.protocols.auth import ActorContext
 from agent.protocols.diagnostics import DiagnosticContext
 from agent.protocols.memory import MemoryStore
-from agent.protocols.skill import SkillProvider
+from agent.protocols.skill import SkillExecutor, SkillProvider
 from agent.protocols.tool import ToolResult
+from agent.skills.executor import PythonSkillExecutor
 from agent.skills.sync import SkillSourceSync
 from agent.tools.diagnostics import DiagnoseRecentActivityTool, DiagnoseSystemActivityTool
 from agent.tools.exec import ExecTool
 from agent.tools.memory import MemoryReadTool, MemoryWriteTool
 from agent.tools.readonly import GrepTool, ListDirTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
-from agent.tools.skill import LoadSkillsTool, SyncSkillsTool
+from agent.tools.skill import LoadSkillsTool, RunSkillTool, SyncSkillsTool
 
 _READONLY_NAMES = {"list_dir", "read_file", "grep"}
 
@@ -32,6 +33,7 @@ class UserScopedToolProvider:
         actor: ActorContext,
         skills: SkillProvider | None = None,
         skill_sync: SkillSourceSync | None = None,
+        skill_executor: SkillExecutor | None = None,
         diagnostics=None,
         system_diagnostics=None,
         diagnostic_context: DiagnosticContext | None = None,
@@ -47,8 +49,11 @@ class UserScopedToolProvider:
         ]
         if skills is not None:
             primary_tools.append(LoadSkillsTool(files_dir, skills))
+            primary_tools.append(
+                RunSkillTool(files_dir, skills, skill_executor or PythonSkillExecutor())
+            )
         if skill_sync is not None:
-            primary_tools.append(SyncSkillsTool(files_dir, skill_sync))
+            primary_tools.append(SyncSkillsTool(files_dir, skill_sync, skills))
         if diagnostics is not None:
             primary_tools.append(
                 DiagnoseRecentActivityTool(
@@ -108,3 +113,15 @@ class UserScopedToolProvider:
             output = f"{result.output}\nDIR  shared" if result.output else "DIR  shared"
             return ToolResult(output=output, metadata=dict(result.metadata))
         return result
+
+    def execute_with_context(
+        self,
+        name: str,
+        args: dict[str, Any],
+        context,
+    ) -> ToolResult:
+        """Preserve trusted context while retaining shared read-only routing."""
+
+        if name not in _READONLY_NAMES or not isinstance(args, dict):
+            return self._primary.execute_with_context(name, args, context)
+        return self.execute(name, args)

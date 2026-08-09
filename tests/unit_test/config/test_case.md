@@ -61,3 +61,9 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 - 输入：分别加载Context、Skills、Subagents、Channels、Hooks和MCP分区。
 - 预期：缺失分区使用安全默认或禁用可选能力；错误类型只使对应能力失败。
 - 检查点：YAML根结构和`schema_version`统一校验；各模块继续严格校验本领域字段；不从旧文件懒读取。
+
+### Case 9: Ops 终端公开投影配置
+
+- 输入：读取`operations.terminal`中的`enabled/url/presentation`。
+- 预期：缺省关闭；生产地址使用显式HTTPS；本机loopback可用HTTP调试。
+- 检查点：启用时URL必填；拒绝credential、query、fragment、非本机HTTP和未知展示模式；配置不包含或推导宿主机权限。

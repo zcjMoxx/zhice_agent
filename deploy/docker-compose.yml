@@ -1,5 +1,6 @@
 services:
   zcagent:
+    container_name: zhice-agent
     image: ${ZHICE_IMAGE:-zhice-agent:local}
     build:
       context: ..
@@ -10,8 +11,13 @@ services:
         ZHICE_BUILD_DATE: ${ZHICE_BUILD_DATE:-unknown}
         APT_MIRROR: ${ZHICE_APT_MIRROR:-}
     restart: unless-stopped
+    environment:
+      ZHICE_OPS_MODE: local_docker
+      ZHICE_OPS_URL: http://127.0.0.1:${ZHICE_OPS_PORT:-17681}
+      ZHICE_OPS_TARGET_TYPE: container
+      ZHICE_OPS_TARGET_NAME: zhice-agent
     ports:
-      - "${ZHICE_PORT:-10086}:10086"
+      - "127.0.0.1:${ZHICE_PORT:-10086}:10086"
     volumes:
       - zhice-contexts:/home/zhice/.zhice/contexts
       - zhice-state:/home/zhice/.zhice/state
@@ -19,6 +25,24 @@ services:
       - zhice-extends:/home/zhice/.zhice/extends
       - zhice-weixin-credentials:/home/zhice/.zhice/config/channels/weixin/accounts
     init: true
+
+  zhice-ops:
+    container_name: zhice-agent-ops
+    build:
+      context: ..
+      dockerfile: deploy/ops/Dockerfile.local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${ZHICE_OPS_PORT:-17681}:17681"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
 volumes:
   zhice-contexts:

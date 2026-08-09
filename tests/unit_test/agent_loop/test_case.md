@@ -71,6 +71,7 @@
 - admin 的有效权限显式命中单 Hook `exempt_permissions` 时不启动 Runner，但 admin 仍继续经过核心 policy、危险确认和具体 Tool guard。
 - post Hook 只增强最终 Tool Event 的 display/ui_metadata，不改变 ToolResult 或成功失败状态。
 - Keep Fake LLM tests deterministic while covering normal, error, streaming, cancellation, and tool paths.
+- Part 18 覆盖 `load_skills -> run_skill -> skill.* -> ToolResult`；瞬态进度不写 Session，最终 Tool 调用事实保留。
 
 ## Part 8 Logging Coverage
 

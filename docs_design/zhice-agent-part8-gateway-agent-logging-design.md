@@ -8,7 +8,7 @@
 >
 > 设计依据：`docs_design/2026-07-02-gateway-runtime-logging-design.md`、`docs_design/2026-07-06-next-stage-sequencing-design.md`、`docs_design/2026-07-25-channel-lifecycle-startup-logging-design.md`
 >
-> 当前状态：第八部分代码已落地。当前代码已经具备分层 gateway 日志参数、安全 preview / redaction helper、`AgentLoop` / WebRuntime / tool dispatch 运行打点、按 `channels.yml` 顺序输出的 Web/QQ/微信渠道生命周期、Agent 执行的 `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` 格式、渠道连接的 Uvicorn `LEVEL: [channel] event` 格式，以及 `${ZHICE_AGENT_WORKSPACE}/logs/YYYY-MM-DD/trace.log` JSONL trace。
+> 当前状态：第八部分代码已落地。当前代码已经具备分层 gateway 日志参数、安全 preview / redaction helper、`AgentLoop` / WebRuntime / tool dispatch 运行打点、按 `channels.yml` 顺序输出的 Web/QQ/微信渠道生命周期、Agent 执行的 `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` 格式、渠道连接的 Uvicorn `LEVEL: [channel] event` 格式，以及 `${ZHICE_AGENT_WORKSPACE}/logs/log-YYYY-MM-DD.jsonl` JSONL trace。
 
 ---
 
@@ -31,7 +31,7 @@
 - `agent/app/runtime.py`：使用 `zcagent.agent.web` / `zcagent.agent.session` 打印 WebRuntime chat/session lifecycle。
 - `agent/core/loop.py`：使用 `zcagent.agent.turn`、`zcagent.agent.llm`、`zcagent.agent.tool` 和 `zcagent.agent.session` 打印 turn、LLM、tool dispatch、session save 生命周期。
 - `agent/tools/registry.py`：仍保持简单 ToolProvider 协议，不接收 `session_id` / `turn_id`；带 turn 的 tool lifecycle 由 AgentLoop dispatch 层负责。
-- `agent/config.py`：`${ZHICE_AGENT_WORKSPACE}/logs` 运行目录用于 `logs/YYYY-MM-DD/trace.log`。
+- `agent/config.py`：`${ZHICE_AGENT_WORKSPACE}/logs` 运行目录用于 `logs/log-YYYY-MM-DD.jsonl`。
 
 因此现在的问题不再是“有没有 turn id”，而是本地开发时仍难以从终端判断：
 
@@ -41,7 +41,7 @@
 - session 是否保存成功。
 - stop、error、工具失败是否和同一个 `session_id` / `turn_id` 对齐。
 
-第八部分先补开发者可观测性：终端日志用于实时观察，workspace `logs/YYYY-MM-DD/trace.log` 用于事后回放。它仍然不是完整 audit 平台，也不引入用户权限库表。
+第八部分先补开发者可观测性：终端日志用于实时观察，workspace `logs/log-YYYY-MM-DD.jsonl` 用于事后回放。它仍然不是完整 audit 平台，也不引入用户权限库表。
 
 ---
 
@@ -50,7 +50,7 @@
 1. `zcagent gateway` 默认打印简短、可读、脱敏的 Agent 运行痕迹。
 2. 分离 Agent lifecycle log、HTTP access log 和 HTTP server log，避免一个 `--log-level` 同时表达多件事。
 3. 终端日志每行必须带本地日期时间、等级、`component.event` 和关键字段，避免只看到零散消息。
-4. 在 `${ZHICE_AGENT_WORKSPACE}/logs/YYYY-MM-DD/trace.log` 写入结构化 JSONL trace。
+4. 在 `${ZHICE_AGENT_WORKSPACE}/logs/log-YYYY-MM-DD.jsonl` 写入结构化 JSONL trace。
 5. JSONL trace 使用 `session_id` 和可用时的 `turn_id` 关联运行轨迹；人读终端日志不重复展开完整内部 ID。
 6. `AgentLoop` 打印 turn、LLM、tool decision、session save 和 stop/error 关键生命周期。
 7. AgentLoop tool dispatch 层打印 tool start/done/error，包含耗时和安全 preview。
@@ -125,7 +125,7 @@ zcagent.agent.session
 [2026-07-07 21:34:14] | INFO | agent.turn.done | turn=5 duration=2.27s output_preview=结论：先检查真实代码路径。
 ```
 
-默认 INFO 只保留路标。`llm.call`、`llm.done`、`llm.tool_calls` 保留在 DEBUG；`llm.direct`、成功 `session.save`、`web.chat.accepted` 和 `web.chat.done` 已因与主生命周期重复而删除。需要排查细节时用 `--agent-log-level debug`，或者直接看 workspace `trace.log`。
+默认 INFO 只保留路标。`llm.call`、`llm.done`、`llm.tool_calls` 保留在 DEBUG；`llm.direct`、成功 `session.save`、`web.chat.accepted` 和 `web.chat.done` 已因与主生命周期重复而删除。需要排查细节时用 `--agent-log-level debug`，或者直接看 workspace 每日 JSONL 日志。
 
 `debug` 增加 LLM/session 细节和 preview：
 
@@ -170,16 +170,16 @@ zcagent.ws                          -> ws
 路径固定从 `AppConfig.logs_dir` 派生：
 
 ```text
-${ZHICE_AGENT_WORKSPACE}/logs/YYYY-MM-DD/trace.log
+${ZHICE_AGENT_WORKSPACE}/logs/log-YYYY-MM-DD.jsonl
 ```
 
 例如：
 
 ```text
-C:\Users\84953\ZhiCe_Agent_Workspace\logs\2026-07-07\trace.log
+C:\Users\84953\ZhiCe_Agent_Workspace\logs\log-2026-07-07.jsonl
 ```
 
-`trace.log` 使用 JSONL：一行一个事件。文件名保持 `trace.log`，日期放在目录名里，方便同一天后续增加 `gateway.log`、`error.log`、`audit.log`。
+`log-YYYY-MM-DD.jsonl` 使用 JSONL：一行一个事件，日期直接体现在文件名中，文件管理器和编辑器可从扩展名识别格式。写入和诊断读取都只使用当前命名；既有 workspace 的旧文件在升级时一次性迁移，不在代码中保留双格式。
 
 字段建议：
 
@@ -231,7 +231,7 @@ zcagent gateway \
 
 - `--agent-log on|off`：是否打印 Agent lifecycle log。
 - `--agent-log-level debug|info|warning|error|critical`：Agent lifecycle log 等级。
-- `--trace-log on|off`：是否写入 workspace date-based `trace.log`。默认 `on`。
+- `--trace-log on|off`：是否写入 workspace 每日 `log-YYYY-MM-DD.jsonl`。默认 `on`。
 - `--http-access-log on|off`：是否打印 HTTP 请求访问记录。
 - `--http-server-log on|off`：是否允许 uvicorn/FastAPI server logger 输出。
 - `--http-server-log-level debug|info|warning|error|critical`：HTTP server logger 等级。
@@ -307,7 +307,7 @@ class GatewayLogOptions:
 职责：
 
 - `configure_gateway_logging(options)` 配置 `zcagent.*` 和 uvicorn logger。
-- `configure_gateway_logging(options, logs_dir=config.logs_dir)` 配置终端 handler 和 `${logs_dir}/YYYY-MM-DD/trace.log` file handler。
+- `configure_gateway_logging(options, logs_dir=config.logs_dir)` 配置终端 handler 和 `${logs_dir}/log-YYYY-MM-DD.jsonl` file handler。
 - `preview_text(text, limit=...)` 做单行截断。
 - `redact_value(value)` / `redact_mapping(data)` 做敏感字段脱敏。
 - `format_terminal_record(record)` 输出带本地日期时间的终端文本。
@@ -353,7 +353,7 @@ def run_gateway(
 agent-log: on level=info
 http-access-log: on
 http-server-log: on level=warning
-trace-log: on path=${workspace}/logs/YYYY-MM-DD/trace.log
+trace-log: on path=${workspace}/logs/log-YYYY-MM-DD.jsonl
 ```
 
 - `uvicorn.run(..., access_log=log_options.http_access_log, log_level=...)`。
@@ -426,7 +426,7 @@ zcagent gateway
   -> build GatewayLogOptions
   -> configure_gateway_logging(options, logs_dir=config.logs_dir)
       -> terminal handler with timestamp format
-      -> trace handler to logs/YYYY-MM-DD/trace.log
+      -> trace handler to logs/log-YYYY-MM-DD.jsonl
   -> uvicorn.run(access_log=http_access_log, log_level=http_server_log_level)
 
 browser / external WS / REST
@@ -506,7 +506,7 @@ preview/redaction helper 已放到独立 `agent/logging_utils.py`，对应测试
 | terminal timestamp | 默认终端 handler | 每行包含 `[YYYY-MM-DD HH:MM:SS]`，不带毫秒 |
 | terminal separator | 默认终端 handler | 固定区使用 ` | ` 分隔 |
 | terminal action | `zcagent.agent.turn` 的 `turn.start` 事件 | 第三段显示 `agent.turn.start`，不显示完整 logger |
-| trace path | `trace_log=True` | 写入 `logs/YYYY-MM-DD/trace.log` |
+| trace path | `trace_log=True` | 写入 `logs/log-YYYY-MM-DD.jsonl` |
 | trace jsonl | 写入一个事件 | 文件最后一行是合法 JSON object |
 | debug isolation | `agent_log_level=debug` | uvicorn 不变成 debug |
 | server off | `http_server_log=False` | server 普通日志不输出 |
@@ -519,7 +519,7 @@ preview/redaction helper 已放到独立 `agent/logging_utils.py`，对应测试
 | nested token | 嵌套 dict/list 中含 token | 全部脱敏 |
 | multiline text | 多行文本 | 单行 preview |
 | long output | 超长工具结果 | 被截断 |
-| trace secret | trace event 中含 secret 字段 | `trace.log` 中只出现 `***` |
+| trace secret | trace event 中含 secret 字段 | 每日 JSONL 中只出现 `***` |
 
 ### 10.4 AgentLoop
 
@@ -548,7 +548,7 @@ preview/redaction helper 已放到独立 `agent/logging_utils.py`，对应测试
 
 1. 增加 `GatewayLogOptions`、日志配置、terminal formatter、trace JSONL formatter 和 preview/redaction helper。
 2. 改 gateway CLI 参数和 `run_gateway()` 签名，不保留旧参数兼容。
-3. 接入 `${config.logs_dir}/YYYY-MM-DD/trace.log` file handler，确认目录自动创建。
+3. 接入 `${config.logs_dir}/log-YYYY-MM-DD.jsonl` file handler，确认日志目录自动创建。
 4. 收敛 WebRuntime logger 命名和现有 lifecycle 日志字段。
 5. 给 AgentLoop 增加 turn/LLM/session lifecycle 打点。
 6. 给 ToolRegistry 或 AgentLoop tool dispatch 增加 tool start/done/error 打点。
@@ -571,15 +571,15 @@ python -m pytest --basetemp .tmp/pytest_basetemp
 2. `--agent-log off` 后不再输出 Agent lifecycle log。
 3. 终端 Agent lifecycle log 每行包含 `[YYYY-MM-DD HH:MM:SS]` 格式的本地日期时间，精度到秒，不带毫秒。
 4. 终端 Agent lifecycle log 固定区使用 ` | ` 分隔，例如 `[time] | level | component.event | fields`；交互式终端可对时间段和 `component.event` 段着色。
-5. 默认 `zcagent gateway` 写入 `${ZHICE_AGENT_WORKSPACE}/logs/YYYY-MM-DD/trace.log`。
-6. `trace.log` 是 JSONL，每行包含 `ts`、`level`、`component`、`event`，以及可用的 `session_id`、`turn_id`；不额外写完整内部 logger。
+5. 默认 `zcagent gateway` 写入 `${ZHICE_AGENT_WORKSPACE}/logs/log-YYYY-MM-DD.jsonl`。
+6. 每日日志是 JSONL，每行包含 `ts`、`level`、`component`、`event`，以及可用的 `session_id`、`turn_id`；不额外写完整内部 logger。
 7. `--trace-log off` 后不写 workspace trace file。
 8. `--agent-log-level debug` 会显示截断 preview，但不会把 uvicorn server log 提升到 debug。
 9. `--http-access-log off` 后不显示 HTTP access log。
 10. `--http-server-log-level error|critical` 可解析并传给 server log 配置。
 11. AgentLoop 日志能用 `session_id` 和 `turn_id` 串起 LLM、tool、session save 和 final status。
 12. Tool execution 日志能在 AgentLoop dispatch 层看出工具名、成功/失败、耗时和安全 output preview。
-13. 终端日志和 `trace.log` 都不输出完整 prompt、完整 session、完整工具结果或 secret。
+13. 终端日志和每日 JSONL 都不输出完整 prompt、完整 session、完整工具结果或 secret。
 14. core 层不 import app/gateway/logging 配置模块；只依赖标准库 logging 和安全的通用 helper。
 15. 现有 Web、CLI、AgentLoop、ToolRegistry 测试继续通过。
 

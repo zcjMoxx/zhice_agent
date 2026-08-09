@@ -3,17 +3,45 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+
+import yaml
 
 from agent.protocols.skill import SkillError
 
 REQUIRED_SKILL_FIELDS = {"description"}
 
 
+class _SkillFrontmatterLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects ambiguous duplicate keys."""
+
+
+def _unique_mapping(loader, node, deep=False):
+    result = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in result:
+            raise yaml.constructor.ConstructorError(
+                "while constructing Skill frontmatter",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+
+_SkillFrontmatterLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _unique_mapping,
+)
+
+
 @dataclass(frozen=True)
 class ParsedSkillMarkdown:
     """Parsed frontmatter, body, and compact summary for a Skill file."""
 
-    frontmatter: dict[str, str]
+    frontmatter: dict[str, Any]
     body: str
     summary: str
 
@@ -70,46 +98,30 @@ def _frontmatter_end_index(lines: list[str]) -> int | None:
     return None
 
 
-def _parse_frontmatter_lines(lines: list[str]) -> dict[str, str]:
-    """Parse simple key: value frontmatter without a YAML dependency."""
+def _parse_frontmatter_lines(lines: list[str]) -> dict[str, Any]:
+    """Parse bounded YAML frontmatter, including explicit runtime mappings."""
 
-    result: dict[str, str] = {}
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if ":" not in stripped:
-            raise SkillError(
-                "Skill frontmatter supports only simple key: value lines.",
-                "INVALID_SKILL_FRONTMATTER",
-            )
-        key, raw_value = stripped.split(":", 1)
-        key = key.strip()
-        if not key:
-            raise SkillError("Skill frontmatter contains an empty key.", "INVALID_SKILL_FRONTMATTER")
-        result[key] = _parse_scalar(raw_value.strip(), key=key)
-    return result
-
-
-def _parse_scalar(value: str, *, key: str) -> str:
-    """Parse one simple scalar value."""
-
-    unquoted = _strip_matching_quotes(value)
-    if not unquoted:
+    raw = "\n".join(lines)
+    if len(raw.encode("utf-8")) > 64 * 1024:
+        raise SkillError("Skill frontmatter is too large.", "INVALID_SKILL_FRONTMATTER")
+    try:
+        value = yaml.load(raw, Loader=_SkillFrontmatterLoader) if raw.strip() else {}
+    except yaml.YAMLError as exc:
         raise SkillError(
-            f"Skill frontmatter field is empty: {key}",
+            "Skill frontmatter is invalid YAML.",
             "INVALID_SKILL_FRONTMATTER",
-            {"field": key},
+        ) from exc
+    if not isinstance(value, dict):
+        raise SkillError(
+            "Skill frontmatter must be a mapping.",
+            "INVALID_SKILL_FRONTMATTER",
         )
-    return unquoted
-
-
-def _strip_matching_quotes(value: str) -> str:
-    """Remove one matching quote pair around a scalar value."""
-
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-        return value[1:-1].strip()
-    return value.strip()
+    if any(not isinstance(key, str) or not key.strip() for key in value):
+        raise SkillError(
+            "Skill frontmatter keys must be non-empty strings.",
+            "INVALID_SKILL_FRONTMATTER",
+        )
+    return {str(key).strip(): item for key, item in value.items()}
 
 
 def _build_summary(*, description: str, body: str, max_chars: int) -> str:

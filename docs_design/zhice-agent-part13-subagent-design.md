@@ -52,7 +52,7 @@ Part 13 当前已经实现：
 - child terminal 安全 trace 和从父 `delegate_tasks` Turn 沿 root IDs 下钻的自助诊断；
 - Runtime Activity、Security Audit、Hook/RBAC/确认链复用和专项测试。
 
-第一阶段仍不包含跨 Turn 后台 Job、depth > 1、自动 merge/commit/push、远程 worker 和独立 SkillExecutor。同步 Provider 已进入阻塞调用时只能在现有取消检查点停止，不能由 Python 线程安全强杀。
+Part 13 本身仍不包含跨 Turn 后台 Job、depth > 1、自动 merge/commit/push 或远程 worker。独立 SkillExecutor 已由 Part 18 实现；child 只有同时命中父 actor source 可见性、Profile Skill allowlist 和 `run_skill` Tool 权限时才能使用。
 
 ## 3. 设计原则
 
@@ -339,7 +339,7 @@ Tool pattern 只支持明确规则：
 禁止所有 child 使用 `exec` 不合理，因为：
 
 - 运行测试、ruff、git diff/status 需要 `exec`；
-- 当前 Skill 脚本通过 `exec` 执行；
+- 指令型 Skill 组合已有 Tool；显式可执行 Skill 通过 Part 18 `run_skill` 执行；
 - 数据分析和诊断经常需要命令；
 - 成熟 Agent 项目普遍允许按 agent profile 使用 Bash/code execution。
 
@@ -387,7 +387,7 @@ effective_skills = parent_visible_skills ∩ profile.allowed_skills
 
 ### 10.3 与 Part 18 的边界
 
-Part 13 复用当前 SkillLoader/`load_skills`/`exec` 链路，不新增独立 SkillExecutor，不伪造 `skill.started/progress/completed`。Part 18 仍负责正式 Skill Runtime 和 ProgressSink。
+Part 13 落地时复用了 SkillLoader/`load_skills`/`exec` 链路且不伪造 Skill Event。当前 Part 18 已增加正式 Skill Runtime 和 ProgressSink；Subagent 在父 actor 可见 provider 上再取 Profile `allowed_skills` 和 Tool allow/deny 交集。
 
 ## 11. MCP 设计
 
@@ -949,6 +949,6 @@ Part 13 关闭必须满足：
 - 自动 merge/commit/push；
 - 远程 worker 和分布式队列；
 - 子代理自行创建 Profile 或提升权限；
-- 独立 SkillExecutor、`skill.*` 和 ProgressSink。
+- Part 18 独立 SkillExecutor、`skill.*` 和 ProgressSink 已落地；Part 13 只负责能力交集，不拥有执行器。
 
 第一阶段先完成并行 manager/worker 闭环及真实工具安全边界，再根据运行数据扩展。

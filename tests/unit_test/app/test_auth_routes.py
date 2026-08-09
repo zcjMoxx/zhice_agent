@@ -935,6 +935,204 @@ def test_non_owner_admin_cannot_permanently_delete_user(tmp_path):
     assert store.get_user(target.id).username == target.username
 
 
+def test_skill_source_admin_api_filters_fields_syncs_and_audits_safely(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_owner("owner", "Owner", "password-123")
+    auth = AuthService(store, audit_sink=SqliteAuditSink(store))
+    runtime = _AuthRuntime(auth, tmp_path)
+    runtime.skill_status = _FakeSkillStatus()
+    runtime.skill_loader = _FakeSkillLoader()
+    runtime.skill_sync = _FakeSkillSync()
+    client = _client(tmp_path, runtime)
+    client.post("/api/auth/login", json={"username": "owner", "password": "password-123"})
+
+    listed = client.get("/api/admin/skills/sources")
+    synced = client.post("/api/admin/skills/sources/official/sync")
+    refreshed = client.post("/api/admin/skills/sources/official/refresh-index")
+    unknown = client.post("/api/admin/skills/sources/not-configured/sync")
+
+    assert listed.status_code == 200
+    assert listed.json()["sources"] == [
+        {
+            "source": "official",
+            "enabled": True,
+            "sync_enabled": True,
+            "configured_target": "master",
+            "current_commit": "abc123",
+            "last_sync_started_at": "2026-08-09T01:00:00Z",
+            "last_sync_finished_at": "2026-08-09T01:00:01Z",
+            "last_success_at": "2026-08-09T01:00:01Z",
+            "last_status": "up_to_date",
+            "health": "healthy",
+            "skill_count": 1,
+            "load_error_count": 0,
+            "last_error_code": "",
+            "last_error_message_safe": "",
+        }
+    ]
+    assert listed.json()["skills"][0]["qualified_name"] == "official/weather"
+    serialized = listed.text
+    assert "/srv/private" not in serialized
+    assert "https://credential" not in serialized
+    assert "raw secret stderr" not in serialized
+    assert synced.json() == {"status": "synchronized", "user": None}
+    assert refreshed.json() == {"status": "refreshed", "user": None}
+    assert unknown.status_code == 404
+    assert unknown.json()["error"]["code"] == "SKILL_SOURCE_NOT_CONFIGURED"
+    assert runtime.skill_sync.calls == [["official"]]
+    assert runtime.skill_loader.invalidated == ["official", "official"]
+    audit = store.list_audit_events(limit=20)
+    completed = next(event for event in audit if event["action"] == "skill.source.sync_completed")
+    assert completed["metadata"] == {"source": "official"}
+    assert "url" not in completed["metadata"]
+    assert "path" not in completed["metadata"]
+
+
+def test_skill_source_permissions_and_owner_only_operations_projection(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_owner("owner", "Owner", "password-123")
+    admin = store.create_user("ops-admin", "Ops Admin", "password-456", role_keys=("admin",))
+    viewer = store.create_user("viewer", "Viewer", "password-789")
+    admin_role = next(role for role in store.list_roles() if role["key"] == "admin")
+    store.update_role_permissions(
+        admin_role["id"],
+        [*admin_role["permission_keys"], "skill.sources.read", "skill.sync"],
+    )
+    runtime = _AuthRuntime(AuthService(store, audit_sink=SqliteAuditSink(store)), tmp_path)
+    runtime.skill_status = _FakeSkillStatus()
+    runtime.skill_loader = _FakeSkillLoader()
+    runtime.skill_sync = _FakeSkillSync()
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True)
+    config_dir.joinpath("config.yml").write_text(
+        """schema_version: 1
+operations:
+  terminal:
+    enabled: true
+    url: https://ops.example.test
+    presentation: both
+""",
+        encoding="utf-8",
+    )
+
+    viewer_client = _client(tmp_path, runtime)
+    viewer_client.post(
+        "/api/auth/login", json={"username": viewer.username, "password": "password-789"}
+    )
+    viewer_sources = viewer_client.get("/api/admin/skills/sources")
+    assert viewer_sources.status_code == 403
+    assert viewer_sources.json()["error"]["details"] == {
+        "required_permission": "skill.sources.read"
+    }
+
+    admin_client = _client(tmp_path, runtime)
+    admin_client.post(
+        "/api/auth/login", json={"username": admin.username, "password": "password-456"}
+    )
+    assert admin_client.get("/api/admin/skills/sources").status_code == 200
+    assert admin_client.post("/api/admin/skills/sources/official/sync").status_code == 200
+    denied_ops = admin_client.get("/api/admin/operations/terminal")
+    assert denied_ops.status_code == 403
+    assert denied_ops.json()["error"]["details"] == {"required_role": "owner"}
+
+    owner_client = _client(tmp_path, runtime)
+    owner_client.post("/api/auth/login", json={"username": "owner", "password": "password-123"})
+    projected = owner_client.get("/api/admin/operations/terminal")
+    assert projected.status_code == 200
+    assert projected.json() == {
+        "enabled": True,
+        "configured": True,
+        "url": "https://ops.example.test",
+        "presentation": "both",
+        "mode": "server_docker",
+        "target_type": "container",
+        "target_name": "zhice-agent",
+    }
+    assert "credential" not in projected.text.lower()
+    assert "password" not in projected.text.lower()
+    assert "socket" not in projected.text.lower()
+    from agent.operations.runtime import OperationsRuntimeState, write_operations_runtime_state
+
+    write_operations_runtime_state(
+        tmp_path / "state",
+        OperationsRuntimeState(
+            mode="local_process",
+            target_type="process",
+            target_name="zcagent-gateway",
+            url="http://127.0.0.1:17681",
+            instance_id="test-owner",
+            supervisor_pid=__import__("os").getpid(),
+        ),
+    )
+    runtime_projection = owner_client.get("/api/admin/operations/terminal")
+    assert runtime_projection.status_code == 200
+    assert runtime_projection.json()["mode"] == "local_process"
+    assert runtime_projection.json()["url"] == "http://127.0.0.1:17681"
+    operations_audit = next(
+        event
+        for event in store.list_audit_events(limit=20)
+        if event["action"] == "server.operations.entry_read"
+    )
+    assert operations_audit["metadata"] == {}
+
+
+class _FakeSkillStatus:
+    def list_statuses(self, *, skill_loader, skill_sync):
+        assert skill_loader is not None
+        assert skill_sync is not None
+        return [
+            {
+                "name": "official",
+                "enabled": True,
+                "sync": True,
+                "target": "master",
+                "commit": "abc123",
+                "last_sync_started_at": "2026-08-09T01:00:00Z",
+                "last_sync_finished_at": "2026-08-09T01:00:01Z",
+                "last_success_at": "2026-08-09T01:00:01Z",
+                "status": "up_to_date",
+                "health": "healthy",
+                "skills": 1,
+                "load_error_count": 0,
+                "materialized_root": "/srv/private/extends/official",
+                "git_url": "https://credential@example.test/repo.git",
+                "stderr": "raw secret stderr",
+            }
+        ]
+
+
+class _FakeSkillLoader:
+    def __init__(self):
+        self.invalidated = []
+
+    def list_skills_for_actor(self, actor):
+        assert actor.user_id
+        return [
+            SimpleNamespace(
+                qualified_name="official/weather",
+                source="official",
+                name="weather",
+                description="Weather report",
+                runtime=SimpleNamespace(type="python"),
+            )
+        ]
+
+    def invalidate(self, source=None):
+        self.invalidated.append(source)
+
+
+class _FakeSkillSync:
+    def __init__(self):
+        self.calls = []
+
+    def sync(self, *, source_names=None):
+        self.calls.append(source_names)
+        return SimpleNamespace(errors=[])
+
+    def load(self):
+        return SimpleNamespace(), [SimpleNamespace(name="official")]
+
+
 class _AuthRuntime:
     def __init__(self, auth, tmp_path: Path | None = None):
         self.auth = auth

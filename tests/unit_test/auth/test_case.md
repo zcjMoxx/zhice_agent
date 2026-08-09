@@ -33,6 +33,7 @@
 - `diagnose_system_activity` 仅对显式拥有 `diagnostics.system.use` 的 actor 可用；跨用户查询保持时间/数量有界，事故由稳定规则聚合，trace、Tool 与时间线只返回白名单脱敏字段，绝不回传参数、命令、输出或 Secret。
 - 普通用户诊断到 Subagent 内部失败时只返回暂时不可用并联系管理员，隐藏 cause/evidence/修复命令；Owner 和具备内部审计权限的管理员保留完整证据。
 - 父 `delegate_tasks` Turn 可沿同 actor 的 `root_session_id/root_turn_id` 下钻 child terminal trace，优先报告 child failure code/stage 和脱敏 `error_message`；安全证据只暴露白名单字段，不能跨 actor。缺少 child 终因的通用 `SUBAGENT_FAILED` 最多为中等置信度。
+- 诊断只读取权威 `logs/log-YYYY-MM-DD.jsonl`，不保留旧文件路径分支。
 - Runtime Activity 独立维护 `turn_runs` / `tool_call_records`，不会写入 `audit_events`；AuditSink 也不再隐式更新运行索引。
 - `turn_runs` 直接使用 `turn_id` 主键，不存在额外 `turn-run-*` id，也不保留旧表兼容结构。
 - Gateway 启动恢复只把上次进程遗留的 `started` Turn 终结为 `error/GATEWAY_RESTART_INTERRUPTED`，已有终态不改写且重复恢复幂等。

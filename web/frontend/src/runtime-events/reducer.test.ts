@@ -31,4 +31,22 @@ describe("RuntimeEvent reducer", () => {
     expect(done.childTasks.implementation).toBeUndefined();
     expect(done.childTasks.tests.title).toBe("llm.started");
   });
+
+  it("shows Skill progress and ignores internal run_skill wrapper events", () => {
+    const started = applyRuntimeEvent(emptyRuntimeState(), event("skill.started", 5, {
+      skill_run_id: "skill-run-1",
+      display: { title: "正在运行 official/demo" },
+    }), "t1");
+    const progress = applyRuntimeEvent(started, event("skill.progress", 6, {
+      skill_run_id: "skill-run-1",
+      display: { title: "official/demo 运行中", detail: "已完成 50%" },
+      metadata: { percent: 50 },
+    }), "t1");
+    const wrapper = applyRuntimeEvent(progress, event("tool.completed", 7, {
+      display: { title: "run_skill 执行完成", visibility: "internal" },
+    }), "t1");
+
+    expect(progress.title).toBe("已完成 50%");
+    expect(wrapper).toEqual(progress);
+  });
 });

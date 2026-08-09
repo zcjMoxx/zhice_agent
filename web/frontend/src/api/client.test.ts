@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ApiError, onAuthorizationFailure, request } from "./client";
+import { api, ApiError, onAuthorizationFailure, request } from "./client";
 
 describe("API client", () => {
   it("preserves stable backend errors and refreshes authorization", async () => {
@@ -11,5 +11,15 @@ describe("API client", () => {
     expect(failure).toBeInstanceOf(ApiError);
     expect(failure).toMatchObject({ status: 401, code: "AUTH_REQUIRED", requestId: "req-1" });
     expect(refresh).toHaveBeenCalledWith(401);
+  });
+
+  it("encodes fixed Skill source path segments", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "refreshed" }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    await api.refreshSkillSourceIndex("official source");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/admin/skills/sources/official%20source/refresh-index",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });

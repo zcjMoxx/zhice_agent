@@ -84,7 +84,18 @@ HOME=/home/zhice
 /home/zhice/.zhice/config/models.json
 ```
 
-镜像不设置 `ZHICE_AGENT_WORKSPACE` 和 `ZHICE_AGENT_SKILL_REPO`；通用默认规则自然得到 `/home/zhice/.zhice`，Skill 同步器根据镜像内代码位置得到 `/app/skill_repo`。镜像声明 `contexts`、`state`、`logs`、`extends` 四个通用运行数据 volume，并为运行时扫码生成的微信账号凭据声明独立的 `config/channels/weixin/accounts` volume。完整 `config/` 不挂卷，`.env`、`config.yml`、`models.json` 仍随私有镜像发布更新。一个 workspace 只允许一个 Gateway 容器写入。
+镜像不设置 `ZHICE_AGENT_WORKSPACE` 和 `ZHICE_AGENT_SKILL_REPO`；通用默认规则自然得到 `/home/zhice/.zhice`，Skill 同步器根据镜像内代码位置得到 `/app/skill_repo`。镜像声明 `contexts`、`state`、`logs`、`extends` 四个通用运行数据 volume，并为运行时扫码生成的微信账号凭据声明独立的 `config/channels/weixin/accounts` volume。一个 workspace 只允许一个 Gateway 容器写入。
+
+私有镜像里的 `.env`、`config.yml`、`models.json` 现在只作为云服务器首次迁移和灾难恢复基线。云端第一次执行 `deploy.sh` 时，会在不显示正文的前提下，从受控 Digest 临时容器复制并校验三份文件，再原子建立宿主机权威目录：
+
+```text
+/etc/zhice-agent/runtime/.env
+/etc/zhice-agent/runtime/config.yml
+/etc/zhice-agent/runtime/models.json
+/etc/zhice-agent/runtime/backups/
+```
+
+后续 Digest 默认保留宿主机副本，三个文件分别以只读 bind mount 进入容器原路径。缺少任一文件、出现 symlink 或校验失败都会 fail closed，不会把不同镜像的配置混合初始化。本地 Windows Compose 仍使用镜像内私有基线，不强制依赖 Linux `/etc` 路径。
 
 ## 三个日常入口
 
@@ -128,7 +139,7 @@ deploy\build-and-deploy-cloud.cmd
 Copy-Item deploy\private\cloud-target.example.json deploy\private\cloud-target.json
 ```
 
-`private/cloud-target.json` 保存 registry 路径、SSH 目标与密码、远端运维脚本目录、公网 HTTPS 地址和端口，已被 Git ignore。公开的 `cloud-target.example.json` 对所有需要替换的字符串直接使用中文占位，复制后必须填写真实目标；未替换时流水线会在推送或连接云端之前拒绝执行。
+`private/cloud-target.json` 保存 registry 路径、SSH 目标与密码、远端运维脚本目录、主站/Ops HTTPS 地址和端口，已被 Git ignore。公开的 `cloud-target.example.json` 对所有需要替换的字符串直接使用中文占位，复制后必须填写真实目标；未替换时流水线会在推送或连接云端之前拒绝执行。
 
 | 字段 | 应填写内容 |
 | --- | --- |
@@ -138,6 +149,7 @@ Copy-Item deploy\private\cloud-target.example.json deploy\private\cloud-target.j
 | `SshPassword` | SSH 登录密码；当前流程同时假设它也是该用户的 sudo 密码 |
 | `RemoteOpsDir` | 云服务器上的绝对运维脚本目录，必须填写 |
 | `PublicUrl` | Caddy 对外提供的 HTTPS 访问地址，不带 `/health` |
+| `OpsUrl` | 既有 Cloudflare Tunnel 转发、由服务器 Caddy/ttyd Basic Auth 保护的独立 Ops HTTPS origin，不带路径 |
 | `Port` | Gateway 在云服务器 loopback 上监听的宿主机端口；默认 `10086`，没有端口冲突可直接保留 |
 
 这个文件允许保存 SSH 密码，但它是本机明文 Secret：只依赖 `deploy/.gitignore` 与本机文件权限保护，不会进入 Docker 镜像。不要复制到公开位置、提交 Git、粘贴到日志或对话中。
@@ -151,7 +163,9 @@ Python 已安装 Paramiko，并已在 Windows `%USERPROFILE%\.ssh\known_hosts` �
 SSH 登录密码可用于该用户的 sudo；若两者不同，当前一键流程不适用
 ```
 
-云发布前还必须检查 `deploy/private/config.yml`：每个启用的 QQ `accounts` 项都要显式配置真实公网 HTTPS `web_base_url`。备案域名启用前，当前生产 `main` 账号应指向 Cloudflare Tunnel 地址 `https://chat.zouzhou.xyz`；不能依赖未配置时的本地默认值 `http://127.0.0.1:10086`，否则 QQ 私聊裸 `/bind` 会向远端用户返回不可访问的 loopback 链接。本地和云端也不要同时运行同一 QQ Bot 账号，避免两个 WebSocket 实例竞争消息。
+云发布前还必须检查 `deploy/private/config.yml`：每个启用的 QQ `accounts` 项都要显式配置真实公网 HTTPS `web_base_url`，并与私有 `cloud-target.json` 的 `PublicUrl` 对齐；不能依赖未配置时的本地默认值 `http://127.0.0.1:10086`，否则 QQ 私聊裸 `/bind` 会向远端用户返回不可访问的 loopback 链接。本地和云端也不要同时运行同一 QQ Bot 账号，避免两个 WebSocket 实例竞争消息。
+
+本地 `docker compose -f deploy/docker-compose.yml up --build` 会同时启动固定 `zhice-agent` 和独立 `zhice-agent-ops`；Gateway 与 Ops 端口都只发布到 `127.0.0.1`。主 Web 会投影 `local_docker` endpoint；sidecar 使用共享“监控面板 / 运维终端”，终端只接受 status/logs/logs-follow/diagnose/restart/help/exit，所有 Docker API 仍固定为 `zhice-agent`，不接受浏览器提交容器名、Docker 参数、路径或服务器配置命令。
 
 ### 密码与凭证保存在哪里
 
@@ -185,7 +199,7 @@ Dockerfile 仍只安装 `.[gateway,qq]`，不会把 Paramiko 打入运行镜像�
 .\deploy\scripts\push-image.ps1 -Registry "阿里云镜像仓库路径" -Image zhice-agent -Tag 0.1.0
 ```
 
-脚本会精确返回目标 repository 的 Digest，不使用本地 RepoDigests 索引猜测。一键发布不会上传整个 `deploy/`，只会把五个 Shell 运维脚本上传到 `RemoteOpsDir/releases/<release>`，通过 `sh -n` 后原子切换 `RemoteOpsDir/current`：
+脚本会精确返回目标 repository 的 Digest，不使用本地 RepoDigests 索引猜测。一键发布不会上传私有配置或整个 workspace，只会把六个 Shell 运维脚本（包含宿主机 `diagnose.sh`）和公开的固定 Ops 安装资产上传到 `RemoteOpsDir/releases/<release>`，完成 Shell/Python 静态校验后原子切换 `RemoteOpsDir/current`：
 
 ```sh
 cd /填写的RemoteOpsDir/current
@@ -197,8 +211,24 @@ sudo sh restart.sh
 
 手工排障也统一从 `RemoteOpsDir/current` 执行并使用 `sudo sh`，确保 Docker 权限与一键流水线一致。
 
-`deploy.sh` 固定启动一个容器、一个 Gateway 进程和一个 worker，并在新容器健康检查失败时恢复上一容器。脚本用当前镜像初始化 `zhice-weixin-credentials` 的 `zhice:zhice` 所有权和 `0700` 目录权限，且不会删除该卷；微信扫码凭据因此能跨容器重建和镜像升级保留。Gateway 只绑定宿主机 `127.0.0.1:10086`，公网必须通过 Caddy/Nginx 的 80/443 进入；TLS、可信代理头和访问控制由云端反向代理负责。
+`deploy.sh` 固定启动名为 `zhice-agent` 的一个容器、一个 Gateway 进程和一个 worker，并在新容器健康检查失败时恢复上一容器。浏览器、环境变量和运维终端都不能覆盖容器名。脚本用当前镜像初始化 `zhice-weixin-credentials` 的 `zhice:zhice` 所有权和 `0700` 目录权限，且不会删除该卷；微信扫码凭据因此能跨容器重建和镜像升级保留。Gateway 只绑定宿主机 `127.0.0.1:10086`，公网必须通过 Caddy/Nginx 的 80/443 进入；TLS、可信代理头和访问控制由云端反向代理负责。
 
-共享 `pipelines/invoke-cloud-release.ps1` 通过 Python Paramiko helper 自动同步五个远端运维脚本、执行部署并读取远端状态。部署与 status 成功后，同一 Paramiko 连接会从云服务器执行受控 `curl --fail --silent --show-error --max-time 20` 访问 `${PublicUrl}/health`，解析 JSON 并强制要求 `status=ok`；该远端公网 HTTPS 检查失败仍会使发布失败。本机随后再做一次附加 health 检查：成功会明确输出 passed；若本机代理、TUN DNS 或 TLS 环境异常，或返回状态异常，只输出 warning，因为远端公网链路已经通过。`RemoteOpsDir` 不是 Docker 部署目录：镜像、容器和命名卷仍由 Docker 管理。任一 build、smoke、push、SSH、远端容器健康或远端公网 HTTPS 步骤失败都会以非零退出码结束；容器健康失败由 `deploy.sh` 恢复上一容器，数据卷不会删除。
+共享 `pipelines/invoke-cloud-release.ps1` 通过 Python Paramiko helper 自动同步六个远端运维脚本和公开 Ops 安装资产、执行部署、安装/升级 root-owned Ops 服务并读取远端状态。部署与 status 成功后，同一 Paramiko 连接会从云服务器执行受控 `curl --fail --silent --show-error --max-time 20` 访问 `${PublicUrl}/health`，解析 JSON 并强制要求 `status=ok`；该远端公网 HTTPS 检查失败仍会使发布失败。本机随后再做一次附加 health 检查：成功会明确输出 passed；若本机代理、TUN DNS 或 TLS 环境异常，或返回状态异常，只输出 warning，因为远端公网链路已经通过。`RemoteOpsDir` 不是 Docker 部署目录：镜像、容器和命名卷仍由 Docker 管理。任一 build、smoke、push、SSH、远端容器健康、Ops 安装或远端公网 HTTPS 步骤失败都会以非零退出码结束；容器健康失败由 `deploy.sh` 恢复上一容器，数据卷不会删除。
 
 也可以用 `docker compose -f deploy/docker-compose.yml up -d --build` 做单机开发验证；正式云端发布仍应使用 digest。
+
+## 独立受限服务器 Ops
+
+`deploy/ops/` 提供独立于 Agent 容器的宿主机运维面：共享双视图静态页、loopback Caddy 统一入口、固定版本并校验 SHA-256 的 ttyd、固定 dashboard adapter、`zhice-operator` systemd 服务、非 shell 的 `zhice-ops-shell`、root-owned wrapper、精确 sudoers和 ZhiCe 深色视觉覆盖。安装入口：
+
+```sh
+sudo sh deploy/ops/install.sh
+```
+
+正式公网入口复用服务器已有 Cloudflare Tunnel，发布一条 `${OpsUrl} -> http://127.0.0.1:7681` 路由；不再为 Ops 新建 connector 或 Access/IdP/MFA。Caddy 在 `7681` 强制独立 `owner` Basic Auth并同源提供监控页、`/api/*` 和 `/terminal/`，ttyd 在 `7682` 保留第二层同 credential 认证，dashboard adapter 在 `7683`；三端口均受 loopback/systemd 网络边界保护。首次安装生成高熵密码并保存于 root-only `/etc/zhice-ops/ops.env`，升级时保留且不进入发布日志。安全组禁止裸露这些端口；真实认证、iframe 缓存和 WebSocket Origin 验收见 `deploy/ops/README.md`。
+
+终端只允许 `status`、有界 `logs`、`logs-follow`、`diagnose`、固定三文件的 `config view/edit/validate/diff/backup/restore/apply`、二次确认的 `restart`、`help` 和 `exit`。它不提供 Bash、`sudo -i`、任意 Docker、任意容器名或任意路径。`zhice-operator` 不加入 docker group；需要提权的动作只能经过参数结构化校验后的 root wrapper。
+
+配置编辑先进入 `/var/lib/zhice-ops/pending`，保存时自动备份。只有三份配置一起校验成功后才能 `config apply`；apply 原子替换宿主机权威文件并重启固定容器，失败会恢复备份。journald 只记录动作和结果，不记录配置正文；原始容器日志和 diagnose 输出还会经过已知 Secret 与敏感键模式的二次脱敏。
+
+真实 Linux/Cloudflare 验收必须覆盖：systemd 独立存活、ttyd resize/15 分钟 idle/最多一个会话、无/错误 Basic Auth 拒绝、正确认证与跨升级保留、Agent 容器退出后的直接救援、Docker unavailable 诊断、只读挂载、跨 restart/Digest 保留、备份恢复、通用 Shell/Docker/路径逃逸全部失败，以及私有 `PublicUrl` 的 `/health` 恢复。Windows 静态与单元测试不能替代这些外部验收。

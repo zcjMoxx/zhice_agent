@@ -2,7 +2,7 @@
 
 ## 测试目标
 
-验证第五部分 Skill 体系的本地发现、`SKILL.md` 解析、source 命名空间、source 同步、运行时目录边界和错误处理，确保 Skill 能力作为扩展层接入，而不污染 AgentLoop 或协议边界。
+验证第五部分与 Part 18 Skill 体系的本地发现、`SKILL.md` 解析、source 命名空间、source 同步、正式可执行 Runtime、状态缓存、权限与错误处理，确保 Skill 能力作为扩展层接入，而不污染 AgentLoop 或协议边界。
 
 ## 用例覆盖
 
@@ -77,3 +77,21 @@
 - 输入：未知 source 名、`sync=false`、旧字段 `enabled`/`type`/`path`/`skills_subdir`/`target_type`、空 source 目录、workspace 外 extends_dir。
 - 预期：返回结构化失败、跳过或抛出配置错误。
 - 检查点：runtime 写入目录必须留在 workspace 内，旧字段不会被悄悄兼容。
+
+### Case 13: 指令型与显式可执行型并存
+
+- 输入：无 `runtime` 的指令型 Skill、合法 `runtime` 与非法 `runtime`。
+- 预期：指令型保持兼容；合法声明生成可执行 metadata；非法声明只关闭执行能力并保留正文。
+- 检查点：仅支持 Python、相对入口、`ndjson-v1` 和有界 timeout，入口越界 fail closed。
+
+### Case 14: NDJSON SkillExecutor
+
+- 输入：flushed progress、typed result、旧式末行结果、非 JSON 日志、非法 percent/result、重复/额外输出、stdout/stderr/行数上限、timeout、取消和参数 schema/大小/深度错误。
+- 预期：输出实时逐行校验，进度脱敏，所有终止路径结构化返回并回收完整进程树。
+- 检查点：模型不能覆盖 executable/cwd/env；执行前后均重新检查入口，symlink 换出 Skill root 会 fail closed；正常结束后残留子进程也被清理；普通结果不暴露 stderr 或 `error_stack`。
+
+### Case 15: Source 状态、索引缓存与权限过滤
+
+- 输入：同步成功/空源/损坏状态文件、索引缓存损坏、source role/permission 策略。
+- 预期：状态原子持久化并安全重建；索引仍以 `SKILL.md` 为真值；未授权 actor 不可列出或加载 source。
+- 检查点：状态不记录 credential、原始 stderr 或 workspace 外路径，Subagent 后续再取 Profile 交集。

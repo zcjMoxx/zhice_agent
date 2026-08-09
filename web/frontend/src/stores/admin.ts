@@ -1,13 +1,16 @@
 import { defineStore } from "pinia";
 
 import { api } from "@/api/client";
-import type { MonitorSnapshot, PublicUser, Role, SystemDiagnosticsSnapshot } from "@/api/types";
+import type { MonitorSnapshot, OperationsTerminal, PublicUser, Role, SkillSourcesSnapshot, SystemDiagnosticsSnapshot } from "@/api/types";
 
 export const useAdminStore = defineStore("admin", {
   state: () => ({
     users: [] as PublicUser[],
     roles: [] as Role[],
     permissions: [] as string[],
+    skillSources: null as SkillSourcesSnapshot | null,
+    operationsTerminal: null as OperationsTerminal | null,
+    skillActionSource: "",
     monitor: null as MonitorSnapshot | null,
     diagnostics: null as SystemDiagnosticsSnapshot | null,
     auditEvents: [] as Record<string, unknown>[],
@@ -25,6 +28,18 @@ export const useAdminStore = defineStore("admin", {
       const updated = await api.updateRole(id, keys);
       this.roles = this.roles.map((role) => role.id === id ? updated : role);
     },
+    async loadSkillSources() { this.skillSources = await api.skillSources(); },
+    async syncSkillSource(source: string) {
+      this.skillActionSource = source;
+      try { await api.syncSkillSource(source); await this.loadSkillSources(); }
+      finally { this.skillActionSource = ""; }
+    },
+    async refreshSkillSourceIndex(source: string) {
+      this.skillActionSource = source;
+      try { await api.refreshSkillSourceIndex(source); await this.loadSkillSources(); }
+      finally { this.skillActionSource = ""; }
+    },
+    async loadOperationsTerminal() { this.operationsTerminal = await api.operationsTerminal(); },
     async loadMonitor(status = "error") {
       const query = new URLSearchParams({ limit: "50" });
       if (status) query.set("status", status);

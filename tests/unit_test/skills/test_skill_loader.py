@@ -2,8 +2,9 @@
 
 import pytest
 
+from agent.protocols.auth import ActorContext
 from agent.protocols.skill import SkillError
-from agent.skills.loader import SkillLoader
+from agent.skills.loader import SkillLoader, SkillRoot
 
 
 def test_loader_returns_empty_for_missing_skills_dir(tmp_path):
@@ -129,6 +130,104 @@ def test_loader_get_skill_reports_unknown_and_invalid_names(tmp_path):
 
     assert unknown.value.code == "UNKNOWN_SKILL"
     assert invalid.value.code == "INVALID_SKILL_NAME"
+
+
+def test_loader_parses_explicit_runtime_and_keeps_instruction_only_compatibility(tmp_path):
+    skills_dir = tmp_path / "skills"
+    executable = _write_skill(skills_dir, "executable")
+    executable.joinpath("scripts").mkdir()
+    executable.joinpath("scripts", "main.py").write_text("print('ok')\n", encoding="utf-8")
+    executable.joinpath("SKILL.md").write_text(
+        """---
+name: executable
+description: Executable demo.
+runtime:
+  type: python
+  entrypoint: scripts/main.py
+  protocol: ndjson-v1
+  timeout_seconds: 45
+---
+
+Run it.
+""",
+        encoding="utf-8",
+    )
+    _write_skill(skills_dir, "instruction-only")
+
+    loaded = {skill.name: skill for skill in SkillLoader(skills_dir).list_skills()}
+
+    assert loaded["executable"].executable is not None
+    assert loaded["executable"].executable.protocol == "ndjson-v1"
+    assert loaded["executable"].executable.timeout_seconds == 45
+    assert loaded["instruction-only"].executable is None
+
+
+def test_invalid_runtime_fails_closed_without_hiding_instruction_skill(tmp_path):
+    skills_dir = tmp_path / "skills"
+    skill_dir = _write_skill(skills_dir, "demo")
+    skill_dir.joinpath("SKILL.md").write_text(
+        """---
+name: demo
+description: Demo skill.
+runtime:
+  type: bash
+  entrypoint: ../outside.py
+  protocol: text
+---
+
+Instruction body remains available.
+""",
+        encoding="utf-8",
+    )
+    loader = SkillLoader(skills_dir)
+
+    skill = loader.list_skills()[0]
+
+    assert skill.executable is None
+    assert "Instruction body" in loader.get_skill_body("demo")
+    assert any(error["code"] == "INVALID_SKILL_RUNTIME" for error in loader.load_errors)
+
+
+def test_source_policy_filters_catalog_and_lookup(tmp_path):
+    skills_dir = tmp_path / "official" / "skills"
+    _write_skill(skills_dir, "demo")
+    loader = SkillLoader(
+        [SkillRoot(source="official", root=skills_dir, allowed_roles=("owner",))]
+    )
+    owner = _actor("owner")
+    viewer = _actor("viewer")
+
+    assert [skill.qualified_name for skill in loader.list_skills_for_actor(owner)] == [
+        "official/demo"
+    ]
+    assert loader.list_skills_for_actor(viewer) == []
+    with pytest.raises(SkillError) as denied:
+        loader.get_skill_for_actor(viewer, "official/demo")
+    assert denied.value.code == "UNKNOWN_SKILL"
+
+
+def test_corrupt_index_cache_is_rebuilt_from_source_truth(tmp_path):
+    skills_dir = tmp_path / "skills"
+    _write_skill(skills_dir, "demo")
+    cache = tmp_path / "state" / "skill_index.json"
+    cache.parent.mkdir()
+    cache.write_text("{broken", encoding="utf-8")
+    loader = SkillLoader(skills_dir, cache_path=cache)
+
+    assert [skill.name for skill in loader.list_skills()] == ["demo"]
+    assert cache.read_text(encoding="utf-8").startswith("{")
+
+
+def _actor(role):
+    return ActorContext(
+        actor_type="user",
+        user_id=role,
+        username=role,
+        display_name=role,
+        role_keys=frozenset({role}),
+        permission_keys=frozenset(),
+        channel="web",
+    )
 
 
 def _write_skill(skills_dir, directory, *, name=None):

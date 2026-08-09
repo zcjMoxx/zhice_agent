@@ -2,7 +2,7 @@
 
 ## 测试目标
 
-验证 Part 12 transport-neutral RuntimeEvent 的字段白名单、状态映射、turn-scoped sequence、安全展示字段和 best-effort sink 行为。
+验证 Part 12 transport-neutral RuntimeEvent 与 Part 18 `skill.*` 的字段白名单、状态映射、turn-scoped sequence、安全展示字段和 best-effort sink 行为。
 
 ## 用例覆盖
 
@@ -12,3 +12,4 @@
 - sink 抛异常时不影响 emitter 调用方。
 - RuntimeEvent payload 可与旧 `text_delta` / interaction dict 区分。
 - Subagent 的 agent/root/parent/batch/task/depth scope 可稳定序列化，depth 超过第一阶段硬上限时拒绝。
+- Skill started/progress/completed/failed 携带稳定 `skill_run_id`，并关联外层 Tool Event。

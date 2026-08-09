@@ -39,6 +39,7 @@ def write_config(tmp_path: Path, **overrides: Any) -> Path:
         "SshPassword": "ssh-secret",
         "RemoteOpsDir": "/home/operator/zhice-ops",
         "PublicUrl": "https://agent.example.test",
+        "OpsUrl": "https://ops.example.test",
         "Port": 10086,
     }
     config.update(overrides)
@@ -53,6 +54,21 @@ def test_load_config_requires_remote_ops_dir(tmp_path: Path) -> None:
 
     with pytest.raises(remote_ops.RemoteOpsError, match="RemoteOpsDir"):
         remote_ops.load_config(write_config(tmp_path, RemoteOpsDir=None))
+
+
+def test_validate_https_origin_rejects_path_credentials_and_whitespace() -> None:
+    assert (
+        remote_ops.validate_https_origin("https://ops.example.test/", field="OpsUrl")
+        == "https://ops.example.test"
+    )
+    for value in (
+        "http://ops.example.test",
+        "https://user@ops.example.test",
+        "https://ops.example.test/path",
+        "https://ops.example.test\n",
+    ):
+        with pytest.raises(remote_ops.RemoteOpsError):
+            remote_ops.validate_https_origin(value, field="OpsUrl")
 
 
 @pytest.mark.parametrize(
@@ -107,7 +123,7 @@ class FakeUploadClient:
         return self.sftp
 
 
-def test_upload_release_uploads_five_scripts_validates_and_switches_atomically(
+def test_upload_release_uploads_six_scripts_validates_and_switches_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for name in remote_ops.SCRIPT_NAMES:
@@ -125,17 +141,81 @@ def test_upload_release_uploads_five_scripts_validates_and_switches_atomically(
     )
 
     assert current == "/home/operator/zhice-ops/current"
-    assert len(client.sftp.puts) == 5
+    assert len(client.sftp.puts) == len(remote_ops.SCRIPT_NAMES)
     assert {Path(local).name for local, _remote in client.sftp.puts} == set(
         remote_ops.SCRIPT_NAMES
     )
     assert all(mode == 0o700 for _remote, mode in client.sftp.chmods)
-    assert len(client.sftp.renames) == 5
+    assert len(client.sftp.renames) == len(remote_ops.SCRIPT_NAMES)
     syntax_command = next(command for command in commands if "sh -n" in command)
     assert all(name in syntax_command for name in remote_ops.SCRIPT_NAMES)
     switch_command = next(command for command in commands if "mv -Tf" in command)
     assert "ln -sfn" in switch_command
     assert "/home/operator/zhice-ops/current" in switch_command
+
+
+def test_upload_release_includes_fixed_public_ops_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scripts = tmp_path / "scripts"
+    ops = tmp_path / "ops"
+    scripts.mkdir()
+    for name in remote_ops.SCRIPT_NAMES:
+        (scripts / name).write_text("#!/usr/bin/env sh\n", encoding="utf-8")
+    for relative_name in remote_ops.OPS_FILES:
+        path = ops / relative_name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# public ops asset\n", encoding="utf-8")
+    commands: list[str] = []
+    monkeypatch.setattr(
+        remote_ops,
+        "run",
+        lambda _client, command: (commands.append(command) or ("", "")),
+    )
+    client = FakeUploadClient()
+
+    remote_ops.upload_release(
+        client,
+        scripts,
+        "/home/operator/zhice-ops",
+        "20260809-ops",
+        ops,
+    )
+
+    uploaded = {Path(local).as_posix() for local, _remote in client.sftp.puts}
+    assert all((ops / name).as_posix() in uploaded for name in remote_ops.OPS_FILES)
+    assert any("python3 -m py_compile" in command for command in commands)
+    assert any("ops/install.sh" in command for command in commands)
+
+
+def test_ops_service_requires_server_generated_basic_auth() -> None:
+    gateway = (ROOT / "deploy/ops/systemd/zhice-ops.service").read_text(encoding="utf-8")
+    terminal = (ROOT / "deploy/ops/systemd/zhice-ops-terminal.service").read_text(
+        encoding="utf-8"
+    )
+    caddy = (ROOT / "deploy/ops/config/Caddyfile").read_text(encoding="utf-8")
+    installer = (ROOT / "deploy/ops/install.sh").read_text(encoding="utf-8")
+    sudoers = (ROOT / "deploy/ops/sudoers.d/zhice-ops").read_text(encoding="utf-8")
+
+    assert "--credential ${ZHICE_OPS_CREDENTIAL}" in terminal
+    assert "--interface lo" in terminal
+    assert "--interface 127.0.0.1" not in terminal
+    assert "IPAddressDeny=any" in terminal
+    assert "IPAddressAllow=localhost" in terminal
+    assert "/usr/bin/caddy run" in gateway
+    assert "basicauth" in caddy
+    assert "{$ZHICE_OPS_CADDY_HASH}" in caddy
+    assert "ZHICE_OPS_CREDENTIAL=$ops_credential" in installer
+    assert "ZHICE_OPS_CADDY_HASH=$caddy_hash" in installer
+    assert "printf '%s\\n' \"$credential_secret\" | caddy hash-password" in installer
+    assert "od -An -N24 -tx1 /dev/urandom" in installer
+    assert "chmod 0600" in installer
+    assert "root-only Ops credential was preserved or generated" in installer
+    assert "echo \"$ops_credential\"" not in installer
+    assert "visudo -cf /etc/sudoers" in installer
+    assert "previous policy restored" in installer
+    assert "Cmnd_Alias" not in sudoers
+    assert "zhice_ops_root.py *" in sudoers
 
 
 class FakeChannel:
@@ -208,11 +288,17 @@ def test_sudo_deploy_sends_password_only_to_stdin_and_redacts_output() -> None:
         "/home/operator/zhice-ops/current",
         "registry.example.test/team/zhice-agent@sha256:" + "a" * 64,
         10086,
+        "https://agent.example.test",
+        "https://ops.example.test",
     )
 
     assert channel.pty_requested
     assert channel.sent == [(password + "\n").encode()]
     assert password not in channel.command
+    assert "deploy.sh" in channel.command
+    assert "ops/install.sh" in channel.command
+    assert channel.command.index("deploy.sh") < channel.command.index("ops/install.sh")
+    assert channel.command.index("ops/install.sh") < channel.command.index("status.sh")
     assert password not in out
     assert "[REDACTED]" in out
     assert err == ""
@@ -228,6 +314,8 @@ def test_sudo_deploy_times_out_and_closes_channel() -> None:
             "/home/operator/zhice-ops/current",
             "registry.example.test/team/zhice-agent@sha256:" + "a" * 64,
             10086,
+            "https://agent.example.test",
+            "https://ops.example.test",
             timeout_seconds=0,
         )
 

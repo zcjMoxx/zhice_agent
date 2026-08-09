@@ -1,5 +1,10 @@
 # CLI 单元测试用例
 
+## Part 18 本地 Ops 启动覆盖
+
+- 普通 `zcagent gateway` 默认进入 `LocalOpsSupervisor`，child argv 固定复用 workspace、Gateway host/port 与日志参数，并携带内部 `--ops-child` 防止递归启动。
+- `--check` 不启动 Ops；容器启动器注入 `ZHICE_OPS_MODE=local_docker|server_docker` 时跳过本地进程 supervisor，由外部 sidecar/systemd Ops 接管。
+
 ## 测试目标
 
 验证 `zcagent` 命令行入口只负责参数解析、运行时依赖初始化、用户输入循环和输出展示，不直接实现 AgentLoop、LLM 或工具业务逻辑。
@@ -84,6 +89,6 @@ Part 9 还验证 `zcagent auth init-owner` 只通过安全输入读取一次密�
 
 ## Part 12 RuntimeEvent Coverage
 
-- CLI 将 RuntimeEvent 的 started/waiting 安全短标题原位更新到 Spinner。
+- CLI 将 RuntimeEvent 的 started/waiting 安全短标题原位更新到 Spinner；`skill.progress` 优先显示脱敏 detail，internal 的 `run_skill` 包装事件不重复展示。
 - completed Event、text_delta 和未知事件不额外刷状态行。
 - Hook 配置从当前 workspace/config 加载；显式非法配置阻断 chat 启动并给出稳定提示。

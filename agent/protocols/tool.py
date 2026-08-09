@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from agent.protocols.auth import ActorContext
+from agent.protocols.runtime_event import RuntimeEventPublisher
+from agent.protocols.skill import CancellationToken
 
 
 @dataclass
@@ -45,6 +47,8 @@ class ToolExecutionContext:
     parent_turn_id: str = ""
     subagent_id: str = ""
     task_id: str = ""
+    cancellation_token: CancellationToken | None = None
+    runtime_events: RuntimeEventPublisher | None = None
 
 
 @dataclass(frozen=True)

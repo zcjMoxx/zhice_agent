@@ -100,3 +100,16 @@ klmnopqrst
 
     assert parsed.summary.endswith("[truncated]")
     assert len(parsed.summary) == 15
+
+
+def test_parse_skill_markdown_rejects_duplicate_yaml_keys():
+    with pytest.raises(SkillError) as error:
+        parse_skill_markdown(
+            """---
+description: first
+description: second
+---
+"""
+        )
+
+    assert error.value.code == "INVALID_SKILL_FRONTMATTER"

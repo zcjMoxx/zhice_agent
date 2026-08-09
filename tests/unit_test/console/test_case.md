@@ -6,6 +6,12 @@
 
 ## 用例覆盖
 
+### Case 0: supervisor PIPE 中恢复原版 Console 配色
+
+- 输入：受控 child 设置 `ZHICE_FORCE_TERMINAL_COLOR=1`，stdout 为 PIPE。
+- 预期：地址和路径继续使用 ANSI `36` 青色；设置 `NO_COLOR` 时仍输出纯文本。
+- 检查点：内部 override 只恢复原版 TTY 语义，不改变用户关闭颜色的优先级。
+
 ### Case 1: spinner 结束行清理
 
 - 输入：spinner 动画帧比最终输出行更长。

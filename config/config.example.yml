@@ -74,3 +74,12 @@ mcp:
   servers: {}
 
 logging: {}
+
+# Non-secret projection of the independently protected Ops terminal.
+# Production deployments must use an explicit HTTPS URL protected by
+# Cloudflare Tunnel + Access. The main Web never proxies terminal traffic.
+operations:
+  terminal:
+    enabled: false
+    url: ""
+    presentation: both

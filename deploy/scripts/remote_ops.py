@@ -23,7 +23,29 @@ with warnings.catch_warnings():
     )
     paramiko = importlib.import_module("paramiko")
 
-SCRIPT_NAMES = ("deploy.sh", "status.sh", "logs.sh", "stop.sh", "restart.sh")
+SCRIPT_NAMES = (
+    "deploy.sh",
+    "apply.sh",
+    "status.sh",
+    "logs.sh",
+    "stop.sh",
+    "restart.sh",
+    "diagnose.sh",
+)
+OPS_FILES = (
+    "install.sh",
+    "ttyd-version.env",
+    "bin/zhice-ops-shell",
+    "libexec/zhice_ops_root.py",
+    "libexec/zhice_ops_dashboard.py",
+    "systemd/zhice-ops.service",
+    "systemd/zhice-ops-dashboard.service",
+    "systemd/zhice-ops-terminal.service",
+    "sudoers.d/zhice-ops",
+    "config/Caddyfile",
+    "config/ops.env.example",
+    "web/index.html",
+)
 PLACEHOLDER_RE = re.compile(r"[^\x00-\x7f]")
 
 
@@ -45,6 +67,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "SshPassword": config.get("SshPassword"),
         "RemoteOpsDir": remote_ops_dir,
         "PublicUrl": config.get("PublicUrl"),
+        "OpsUrl": config.get("OpsUrl"),
         "Port": config.get("Port"),
     }
     for key, value in required.items():
@@ -106,7 +129,11 @@ def run(client: paramiko.SSHClient, command: str) -> tuple[str, str]:
 
 
 def upload_release(
-    client: paramiko.SSHClient, scripts_dir: Path, remote_ops_dir: str, release_id: str
+    client: paramiko.SSHClient,
+    scripts_dir: Path,
+    remote_ops_dir: str,
+    release_id: str,
+    ops_dir: Path | None = None,
 ) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", release_id):
         raise RemoteOpsError(f"Invalid remote operations release id: {release_id}")
@@ -115,17 +142,50 @@ def upload_release(
     with client.open_sftp() as sftp:
         for name in SCRIPT_NAMES:
             local_path = scripts_dir / name
-            if not local_path.is_file():
+            if local_path.is_symlink() or not local_path.is_file():
                 raise RemoteOpsError(f"Missing remote operations script: {local_path}")
             temp_path = posixpath.join(release_dir, f".{name}.upload")
             final_path = posixpath.join(release_dir, name)
             sftp.put(str(local_path), temp_path)
             sftp.chmod(temp_path, 0o700)
             sftp.rename(temp_path, final_path)
+        if ops_dir is not None:
+            for relative_name in OPS_FILES:
+                local_path = ops_dir / relative_name
+                if relative_name == "web/index.html" and not local_path.is_file():
+                    local_path = (
+                        ops_dir.parents[1]
+                        / "agent"
+                        / "operations"
+                        / "static"
+                        / "ops.html"
+                    )
+                if local_path.is_symlink() or not local_path.is_file():
+                    raise RemoteOpsError(f"Missing Ops service asset: {local_path}")
+                remote_parent = posixpath.join(
+                    release_dir, "ops", posixpath.dirname(relative_name)
+                )
+                run(client, f"mkdir -p -- {shlex.quote(remote_parent)}")
+                final_path = posixpath.join(release_dir, "ops", relative_name)
+                temp_path = f"{final_path}.upload"
+                sftp.put(str(local_path), temp_path)
+                mode = 0o700 if relative_name in {"install.sh", "bin/zhice-ops-shell"} else 0o600
+                sftp.chmod(temp_path, mode)
+                sftp.rename(temp_path, final_path)
 
     checks = " && ".join(
         f"sh -n {shlex.quote(posixpath.join(release_dir, name))}" for name in SCRIPT_NAMES
     )
+    if ops_dir is not None:
+        checks += (
+            " && "
+            f"sh -n {shlex.quote(posixpath.join(release_dir, 'ops', 'install.sh'))}"
+            " && "
+            "python3 -m py_compile "
+            f"{shlex.quote(posixpath.join(release_dir, 'ops', 'bin', 'zhice-ops-shell'))} "
+            f"{shlex.quote(posixpath.join(release_dir, 'ops', 'libexec', 'zhice_ops_root.py'))} "
+            f"{shlex.quote(posixpath.join(release_dir, 'ops', 'libexec', 'zhice_ops_dashboard.py'))}"
+        )
     run(client, checks)
     current = posixpath.join(remote_ops_dir, "current")
     pending = posixpath.join(remote_ops_dir, f".current-{release_id}")
@@ -144,11 +204,15 @@ def sudo_deploy(
     current_dir: str,
     digest: str,
     port: int,
+    public_url: str,
+    ops_url: str,
     timeout_seconds: float = 300,
 ) -> tuple[str, str]:
     inner = (
         f"sh {shlex.quote(posixpath.join(current_dir, 'deploy.sh'))} "
-        f"{shlex.quote(digest)} {port} && "
+        f"{shlex.quote(digest)} {port} {shlex.quote(public_url)} {shlex.quote(ops_url)} && "
+        f"sh {shlex.quote(posixpath.join(current_dir, 'ops', 'install.sh'))} "
+        f"{shlex.quote(public_url)} {shlex.quote(ops_url)} && "
         f"sh {shlex.quote(posixpath.join(current_dir, 'status.sh'))}"
     )
     command = f"sudo -S -p '' sh -c {shlex.quote(inner)}"
@@ -218,6 +282,24 @@ def verify_public_health(client: paramiko.SSHClient, public_url: str) -> str:
     return health_url
 
 
+def validate_https_origin(value: str, *, field: str) -> str:
+    value = value.rstrip("/")
+    if not value or any(character.isspace() or ord(character) < 32 for character in value):
+        raise RemoteOpsError(f"{field} must not contain whitespace or control characters")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise RemoteOpsError(f"{field} must be an HTTPS origin without credentials or path")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Secure ZhiCe-Agent remote operations helper")
     parser.add_argument("--config", type=Path, required=True)
@@ -226,6 +308,7 @@ def main() -> int:
     subparsers.add_parser("check")
     deploy_parser = subparsers.add_parser("deploy")
     deploy_parser.add_argument("--scripts-dir", type=Path, required=True)
+    deploy_parser.add_argument("--ops-dir", type=Path, required=True)
     deploy_parser.add_argument("--release-id", required=True)
     deploy_parser.add_argument("--digest", required=True)
     deploy_parser.add_argument("--port", type=int, required=True)
@@ -234,6 +317,8 @@ def main() -> int:
     password = ""
     try:
         config = load_config(args.config.resolve())
+        public_url = validate_https_origin(str(config["PublicUrl"]), field="PublicUrl")
+        ops_url = validate_https_origin(str(config["OpsUrl"]), field="OpsUrl")
         password = str(config["SshPassword"])
         if args.action == "inspect-config":
             print(json.dumps(public_config(config), ensure_ascii=True))
@@ -250,10 +335,22 @@ def main() -> int:
         client = connect(config)
         try:
             current = upload_release(
-                client, args.scripts_dir.resolve(), str(config["RemoteOpsDir"]), args.release_id
+                client,
+                args.scripts_dir.resolve(),
+                str(config["RemoteOpsDir"]),
+                args.release_id,
+                args.ops_dir.resolve(),
             )
-            out, err = sudo_deploy(client, password, current, args.digest, args.port)
-            verified_health_url = verify_public_health(client, str(config["PublicUrl"]))
+            out, err = sudo_deploy(
+                client,
+                password,
+                current,
+                args.digest,
+                args.port,
+                public_url,
+                ops_url,
+            )
+            verified_health_url = verify_public_health(client, public_url)
         finally:
             client.close()
         if out:

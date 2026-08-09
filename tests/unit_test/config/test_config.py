@@ -20,6 +20,10 @@ from agent.llm.runtime import (
     create_optional_aliased_llm_provider,
 )
 from agent.protocols.llm import LLMConfigurationError
+from agent.runtime_config import (
+    RuntimeConfigurationError,
+    load_operations_terminal_config,
+)
 
 
 def _clear_zhice_env(monkeypatch):
@@ -110,6 +114,80 @@ def test_public_runtime_env_template_has_required_empty_keys_and_no_workspace_lo
     } <= assignments.keys()
     assert "ZHICE_AGENT_WORKSPACE" not in assignments
     assert set(assignments.values()) == {""}
+
+
+def _write_runtime_config(config_dir: Path, body: str) -> None:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yml").write_text(body, encoding="utf-8")
+
+
+def test_operations_terminal_config_defaults_disabled_and_accepts_safe_urls(tmp_path):
+    default = load_operations_terminal_config(tmp_path)
+    assert default.enabled is False
+    assert default.url == ""
+    assert default.presentation == "both"
+
+    _write_runtime_config(
+        tmp_path,
+        """schema_version: 1
+operations:
+  terminal:
+    enabled: true
+    url: https://ops.example.test
+    presentation: both
+""",
+    )
+    configured = load_operations_terminal_config(tmp_path)
+    assert configured.enabled is True
+    assert configured.url == "https://ops.example.test"
+    assert configured.presentation == "both"
+
+    _write_runtime_config(
+        tmp_path,
+        """schema_version: 1
+operations:
+  terminal:
+    enabled: true
+    url: http://127.0.0.1:7681
+    presentation: embed
+""",
+    )
+    assert load_operations_terminal_config(tmp_path).url == "http://127.0.0.1:7681"
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            "operations:\n  terminal:\n    enabled: true\n    url: ''\n",
+            "url is required",
+        ),
+        (
+            "operations:\n  terminal:\n    enabled: true\n    url: http://ops.example.test\n",
+            "must use HTTPS",
+        ),
+        (
+            "operations:\n  terminal:\n    enabled: true\n    url: https://user:pass@ops.example.test\n",
+            "must not contain credentials",
+        ),
+        (
+            "operations:\n  terminal:\n    enabled: true\n    url: https://ops.example.test/path?ticket=secret\n",
+            "must not contain query or fragment",
+        ),
+        (
+            "operations:\n  terminal:\n    enabled: true\n    url: https://ops.example.test/#terminal\n",
+            "must not contain query or fragment",
+        ),
+        (
+            "operations:\n  terminal:\n    enabled: true\n    url: https://ops.example.test\n    presentation: popup\n",
+            "must be new_tab, embed, or both",
+        ),
+    ],
+)
+def test_operations_terminal_config_rejects_unsafe_projection(tmp_path, body, message):
+    _write_runtime_config(tmp_path, f"schema_version: 1\n{body}")
+    with pytest.raises(RuntimeConfigurationError, match=message):
+        load_operations_terminal_config(tmp_path)
 
 
 def test_bootstrap_dotenv_loads_workspace_env_without_allowing_workspace_rebind(

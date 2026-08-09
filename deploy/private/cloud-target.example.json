@@ -5,5 +5,6 @@
   "SshPassword": "云服务器SSH登录密码",
   "RemoteOpsDir": "云服务器运维脚本目录",
   "PublicUrl": "公网访问地址",
+  "OpsUrl": "运维访问地址",
   "Port": 10086
 }

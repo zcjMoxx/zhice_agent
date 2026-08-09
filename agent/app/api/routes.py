@@ -6,6 +6,9 @@ import csv
 import inspect
 import io
 import json
+import re
+from collections.abc import Mapping
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from queue import Queue
 from threading import Thread
@@ -37,6 +40,7 @@ from agent.app.api.schemas import (
     ModelPreferenceRequest,
     ModelsResponse,
     MonitorActivityResponse,
+    OperationsTerminalResponse,
     PasswordChangeRequest,
     ProfileUpdateRequest,
     PublicUserResponse,
@@ -49,6 +53,9 @@ from agent.app.api.schemas import (
     SessionResponse,
     SessionsResponse,
     SessionSummaryResponse,
+    SkillSourcesResponse,
+    SkillSourceStatusResponse,
+    SkillSummaryResponse,
     SystemDiagnosticsResponse,
     ToolConfirmationResponse,
     ToolConfirmationsResponse,
@@ -62,12 +69,15 @@ from agent.auth.session_access import SessionAccessError
 from agent.auth.store import AuthStoreError, ExternalIdentityConflictError
 from agent.core.turns import new_turn_id
 from agent.message import Message
+from agent.operations.runtime import load_operations_runtime_state, state_from_environment
 from agent.protocols.auth import AuditEvent
 from agent.protocols.errors import ErrorCode
 from agent.protocols.llm import LLMConfigurationError, LLMProviderError
 from agent.protocols.runtime_event import is_runtime_event_payload
+from agent.runtime_config import RuntimeConfigurationError, load_operations_terminal_config
 
 router = APIRouter(prefix="/api")
+_SKILL_SOURCE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class ApiError(Exception):
@@ -932,6 +942,175 @@ def update_role(
     return RoleResponse(**role)
 
 
+@router.get("/admin/skills/sources", response_model=SkillSourcesResponse)
+def read_skill_sources(request: Request) -> SkillSourcesResponse:
+    """Return persistent source health and the actor-visible Skill catalog."""
+
+    actor = _actor(request, "skill.sources.read", channel="rest")
+    return _skill_sources_response(_runtime(request), actor)
+
+
+@router.post(
+    "/admin/skills/sources/{source}/sync",
+    response_model=AuthMutationResponse,
+)
+def sync_skill_source(source: str, request: Request) -> AuthMutationResponse:
+    """Synchronize one configured source and record only safe audit facts."""
+
+    source = _validated_skill_source_name(source)
+    actor = _actor(request, "skill.sync", channel="rest")
+    runtime = _runtime(request)
+    skill_sync = getattr(runtime, "skill_sync", None)
+    if skill_sync is None:
+        raise ApiError("SKILL_SYNC_UNAVAILABLE", "Skill synchronization is unavailable", 503)
+    _ensure_configured_skill_source(skill_sync, source)
+    try:
+        result = skill_sync.sync(source_names=[source])
+        errors = tuple(getattr(result, "errors", ()) or ())
+    except Exception as exc:  # noqa: BLE001 - raw source errors must not cross the API.
+        _audit_skill_source_action(
+            request,
+            actor,
+            action="skill.source.sync_failed",
+            source=source,
+            decision="error",
+            reason_code="SKILL_SYNC_FAILED",
+            error_type=type(exc).__name__,
+        )
+        raise ApiError(
+            "SKILL_SYNC_FAILED",
+            "Skill source synchronization failed",
+            status_code=502,
+        ) from exc
+    if errors:
+        _audit_skill_source_action(
+            request,
+            actor,
+            action="skill.source.sync_failed",
+            source=source,
+            decision="error",
+            reason_code="SKILL_SYNC_FAILED",
+        )
+        raise ApiError(
+            "SKILL_SYNC_FAILED",
+            "Skill source synchronization failed",
+            status_code=502,
+        )
+    loader = getattr(runtime, "skill_loader", None)
+    invalidate = getattr(loader, "invalidate", None)
+    if callable(invalidate):
+        invalidate(source=source)
+    _audit_skill_source_action(
+        request,
+        actor,
+        action="skill.source.sync_completed",
+        source=source,
+        decision="allow",
+    )
+    return AuthMutationResponse(status="synchronized")
+
+
+@router.post(
+    "/admin/skills/sources/{source}/refresh-index",
+    response_model=AuthMutationResponse,
+)
+def refresh_skill_source_index(source: str, request: Request) -> AuthMutationResponse:
+    """Invalidate one derived Skill index without changing source files."""
+
+    source = _validated_skill_source_name(source)
+    actor = _actor(request, "skill.sources.read", channel="rest")
+    runtime = _runtime(request)
+    _ensure_configured_skill_source(getattr(runtime, "skill_sync", None), source)
+    loader = getattr(runtime, "skill_loader", None)
+    invalidate = getattr(loader, "invalidate", None)
+    if not callable(invalidate):
+        raise ApiError("SKILL_INDEX_UNAVAILABLE", "Skill index is unavailable", 503)
+    try:
+        invalidate(source=source)
+    except Exception as exc:  # noqa: BLE001 - keep cache implementation details private.
+        raise ApiError(
+            "SKILL_INDEX_REFRESH_FAILED",
+            "Skill index refresh failed",
+            status_code=500,
+        ) from exc
+    _audit_skill_source_action(
+        request,
+        actor,
+        action="skill.index.refreshed",
+        source=source,
+        decision="allow",
+    )
+    return AuthMutationResponse(status="refreshed")
+
+
+@router.get("/admin/operations/terminal", response_model=OperationsTerminalResponse)
+def read_operations_terminal(request: Request) -> OperationsTerminalResponse:
+    """Project the configured independent Ops URL to the unique Owner only."""
+
+    actor = _actor(request, channel="rest")
+    if "owner" not in actor.role_keys:
+        _audit_operations_projection(
+            request,
+            actor,
+            action="server.operations.access_denied",
+            decision="deny",
+            reason_code="OWNER_REQUIRED",
+        )
+        raise ApiError(
+            ErrorCode.AUTH_PERMISSION_DENIED,
+            "Only Owner can access server operations",
+            status_code=403,
+            details={"required_role": "owner"},
+        )
+    config = getattr(request.app.state, "config", None)
+    config_dir = getattr(config, "config_dir", None)
+    state_dir = getattr(config, "state_dir", None)
+    if config_dir is None or state_dir is None:
+        raise ApiError(ErrorCode.CONFIG_INVALID, "runtime config is unavailable", 503)
+    runtime_state = load_operations_runtime_state(state_dir) or state_from_environment()
+    if runtime_state is not None:
+        response = OperationsTerminalResponse(
+            enabled=True,
+            configured=True,
+            url=runtime_state.url,
+            presentation=runtime_state.presentation,
+            mode=runtime_state.mode,
+            target_type=runtime_state.target_type,
+            target_name=runtime_state.target_name,
+        )
+        _audit_operations_projection(
+            request,
+            actor,
+            action="server.operations.entry_read",
+            decision="allow",
+        )
+        return response
+    try:
+        terminal = load_operations_terminal_config(config_dir)
+    except RuntimeConfigurationError as exc:
+        raise ApiError(
+            ErrorCode.CONFIG_INVALID,
+            "Operations terminal configuration is invalid",
+            status_code=503,
+        ) from exc
+    response = OperationsTerminalResponse(
+        enabled=terminal.enabled,
+        configured=bool(terminal.enabled and terminal.url),
+        url=terminal.url if terminal.enabled else "",
+        presentation=terminal.presentation,
+        mode="server_docker" if terminal.enabled else "",
+        target_type="container" if terminal.enabled else "",
+        target_name="zhice-agent" if terminal.enabled else "",
+    )
+    _audit_operations_projection(
+        request,
+        actor,
+        action="server.operations.entry_read",
+        decision="allow",
+    )
+    return response
+
+
 @router.get("/admin/monitor", response_model=AdminMonitorResponse)
 def read_admin_monitor(
     request: Request,
@@ -1203,6 +1382,206 @@ def deny_tool_confirmation(
     runtime = _runtime(request)
     status = _runtime_call(runtime, "decide_tool_confirmation", actor, confirmation_id, False)
     return ConfirmationMutationResponse(confirmation_id=confirmation_id, status=status)
+
+
+def _skill_sources_response(runtime, actor) -> SkillSourcesResponse:
+    status_service = getattr(runtime, "skill_status", None)
+    skill_loader = getattr(runtime, "skill_loader", None)
+    skill_sync = getattr(runtime, "skill_sync", None)
+    list_statuses = getattr(status_service, "list_statuses", None)
+    list_skills = getattr(skill_loader, "list_skills_for_actor", None)
+    if not callable(list_statuses) or not callable(list_skills):
+        raise ApiError(
+            "SKILL_STATUS_UNAVAILABLE",
+            "Skill source status is unavailable",
+            status_code=503,
+        )
+    try:
+        raw_statuses = list_statuses(skill_loader=skill_loader, skill_sync=skill_sync)
+        raw_skills = list_skills(actor)
+    except Exception as exc:  # noqa: BLE001 - management APIs return only safe summaries.
+        raise ApiError(
+            "SKILL_STATUS_UNAVAILABLE",
+            "Skill source status is unavailable",
+            status_code=503,
+        ) from exc
+    if isinstance(raw_statuses, Mapping):
+        raw_statuses = raw_statuses.get("sources", ())
+    sources = sorted(
+        (_public_skill_source_status(item) for item in (raw_statuses or ())),
+        key=lambda item: item.source,
+    )
+    skills = sorted(
+        (_public_skill_summary(item) for item in (raw_skills or ())),
+        key=lambda item: item.qualified_name,
+    )
+    return SkillSourcesResponse(sources=sources, skills=skills)
+
+
+def _public_skill_source_status(value: object) -> SkillSourceStatusResponse:
+    raw = _object_mapping(value)
+    source = _bounded_text(raw.get("source") or raw.get("name"), 100)
+    if not _SKILL_SOURCE_NAME_RE.fullmatch(source):
+        source = "unknown"
+    last_status = _bounded_text(raw.get("last_status") or raw.get("status"), 40) or "unknown"
+    health = _bounded_text(raw.get("health"), 40)
+    if not health:
+        health = {
+            "synced": "healthy",
+            "up_to_date": "healthy",
+            "success": "healthy",
+            "failed": "error",
+            "skipped": "disabled",
+        }.get(last_status, "unknown")
+    return SkillSourceStatusResponse(
+        source=source,
+        enabled=bool(raw.get("enabled", True)),
+        sync_enabled=bool(raw.get("sync_enabled", raw.get("sync", True))),
+        configured_target=_bounded_text(raw.get("configured_target") or raw.get("target"), 160),
+        current_commit=_bounded_text(raw.get("current_commit") or raw.get("commit"), 80),
+        last_sync_started_at=_bounded_text(raw.get("last_sync_started_at"), 64),
+        last_sync_finished_at=_bounded_text(raw.get("last_sync_finished_at"), 64),
+        last_success_at=_bounded_text(raw.get("last_success_at"), 64),
+        last_status=last_status,
+        health=health,
+        skill_count=_non_negative_int(raw.get("skill_count", raw.get("skills", 0))),
+        load_error_count=_non_negative_int(raw.get("load_error_count", 0)),
+        last_error_code=_bounded_text(raw.get("last_error_code"), 100),
+        last_error_message_safe=_bounded_text(raw.get("last_error_message_safe"), 500),
+    )
+
+
+def _public_skill_summary(value: object) -> SkillSummaryResponse:
+    raw = _object_mapping(value)
+    source = _bounded_text(raw.get("source"), 100)
+    name = _bounded_text(raw.get("name"), 100)
+    qualified_name = _bounded_text(raw.get("qualified_name"), 220)
+    if not qualified_name and source and name:
+        qualified_name = f"{source}/{name}"
+    runtime = raw.get("runtime")
+    metadata = raw.get("metadata")
+    metadata_runtime = metadata.get("runtime") if isinstance(metadata, Mapping) else None
+    return SkillSummaryResponse(
+        qualified_name=qualified_name,
+        source=source,
+        name=name,
+        description=_bounded_text(raw.get("description") or raw.get("summary"), 500),
+        executable=bool(raw.get("executable", runtime is not None or metadata_runtime is not None)),
+    )
+
+
+def _object_mapping(value: object) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    as_dict_method = getattr(value, "as_dict", None)
+    if callable(as_dict_method):
+        result = as_dict_method()
+        return result if isinstance(result, Mapping) else {}
+    if is_dataclass(value):
+        result = asdict(value)
+        return result if isinstance(result, Mapping) else {}
+    attributes = getattr(value, "__dict__", None)
+    return attributes if isinstance(attributes, Mapping) else {}
+
+
+def _bounded_text(value: object, limit: int) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    return text[:limit]
+
+
+def _non_negative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _validated_skill_source_name(source: str) -> str:
+    normalized = str(source or "").strip()
+    if not _SKILL_SOURCE_NAME_RE.fullmatch(normalized):
+        raise ApiError(
+            ErrorCode.REQUEST_VALIDATION_FAILED,
+            "Invalid Skill source name",
+            status_code=400,
+        )
+    return normalized
+
+
+def _ensure_configured_skill_source(skill_sync, source: str) -> None:
+    load = getattr(skill_sync, "load", None)
+    if not callable(load):
+        raise ApiError("SKILL_SYNC_UNAVAILABLE", "Skill synchronization is unavailable", 503)
+    try:
+        _settings, sources = load()
+    except Exception as exc:  # noqa: BLE001 - configuration details stay server-side.
+        raise ApiError(
+            "SKILL_SOURCE_CONFIG_INVALID",
+            "Skill source configuration is invalid",
+            status_code=503,
+        ) from exc
+    if source not in {str(getattr(item, "name", "")) for item in sources}:
+        raise ApiError(
+            "SKILL_SOURCE_NOT_CONFIGURED",
+            "Skill source is not configured",
+            status_code=404,
+        )
+
+
+def _audit_skill_source_action(
+    request: Request,
+    actor,
+    *,
+    action: str,
+    source: str,
+    decision: str,
+    reason_code: str = "",
+    error_type: str = "",
+) -> None:
+    auth = _auth_service(request)
+    if auth is None or auth.audit_sink is None:
+        return
+    metadata = {"source": source}
+    if error_type:
+        metadata["error_type"] = _bounded_text(error_type, 100)
+    auth.audit_sink.record(
+        AuditEvent(
+            action=action,
+            resource_type="skill_source",
+            actor=actor,
+            resource_id=source,
+            request_id=_request_id(request),
+            channel="rest",
+            route=request.url.path,
+            decision=decision,
+            reason_code=reason_code,
+            metadata=metadata,
+        )
+    )
+
+
+def _audit_operations_projection(
+    request: Request,
+    actor,
+    *,
+    action: str,
+    decision: str,
+    reason_code: str = "",
+) -> None:
+    auth = _auth_service(request)
+    if auth is None or auth.audit_sink is None:
+        return
+    auth.audit_sink.record(
+        AuditEvent(
+            action=action,
+            resource_type="server_operations",
+            actor=actor,
+            request_id=_request_id(request),
+            channel="rest",
+            route=request.url.path,
+            decision=decision,
+            reason_code=reason_code,
+        )
+    )
 
 
 def _runtime(request: Request):

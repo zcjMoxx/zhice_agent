@@ -254,7 +254,7 @@ def test_chat_stream_api_uses_runtime_streaming_events(tmp_path):
 
 
 def test_chat_stream_api_forwards_runtime_events(tmp_path):
-    runtime = _FakeRuntime(runtime_events=[_runtime_event("llm.started", 4)])
+    runtime = _FakeRuntime(runtime_events=[_runtime_event("skill.progress", 4)])
     client = _client(tmp_path, runtime)
 
     response = client.post(
@@ -265,7 +265,8 @@ def test_chat_stream_api_forwards_runtime_events(tmp_path):
     events = _parse_sse(response.text)
     turn_id = events[0][1]["turn_id"]
     runtime_payload = next(payload for name, payload in events if name == "runtime")
-    assert runtime_payload["type"] == "llm.started"
+    assert runtime_payload["type"] == "skill.progress"
+    assert runtime_payload["skill_run_id"] == "skill-run-1"
     assert runtime_payload["turn_id"] == turn_id
     assert runtime_payload["sequence"] == 4
 
@@ -619,6 +620,7 @@ def _runtime_event(event_type: str, sequence: int) -> dict:
         "request_id": "",
         "tool_call_id": "",
         "tool_call_record_id": "",
+        "skill_run_id": "skill-run-1",
         "parent_event_id": "",
         "display": {"title": "正在请求模型"},
         "ui_metadata": {},

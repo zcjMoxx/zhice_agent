@@ -42,7 +42,7 @@
 - WebSocket accepted, text, done, stopped, and error events carry the aligned turn id.
 - Session history API exposes optional message turn fields.
 - SSE status, delta, done, stopped, and error payloads carry one consistent turn id.
-- WS 使用 `runtime_event` 信封转发 RuntimeEvent；SSE 使用 `event: runtime`，均保持旧 text/status/interaction 兼容。
+- WS 使用 `runtime_event` 信封转发 RuntimeEvent；SSE 使用 `event: runtime`，`skill.*` 的 `skill_run_id` 也必须原样保留，且均保持旧 text/status/interaction 兼容。
 - 浏览器 RuntimeEvent reducer 按 turn_id + sequence 忽略旧状态，并在 terminal turn Event 清理运行状态。
 - Subagent child RuntimeEvent 按 root session/turn 归并，并按 agent/task 维护独立 sequence 与并行任务状态，不能跨 child 用同一 sequence 覆盖。
 - Web `/help` 只新增顶层 `/subagent`；裸命令显示 mode、force-once、可用 Profile，并在 Tip 中提示 `auto/off/once`。`/clear` 与清空当前 Session 只清 one-shot、保留 mode；旧 `/reset` 不再支持。QQ群帮助展示 `/clear`。
@@ -54,7 +54,8 @@
 
 - Gateway logging options split Agent lifecycle log, HTTP access log, HTTP server log, and workspace trace log.
 - Terminal Agent log lines use `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` without milliseconds；TTY 下 WARNING 整行使用高亮红色，ERROR/CRITICAL 整行使用红色，普通日志继续按组件着色。
-- Workspace trace writes JSONL to `logs/YYYY-MM-DD/trace.log` with `component` and no full internal logger name.
+- Workspace trace writes JSONL to `logs/log-YYYY-MM-DD.jsonl` with `component` and no full internal logger name.
+- 本地 Ops supervisor 的受控 Gateway child 可在 PIPE 后恢复原终端 ANSI 配色；`NO_COLOR` 仍具有最高优先级。
 - Logging configuration is idempotent and can disable terminal Agent logs while keeping trace on.
 - Preview helpers redact sensitive fields, collapse multiline text, and truncate long values.
 - WebRuntime relies on `turn.start/done` for ordinary chat lifecycle and only keeps Web stop/error, cancel, Session mutation, real model changes, and background Memory extraction events.
@@ -104,6 +105,13 @@
 - `GET /api/admin/diagnostics` 独立要求 `diagnostics.system.use`；Owner 默认可查，普通角色不能用 `turn.read.any` 替代该权限，并支持 component/error_code 等有界筛选。
 - `GET /api/audit/events` 保持旧 `limit/session_id/turn_id` 兼容，并增加事件、操作者、结果、时间和 cursor 筛选；`audit.export` 独立保护 CSV 导出。
 - Gateway lifespan 对同一 workspace 持有跨平台单实例锁；关闭时拒绝新 Turn、取消 active Turn 与 MCP 调用，并在释放锁前关闭渠道、Memory 和 MCP。
+
+## Part 18B Skill 与 Ops Web 投影覆盖
+
+- `GET /api/admin/skills/sources`独立要求`skill.sources.read`，只返回持久source状态、安全错误摘要和当前actor可见Skill，不泄露路径、仓库URL或原始stderr。
+- 单source同步继续独立要求`skill.sync`；索引刷新要求source读取权限；两者拒绝非法source名并只记录source、结果和安全错误类型审计。
+- 被显式授予Skill权限的Admin可管理source；普通用户拒绝；`GET /api/admin/operations/terminal`即使对Admin也拒绝，只允许唯一Owner。
+- Ops API只投影`enabled/configured/url/presentation/mode/target_type/target_name`，运行态 endpoint 优先于静态配置；不代理日志、Docker 动作、重启、终端字节流或宿主机认证信息。
 
 ## Part 10 Memory Coverage
 

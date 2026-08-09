@@ -318,7 +318,7 @@ channels:
         max_attachment_bytes: 20971520
 ```
 
-`web_base_url` 是账号级绑定入口。`http://127.0.0.1:10086` 只作为未显式配置时的本地开发默认值；公网启用 QQ 时，每个账号都必须在实际部署配置中显式填写真实 HTTPS 地址。当前云端 `main` 账号使用 `https://agent.zouzhou.xyz`。Adapter 不从全局部署目标推导该字段，也不改变本地默认语义。
+`web_base_url` 是账号级绑定入口。`http://127.0.0.1:10086` 只作为未显式配置时的本地开发默认值；公网启用 QQ 时，每个账号都必须在私有部署配置中显式填写与 `PublicUrl` 对齐的真实 HTTPS 地址。Adapter 不从公开模板推导该字段，也不改变本地默认语义。
 
 ### 9.2 Secret 规则
 
@@ -427,7 +427,7 @@ Web 个人设置只提供一个“生成 QQ 一次性绑定码”按钮，显示
 5. 已登录用户打开链接时直接完成绑定；
 6. token 只保存 hash，默认 10 分钟过期、单次消费，URL 不包含 OpenID、AppID 或内部用户 id。
 
-生产部署必须保证生成链接中的 `web_base_url` 是 QQ 用户设备可访问的公网 HTTPS origin。若云端账号遗漏该字段，配置加载会回退到本地 loopback 默认值，链接虽然格式正确却无法从手机访问。当前修复保持 Adapter 直接消费账号配置，仅在云端私有账号配置中显式设置公网地址；临时 Cloudflare Tunnel 使用 `https://chat.zouzhou.xyz`，备案域名启用后再切回正式地址。详细记录见 `docs_design/2026-08-04-qq-public-binding-url-deployment-fix.md`。
+生产部署必须保证生成链接中的 `web_base_url` 是 QQ 用户设备可访问的公网 HTTPS origin。若云端账号遗漏该字段，配置加载会回退到本地 loopback 默认值，链接虽然格式正确却无法从手机访问。当前修复保持 Adapter 直接消费账号配置，仅在云端私有账号配置中显式设置公网地址；临时 Tunnel 与后续正式域名的切换都只修改私有配置。详细记录见 `docs_design/2026-08-04-qq-public-binding-url-deployment-fix.md`。
 
 移动端绑定闭环采用独立 `/bind/qq` 页面持有 token、认证状态变化后自动消费的流程；成功与失败均原地给出任务结果，失败时保留大号重试入口。手机设置页继续使用单列全屏布局，绑定输入与按钮上下两行，详见 `docs_design/2026-08-08-mobile-channel-binding-ux-design.md`。
 

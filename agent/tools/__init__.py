@@ -3,8 +3,9 @@
 from pathlib import Path
 
 from agent.protocols.memory import MemoryStore
-from agent.protocols.skill import SkillProvider
+from agent.protocols.skill import SkillExecutor, SkillProvider
 from agent.protocols.tool import Tool
+from agent.skills.executor import PythonSkillExecutor
 from agent.skills.sync import SkillSourceSync
 from agent.tools.discovery import DiscoverableToolProvider, with_tool_discovery
 from agent.tools.exec import ExecTool
@@ -14,7 +15,7 @@ from agent.tools.memory import MemoryReadTool, MemoryWriteTool
 from agent.tools.readonly import GrepTool, ListDirTool, ReadFileTool
 from agent.tools.registry import ToolRegistry
 from agent.tools.scoped import UserScopedToolProvider
-from agent.tools.skill import LoadSkillsTool, SyncSkillsTool
+from agent.tools.skill import LoadSkillsTool, RunSkillTool, SyncSkillsTool
 from agent.tools.subagent import AugmentedToolProvider, DelegateTasksTool
 
 
@@ -22,6 +23,7 @@ def create_default_tool_registry(
     workspace: Path | str,
     skills: SkillProvider | None = None,
     skill_sync: SkillSourceSync | None = None,
+    skill_executor: SkillExecutor | None = None,
     *,
     allow_confirmable_exec: bool = False,
     memory_store: MemoryStore | None = None,
@@ -39,8 +41,9 @@ def create_default_tool_registry(
     ]
     if skills is not None:
         tools.append(LoadSkillsTool(workspace_path, skills))
+        tools.append(RunSkillTool(workspace_path, skills, skill_executor or PythonSkillExecutor()))
     if skill_sync is not None:
-        tools.append(SyncSkillsTool(workspace_path, skill_sync))
+        tools.append(SyncSkillsTool(workspace_path, skill_sync, skills))
     if memory_store is not None and memory_safety is not None:
         tools.extend(
             [
@@ -69,6 +72,7 @@ __all__ = [
     "MemoryWriteTool",
     "McpToolAdapter",
     "ReadFileTool",
+    "RunSkillTool",
     "SyncSkillsTool",
     "ToolRegistry",
     "UserScopedToolProvider",

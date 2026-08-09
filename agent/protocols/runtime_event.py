@@ -25,6 +25,10 @@ RUNTIME_EVENT_STATUS_BY_TYPE = {
     "tool.completed": "completed",
     "tool.failed": "failed",
     "tool.waiting_confirmation": "waiting",
+    "skill.started": "started",
+    "skill.progress": "started",
+    "skill.completed": "completed",
+    "skill.failed": "failed",
 }
 RUNTIME_EVENT_TYPES = frozenset(RUNTIME_EVENT_STATUS_BY_TYPE)
 RUNTIME_EVENT_STATUSES = frozenset(RUNTIME_EVENT_STATUS_BY_TYPE.values())
@@ -74,6 +78,7 @@ class RuntimeEvent:
     request_id: str = ""
     tool_call_id: str = ""
     tool_call_record_id: str = ""
+    skill_run_id: str = ""
     parent_event_id: str = ""
     agent_id: str = ""
     parent_agent_id: str = ""
@@ -112,6 +117,7 @@ class RuntimeEvent:
             ("request_id", self.request_id),
             ("tool_call_id", self.tool_call_id),
             ("tool_call_record_id", self.tool_call_record_id),
+            ("skill_run_id", self.skill_run_id),
             ("parent_event_id", self.parent_event_id),
             ("agent_id", self.agent_id),
             ("parent_agent_id", self.parent_agent_id),
@@ -149,6 +155,7 @@ class RuntimeEvent:
             "request_id": self.request_id,
             "tool_call_id": self.tool_call_id,
             "tool_call_record_id": self.tool_call_record_id,
+            "skill_run_id": self.skill_run_id,
             "parent_event_id": self.parent_event_id,
             "agent_id": self.agent_id,
             "parent_agent_id": self.parent_agent_id,
@@ -169,6 +176,12 @@ class RuntimeEventSink(Protocol):
     """Consume one validated RuntimeEvent without owning transport semantics."""
 
     def emit(self, event: RuntimeEvent) -> None: ...
+
+
+class RuntimeEventPublisher(Protocol):
+    """Publish one event while owning turn-local sequence allocation."""
+
+    def emit(self, event_type: str, **kwargs: Any) -> RuntimeEvent | None: ...
 
 
 def is_runtime_event_payload(value: object) -> bool:

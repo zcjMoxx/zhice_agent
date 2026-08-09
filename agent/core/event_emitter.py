@@ -61,6 +61,7 @@ class RuntimeEventEmitter:
         *,
         tool_call_id: str = "",
         tool_call_record_id: str = "",
+        skill_run_id: str = "",
         parent_event_id: str = "",
         display: dict[str, Any] | None = None,
         ui_metadata: dict[str, Any] | None = None,
@@ -85,6 +86,7 @@ class RuntimeEventEmitter:
                 request_id=self.request_id,
                 tool_call_id=tool_call_id,
                 tool_call_record_id=tool_call_record_id,
+                skill_run_id=skill_run_id,
                 parent_event_id=parent_event_id,
                 agent_id=str(self.scope.get("agent_id") or ""),
                 parent_agent_id=str(self.scope.get("parent_agent_id") or ""),
@@ -132,6 +134,7 @@ def callback_runtime_event_sink(
 
 def _default_display(event_type: str, metadata: dict[str, Any]) -> dict[str, str]:
     tool_name = str(metadata.get("tool_name") or "工具")
+    skill_name = str(metadata.get("skill_name") or "Skill")
     reason = str(metadata.get("reason") or "")
     titles = {
         "turn.started": "已接收问题",
@@ -150,12 +153,17 @@ def _default_display(event_type: str, metadata: dict[str, Any]) -> dict[str, str
         "tool.completed": "命令执行完成" if tool_name == "exec" else f"{tool_name} 执行完成",
         "tool.failed": "命令执行失败" if tool_name == "exec" else f"{tool_name} 执行失败",
         "tool.waiting_confirmation": "等待操作确认",
+        "skill.started": f"正在运行 {skill_name}",
+        "skill.progress": f"{skill_name} 运行中",
+        "skill.completed": f"{skill_name} 已完成",
+        "skill.failed": f"{skill_name} 运行失败",
     }
     icons = {
         "turn": "turn",
         "context": "context",
         "llm": "model",
         "tool": "tool",
+        "skill": "skill",
     }
     prefix = event_type.partition(".")[0]
     return {

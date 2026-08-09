@@ -244,7 +244,18 @@ def test_vue_source_uses_single_initials_node_and_part16_surfaces():
 
     assert '<span class="user-avatar" aria-hidden="true">{{ initials }}</span>' in avatar
     assert all(name in settings for name in ("常规", "个性化", "个人资料", "账号与安全", "渠道连接"))
-    assert all(name in admin for name in ("概览", "账号管理", "角色与权限", "运行诊断", "高级设置"))
+    assert all(
+        name in admin
+        for name in (
+            "概览",
+            "账号管理",
+            "角色与权限",
+            "Skills",
+            "运行诊断",
+            "服务器运维",
+            "高级设置",
+        )
+    )
     assert "近期运行记录" in admin
     assert "普通运行错误请到运行诊断查看" in admin
 
@@ -397,7 +408,7 @@ def test_run_gateway_prints_trace_log_after_http_logs(tmp_path, capsys, monkeypa
     monkeypatch.setattr(
         "agent.app.gateway.configure_gateway_logging",
         lambda _options, *, logs_dir: GatewayLoggingResult(
-            trace_path=logs_dir / "2026-07-08" / "trace.log"
+            trace_path=logs_dir / "log-2026-07-08.jsonl"
         ),
     )
     monkeypatch.setattr("agent.app.gateway._OrderedGatewayServer.run", lambda _self: None)
@@ -411,13 +422,38 @@ def test_run_gateway_prints_trace_log_after_http_logs(tmp_path, capsys, monkeypa
     assert agent_index < http_index < trace_index
 
 
+def test_run_gateway_forwards_supervisor_color_override_to_uvicorn(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    captured = {}
+
+    monkeypatch.setenv("ZHICE_FORCE_TERMINAL_COLOR", "1")
+    monkeypatch.setattr("agent.app.gateway.build_web_runtime", lambda _config: _FakeRuntime())
+    monkeypatch.setattr(
+        "agent.app.gateway.configure_gateway_logging",
+        lambda _options, *, logs_dir: GatewayLoggingResult(
+            trace_path=logs_dir / "log-2026-08-09.jsonl"
+        ),
+    )
+
+    def capture(server):
+        captured["use_colors"] = server.config.use_colors
+
+    monkeypatch.setattr("agent.app.gateway._OrderedGatewayServer.run", capture)
+
+    run_gateway(config, log_options=GatewayLogOptions())
+
+    assert captured["use_colors"] is True
+
+
 def test_run_gateway_swallows_keyboard_interrupt_during_server_shutdown(tmp_path, monkeypatch):
     config = _config(tmp_path)
 
     monkeypatch.setattr("agent.app.gateway.build_web_runtime", lambda _config: _FakeRuntime())
     monkeypatch.setattr(
         "agent.app.gateway.configure_gateway_logging",
-        lambda _options, *, logs_dir: GatewayLoggingResult(trace_path=logs_dir / "trace.log"),
+        lambda _options, *, logs_dir: GatewayLoggingResult(
+            trace_path=logs_dir / "log-2026-07-08.jsonl"
+        ),
     )
 
     def interrupt(_self):
@@ -516,6 +552,7 @@ def test_cli_gateway_check_does_not_start_gateway(tmp_path, monkeypatch, capsys)
 
 def test_cli_gateway_passes_split_log_options(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("ZHICE_OPS_MODE", "local_docker")
     captured = {}
 
     def capture_gateway(config, **kwargs):

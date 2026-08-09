@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经完成到 Part 17 运行可靠性、系统级诊断与私有镜像部署实现。主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码已具备 Part 18 正式 Skill Runtime、Skill source 管理与多运行形态 restricted Ops：本地终端自动 supervisor、本地 Docker sidecar、服务器 systemd Ops 分别监控实际启动目标，并统一提供“监控面板 / 运维终端”双视图；本地进程、Docker sidecar 与服务器 HTTP/认证链已完成真实 smoke，浏览器 ttyd WebSocket/iframe 等外部行为继续按环境边界单列。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -11,10 +11,11 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - 多轮 tool calling
 - Turn-scoped `discover_tools` 按需发现与动态 Tool schema 激活；模型不再首轮接收全部业务 Tool
 - 受限 `exec`、`read_file`、`list_dir`、`grep`
-- Skill source 同步、SkillLoader、`load_skills` 和 `sync_skills`
+- Skill source 同步、状态/commit/健康/索引缓存与权限过滤，SkillLoader、`load_skills`、`sync_skills` 和正式 `run_skill`
+- 指令型/可执行型 Skill 并存，显式 Python runtime、`ndjson-v1`、SkillExecutor、ProgressSink、取消/timeout/输出上限/进程树回收和 `skill.*` RuntimeEvent
 - CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道，以及支持安全 Markdown、KaTeX 公式和明暗曜石主题的 Vue Web UI
 - `turn_id` / `turn_index` 持久化、WebSocket turn 对齐、预算内完整 Session 历史、确定性历史查询、结构化 compaction、SQLite FTS/embedding 混合检索和 endpoint token 预算
-- Gateway / Agent 分层运行日志、Web/QQ/微信渠道启动结果、终端时间戳格式和 workspace `logs/YYYY-MM-DD/trace.log`
+- Gateway / Agent 分层运行日志、Web/QQ/微信渠道启动结果、终端时间戳格式和 workspace `logs/log-YYYY-MM-DD.jsonl`
 - SQLite 本地用户、角色、特权权限、可撤销登录态、唯一永久 Owner、Owner 管理权委派、普通用户自助注册和个人设置
 - 用户上下文目录、session owner/index、session 级模型偏好和 call-scoped provider
 - 登录用户基础能力、跨用户/管理/审计特权、高风险 `exec` 明确确认、独立 Runtime Activity/Security Audit 和当前 Session 自助诊断
@@ -25,8 +26,9 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码能力已经�
 - `/subagent` 的 `auto/off/once` Session 语义、Web child task 状态和可选能力结构化启动告警
 - 中性 Channel 协议、外部身份绑定、持久 conversation route/event receipt，以及 QQ 私聊/群聊 `@` WebSocket adapter
 - 微信 `channel_accounts` 所有权、本人扫码 API/UI、stdio NDJSON Node sidecar、基于腾讯 `2.4.6` 审计来源的 direct-text Transport 和多用户隔离
+- Owner-only Skills/Ops 管理入口、运行态 Ops endpoint、新窗口与 iframe 回退，共享监控/终端双视图、本地 loopback supervisor、固定 Docker sidecar，以及宿主机 Caddy/dashboard/ttyd、restricted `zhice-ops-shell`、复用既有 Cloudflare Tunnel 的服务器双层 Basic Auth 和跨 Digest 持久配置链
 
-当前仍保持轻量边界：已有本地多用户、QQ/微信渠道和私有镜像部署，但不等于生产级公网鉴权或托管平台；项目还没有 OAuth/SSO、组织/租户、多 workspace 隔离、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge 或 Skill 市集。MCP Runtime 从 `config.yml` 的 `mcp.servers` 读取常见 MCP server 字段，通过 `tools/list` 自动暴露有效 Tool，并支持 stdio、Streamable HTTP、旧 SSE、直接/env credential、OAuth token refresh、Elicitation 和 `/mcp`。配置、credential、Catalog、连接和 stdio 进程由 workspace 共享；artifact 按当前 actor 写入本人目录。stdio 已强制使用专用临时 cwd、最小环境、无 shell 和 Job Object 回收，但 Windows OS 级读取隔离仍是后续硬化项。Part 12 已完成 turn/context/LLM/tool RuntimeEvent、WebSocket/SSE/CLI 与前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime；Hook 只能增加业务阻断、修改后重新走核心校验或补充安全 display/ui_metadata，不能降低 RBAC、危险确认、workspace guard、timeout、脱敏或 SSRF。Part 13 在此基线上增加同步 Provider 下的有界线程并行、父能力交集、独立 child 运行态和 workspace lease。SkillExecutor、`skill.*` 和 ProgressSink 属于未来 Skill Runtime / Part 18。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口。
+当前仍保持轻量边界：已有本地多用户、QQ/微信渠道、私有镜像部署和受限单机 Ops，但不等于生产级托管平台；项目没有面向公网的 OAuth/SSO、组织/租户、多 workspace 隔离、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge、Skill 市场、多服务器管理、多 profile 初始化、keyring/Secret Manager、CLI Session 管理或宿主机通用 Shell。Part 12 的 turn/context/LLM/tool RuntimeEvent 与 Hook 安全边界继续有效；Part 18 在独立 SkillExecutor 中增加 `skill.*` 和 ProgressSink，不从 `exec.command` 猜 Skill。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口；主 Web 只投影独立 Ops URL，不代理 PTY/WebSocket、Docker、日志或重启。
 
 Tool capability selection 已从原可靠性路线提前进入当前基线。每个 CLI/Web/child Turn 首次只向模型提供 `discover_tools`；模型判断需要真实能力时先查询并激活最小 Tool 集合，下一模型步才收到这些具体 schema。Catalog 在 actor RBAC 和 Subagent Profile 过滤之后生成，未激活 Tool 即使被编造也返回 `TOOL_NOT_ACTIVATED`；实际 Tool 仍经过确认、Hook、workspace guard 和审计。Session JSONL 保存完整历史真值；CLI、Web、external WebSocket、QQ 和微信共用同一 `ContextBuilder/ContextPlanner`：预算允许时携带全部完整 Turn，明确历史元问题确定性扫描当前 Session，超长历史使用结构化 compaction、连续 recent raw Turn 和 SQLite FTS5/BM25 + embedding BLOB 精确 cosine + entity/anchor/recency 混合召回。每次初始/工具结果 LLM 调用前都把实际 Tool schema 纳入 failover-safe endpoint token 预算。child 使用新鲜独立 Session 上下文，不能读取父 Session 索引，但继承父 Turn 的同一输入预算。
 
@@ -352,6 +354,16 @@ zcagent auth init-owner
 zcagent gateway
 ```
 
+普通终端启动会先在 `127.0.0.1:17681..17690` 选择可用端口并启动本地 Ops supervisor，再由 supervisor 创建 Gateway child；终端会打印实际 Ops URL。Ops 固定监控本次 `zcagent-gateway`，共享页面可在“监控面板 / 运维终端”间切换；本地终端只允许 status/logs/logs-follow/diagnose/restart/help/exit，不接受 Bash、Docker、sudo 或服务器配置命令。Gateway stdout/stderr 会同时 tee 到原 PowerShell 和浏览器的有界终端缓冲：PowerShell 保留时间、动作与告警配色，Ops 页面使用安全 DOM 对去 ANSI 后的同一批人类可读日志分段着色，不直接展示结构化 JSONL；日志默认每秒跟随并滚动到底部，向上翻阅会暂停，点击“继续跟随”立即恢复并拉取最新日志。页面使用暗色细圆角滚动条，不保留重复的手动刷新按钮，诊断、暂停和重启均提供明确反馈。`zcagent gateway --check` 只检查配置，不启动 Ops。
+
+本地 Docker 使用：
+
+```bash
+docker compose -f deploy/docker-compose.yml up --build
+```
+
+Compose 固定启动 `zhice-agent` 与 `zhice-agent-ops`，默认入口分别为 `http://127.0.0.1:10086` 和 `http://127.0.0.1:17681`；可通过本地环境的 `ZHICE_PORT`、`ZHICE_OPS_PORT` 覆盖端口。sidecar 复用相同双视图页面和通用 restricted 命令，只监控固定 Agent 容器。
+
 普通用户可以在 Owner 初始化前后通过 “Create account” 注册，新账号固定获得 `viewer`，不能通过请求字段自选权限。唯一 Owner 可在服务器运行 `zcagent auth init-owner` 创建；云端如需 Web 初始化，应注入随机 `ZHICE_AGENT_SETUP_TOKEN`，再访问隐藏入口 `http://127.0.0.1:10086/_setup`。Web 用户名固定为 `owner`，页面只填写一次 Owner 密码和一次 setup credential。普通登录页和账号菜单不展示该入口。
 
 用户在 Account settings 修改密码成功后，当前及其它登录态会全部撤销，浏览器立即返回登录页，必须使用新密码重新登录。
@@ -375,7 +387,7 @@ QQ 是所有用户共用的单机器人，只有真实 botpy `on_ready` 后才�
 终端中的实际耗时会自动显示为 `500ms`、`1.25s`、`3m20s` 或 `1h5m5s`；trace 仍保留原始 `duration_ms` 数值。
 
 ```text
-${ZHICE_AGENT_WORKSPACE}/logs/YYYY-MM-DD/trace.log
+${ZHICE_AGENT_WORKSPACE}/logs/log-YYYY-MM-DD.jsonl
 ```
 
 常用日志开关：

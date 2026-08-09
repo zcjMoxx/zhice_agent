@@ -25,7 +25,7 @@
 
 - `AgentLoop` / `WebRuntime` / tool dispatch 运行日志都带 `session_id` 和 `turn_id`。
 - 终端日志使用 `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields`。
-- workspace trace 写入 `${ZHICE_AGENT_WORKSPACE}/logs/YYYY-MM-DD/trace.log`。
+- workspace trace 写入 `${ZHICE_AGENT_WORKSPACE}/logs/log-YYYY-MM-DD.jsonl`。
 
 这些能力让后续权限审计有了稳定运行边界。现在缺口集中在身份和执行授权：
 
@@ -188,12 +188,12 @@ SessionAccessService
 ${ZHICE_AGENT_WORKSPACE}/
   config/
     llm_endpoints.json
-    skill_sources.yml
+    config.yml  # skills 等统一运行配置
   prompts/
   extends/
   logs/
     YYYY-MM-DD/
-      trace.log
+      log-YYYY-MM-DD.jsonl
   state/
     auth.sqlite3
   contexts/
@@ -664,7 +664,7 @@ CREATE INDEX idx_audit_session_turn ON audit_events(session_id, turn_id);
 
 Audit 与 trace 的分工：
 
-- `trace.log` 面向运行排查，主要回答“这一轮发生了什么”。
+- 每日结构化 JSONL 面向运行排查，主要回答“这一轮发生了什么”。
 - `audit_events` 面向安全审计，主要回答“谁在什么时候对什么资源做了什么，决策是什么”。
 
 ---
@@ -1186,7 +1186,7 @@ HTTP access / gateway 事件未必都有 `turn_id`，例如登录失败、WebSoc
 
 ### 12.5 用户可见诊断工具
 
-普通用户不能直接读取 raw `trace.log`，但可以在当前对话中让 Agent 自助诊断自己的近期问题：
+普通用户不能直接读取 raw 每日 JSONL 日志，但可以在当前对话中让 Agent 自助诊断自己的近期问题：
 
 ```text
 diagnose_my_recent_activity
@@ -1747,7 +1747,7 @@ channel = cli
 
    如果 auth DB 已存在，CLI 高风险工具确认仍应写 audit，但不因此获得 `contexts/users/{user_id}`。
 7. 已有 CLI 全局 JSONL session 不在初始化 Owner 时移动或复制；Owner 只补全局 session index，普通用户不接管这些历史。
-8. 旧 `trace.log` 保持不变，不需要回填 actor；新 trace 事件尽量写 actor/request/session/turn/channel 字段。
+8. 历史 `trace.log` 在升级时迁移为 `log-YYYY-MM-DD.jsonl`，不需要回填 actor；新 trace 事件继续尽量包含 actor/request/session/turn/channel 字段。
 9. 现有 session JSONL message schema 不新增强制字段，避免破坏历史读取。
 10. 聊天正文和 session 模型偏好都不迁入 SQLite；SQLite 只保存身份、权限、session 索引、turn/tool 运行记录、confirmation 和 audit。模型偏好保存在对应 `sessions_meta/{session_id}.json`。
 11. 外部渠道历史不直接生成用户目录；必须先通过 `external_identities` 映射到内部 `user_id`。

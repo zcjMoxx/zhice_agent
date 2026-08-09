@@ -4,7 +4,11 @@ import json
 from datetime import datetime
 
 from agent.auth.activity import SqliteRuntimeActivitySink
-from agent.auth.diagnostics import RecentActivityDiagnostics, SystemDiagnosticsService
+from agent.auth.diagnostics import (
+    RecentActivityDiagnostics,
+    SystemDiagnosticsService,
+    _trace_paths,
+)
 from agent.auth.store import SQLiteAuthStore
 from agent.protocols.activity import RuntimeActivityEvent
 from agent.protocols.auth import ActorContext
@@ -358,6 +362,18 @@ def test_generic_subagent_failure_without_child_terminal_is_not_high_confidence(
     assert "no correlated child terminal failure" in report["limitations"][0]
 
 
+def test_trace_paths_read_only_daily_jsonl_files(tmp_path):
+    today = datetime.now().astimezone()
+    logs_dir = tmp_path / "logs"
+    legacy = logs_dir / today.date().isoformat() / "trace.log"
+    current = logs_dir / f"log-{today.date().isoformat()}.jsonl"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("{}\n", encoding="utf-8")
+    current.write_text("{}\n", encoding="utf-8")
+
+    assert _trace_paths(logs_dir, today) == [current]
+
+
 def test_child_trace_correlation_keeps_actor_boundary(tmp_path):
     store, actor = _store_and_actor(tmp_path)
     other = store.create_user("other", "Other", "other-password", role_keys=["viewer"])
@@ -477,7 +493,7 @@ def _record_delegate_failure(activity, actor, turn_id):
         )
     )
 def _write_trace(tmp_path, events):
-    path = tmp_path / "logs" / datetime.now().strftime("%Y-%m-%d") / "trace.log"
+    path = tmp_path / "logs" / f"log-{datetime.now().astimezone().date().isoformat()}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     normalized = []
     for event in events:

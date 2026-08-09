@@ -6,6 +6,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +24,12 @@ from agent.app.logging import (
     DeferredGatewayTerminalLogs,
     GatewayLogOptions,
     configure_gateway_logging,
+    terminal_color_override,
 )
 from agent.app.runtime import WebRuntime, build_web_runtime
 from agent.config import AppConfig
 from agent.console import console
+from agent.log_paths import daily_trace_path
 from agent.logging_utils import (
     begin_console_log_deferral,
     flush_deferred_console_logs,
@@ -74,7 +77,10 @@ def run_gateway(
         f"{'on' if resolved_log_options.http_server_log else 'off'} "
         f"level={resolved_log_options.http_server_log_level}"
     )
-    trace_path = logging_result.trace_path or config.logs_dir / "YYYY-MM-DD" / "trace.log"
+    trace_path = logging_result.trace_path or daily_trace_path(
+        config.logs_dir,
+        datetime.now().astimezone().date(),
+    )
     print(f"trace-log: {'on' if resolved_log_options.trace_log else 'off'} path={console.path(trace_path)}")
     server_config = uvicorn.Config(
         app=app,
@@ -82,6 +88,7 @@ def run_gateway(
         port=port,
         log_level=_uvicorn_log_level(resolved_log_options),
         access_log=resolved_log_options.http_access_log,
+        use_colors=terminal_color_override(),
     )
     begin_console_log_deferral()
     try:

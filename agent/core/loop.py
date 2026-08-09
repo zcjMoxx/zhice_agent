@@ -37,6 +37,7 @@ from agent.protocols.llm import (
     LLMStreamChunk,
 )
 from agent.protocols.session import SessionStore
+from agent.protocols.skill import SkillProvider
 from agent.protocols.tool import (
     ToolConfirmationBroker,
     ToolExecutionContext,
@@ -154,6 +155,7 @@ class AgentLoop:
         runtime_event_scope: dict[str, Any] | None = None,
         system_prompt_addendum: str = "",
         context_budget: ContextBudget | None = None,
+        skills_override: SkillProvider | None = None,
     ) -> str:
         """Run one user turn, saving user, assistant, and tool messages."""
 
@@ -199,6 +201,7 @@ class AgentLoop:
                         "tool_definitions": tools.definitions() if tools else None,
                         "session_store": sessions,
                         "llm_provider": llm,
+                        "skills_override": skills_override,
                     }
                 )
             if context_budget is not None:
@@ -691,6 +694,7 @@ class AgentLoop:
                     "tool.started",
                     tool_call_id=call.id,
                     tool_call_record_id=record_id,
+                    display={"visibility": "internal"} if call.name == "run_skill" else None,
                     metadata={"tool_name": call.name},
                 )
                 result = call.error
@@ -767,7 +771,10 @@ class AgentLoop:
                     "tool.failed" if result.is_error else "tool.completed",
                     tool_call_id=call.id,
                     tool_call_record_id=record_id,
-                    display=presentation.display,
+                    display={
+                        **presentation.display,
+                        **({"visibility": "internal"} if call.name == "run_skill" else {}),
+                    },
                     ui_metadata=presentation.ui_metadata,
                     metadata={
                         "tool_name": call.name,
@@ -1029,6 +1036,8 @@ def _dispatch_tool(
             parent_turn_id=str(scope.get("parent_turn_id") or ""),
             subagent_id=str(scope.get("agent_id") or "") if int(scope.get("depth") or 0) else "",
             task_id=str(scope.get("task_id") or ""),
+            cancellation_token=cancellation_token,
+            runtime_events=runtime_events,
         )
     metadata = {
         "tool_name": call.name,
@@ -1533,6 +1542,17 @@ def _log_tool_result(
 def _safe_tool_args_preview(tool_name: str, args: dict[str, Any]) -> str:
     """Return a bounded preview without persisting private Memory text."""
 
+    if tool_name == "run_skill":
+        params = args.get("params")
+        param_keys = sorted(str(key) for key in params)[:20] if isinstance(params, dict) else []
+        return preview_json(
+            {
+                "skill": args.get("skill", ""),
+                "param_count": len(params) if isinstance(params, dict) else 0,
+                "param_keys": param_keys,
+            },
+            limit=300,
+        )
     if tool_name == "memory_read":
         query = args.get("query", "")
         return preview_json(
@@ -1572,6 +1592,16 @@ def _safe_tool_args_preview(tool_name: str, args: dict[str, Any]) -> str:
 def _safe_tool_output_preview(tool_name: str, result: ToolResult, *, limit: int) -> str:
     """Return operational Memory result metadata instead of private content."""
 
+    if tool_name == "run_skill":
+        return preview_json(
+            {
+                "ok": not result.is_error,
+                "code": result.metadata.get("code", ""),
+                "skill": result.metadata.get("skill", ""),
+                "duration_ms": result.metadata.get("duration_ms", 0),
+            },
+            limit=limit,
+        )
     if tool_name in {"memory_read", "memory_write"}:
         return preview_json(
             {

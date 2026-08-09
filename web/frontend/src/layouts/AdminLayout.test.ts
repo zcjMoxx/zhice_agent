@@ -20,6 +20,7 @@ describe("AdminLayout", () => {
   ];
 
   beforeEach(() => {
+    vi.stubGlobal("open", vi.fn());
     vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.startsWith("/api/admin/users/user-disabled") && init?.method === "DELETE") return Promise.resolve(response({ status: "deleted" }));
@@ -29,6 +30,10 @@ describe("AdminLayout", () => {
       ] }));
       if (url.startsWith("/api/admin/roles") && init?.method === "PATCH") return Promise.resolve(response({ id: "role-dev", key: "developer", name: "Developer", description: "", is_builtin: true, permission_keys: ["audit.read"] }));
       if (url.startsWith("/api/admin/roles")) return Promise.resolve(response({ roles, permissions: ["audit.read"] }));
+      if (url.startsWith("/api/admin/skills/sources/official/sync") && init?.method === "POST") return Promise.resolve(response({ status: "synchronized" }));
+      if (url.startsWith("/api/admin/skills/sources/official/refresh-index") && init?.method === "POST") return Promise.resolve(response({ status: "refreshed" }));
+      if (url.startsWith("/api/admin/skills/sources")) return Promise.resolve(response({ status: "ok", sources: [{ source: "official", enabled: true, sync_enabled: true, configured_target: "master", current_commit: "abc123", last_sync_started_at: "2026-08-09T00:00:00Z", last_sync_finished_at: "2026-08-09T00:00:01Z", last_success_at: "2026-08-09T00:00:01Z", last_status: "up_to_date", health: "healthy", skill_count: 1, load_error_count: 0, last_error_code: "", last_error_message_safe: "" }], skills: [{ qualified_name: "official/weather", source: "official", name: "weather", description: "天气报告", executable: true }] }));
+      if (url.startsWith("/api/admin/operations/terminal")) return Promise.resolve(response({ enabled: true, configured: true, url: "https://ops.example.test", presentation: "both", mode: "server_docker", target_type: "container", target_name: "zhice-agent" }));
       if (url.startsWith("/api/admin/diagnostics")) return Promise.resolve(response({ status: "ok", window_minutes: 1440, filters: {}, summary: { incidents: 1 }, incidents: [{ incident_id: "inc-1", component: "agent", code: "WEIXIN_TOKEN_STALE", subject: "", count: 1, first_seen_at: "2026-07-29T00:00:00Z", last_seen_at: "2026-07-29T00:00:00Z", rule: "same_component_code_subject_within_query_window", evidence: [{ evidence_id: "evt-1", ts: "2026-07-29T00:00:00Z", component: "agent", event: "channel.weixin.reconnect_required", code: "WEIXIN_TOKEN_STALE", error_message: "The Weixin token is stale", request_id: "req-1" }] }], timeline: [{ evidence_id: "evt-1", ts: "2026-07-29T00:00:00Z", component: "agent", event: "channel.weixin.reconnect_required", code: "WEIXIN_TOKEN_STALE", is_error: true, error_message: "The Weixin token is stale", request_id: "req-1" }, { evidence_id: "evt-2", ts: "2026-07-29T00:00:01Z", component: "gateway", event: "channel.ready", code: "", is_error: false }], limitations: [] }));
       if (url.startsWith("/api/admin/monitor")) return Promise.resolve(response({ gateway: { status: "ok", current_model: "default/model" }, capabilities: {}, activity: { summary: {}, recent_turns: [
         { turn_id: "turn-sec", request_id: "req-turn-sec", session_id: "session-error", session_title: "排查模型错误", actor_user_id: "actor", actor_username: "actor", actor_display_name: "Actor", status: "error", error_code: "GATEWAY_RESTART_INTERRUPTED", channel: "web", started_at: "2026-08-08T14:00:00Z", duration_ms: null },
@@ -45,7 +50,7 @@ describe("AdminLayout", () => {
     setActivePinia(pinia);
     const auth = useAuthStore();
     auth.user = { id: "actor", username: "actor", display_name: "Actor", status: "active", roles: userRoles, can_manage_admins: userRoles.includes("owner") };
-    auth.permissions = ["auth.users.read", "auth.users.manage", "auth.roles.read", "auth.roles.manage", "audit.read", "audit.export", "turn.read.any", "diagnostics.system.use"];
+    auth.permissions = ["auth.users.read", "auth.users.manage", "auth.roles.read", "auth.roles.manage", "audit.read", "audit.export", "turn.read.any", "diagnostics.system.use", "skill.sources.read", "skill.sync"];
     const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/", component: { template: "<div />" } }] });
     const mounted = mount(AdminLayout, { global: { plugins: [pinia, router] } });
     await flushPromises();
@@ -207,5 +212,68 @@ describe("AdminLayout", () => {
       "/api/admin/users/user-disabled",
       expect.objectContaining({ method: "DELETE", body: JSON.stringify({ confirmation: "old-user" }) }),
     );
+  });
+
+  it("shows safe Skill source status and executes fixed source actions", async () => {
+    const mounted = await wrapper();
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "Skills")!.trigger("click");
+    await flushPromises();
+
+    expect(mounted.text()).toContain("official");
+    expect(mounted.text()).toContain("abc123");
+    expect(mounted.text()).not.toContain("raw secret stderr");
+    await mounted.findAll(".skill-source-actions button").find((button) => button.text() === "查看 Skills")!.trigger("click");
+    expect(mounted.text()).toContain("official/weather");
+    expect(mounted.text()).toContain("可执行");
+    await mounted.findAll(".skill-source-actions button").find((button) => button.text() === "同步")!.trigger("click");
+    await flushPromises();
+    expect(fetch).toHaveBeenCalledWith("/api/admin/skills/sources/official/sync", expect.objectContaining({ method: "POST" }));
+    await mounted.findAll(".skill-source-actions button").find((button) => button.text() === "刷新索引")!.trigger("click");
+    await flushPromises();
+    expect(fetch).toHaveBeenCalledWith("/api/admin/skills/sources/official/refresh-index", expect.objectContaining({ method: "POST" }));
+  });
+
+  it("keeps server operations Owner-only and falls back from iframe to a new window", async () => {
+    const mounted = await wrapper();
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "服务器运维")!.trigger("click");
+    await flushPromises();
+
+    expect(mounted.text()).toContain("ZhiCe 独立运维控制面");
+    expect(mounted.text()).toContain("服务器 Docker");
+    expect(mounted.text()).toContain("zhice-agent");
+    expect(mounted.text()).toContain(window.location.origin);
+    const operationButtons = mounted.findAll(".operations-actions button");
+    expect(operationButtons.find((button) => button.text() === "独立窗口打开")!.classes()).toContain("operations-action-button");
+    expect(operationButtons.find((button) => button.text() === "页面内嵌")!.classes()).toContain("operations-secondary-button");
+    await mounted.findAll(".operations-actions button").find((button) => button.text() === "页面内嵌")!.trigger("click");
+    expect(mounted.get(".operations-close-button").text()).toBe("关闭投影");
+    const frame = mounted.get(".operations-frame-wrap iframe");
+    expect(frame.attributes("src")).toBe("https://ops.example.test");
+    await frame.trigger("error");
+    expect(mounted.text()).toContain("页面内嵌不可用");
+    expect(window.open).toHaveBeenCalledWith("https://ops.example.test", "_blank", "noopener,noreferrer");
+
+    const adminMounted = await wrapper(["admin"]);
+    expect(adminMounted.findAll(".admin-sidebar nav button").some((button) => button.text() === "服务器运维")).toBe(false);
+    expect(adminMounted.findAll(".admin-sidebar nav button").some((button) => button.text() === "Skills")).toBe(true);
+  });
+
+  it("drills overview failures and incidents into their diagnostic sections", async () => {
+    const failuresMounted = await wrapper();
+    const failures = failuresMounted.get('[data-overview-target="failures"]');
+    expect(failures.element.tagName).toBe("BUTTON");
+    expect(failures.attributes("aria-label")).toBe("查看近期失败运行");
+    await failures.trigger("click");
+    await flushPromises();
+    expect(failuresMounted.find("#monitor-runs").exists()).toBe(true);
+    expect(failuresMounted.get(".recent-runs-section select").element).toHaveProperty("value", "error");
+
+    const incidentsMounted = await wrapper();
+    const incidents = incidentsMounted.get('[data-overview-target="incidents"]');
+    expect(incidents.attributes("aria-label")).toBe("查看当前事故证据");
+    await incidents.trigger("click");
+    await flushPromises();
+    expect(incidentsMounted.find("#monitor-incidents").exists()).toBe(true);
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes("minutes=60"))).toBe(true);
   });
 });

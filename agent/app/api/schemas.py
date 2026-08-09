@@ -265,6 +265,55 @@ class RolesResponse(BaseModel):
     permissions: list[str] = Field(default_factory=list)
 
 
+class SkillSummaryResponse(BaseModel):
+    """Actor-visible Skill metadata safe for the administration UI."""
+
+    qualified_name: str
+    source: str
+    name: str
+    description: str = ""
+    executable: bool = False
+
+
+class SkillSourceStatusResponse(BaseModel):
+    """Persistent Skill source status without paths, URLs, or raw stderr."""
+
+    source: str
+    enabled: bool = True
+    sync_enabled: bool = True
+    configured_target: str = ""
+    current_commit: str = ""
+    last_sync_started_at: str = ""
+    last_sync_finished_at: str = ""
+    last_success_at: str = ""
+    last_status: str = "unknown"
+    health: str = "unknown"
+    skill_count: int = 0
+    load_error_count: int = 0
+    last_error_code: str = ""
+    last_error_message_safe: str = ""
+
+
+class SkillSourcesResponse(BaseModel):
+    """Skill source management read model and actor-visible catalog."""
+
+    status: str = "ok"
+    sources: list[SkillSourceStatusResponse] = Field(default_factory=list)
+    skills: list[SkillSummaryResponse] = Field(default_factory=list)
+
+
+class OperationsTerminalResponse(BaseModel):
+    """Non-secret link projection for the independently protected Ops UI."""
+
+    enabled: bool = False
+    configured: bool = False
+    url: str = ""
+    presentation: str = "both"
+    mode: str = ""
+    target_type: str = ""
+    target_name: str = ""
+
+
 class RoleUpdateRequest(BaseModel):
     """Replacement permission list for one role."""
 

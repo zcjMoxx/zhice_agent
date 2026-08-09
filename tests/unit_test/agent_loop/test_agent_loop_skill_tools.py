@@ -1,11 +1,11 @@
 ﻿"""AgentLoop coverage for a complete local Skill tool chain."""
 
 import json
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agent.app.auth import local_operator_actor
 from agent.message import Message
 from agent.protocols.llm import LLMResponse
 from agent.protocols.session import SessionState
@@ -13,8 +13,8 @@ from agent.skills.loader import SkillLoader
 from agent.tools import create_default_tool_registry
 
 
-def test_agent_loop_can_load_skill_then_exec_script(tmp_path):
-    """The generic tool loop should load Skill docs, then execute scripts through exec."""
+def test_agent_loop_can_load_then_formally_run_skill(tmp_path):
+    """The generic loop should preserve Skill Runtime events and final Tool facts."""
 
     workspace, loader = _make_skill(tmp_path)
     tools = create_default_tool_registry(workspace, skills=loader)
@@ -30,10 +30,10 @@ def test_agent_loop_can_load_skill_then_exec_script(tmp_path):
                 tool_calls=[
                     _tool_call(
                         "call_run",
-                        "exec",
+                        "run_skill",
                         {
-                            "command": _skill_script_command({"value": 7}),
-                            "timeout_seconds": 10,
+                            "skill": "official/demo",
+                            "params": {"value": 7},
                         },
                     )
                 ],
@@ -43,7 +43,13 @@ def test_agent_loop_can_load_skill_then_exec_script(tmp_path):
     )
 
     loop = _make_loop(workspace, llm=llm, tools=tools, sessions=sessions)
-    result = loop.run_turn("default", "use demo")
+    events = []
+    result = loop.run_turn(
+        "default",
+        "use demo",
+        actor=local_operator_actor(channel="web"),
+        on_event=events.append,
+    )
 
     assert result == "skill done"
     assert [message.role for message in sessions.appended["default"]] == [
@@ -63,7 +69,20 @@ def test_agent_loop_can_load_skill_then_exec_script(tmp_path):
     assert load_payload["status"] == "success"
     assert "skill: official/demo" in load_payload["output"]
     assert run_payload["status"] == "success"
-    assert '"data": {"value": 7}' in run_payload["output"]
+    assert json.loads(run_payload["output"])["data"] == {"value": 7}
+    runtime_events = [event for event in events if event.get("protocol_version") == 1]
+    skill_events = [event for event in runtime_events if event["type"].startswith("skill.")]
+    assert [event["type"] for event in skill_events] == [
+        "skill.started",
+        "skill.progress",
+        "skill.completed",
+    ]
+    assert skill_events[0]["parent_event_id"]
+    assert all(event["skill_run_id"] == skill_events[0]["skill_run_id"] for event in skill_events)
+    assert sessions.appended["default"][4].metadata["skill_run_id"] == skill_events[0][
+        "skill_run_id"
+    ]
+    assert len(sessions.appended["default"]) == 6
 
 
 def _make_loop(workspace, *, llm, tools, sessions):
@@ -94,6 +113,11 @@ def _make_skill(tmp_path):
         """---
 name: demo
 description: Demo skill.
+runtime:
+  type: python
+  entrypoint: scripts/main.py
+  protocol: ndjson-v1
+  timeout_seconds: 10
 ---
 
 Demo body.
@@ -105,7 +129,9 @@ Demo body.
 parser = argparse.ArgumentParser()
 parser.add_argument("--params", required=True)
 params = json.loads(parser.parse_args().params)
+print(json.dumps({"type": "progress", "message": "working", "percent": 50}))
 print(json.dumps({
+    "type": "result",
     "status": "success",
     "code": "OK",
     "data": params,
@@ -116,12 +142,6 @@ print(json.dumps({
         encoding="utf-8",
     )
     return workspace, SkillLoader([("official", workspace / "skills")])
-
-
-def _skill_script_command(params: dict[str, Any]) -> str:
-    params_json = json.dumps(params, separators=(",", ":"))
-    escaped_params = params_json.replace('"', r'\"')
-    return f'"{sys.executable}" skills/demo/scripts/main.py --params "{escaped_params}"'
 
 
 @dataclass

@@ -1,0 +1,34 @@
+{
+	auto_https off
+	admin off
+}
+
+http://:{$ZHICE_OPS_PORT} {
+	bind 127.0.0.1
+
+	basicauth {
+		owner {$ZHICE_OPS_CADDY_HASH}
+	}
+
+	header {
+		Cache-Control "no-store"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-src 'self'; frame-ancestors 'self' {$ZHICE_PUBLIC_URL}"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:{$ZHICE_OPS_DASHBOARD_PORT}
+	}
+
+	handle /terminal/* {
+		reverse_proxy 127.0.0.1:{$ZHICE_OPS_TERMINAL_PORT}
+	}
+
+	handle {
+		root * /usr/local/share/zhice-ops
+		try_files {path} /index.html
+		file_server
+	}
+}

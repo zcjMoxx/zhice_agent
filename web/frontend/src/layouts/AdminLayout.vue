@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { Activity, ArrowLeft, ChevronDown, Download, FileClock, Gauge, LockKeyhole, RefreshCw, Settings2, Shield, Trash2, Users } from "@lucide/vue";
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { Activity, ArrowLeft, BookOpen, ChevronDown, Download, ExternalLink, FileClock, Gauge, LockKeyhole, RefreshCw, Server, Settings2, Shield, Trash2, Users } from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 
 import { baseCapabilities, groupedPermissions, permissionLabel, roleName } from "@/admin/permissions";
@@ -34,6 +34,10 @@ const deletingUser = ref<PublicUser | null>(null);
 const deleteConfirmation = ref("");
 const deleteConfirmationError = ref("");
 const deleteBusy = ref(false);
+const expandedSkillSources = ref<Record<string, boolean>>({});
+const opsEmbedded = ref(false);
+const opsFrameFallback = ref(false);
+let opsFrameTimer: ReturnType<typeof setTimeout> | undefined;
 
 function tr(chinese: string, english: string): string { return uiText(ui.language, chinese, english); }
 
@@ -41,9 +45,12 @@ const tabs = computed(() => [
   { key: "overview", label: tr("概览", "Overview"), icon: Gauge, visible: true },
   { key: "users", label: tr("账号管理", "Accounts"), icon: Users, visible: auth.can("auth.users.read") },
   { key: "roles", label: tr("角色与权限", "Roles & permissions"), icon: Shield, visible: auth.can("auth.roles.read") },
+  { key: "skills", label: "Skills", icon: BookOpen, visible: auth.can("skill.sources.read") },
   { key: "monitor", label: tr("运行诊断", "Runtime diagnostics"), icon: Activity, visible: auth.can("turn.read.any") || auth.can("diagnostics.system.use") },
+  { key: "operations", label: tr("服务器运维", "Server operations"), icon: Server, visible: auth.isOwner },
   { key: "advanced", label: tr("高级设置", "Advanced"), icon: Settings2, visible: auth.can("audit.read") },
 ].filter((item) => item.visible));
+const canOpenMonitor = computed(() => tabs.value.some((item) => item.key === "monitor"));
 const auditActionOptions = computed(() => [
   ["login", tr("登录", "Login")],
   ["logout", tr("退出登录", "Logout")],
@@ -110,6 +117,17 @@ const permissionGroups = computed(() => groupedPermissions(admin.permissions, ui
 const visibleBaseCapabilities = computed(() => baseCapabilities(ui.language));
 const auditExportUrl = computed(() => `/api/audit/events/export?${new URLSearchParams(Object.entries(auditFilters).filter(([, value]) => value)).toString()}`);
 const availableCapabilityCount = computed(() => Object.values(admin.monitor?.capabilities || {}).filter((item) => item.state === "available").length);
+const currentDeployment = computed(() => window.location.origin);
+const opsModeLabel = computed(() => {
+  const labels: Record<string, string> = {
+    local_process: tr("本地进程", "Local process"),
+    local_docker: tr("本地 Docker", "Local Docker"),
+    server_docker: tr("服务器 Docker", "Server Docker"),
+  };
+  return labels[admin.operationsTerminal?.mode || ""] || tr("未配置", "Not configured");
+});
+const opsCanOpen = computed(() => Boolean(admin.operationsTerminal?.configured && admin.operationsTerminal.url));
+const opsCanEmbed = computed(() => opsCanOpen.value && ["embed", "both"].includes(admin.operationsTerminal?.presentation || ""));
 const diagnosticSummaryLabels = computed<Record<string, string>>(() => ({
   turns: tr("运行记录", "Runs"),
   tools: tr("工具调用", "Tool calls"),
@@ -122,6 +140,7 @@ watch(() => auditFilters.from_ts, (value) => {
 });
 
 onMounted(async () => { await loadTab("overview"); });
+onBeforeUnmount(() => { if (opsFrameTimer) clearTimeout(opsFrameTimer); });
 
 async function loadTab(next: string) {
   tab.value = next;
@@ -135,6 +154,7 @@ async function loadTab(next: string) {
     }
     if (next === "users") await admin.loadUsers();
     if (next === "roles") { await admin.loadRoles(); selectedRole.value ||= orderedRoles.value[0]?.id || ""; }
+    if (next === "skills") await admin.loadSkillSources();
     if (next === "monitor") {
       const loads: Promise<unknown>[] = [];
       if (auth.can("turn.read.any")) loads.push(admin.loadMonitor(recentRunStatus.value));
@@ -147,7 +167,28 @@ async function loadTab(next: string) {
       if (auth.can("auth.users.read")) loads.push(admin.loadUsers());
       await Promise.all(loads);
     }
+    if (next === "operations") await admin.loadOperationsTerminal();
   } catch (error) { failure.value = errorMessage(error); }
+}
+async function openMonitorSection(target: "failures" | "incidents") {
+  if (!canOpenMonitor.value) return;
+  if (target === "failures") recentRunStatus.value = "error";
+  else {
+    Object.assign(diagnosticFilters, {
+      actor_user_id: "",
+      session_id: "",
+      component: "",
+      error_code: "",
+      status: "",
+      minutes: "60",
+    });
+    timelineScope.value = "errors";
+  }
+  await loadTab("monitor");
+  await nextTick();
+  const section = document.getElementById(target === "failures" ? "monitor-runs" : "monitor-incidents");
+  section?.focus({ preventScroll: true });
+  section?.scrollIntoView?.({ behavior: "smooth", block: "start" });
 }
 async function createUser() {
   try { await import("@/api/client").then(({ api }) => api.createUser({ ...newUser })); Object.assign(newUser, { username: "", display_name: "", password: "", roles: ["viewer"] }); await admin.loadUsers(); }
@@ -199,6 +240,40 @@ async function togglePermission(key: string, enabled: boolean) {
   const keys = enabled ? [...role.permission_keys, key] : role.permission_keys.filter((item) => item !== key);
   try { await admin.updateRole(role.id, [...new Set(keys)]); }
   catch (error) { failure.value = errorMessage(error); }
+}
+function skillsForSource(source: string) {
+  return (admin.skillSources?.skills || []).filter((skill) => skill.source === source);
+}
+async function syncSkillSource(source: string) {
+  try { await admin.syncSkillSource(source); }
+  catch (error) { failure.value = errorMessage(error); }
+}
+async function refreshSkillSourceIndex(source: string) {
+  try { await admin.refreshSkillSourceIndex(source); }
+  catch (error) { failure.value = errorMessage(error); }
+}
+function openOpsWindow() {
+  const url = admin.operationsTerminal?.url;
+  if (url) window.open(url, "_blank", "noopener,noreferrer");
+}
+function startOpsEmbed() {
+  if (!opsCanEmbed.value) return;
+  opsEmbedded.value = true;
+  opsFrameFallback.value = false;
+  if (opsFrameTimer) clearTimeout(opsFrameTimer);
+  opsFrameTimer = setTimeout(() => fallbackOpsFrame(), 8000);
+}
+function markOpsFrameLoaded() {
+  if (opsFrameTimer) clearTimeout(opsFrameTimer);
+  opsFrameTimer = undefined;
+}
+function fallbackOpsFrame() {
+  if (!opsEmbedded.value || opsFrameFallback.value) return;
+  if (opsFrameTimer) clearTimeout(opsFrameTimer);
+  opsFrameTimer = undefined;
+  opsFrameFallback.value = true;
+  opsEmbedded.value = false;
+  openOpsWindow();
 }
 function fmt(value: unknown): string {
   if (!value) return "—";
@@ -317,10 +392,10 @@ function toggleTimelineEvent(evidenceId: unknown) {
         <div class="overview-status-grid">
           <article><span>Gateway</span><strong>{{ admin.monitor?.gateway.status || tr('无权限', 'Unavailable') }}</strong><small>ZhiCe-Agent</small></article>
           <article><span>{{ tr('当前模型', 'Current model') }}</span><strong class="overview-model">{{ admin.monitor?.gateway.current_model || '—' }}</strong><small>{{ tr(`${availableCapabilityCount} 项能力可用`, `${availableCapabilityCount} capabilities available`) }}</small></article>
-          <article :class="{ attention: Number(admin.monitor?.activity.summary.failed || 0) > 0 }"><span>{{ tr('近期失败', 'Recent failures') }}</span><strong>{{ admin.monitor?.activity.summary.failed ?? '—' }}</strong><small>{{ tr('结构化运行记录', 'Structured run records') }}</small></article>
-          <article :class="{ attention: Number(admin.diagnostics?.summary.incidents || 0) > 0 }"><span>{{ tr('当前事故', 'Current incidents') }}</span><strong>{{ admin.diagnostics?.summary.incidents ?? '—' }}</strong><small>{{ tr('近 60 分钟确定性聚合', 'Deterministic, last 60 minutes') }}</small></article>
+          <button type="button" data-overview-target="failures" :disabled="!canOpenMonitor" :class="{ attention: Number(admin.monitor?.activity.summary.failed || 0) > 0 }" :aria-label="tr('查看近期失败运行', 'View recent failed runs')" @click="openMonitorSection('failures')"><span>{{ tr('近期失败', 'Recent failures') }}</span><strong>{{ admin.monitor?.activity.summary.failed ?? '—' }}</strong><small>{{ tr('结构化运行记录', 'Structured run records') }}</small></button>
+          <button type="button" data-overview-target="incidents" :disabled="!canOpenMonitor" :class="{ attention: Number(admin.diagnostics?.summary.incidents || 0) > 0 }" :aria-label="tr('查看当前事故证据', 'View current incident evidence')" @click="openMonitorSection('incidents')"><span>{{ tr('当前事故', 'Current incidents') }}</span><strong>{{ admin.diagnostics?.summary.incidents ?? '—' }}</strong><small>{{ tr('近 60 分钟确定性聚合', 'Deterministic, last 60 minutes') }}</small></button>
         </div>
-        <div class="overview-grid"><button v-for="item in tabs.filter((item) => item.key !== 'overview')" :key="item.key" @click="loadTab(item.key)"><component :is="item.icon" :size="22" /><strong>{{ item.label }}</strong><span>{{ { users: tr('账号状态与角色分配', 'Account status and role assignment'), roles: tr('能力域与技术 key', 'Capability domains and technical keys'), monitor: tr('事故、失败运行与诊断时间线', 'Incidents, failed runs, and diagnostic timeline'), advanced: tr('低频安全审计与导出', 'Low-frequency security audit and export') }[item.key] }}</span></button></div>
+        <div class="overview-grid"><button v-for="item in tabs.filter((item) => item.key !== 'overview')" :key="item.key" @click="loadTab(item.key)"><component :is="item.icon" :size="22" /><strong>{{ item.label }}</strong><span>{{ { users: tr('账号状态与角色分配', 'Account status and role assignment'), roles: tr('能力域与技术 key', 'Capability domains and technical keys'), skills: tr('Skill source 状态、健康与同步', 'Skill source status, health, and sync'), monitor: tr('事故、失败运行与诊断时间线', 'Incidents, failed runs, and diagnostic timeline'), operations: tr('独立受保护的服务器运维入口', 'Independent protected server operations entry'), advanced: tr('低频安全审计与导出', 'Low-frequency security audit and export') }[item.key] }}</span></button></div>
       </section>
 
       <section v-else-if="tab === 'users'" class="admin-section">
@@ -333,9 +408,34 @@ function toggleTimelineEvent(evidenceId: unknown) {
         <div v-if="selectedRoleValue" class="role-detail"><header><div><span class="eyebrow">{{ selectedRoleValue.key }}</span><h2>{{ roleName(selectedRoleValue.key, ui.language) || selectedRoleValue.name }}</h2><p>{{ selectedRoleValue.description }}</p></div><span v-if="ownerRole || adminRoleRestricted" class="role-lock"><LockKeyhole :size="14" />{{ adminRoleRestricted ? tr('仅系统所有者可修改', 'Only Owner can modify') : tr('系统固定，权限不可修改', 'System role · permissions locked') }}</span></header><div class="base-capabilities"><strong>{{ tr('所有登录用户的基础能力', 'Base capabilities for all signed-in users') }}</strong><span v-for="capability in visibleBaseCapabilities" :key="capability">{{ capability }}</span></div><section v-for="(keys, group) in permissionGroups" :key="group" class="permission-group"><h3>{{ group }}</h3><label v-for="key in keys" :key="key"><span><strong>{{ permissionLabel(key, ui.language) }}</strong><small>{{ key }}</small></span><input type="checkbox" :checked="selectedRoleValue.permission_keys.includes(key)" :disabled="!canEditSelectedRole" @change="togglePermission(key, ($event.target as HTMLInputElement).checked)" /></label></section><details class="technical-details" :open="technicalOpen[selectedRoleValue.id]" @toggle="technicalOpen[selectedRoleValue.id] = ($event.target as HTMLDetailsElement).open"><summary>{{ tr('技术详情', 'Technical details') }} <ChevronDown :size="15" /></summary><code v-for="key in selectedRoleValue.permission_keys" :key="key">{{ key }}</code></details></div>
       </section>
 
+      <section v-else-if="tab === 'skills'" class="admin-section skill-sources-section">
+        <div class="truth-banner"><BookOpen :size="22" /><span><strong>{{ tr('Skill source 运行真值', 'Skill source runtime truth') }}</strong><small>{{ tr('状态来自持久同步记录和派生索引；页面不显示凭据、仓库 URL、宿主机路径或原始 stderr。', 'Status comes from persistent sync records and the derived index. Credentials, repository URLs, host paths, and raw stderr are never shown.') }}</small></span></div>
+        <div class="skill-source-list">
+          <article v-for="source in admin.skillSources?.sources" :key="source.source" class="skill-source-card">
+            <header><div><span class="eyebrow">Skill source</span><h2>{{ source.source }}</h2></div><span class="source-health"><i :class="`status-dot ${source.health === 'healthy' ? 'available' : source.health}`"></i>{{ source.health }}</span></header>
+            <dl class="skill-source-facts"><dt>{{ tr('启用', 'Enabled') }}</dt><dd>{{ source.enabled ? tr('是', 'Yes') : tr('否', 'No') }}</dd><dt>{{ tr('同步', 'Sync') }}</dt><dd>{{ source.sync_enabled ? tr('启用', 'Enabled') : tr('停用', 'Disabled') }}</dd><dt>Target</dt><dd><code>{{ source.configured_target || '—' }}</code></dd><dt>Commit</dt><dd><code>{{ source.current_commit || '—' }}</code></dd><dt>{{ tr('上次同步', 'Last sync') }}</dt><dd>{{ fmt(source.last_sync_finished_at) }}</dd><dt>{{ tr('状态', 'Status') }}</dt><dd>{{ source.last_status }}</dd><dt>Skills</dt><dd>{{ source.skill_count }}</dd><dt>{{ tr('加载错误', 'Load errors') }}</dt><dd>{{ source.load_error_count }}</dd></dl>
+            <div v-if="source.last_error_code || source.last_error_message_safe" class="source-safe-error"><code>{{ source.last_error_code || 'SKILL_SOURCE_ERROR' }}</code><span>{{ source.last_error_message_safe }}</span></div>
+            <div class="row-actions skill-source-actions"><button v-if="auth.can('skill.sync')" :disabled="admin.skillActionSource === source.source || !source.sync_enabled" @click="syncSkillSource(source.source)">{{ tr('同步', 'Sync') }}</button><button :disabled="admin.skillActionSource === source.source" @click="refreshSkillSourceIndex(source.source)">{{ tr('刷新索引', 'Refresh index') }}</button><button @click="expandedSkillSources[source.source] = !expandedSkillSources[source.source]">{{ expandedSkillSources[source.source] ? tr('收起 Skills', 'Hide Skills') : tr('查看 Skills', 'View Skills') }}</button></div>
+            <div v-if="expandedSkillSources[source.source]" class="source-skill-list"><article v-for="skill in skillsForSource(source.source)" :key="skill.qualified_name"><span><strong>{{ skill.qualified_name }}</strong><small>{{ skill.description }}</small></span><span v-if="skill.executable" class="readonly-pill">{{ tr('可执行', 'Executable') }}</span></article><p v-if="!skillsForSource(source.source).length" class="empty-note">{{ tr('当前账号没有可见 Skill。', 'No Skills are visible to this account.') }}</p></div>
+          </article>
+          <p v-if="!admin.skillSources?.sources.length" class="empty-note">{{ tr('没有已配置的 Skill source。', 'No Skill sources are configured.') }}</p>
+        </div>
+      </section>
+
+      <section v-else-if="tab === 'operations'" class="admin-section operations-section">
+        <div class="truth-banner"><Server :size="22" /><span><strong>{{ tr('ZhiCe 独立运维控制面', 'Independent ZhiCe operations control plane') }}</strong><small>{{ tr('Ops 自动监控当前真正启动 ZhiCe-Agent 的进程或固定容器；主 Web 只负责导航和投影。', 'Ops monitors the process or fixed container that actually launched ZhiCe-Agent. The main Web only navigates and projects it.') }}</small></span></div>
+        <div class="operations-card">
+          <dl><dt>{{ tr('当前部署', 'Current deployment') }}</dt><dd><code>{{ currentDeployment }}</code></dd><dt>{{ tr('运行形态', 'Runtime mode') }}</dt><dd>{{ opsModeLabel }}</dd><dt>{{ tr('监控目标', 'Target') }}</dt><dd><code>{{ admin.operationsTerminal?.target_name || '—' }}</code></dd><dt>Ops</dt><dd>{{ admin.operationsTerminal?.configured ? tr('已配置', 'Configured') : tr('未配置', 'Not configured') }}</dd><dt>{{ tr('展示方式', 'Presentation') }}</dt><dd>{{ admin.operationsTerminal?.presentation || 'both' }}</dd></dl>
+          <p v-if="!opsCanOpen" class="empty-note">{{ tr('当前启动方式尚未提供 Ops endpoint。终端启动应自动拉起本地 Ops；Docker/服务器部署应同时启动独立 Ops 服务。', 'The current launcher has not provided an Ops endpoint. Terminal startup should launch local Ops automatically; Docker/server deployment should start an independent Ops service.') }}</p>
+          <div v-else class="operations-actions"><button class="operations-action-button primary-button" @click="openOpsWindow"><ExternalLink :size="16" />{{ tr('独立窗口打开', 'Open in new window') }}</button><button v-if="opsCanEmbed" class="operations-action-button operations-secondary-button" @click="startOpsEmbed">{{ tr('页面内嵌', 'Embed in page') }}</button></div>
+          <div v-if="opsFrameFallback" class="source-safe-error"><strong>{{ tr('页面内嵌不可用', 'Embedded Ops is unavailable') }}</strong><span>{{ tr('Cloudflare Access 或浏览器策略阻止了 iframe，已尝试回退到独立窗口。', 'Cloudflare Access or browser policy blocked the iframe. A new-window fallback was attempted.') }}</span><button class="operations-action-button operations-secondary-button" @click="openOpsWindow">{{ tr('再次打开', 'Open again') }}</button></div>
+          <div v-if="opsEmbedded && opsCanEmbed" class="operations-frame-wrap"><header><strong>{{ tr('ZhiCe 运维终端', 'ZhiCe Ops terminal') }}</strong><button class="operations-close-button" @click="opsEmbedded = false">{{ tr('关闭投影', 'Close projection') }}</button></header><iframe :src="admin.operationsTerminal?.url" :title="tr('ZhiCe 运维终端', 'ZhiCe Ops terminal')" allow="clipboard-read; clipboard-write" @load="markOpsFrameLoaded" @error="fallbackOpsFrame" /></div>
+        </div>
+      </section>
+
       <section v-else-if="tab === 'monitor'" class="monitor-section">
         <div class="truth-banner"><Activity :size="22" /><span><strong>{{ tr('定位系统哪里出错，以及为什么出错', 'Find where the system failed and why') }}</strong><small>{{ tr('事故由确定性规则聚合；时间线仅包含白名单脱敏字段，不写入模型推断。', 'Incidents use deterministic rules; timelines contain only allowlisted redacted fields and never persist model inference.') }}</small></span></div>
-        <section v-if="auth.can('diagnostics.system.use')" class="diagnostics-panel">
+        <section v-if="auth.can('diagnostics.system.use')" id="monitor-incidents" class="diagnostics-panel" tabindex="-1">
           <h2>{{ tr('事故与错误证据', 'Incidents and error evidence') }}</h2>
           <form class="diagnostic-filters" @submit.prevent="runDiagnostics"><select v-model="diagnosticFilters.actor_user_id" :aria-label="tr('账号', 'Account')"><option value="">{{ tr('全部账号', 'All accounts') }}</option><option v-for="actor in diagnosticActorOptions" :key="actor.id" :value="actor.id">{{ actor.label }}</option></select><select v-model="diagnosticFilters.session_id" :aria-label="tr('会话', 'Session')"><option value="">{{ tr('全部会话', 'All sessions') }}</option><option v-for="session in diagnosticSessionOptions" :key="session.id" :value="session.id">{{ session.label }}</option></select><select v-model="diagnosticFilters.component" :aria-label="tr('组件', 'Component')"><option value="">{{ tr('全部组件', 'All components') }}</option><option v-for="component in diagnosticComponentOptions" :key="component.value" :value="component.value">{{ component.label }}</option></select><select v-model="diagnosticFilters.error_code" :aria-label="tr('错误码', 'Error code')"><option value="">{{ tr('全部错误码', 'All error codes') }}</option><option v-for="code in diagnosticErrorCodeOptions" :key="code" :value="code">{{ code }}</option></select><select v-model="diagnosticFilters.status" :aria-label="tr('状态', 'Status')"><option value="">{{ tr('全部状态', 'All statuses') }}</option><option value="error">{{ tr('失败', 'Failed') }}</option><option value="stopped">{{ tr('已停止', 'Stopped') }}</option><option value="completed">{{ tr('完成', 'Completed') }}</option></select><select v-model="diagnosticFilters.minutes" :aria-label="tr('时间范围', 'Time range')"><option value="60">{{ tr('最近 1 小时', 'Last hour') }}</option><option value="360">{{ tr('最近 6 小时', 'Last 6 hours') }}</option><option value="1440">{{ tr('最近 24 小时', 'Last 24 hours') }}</option><option value="10080">{{ tr('最近 7 天', 'Last 7 days') }}</option></select><button class="primary-button" :disabled="diagnosticBusy">{{ diagnosticBusy ? tr('诊断中…', 'Diagnosing…') : tr('诊断', 'Diagnose') }}</button></form>
           <div class="monitor-grid"><article v-for="(value, key) in admin.diagnostics?.summary" :key="key"><span>{{ diagnosticSummaryLabels[String(key)] || key }}</span><strong>{{ value }}</strong><small>{{ tr('查询范围', 'Window') }}：{{ diagnosticWindowLabel(admin.diagnostics?.window_minutes || diagnosticFilters.minutes) }}</small></article></div>
@@ -344,7 +444,7 @@ function toggleTimelineEvent(evidenceId: unknown) {
           <div class="diagnostic-timeline-heading"><div><h3>{{ tr('诊断证据时间线', 'Diagnostic evidence timeline') }}</h3><p>{{ tr('按时间排列各组件留下的证据，用于还原错误发生前后的过程；证据标识只是日志关联编号，不代表错误原因。', 'Evidence from each component is ordered by time to reconstruct what happened. An evidence ID is only a log correlation identifier, not an error cause.') }}</p></div><label><span>{{ tr('显示范围', 'Scope') }}</span><select v-model="timelineScope"><option value="errors">{{ tr('仅异常证据', 'Errors only') }}</option><option value="all">{{ tr('全部上下文', 'All context') }}</option></select></label></div><div class="data-table diagnostic-timeline"><div class="table-head"><span>{{ tr('时间 / 状态', 'Time / status') }}</span><span>{{ tr('组件', 'Component') }}</span><span>{{ tr('事件含义 / 内部标识', 'Meaning / internal key') }}</span><span>{{ tr('错误码', 'Error code') }}</span><span></span></div><div v-for="event in displayedDiagnosticTimeline" :key="String(event.evidence_id)" class="timeline-event" :class="{ open: openTimelineEvents[String(event.evidence_id)], error: eventIsError(event), normal: !eventIsError(event) }"><div class="table-row" role="button" tabindex="0" @click="toggleTimelineEvent(event.evidence_id)" @keydown.enter="toggleTimelineEvent(event.evidence_id)" @keydown.space.prevent="toggleTimelineEvent(event.evidence_id)"><span><strong>{{ fmt(event.ts) }}</strong><small class="evidence-status"><i :class="`status-dot ${eventIsError(event) ? 'error' : 'completed'}`"></i>{{ eventIsError(event) ? tr('异常', 'Error') : tr('正常', 'Normal') }}</small></span><span><strong>{{ componentLabel(String(event.component || event.kind || '')) }}</strong><code>{{ event.component || event.kind || '—' }}</code></span><span><strong>{{ diagnosticEventLabel(event) }}</strong><code>{{ diagnosticEventKey(event) }}</code></span><span><code>{{ event.code || '—' }}</code></span><span class="timeline-chevron" :title="openTimelineEvents[String(event.evidence_id)] ? tr('收起证据', 'Collapse evidence') : tr('展开证据', 'Expand evidence')"><ChevronDown :size="18" /></span></div><dl v-if="openTimelineEvents[String(event.evidence_id)]"><template v-for="key in ['error_message','reason_code','status','route','session_id','turn_id','request_id','model','endpoint','duration_ms']" :key="key"><template v-if="event[key]"><dt>{{ diagnosticFieldLabel(key) }}</dt><dd><code v-if="key.endsWith('_id') || key.endsWith('_code')">{{ event[key] }}</code><span v-else>{{ event[key] }}</span></dd></template></template><dt>{{ tr('证据标识', 'Evidence ID') }}</dt><dd><code>{{ event.evidence_id }}</code><small>{{ tr('用于在诊断结果和脱敏日志中唯一定位这条事件', 'Uniquely identifies this event across diagnostics and redacted logs') }}</small></dd></dl></div><p v-if="!displayedDiagnosticTimeline.length" class="empty-note timeline-empty">{{ tr('当前范围没有异常证据，可切换到“全部上下文”查看正常生命周期事件。', 'No error evidence in this scope. Switch to All context to view normal lifecycle events.') }}</p></div>
         </section>
         <template v-if="auth.can('turn.read.any')">
-          <section class="recent-runs-section">
+          <section id="monitor-runs" class="recent-runs-section" tabindex="-1">
             <header><div><h2>{{ tr('近期运行记录', 'Recent runs') }}</h2><p>{{ tr('默认只看失败；需要时再切换到运行中、已停止或全部记录。', 'Failures are shown by default. Switch to running, stopped, completed, or all runs when needed.') }}</p></div><label><span>{{ tr('运行状态', 'Run status') }}</span><select v-model="recentRunStatus" @change="loadRecentRuns"><option value="error">{{ tr('失败', 'Failed') }}</option><option value="started">{{ tr('运行中', 'Running') }}</option><option value="stopped">{{ tr('已停止', 'Stopped') }}</option><option value="completed">{{ tr('完成', 'Completed') }}</option><option value="">{{ tr('全部记录', 'All runs') }}</option></select></label></header>
             <div class="data-table activity-table"><div class="table-head"><span>{{ tr('Session 会话标题 / 账号', 'Session title / account') }}</span><span>{{ tr('状态 / 错误', 'Status / error') }}</span><span>{{ tr('渠道', 'Channel') }}</span><span>{{ tr('开始时间', 'Started') }}</span><span>{{ tr('耗时', 'Duration') }}</span><span></span></div><div v-for="turn in admin.monitor?.activity.recent_turns" :key="String(turn.turn_id)" class="run-record" :class="{ open: openRunRecords[String(turn.turn_id)] }"><div class="table-row"><span><small class="record-kind">{{ tr('Session 会话标题', 'Session title') }}</small><strong>{{ turn.session_title || tr('未命名会话', 'Untitled session') }}</strong><small>{{ tr('账号', 'Account') }}：{{ turn.actor_display_name || turn.actor_username || turn.actor_user_id }}<template v-if="turn.actor_username"> · @{{ turn.actor_username }}</template></small></span><span><strong><i :class="`status-dot ${turn.status}`"></i>{{ statusLabel(turn.status) }}</strong><code v-if="turn.error_code">{{ turn.error_code }}</code></span><span :data-label="tr('渠道', 'Channel')">{{ channelLabel(turn.channel) }}</span><span :data-label="tr('开始', 'Started')">{{ fmt(turn.started_at) }}</span><span :data-label="tr('耗时', 'Duration')">{{ fmtDuration(turn.duration_ms) }}</span><button class="record-toggle" type="button" @click="toggleRunRecord(turn.turn_id)"><span>{{ openRunRecords[String(turn.turn_id)] ? tr('收起', 'Collapse') : tr('查看诊断', 'View diagnosis') }}</span><ChevronDown :size="17" /></button></div><div v-if="openRunRecords[String(turn.turn_id)]" class="run-detail"><div v-if="turn.error_code" class="diagnosis-copy"><article><strong>{{ tr('发生了什么', 'What happened') }}</strong><p>{{ diagnosticGuide(turn.error_code).explanation }}</p></article><article><strong>{{ tr('影响', 'Impact') }}</strong><p>{{ diagnosticGuide(turn.error_code).impact }}</p></article><article><strong>{{ tr('建议处理', 'Recommended action') }}</strong><p>{{ diagnosticGuide(turn.error_code).action }}</p></article></div><dl><dt>Session ID</dt><dd><code>{{ turn.session_id || '—' }}</code></dd><dt>Turn ID</dt><dd><code>{{ turn.turn_id || '—' }}</code></dd><dt>Request / Trace ID</dt><dd><code>{{ turn.request_id || '—' }}</code></dd><dt>{{ tr('账号 ID', 'Account ID') }}</dt><dd><code>{{ turn.actor_user_id || '—' }}</code></dd><dt>{{ tr('结束时间', 'Finished') }}</dt><dd>{{ fmt(turn.finished_at) }}</dd><dt>{{ tr('错误码', 'Error code') }}</dt><dd><code>{{ turn.error_code || '—' }}</code></dd></dl></div></div></div>
             <p v-if="!admin.monitor?.activity.recent_turns.length" class="empty-note">{{ tr('当前状态下没有运行记录。', 'No runs match this status.') }}</p>

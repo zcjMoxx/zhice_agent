@@ -72,3 +72,9 @@
 - 输入：绑定 actor MemoryContext 的 `memory_read(mode=list/search)` 与用户对话授权后的 `memory_write`。
 - 预期：列表按固定类别整理并返回分页数量，搜索要求具体 query；读取只支持 `list/search`，写入支持 add/replace/delete。
 - 检查点：敏感内容拒绝时不回显原文；ToolResult metadata 只包含 id/category/mode/count 等安全字段。
+
+### Case 11: 正式 `run_skill` 上下文工具
+
+- 输入：无上下文直接调用、可信 actor/turn 上下文调用、额外参数、指令型/不可执行 Skill、未授权 source、Subagent Profile 禁止、取消、timeout 和 Executor 异常。
+- 预期：只有 contextual dispatch 可执行；通过 `SkillExecutor` 返回结构化结果，并产生关联外层 Tool Event 的 `skill.*`；所有已开始的异常路径都以 `skill.failed` 收敛。
+- 检查点：参数只含 `skill` 与 `params`，上下文、取消令牌和 RuntimeEvent publisher 经 Registry/Scoped/Discovery/Filtered/Augmented 链保持；运行活动的参数与结果预览不记录 `params` 值或 Skill `data`。

@@ -138,7 +138,7 @@ FastAPI 继续显式提供三个 SPA 入口。Vue Router 负责页面选择，AP
 
 角色和权限按当前界面语言显示能力分组；内部 key 默认收起。普通用户基础能力不显示为“没有权限”。角色按系统所有者、管理员、开发者、审计员、普通用户排序。Owner 固定只读；Admin 权限只能由 Owner 修改，非 Owner 在前端不可操作且服务端继续作为最终权限边界。
 
-概览直接展示 Gateway、当前模型、近期失败和当前事故，不再使用欢迎页占据主要空间。运行诊断展示确定性事故、脱敏跨组件时间线、失败优先的近期运行记录，以及 Gateway、Channel、MCP、Subagent、Memory、Context 和 Activity 真值。近期运行记录关联账号、昵称和 Session 标题，默认筛选失败状态。安全审计降为高级设置中的低频入口，只记录认证异常、账号与权限变更、外部身份绑定、跨账号访问、危险操作和审计导出等敏感事件，并保留筛选、分页、详情与导出；普通 Turn 和 Tool 运行事实不写入安全审计。
+概览直接展示 Gateway、当前模型、近期失败和当前事故，不再使用欢迎页占据主要空间。“近期失败”和“当前事故”是可访问的下钻卡片，分别进入运行诊断的失败运行记录与近 60 分钟事故证据区域。运行诊断展示确定性事故、脱敏跨组件时间线、失败优先的近期运行记录，以及 Gateway、Channel、MCP、Subagent、Memory、Context 和 Activity 真值。近期运行记录关联账号、昵称和 Session 标题，默认筛选失败状态。安全审计降为高级设置中的低频入口，只记录认证异常、账号与权限变更、外部身份绑定、跨账号访问、危险操作和审计导出等敏感事件，并保留筛选、分页、详情与导出；普通 Turn 和 Tool 运行事实不写入安全审计。
 
 ## 7. 组件边界
 
@@ -197,4 +197,4 @@ Part 16 完成时：
 
 Part 17 负责运行可靠性、系统级诊断、MCP 动态可靠性和私有镜像部署；它复用 Part 16 的 Vue 页面和组件，不建立第二套管理界面。当前设计见 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`。
 
-Part 18 负责 Skill Runtime、CLI 和本地运维优化；Skill source 状态页复用 Part 16 的管理后台结构。
+Part 18 已复用 Part 16 的管理后台结构落地 Skill source 状态页和 Owner-only 服务器 Ops 投影；主 Web 只显示配置化独立 Ops URL，不代理终端字节流或宿主机操作。

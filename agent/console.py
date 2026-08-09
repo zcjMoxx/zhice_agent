@@ -9,6 +9,7 @@ import time
 
 _COLOR_ENABLED: bool | None = None
 _COLORAMA_FIXED = False
+_FORCE_TERMINAL_COLOR_ENV = "ZHICE_FORCE_TERMINAL_COLOR"
 
 
 class Console:
@@ -71,6 +72,8 @@ def _detect_color_support() -> bool:
 
     if os.getenv("NO_COLOR"):
         return False
+    if os.getenv(_FORCE_TERMINAL_COLOR_ENV) == "1":
+        return True
     if not sys.stdout.isatty():
         return False
     if os.name != "nt":

@@ -48,7 +48,7 @@ def test_ws_message_streams_text_and_done(tmp_path):
 
 
 def test_ws_forwards_runtime_event_envelope(tmp_path):
-    runtime = _WsRuntime(runtime_events=[_runtime_event("context.started", 2)])
+    runtime = _WsRuntime(runtime_events=[_runtime_event("skill.started", 2)])
     client = _client(tmp_path, runtime)
 
     with client.websocket_connect("/ws") as websocket:
@@ -63,7 +63,8 @@ def test_ws_forwards_runtime_event_envelope(tmp_path):
     assert runtime_frame["event"] == "runtime_event"
     assert runtime_frame["session_id"] == "alpha"
     assert runtime_frame["turn_id"] == turn_id
-    assert runtime_frame["data"]["type"] == "context.started"
+    assert runtime_frame["data"]["type"] == "skill.started"
+    assert runtime_frame["data"]["skill_run_id"] == "skill-run-1"
     assert text["event"] == "channel_text"
     assert done["data"]["type"] == "done"
 
@@ -303,6 +304,7 @@ def _runtime_event(event_type: str, sequence: int) -> dict:
         "request_id": "",
         "tool_call_id": "",
         "tool_call_record_id": "",
+        "skill_run_id": "skill-run-1",
         "parent_event_id": "",
         "display": {"title": "正在整理上下文"},
         "ui_metadata": {},

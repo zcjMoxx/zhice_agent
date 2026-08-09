@@ -1,0 +1,35 @@
+[Unit]
+Description=ZhiCe restricted server operations web gateway
+After=network-online.target zhice-ops-dashboard.service zhice-ops-terminal.service
+Wants=network-online.target
+Requires=zhice-ops-dashboard.service zhice-ops-terminal.service
+
+[Service]
+Type=simple
+User=zhice-operator
+Group=zhice-operator
+EnvironmentFile=/etc/zhice-ops/ops.env
+Environment=XDG_DATA_HOME=/var/lib/zhice-ops/caddy
+Environment=XDG_CONFIG_HOME=/var/lib/zhice-ops/caddy
+ExecStart=/usr/bin/caddy run --config /etc/zhice-ops/Caddyfile --adapter caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/zhice-ops/Caddyfile --adapter caddyfile --force
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+ReadWritePaths=/var/lib/zhice-ops/caddy
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

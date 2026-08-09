@@ -1,0 +1,9 @@
+FROM python:3.12.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin zhice-ops
+COPY --chown=zhice-ops:zhice-ops deploy/ops/local_sidecar.py /opt/zhice-ops/local_sidecar.py
+COPY --chown=zhice-ops:zhice-ops agent/operations/static/ops.html /opt/zhice-ops/ops.html
+USER root
+EXPOSE 17681
+ENTRYPOINT ["python", "-I", "/opt/zhice-ops/local_sidecar.py"]

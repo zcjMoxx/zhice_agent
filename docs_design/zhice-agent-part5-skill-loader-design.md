@@ -6,7 +6,7 @@
 >
 > 承接文档：`docs_design/zhice-agent-part4-exec-tool-design.md`
 >
-> 当前状态：本文档已按当前落地代码更新。Skill source 不再先进入 `cache_dir` 再复制到 `skills/`，而是直接同步到 workspace 的 `extends/{source}`，并从 `{source}/skills/*` 加载和执行。
+> 当前状态：Part 5 的 source/sync/loader 基线继续有效；Part 18 已在其上增加显式 runtime、`run_skill`、SkillExecutor、source 状态/索引缓存/权限过滤和 Web 管理。正式执行与运维口径以 `docs_design/zhice-agent-part18-skill-runtime-and-server-ops-design.md` 为准。
 >
 > 相关设计记录：`docs_design/2026-06-30-skill-source-namespace-design.md` 记录了 Skill source schema 与同名 Skill 命名空间的收敛背景；本文中的配置和数据流已同步为当前口径。
 
@@ -34,7 +34,8 @@ configured Skill source
   -> SkillLoader 扫描 extends/{source}/skills/{skill_name}
   -> ContextBuilder 注入 Skill 摘要
   -> load_skills 读取完整 SKILL.md
-  -> exec 按 SKILL.md 示例执行 scripts/{entry}.py
+  -> 指令型：按 SKILL.md 组合已有 Tool
+  -> 可执行型：run_skill -> SkillExecutor -> ndjson-v1
 ```
 
 ---
@@ -49,7 +50,7 @@ configured Skill source
 6. 支持 `/skills sync --verbose` 展开同步明细。
 7. 支持 `sync_skills` 工具，让后续“更新一下技能仓库”这类自然语言可以走受控工具调用。
 8. 支持 `load_skills` 工具读取完整 `SKILL.md`。
-9. 支持通过 `exec` 按 `SKILL.md` 示例执行 Skill 自带脚本。
+9. 指令型 Skill 组合已有 Tool；显式 runtime 的可执行型 Skill 通过 `run_skill` 和 SkillExecutor 执行。
 10. 保持 `AgentLoop` 只负责通用 LLM/tool/session 循环，不识别具体 Skill 业务。
 
 ---
@@ -63,11 +64,11 @@ configured Skill source
 - `agent/skills/loader.py`
 - `agent/skills/sync.py`
 - `agent/tools/skill.py`
-- `config/skill_sources.example.yml`
+- `config/config.example.yml` 的 `skills` 分区
 - `skill_repo/skills/README.md`
 - CLI `/skills` 与 `/skills sync`
-- Tool：`load_skills`、`sync_skills`
-- 脚本执行复用通用 `exec`
+- Tool：`load_skills`、`sync_skills`、`run_skill`
+- 正式脚本执行使用显式 runtime；不得由文件名或 `exec.command` 猜入口
 - 单元测试覆盖同步、加载、工具、CLI、上下文注入和 AgentLoop 工具链路
 
 本阶段不包含：
@@ -77,7 +78,7 @@ configured Skill source
 - 多层 Skill 覆盖优先级。
 - Skill 签名校验。
 - 自动安装 Skill 依赖。
-- 多用户权限隔离。
+- 用户私有 source 与跨 source 覆盖优先级。
 - 通过自然语言执行任意斜杠命令。
 - 管理员诊断类“查看项目代码、终端日志并判断问题原因”的 Tool 或 Skill。
 
@@ -102,7 +103,7 @@ skill_repo/
       assets/
 ```
 
-如果后续官方 Skill 独立成 git 仓库，只需要改 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`，让 source 指向真实 git 仓库。
+如果后续官方 Skill 独立成 git 仓库，只需要改 `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `skills.sources`，让 source 指向真实 git 仓库。
 
 ### 4.2 Runtime 目录
 
@@ -123,9 +124,9 @@ ${ZHICE_AGENT_WORKSPACE}/extends/
 
 ## 5. 配置设计
 
-模板文件：`config/skill_sources.example.yml`
+模板文件：`config/config.example.yml`
 
-运行文件：`${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`
+运行文件：`${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `skills` 分区
 
 当前模板：
 
@@ -183,12 +184,12 @@ sources:
     target: "master"
 ```
 
-`zcagent init` 默认从仓库模板补齐 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`。重复执行 init 时，已有配置会保留，只有 `--force` 会覆盖已有文件。
+`zcagent init` 默认从统一模板补齐 `${ZHICE_AGENT_WORKSPACE}/config/config.yml`。重复执行 init 时，已有配置会保留，只有 `--force` 会覆盖已有文件。
 
 如果启动时缺少该配置，CLI 打印：
 
 ```text
-缺少 `skill_sources.yml` 表示 Skill source 未启用，CLI/Gateway 静默使用空 SkillLoader；文件存在但非法或配置要求同步而失败时才输出结构化 warning。
+`config.yml` 缺少 `skills` 分区表示 Skill source 未启用，CLI/Gateway 静默使用空 SkillLoader；分区存在但非法或配置要求同步而失败时才输出结构化 warning。
 ```
 
 这表示当前没有配置 Skill source，自动同步被跳过。该缺失不阻断基础聊天，因为 Skill source 属于可选扩展能力；workspace、prompts、LLM endpoint 仍属于聊天必需配置，缺失或非法时直接报错。
@@ -209,7 +210,7 @@ sources:
 
 职责：
 
-- 读取并校验 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`。
+- 读取并校验 `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `skills` 分区。
 - 展开 `${ZHICE_AGENT_WORKSPACE}`、`${ZHICE_AGENT_SKILL_REPO}` 和环境变量占位符。
 - 校验 `extends_dir` 必须在 workspace 内。
 - 校验 source 名称唯一。
@@ -239,16 +240,16 @@ sources:
 
 ### 6.3 Skill 脚本执行约定
 
-本阶段不新增独立脚本执行器。LLM 使用 Skill 时先通过 `load_skills` 读取完整 `SKILL.md`，再按文档里的示例调用通用 `exec` 执行 workspace 内脚本。
+当前同时保留指令型和可执行型 Skill。LLM 先通过 `load_skills` 读取完整 `SKILL.md`；存在合法显式 runtime 时只能调用 `run_skill`，没有 runtime 时把 Skill 作为组合现有 Tool 的指令包。
 
 约定：
 
 - Skill 脚本建议位于 `${ZHICE_AGENT_WORKSPACE}/extends/{source}/skills/{skill_name}/scripts/`。
-- `SKILL.md` 必须写清楚可执行命令、参数 JSON、返回格式、错误码和边界情况。
+- 可执行型 `SKILL.md` 必须声明 Python 相对入口、`ndjson-v1` 和 timeout，并写清参数、返回格式、错误码和边界情况。
 - 脚本推荐通过 `--params '{JSON}'` 接收输入。
 - 脚本推荐 stdout 最后一行输出结构化 JSON。
 - 脚本禁止 import `agent.*`。
-- 安全边界由 `exec` 的 workspace guard、命令策略、超时和输出截断统一承担。
+- 安全边界由 SkillExecutor 的入口 guard、固定解释器、无 shell、最小环境、timeout、输出上限、取消与进程树回收承担；外层仍经过 Tool RBAC、Hook、Audit 和 Profile 过滤。
 
 ### 6.4 `agent/tools/skill.py`
 
@@ -257,6 +258,7 @@ Skill 专属工具：
 ```text
 load_skills
 sync_skills
+run_skill
 ```
 
 `load_skills` 用于读取完整 `SKILL.md`。
@@ -270,6 +272,8 @@ sync_skills
 ```
 
 `source` 可省略，省略时同步所有配置 source。`sync_skills` 不接受临时来源地址或任意命令。
+
+`run_skill` 只接收限定名和 JSON object 参数，不接受 executable、cwd、env 或 timeout。
 
 工具返回 source 级 JSON，例如：
 
@@ -336,7 +340,7 @@ skills synced: zhice-official (3 skills, 1 new, 2 changed)
 
 普通聊天启动时自动同步保持安静；gateway 启动或后续显式入口可以按 `sync.log` 打印摘要。`gateway --check` 只检查配置，不做同步。
 
-`/skills` 只展示 Skill 名称和短描述。`category`、`readonly` 不作为核心 frontmatter 字段，也不作为 CLI、上下文摘要或 tool metadata 的展示字段。兜底安全边界放在 `exec`、workspace guard 和 `SKILL.md` 行为说明里。
+普通 `/skills` 只展示 Skill 限定名和短描述；管理页才展示 source commit、同步时间、健康和安全错误摘要。`category`、`readonly` 不作为核心展示字段。
 
 ---
 
@@ -375,10 +379,13 @@ flowchart TD
     B --> C["tool_call: load_skills"]
     C --> D["return full SKILL.md"]
     D --> E["LLM builds params"]
-    E --> F["tool_call: exec"]
-    F --> G["exec runs workspace script"]
-    G --> H["ToolResult returned to AgentLoop"]
-    H --> I["LLM answers user"]
+    E --> F{"explicit runtime?"}
+    F -->|"yes"| G["tool_call: run_skill"]
+    G --> H["SkillExecutor + ndjson-v1"]
+    F -->|"no"| H2["compose existing Tools"]
+    H --> I["ToolResult returned to AgentLoop"]
+    H2 --> I
+    I --> J["LLM answers user"]
 ```
 
 ---
@@ -387,7 +394,7 @@ flowchart TD
 
 - AgentLoop 不 import SkillLoader 或 SkillSourceSync。
 - `skills/*/scripts/` 禁止 import `agent.*`。
-- Skill script 通过通用 `exec` 执行。
+- 可执行 Skill 只通过显式 `run_skill` 执行；不从 `exec.command` 反推 Skill。
 - `sync_skills` 不接收任意 URL。
 - Runtime 写入目录限制在 workspace。
 - 破坏性操作仍由工具层和用户确认策略控制，不能由 Skill 自动绕过。
@@ -400,14 +407,14 @@ flowchart TD
 
 - Skill frontmatter 解析。
 - SkillLoader 单 root、多 root、跨 source 同名、限定名查询、非法名、缺失 `SKILL.md`。
-- `exec` 的 workspace guard、超时、输出截断、危险命令拦截和脚本执行。
-- `load_skills` 与 `sync_skills` 工具。
+- SkillExecutor 的入口 guard、NDJSON、timeout、取消、输出限制、脱敏与进程树回收。
+- `load_skills`、`sync_skills` 与 contextual `run_skill` 工具。
 - `sync_skills` 只同步配置 source，不接受任意 URL。
 - `SkillSourceSync` 整仓库本地 source 镜像、unchanged、changed、removed、startup always、非法 `sync.on_startup` 值拒绝、未知 source、runtime path guard。
 - ContextBuilder 注入 Skill 摘要。
-- AgentLoop Fake LLM 覆盖 `load_skills -> exec` 的 Skill 使用链路。
+- AgentLoop Fake LLM 覆盖 `load_skills -> run_skill -> skill.* -> ToolResult` 链路。
 - CLI `/skills`、`/skills sync`、`/tools`。
-- `zcagent init` 能补齐 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`，已有文件默认保留。
+- `zcagent init` 能补齐统一 `${ZHICE_AGENT_WORKSPACE}/config/config.yml`，已有文件默认保留。
 
 验收命令：
 
@@ -425,11 +432,8 @@ Windows 本机可能因为系统临时目录或 `.pytest_cache` 权限导致普�
 后续可以单独设计：
 
 - git source 周期轮询，默认关闭，并使用 change-only 日志。
-- `/skills status` 查看 source 最近同步时间和 commit。
-- `sync_skills` 支持多个 source 名称。
 - Skill 版本、签名和依赖声明。
-- 用户私有 Skill source、source 权限过滤和优先级覆盖；这些要等用户权限系统设计清楚后再做。
-- 管理员诊断 Tool：受权限控制地查看项目代码、终端日志、运行状态，再让 Agent 归因分析；它依赖 turn 运行单元、运行日志和用户权限审计，不并入当前 Skill 加载阶段。
+- 用户私有 Skill source 和跨 source 覆盖优先级。
 - 自然语言“更新技能仓库”到 `sync_skills` 的意图路由。
 
-当前阶段先保持轻量闭环：配置来源、同步到 `extends`、扫描加载、按需读取说明、通过 `exec` 受控执行脚本。
+当前闭环是配置来源、同步到 `extends`、指纹索引、actor 可见性、按需读取说明，以及对显式 runtime 的正式可观测执行。

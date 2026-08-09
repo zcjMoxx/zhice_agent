@@ -270,7 +270,7 @@ class LLMProvider(Protocol):
 - 真实 endpoint 配置放在工作目录，不放在仓库中
 - `zcagent init` 会在工作目录生成：
   - `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`
-  - `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml`
+  - `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `skills` 分区
   - `${ZHICE_AGENT_WORKSPACE}/prompts/*.md`
   - `${ZHICE_AGENT_WORKSPACE}/config/.env`
 - `zcagent init` 可重复执行：已存在的本地文件默认保留，缺失文件会自动补齐；只有显式传 `--force` 才覆盖已有文件。
@@ -365,7 +365,7 @@ zcagent init
 - 未显式指定时在 `Path.home() / ".zhice"` 初始化
 - 默认从公开 `config/.env.example` 生成 `${ZHICE_AGENT_WORKSPACE}/config/.env`
 - 在 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 创建 endpoint 配置
-- 在 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 创建 Skill source 配置
+- 在 `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `skills` 分区创建 Skill source 配置
 - 复制默认 prompts
 - 默认保留已有用户文件，只补齐缺失文件
 
@@ -504,7 +504,7 @@ sequenceDiagram
 - `${workspace}/config/.env` 不能反向改变 workspace，显式 `--env-file` 可以兼容提供 workspace
 - 缺少启动 prompts 时能引导用户执行 `zcagent init`
 - 缺少或未正确填写 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 时，`zcagent` 聊天入口直接失败并提示配置；因为 LLM 是聊天运行必需能力
-- 缺少 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 时静默跳过 Skill 同步并视为 disabled；因为 Skill source 是可选扩展能力，只有显式配置后非法或同步失败才记录 warning
+- `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 缺少 `skills` 分区时静默跳过 Skill 同步并视为 disabled；只有显式配置后非法或同步失败才记录 warning
 
 提交前建议运行：
 

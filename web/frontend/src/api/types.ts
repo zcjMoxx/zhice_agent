@@ -56,6 +56,47 @@ export interface Role {
   permission_keys: string[];
 }
 
+export interface SkillSummary {
+  qualified_name: string;
+  source: string;
+  name: string;
+  description: string;
+  executable: boolean;
+}
+
+export interface SkillSourceStatus {
+  source: string;
+  enabled: boolean;
+  sync_enabled: boolean;
+  configured_target: string;
+  current_commit: string;
+  last_sync_started_at: string;
+  last_sync_finished_at: string;
+  last_success_at: string;
+  last_status: string;
+  health: string;
+  skill_count: number;
+  load_error_count: number;
+  last_error_code: string;
+  last_error_message_safe: string;
+}
+
+export interface SkillSourcesSnapshot {
+  status: string;
+  sources: SkillSourceStatus[];
+  skills: SkillSummary[];
+}
+
+export interface OperationsTerminal {
+  enabled: boolean;
+  configured: boolean;
+  url: string;
+  presentation: "new_tab" | "embed" | "both";
+  mode?: "local_process" | "local_docker" | "server_docker" | "";
+  target_type?: "process" | "container" | "";
+  target_name?: string;
+}
+
 export interface AuditPage {
   events: Record<string, unknown>[];
   next_cursor?: string;
@@ -126,12 +167,17 @@ export interface RuntimeEventData {
   type?: string;
   event?: string;
   status?: string;
-  display?: { title?: string; detail?: string };
+  display?: { title?: string; detail?: string; visibility?: string };
   scope?: { agent_id?: string; task_id?: string; task_name?: string };
   agent_id?: string;
   task_id?: string;
   root_session_id?: string;
   root_turn_id?: string;
+  skill_run_id?: string;
+  parent_event_id?: string;
+  tool_call_id?: string;
+  tool_call_record_id?: string;
+  metadata?: { percent?: number; code?: string; skill_name?: string };
 }
 
 export interface WsEnvelope {

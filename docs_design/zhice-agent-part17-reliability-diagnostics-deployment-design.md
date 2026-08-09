@@ -78,7 +78,7 @@ service: SystemDiagnosticsService
 
 Owner 默认拥有该权限；其它角色需要显式授权。系统诊断支持按时间、用户、Session、Turn、request、channel、component、endpoint/model、Tool、MCP Server、状态和错误码查询。
 
-事故由确定性规则从 Runtime Activity 和 trace 聚合。LLM 可以解释事故证据，但不能把推断直接写成运行真值。管理页面继续使用 Part 16 的系统监控入口，增加事故列表、筛选和时间线，不建立独立 Web 应用。
+事故由确定性规则从 Runtime Activity 和 trace 聚合。LLM 可以解释事故证据，但不能把推断直接写成运行真值。管理页面继续使用 Part 16 的系统监控入口，增加事故列表、筛选和时间线，不建立独立 Web 应用；概览事故计数可直接下钻到近 60 分钟无附加筛选的事故证据，失败计数可直接下钻到失败运行记录。
 
 ## 6. MCP 可靠性
 
@@ -158,7 +158,7 @@ default workspace=/home/zhice/.zhice
 /home/zhice/.zhice/config/channels/weixin/accounts
 ```
 
-Session、Memory、用户数据库、Context index、compaction、日志和测试缓存不得从本地烘入镜像。微信扫码生成的账号凭据只进入独立命名卷，不与完整 `config/` 混挂；`.env`、`config.yml`、`models.json` 继续随私有镜像更新。真实 Secret 若进入私有镜像层或运行卷，则 registry、宿主机和 Docker volume 的访问权限必须按 Secret 权限管理。
+Session、Memory、用户数据库、Context index、compaction、日志和测试缓存不得从本地烘入镜像。微信扫码生成的账号凭据只进入独立命名卷，不与完整 `config/` 混挂。Part 18 保留镜像内三份配置作为首次迁移/灾备基线，但云端权威副本已迁到 `/etc/zhice-agent/runtime/` 并逐文件只读 bind mount；后续新 Digest 默认保留宿主机配置。
 
 ## 10. 部署脚本
 
@@ -168,7 +168,7 @@ Session、Memory、用户数据库、Context index、compaction、日志和测�
 - `deploy/pipelines/deploy-existing-image-to-cloud.ps1`：复用操作者确认过的 `zhice-agent:local`，不执行 build，默认不重复 smoke，自动生成发布标签、推送私有 registry 并按 Digest 部署云端。
 - `deploy/pipelines/build-and-deploy-cloud.ps1`：从当前源码 build、隔离 smoke 后进入同一云端发布模块，不调用本地 Compose。
 - `deploy/private/cloud-target.json`：Git 忽略的本机目标配置；`SshPassword` 是其中唯一允许的明文部署 Secret，只依赖本机文件权限和 Git ignore 保护，Token、其他 Secret 与私钥仍禁止进入。Paramiko 从该文件读取 SSH/sudo 共用密码，加载 `%USERPROFILE%/.ssh/known_hosts` 并以 `RejectPolicy` 校验主机密钥；sudo 密码只经 PTY 的 stdin 传入并在输出中脱敏。公开 example 的待填写值直接使用中文。
-- `deploy/pipelines/invoke-cloud-release.ps1` 与 `deploy/scripts/remote_ops.py`：前者校验固定镜像名与 `linux/amd64`、生成时间戳与 Git 短提交号标签并精确取得目标 RepoDigest；后者强制要求 `RemoteOpsDir`，将 `deploy/status/logs/stop/restart` 五个运维脚本上传到 `RemoteOpsDir/releases/<release>`，逐个 `sh -n` 后原子切换 `current`，再部署并从云服务器侧受控 curl 验证公网 HTTPS `status=ok`。本机 health 只作附加诊断，本机代理、TUN DNS 或 TLS 异常不再覆盖已通过的远端公网判定。
+- `deploy/pipelines/invoke-cloud-release.ps1` 与 `deploy/scripts/remote_ops.py`：继续执行不可变 Digest、versioned release 和原子 `current`；Part 18 将同步清单扩展为含 `diagnose.sh` 的六脚本，并从固定公开 allowlist 安装 root-owned Ops 资产，不上传私有配置。
 - `push-image.ps1`：推送到私有 registry 并输出 digest，不回显 Secret。
 - `run-local.ps1`：使用最终镜像完成 health、Web、配置加载和优雅退出烟测。
 - `deploy.sh`：云端按 digest 启动单实例，挂通用运行数据 volume 和独立微信账号凭据 volume；发布、回滚和重启均不删除凭据卷。
@@ -187,8 +187,8 @@ Session、Memory、用户数据库、Context index、compaction、日志和测�
    Dockerfile 默认保留 Debian 官方源，同时允许构建脚本或 Compose 显式传入经过白名单检查的 APT 镜像主机；该参数不进入容器运行环境。
    Windows 根目录提供三个 CMD 用户入口；PowerShell 流水线位于 `pipelines/`，底层参数化脚本继续保留在 `scripts/` 供排障和非默认环境使用。
 6. 全量 Python 与前端测试、Ruff、lint/typecheck/build、deploy 静态检查和 compose 校验已通过。
-7. 真实生产验收已关闭：本地 Compose 容器为 healthy；私有镜像成功推送阿里云 ACR；腾讯云实例按 Digest 运行且重启后认证数据保留；`https://agent.zouzhou.xyz/health` 经 Caddy 返回 `status=ok`，QQ/微信渠道 available。2026-08-04 三入口又分别完成真实验收：本地入口 build/smoke/Compose healthy，已有镜像入口完成 push/原子同步/远端健康与公网 health，源码完整入口完成 build/smoke/push/deploy 全链；现场发现的 PowerShell 5.1 RepoDigest 数组嵌套、Paramiko 2.8 warning stderr 和发布端 TUN fake DNS `198.18.1.0` 假阴性均已修复并纳入自动化契约。
-   QQ 公网部署还要求每个启用账号在镜像私有 `config.yml` 中显式设置可访问的 HTTPS `web_base_url`；当前云端 `main` 使用 `https://agent.zouzhou.xyz`，避免裸 `/bind` 继承本地 `127.0.0.1` 默认值。该账号不得同时由本地 Compose 与云端实例消费。
+7. Part 17 当时的真实生产验收已关闭；当前真实主站已迁入 Git 忽略的私有 `PublicUrl`。Part 18 新增的独立 Ops、宿主机权威配置和跨 Digest 保留属于新的外部验收项，不能沿用 Part 17 结果自动判定通过。
+   QQ 公网部署仍要求启用账号显式设置与私有 `PublicUrl` 对齐的 HTTPS `web_base_url`，避免裸 `/bind` 继承本地 `127.0.0.1` 默认值。
 
 ## 12. 验收标准
 
@@ -205,7 +205,7 @@ Session、Memory、用户数据库、Context index、compaction、日志和测�
 
 ## 13. 后续 Part
 
-Part 18 继续 Skill Runtime、CLI 和本地运维优化，复用 Part 17 的系统诊断服务和部署状态，但不回头改变 Part 17 的私有镜像与单进程边界。
+Part 18 已实现正式 Skill Runtime、Skill source 管理和独立服务器 Ops，并把云端三份运行配置迁为宿主机权威副本。它复用 Part 17 的私有镜像与单机边界，但明确改变了“配置只随镜像更新”的旧运行口径；当前以 Part 18 活文档为准。
 
 ## 14. 当前验证状态
 

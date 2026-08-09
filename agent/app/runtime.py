@@ -63,6 +63,7 @@ from agent.session import (
     SessionSubagentPreference,
 )
 from agent.skills import SkillLoader, SkillSourceSync
+from agent.skills.status import SkillSourceStatusStore
 from agent.skills.sync import SkillSyncError
 from agent.subagents.config import SubagentConfig
 from agent.subagents.presentation import can_view_subagent_details, format_subagent_unavailable
@@ -142,6 +143,7 @@ class WebRuntime:
     system_diagnostics: SystemDiagnosticsService | None = None
     skill_loader: SkillLoader | None = None
     skill_sync: SkillSourceSync | None = None
+    skill_status: SkillSourceStatusStore | None = None
     prompt_loader: PromptLoader | None = None
     memory_extraction_enabled: bool = False
     memory_idle_seconds: float = 300.0
@@ -344,6 +346,7 @@ class WebRuntime:
         sessions = self.sessions
         workspace = self.config.workspace
         tools = getattr(self.agent_loop, "tools", None)
+        visible_skills = self.skill_loader
         turn_llm = self.llm
         turn_context_budget = (
             self.llm_resolver.context_budget() if self.llm_resolver is not None else None
@@ -380,6 +383,11 @@ class WebRuntime:
             sessions = resolved.store
             owner_has_workspace_scope = "owner" in actor.role_keys
             workspace = self.config.workspace if owner_has_workspace_scope else resolved.context.files_dir
+            visible_skills = (
+                self.skill_loader.for_actor(actor)
+                if self.skill_loader is not None
+                else None
+            )
             memory_context = build_memory_context(
                 resolved.context.memory_dir,
                 scope="workspace" if owner_has_workspace_scope else "user",
@@ -397,7 +405,7 @@ class WebRuntime:
                 files_dir=workspace,
                 shared_readonly_dir=resolved.context.shared_readonly_dir,
                 actor=actor,
-                skills=self.skill_loader,
+                skills=visible_skills,
                 skill_sync=self.skill_sync,
                 diagnostics=self.diagnostics,
                 system_diagnostics=self.system_diagnostics,
@@ -491,7 +499,7 @@ class WebRuntime:
                 parent_llm=turn_llm,
                 context_budget=turn_context_budget,
                 tool_provider_factory=child_tools,
-                skills=self.skill_loader,
+                skills=visible_skills,
                 cancellation_token=token,
                 on_event=on_event,
                 force_once=force_subagent_once,
@@ -526,6 +534,7 @@ class WebRuntime:
                 sessions_override=sessions,
                 tools_override=tools,
                 workspace_override=workspace,
+                skills_override=visible_skills,
                 tool_policy=self.tool_policy,
                 confirmation_broker=self.confirmation_broker,
                 activity_sink=self.activity_sink,
@@ -1433,6 +1442,7 @@ def build_web_runtime(
         system_diagnostics=system_diagnostics,
         skill_loader=skill_loader,
         skill_sync=skill_sync,
+        skill_status=skill_sync.status_store,
         prompt_loader=prompt_loader,
         memory_extraction_enabled=memory_extraction_startup.enabled,
         mcp_runtime=mcp_runtime,
@@ -1617,7 +1627,7 @@ def _create_skill_loader(
     """Create a SkillLoader and emit at most one warning for one startup cause."""
 
     if not skill_sync.has_config():
-        return SkillLoader([])
+        return SkillLoader([], cache_path=skill_sync.workspace / "state" / "skill_index.json")
     try:
         roots = skill_sync.skill_roots()
     except SkillSyncError as exc:
@@ -1631,7 +1641,7 @@ def _create_skill_loader(
             config_file="config.yml",
             error_type=type(exc).__name__,
         )
-        return SkillLoader([])
+        return SkillLoader([], cache_path=skill_sync.workspace / "state" / "skill_index.json")
     if startup_error is not None:
         log_event(
             skill_logger,
@@ -1643,7 +1653,10 @@ def _create_skill_loader(
             config_file="config.yml",
             error_type=type(startup_error).__name__,
         )
-    return SkillLoader(roots)
+    return SkillLoader(
+        roots,
+        cache_path=skill_sync.workspace / "state" / "skill_index.json",
+    )
 
 
 def _current_endpoint(llm: LLMProvider) -> LLMEndpoint:

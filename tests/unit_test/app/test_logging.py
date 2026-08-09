@@ -12,8 +12,10 @@ from agent.app.logging import (
     GatewayLogOptions,
     TerminalLogFormatter,
     _format_duration_ms,
+    _stream_supports_color,
     configure_gateway_logging,
     reset_gateway_logging,
+    terminal_color_override,
 )
 from agent.logging_utils import (
     DeferredConsoleHandler,
@@ -172,6 +174,20 @@ def test_terminal_formatter_marks_entire_warning_line_in_bright_red():
     assert rendered.count("\033[") == 2
 
 
+def test_supervisor_force_color_overrides_pipe_detection(monkeypatch):
+    monkeypatch.setenv("ZHICE_FORCE_TERMINAL_COLOR", "1")
+
+    assert _stream_supports_color(io.StringIO()) is True
+
+
+def test_no_color_has_priority_over_supervisor_force_color(monkeypatch):
+    monkeypatch.setenv("ZHICE_FORCE_TERMINAL_COLOR", "1")
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    assert _stream_supports_color(io.StringIO()) is False
+    assert terminal_color_override() is False
+
+
 def test_preview_text_redacts_multiline_and_truncates():
     text = "OPENAI_API_KEY=sk-testsecret123456\n" + "x" * 80
 
@@ -209,7 +225,7 @@ def test_redact_mapping_keeps_original_object_untouched():
     assert payload == {"api_key": "abc", "name": "demo"}
 
 
-def test_configure_gateway_logging_writes_date_partitioned_trace_jsonl(tmp_path):
+def test_configure_gateway_logging_writes_flat_daily_trace_jsonl(tmp_path):
     stream = io.StringIO()
     result = configure_gateway_logging(
         GatewayLogOptions(trace_log=True),
@@ -227,8 +243,10 @@ def test_configure_gateway_logging_writes_date_partitioned_trace_jsonl(tmp_path)
     )
 
     assert result.trace_path is not None
-    assert result.trace_path.name == "trace.log"
-    assert result.trace_path.parent.name == datetime.now().strftime("%Y-%m-%d")
+    assert result.trace_path.name == (
+        f"log-{datetime.now().astimezone().date().isoformat()}.jsonl"
+    )
+    assert result.trace_path.parent == (tmp_path / "logs").resolve()
     payload = json.loads(result.trace_path.read_text(encoding="utf-8").splitlines()[-1])
     assert payload["level"] == "INFO"
     assert payload["component"] == "agent"

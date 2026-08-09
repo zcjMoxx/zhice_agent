@@ -1,8 +1,19 @@
 # Deploy 测试说明
 
+## Part 18 多运行形态 Ops 纠偏
+
+- 本地 Compose 固定启动 `zhice-agent` 与独立 `zhice-agent-ops`，Ops 端口只绑定 `127.0.0.1`，主容器通过非敏感环境投影 `local_docker` endpoint。
+- 本地 sidecar 的 Docker API 请求只能包含固定 `zhice-agent`，浏览器不能提交容器名、Docker 参数或路径。
+- 私有云目标同时要求 `PublicUrl` 与 `OpsUrl`；公开 example 只有占位值，部署把 `server_docker` endpoint 投影给主 Web。
+- `config apply` 调用内部 `apply.sh`，从 root-owned 固定 deployment spec 使用当前 Digest/mounts 重建容器；不再以单纯 restart 代替 bind-mount 配置生效。
+- Docker Ops 日志页默认每秒刷新固定容器的有界日志并自动滚动；用户向上查看历史时暂停，Continue follow 恢复，不使用无限输出缓冲。
+- 本地 Docker 与本地进程复用同一双视图静态页面和通用 restricted 命令集；页面不能提交容器名、Docker 参数、路径或服务器配置命令。
+- 服务器 Ops 使用 loopback Caddy 统一 Basic Auth，在同一 origin 提供共享监控页、固定 dashboard API 和 `/terminal/` ttyd；dashboard/terminal adapter 分离为受 systemd 保护的非 root 服务。
+- 服务器 dashboard API 只允许 meta/status/logs/diagnose/restart，restart 必须提交精确 JSON 确认；配置正文继续只在 restricted ttyd 内访问。
+
 ## 测试目标
 
-验证 Part 17 私有镜像部署资产的静态契约，避免真实配置进入 Git、完整 workspace 被复制进镜像或生产拓扑意外扩展为多 writer。
+验证 Part 17 私有镜像部署和 Part 18C 独立受限 Ops 的静态、解析与配置事务契约，避免真实配置进入 Git、完整 workspace 被复制进镜像、运维终端扩大为通用 Shell，或生产拓扑意外扩展为多 writer。
 
 ## 用例覆盖
 
@@ -27,18 +38,23 @@
 - `deploy/build-and-deploy-local.cmd` 是 Windows 双击薄入口，只定位并调用同名 pipeline、保留退出码和暂停窗口，不复制 Docker 流程、不提升权限或修改系统 Execution Policy。
 - `deploy/pipelines/deploy-existing-image-to-cloud.ps1` 复用已经存在的 `zhice-agent:local`，不执行 build，默认不重复 smoke；只有显式 `-Smoke` 才调用隔离烟测，然后进入共享云端发布。
 - `deploy/pipelines/build-and-deploy-cloud.ps1` 从当前源码 build、smoke 后调用共享云端发布，不调用本地 Compose；两个云端 CMD 都是指向同名 `pipelines/` 编排的双击薄入口。
-- `pipelines/invoke-cloud-release.ps1` 从 Paramiko helper 取得脱敏后的公开目标，固定镜像名、生成时间戳与 Git 短提交号标签，校验 `linux/amd64`、Docker、Python/Paramiko，精确取得 Digest，同步固定五个 shell 脚本，远端部署后验证公网 HTTPS `/health`。
+- `pipelines/invoke-cloud-release.ps1` 从 Paramiko helper 取得脱敏后的公开目标，固定镜像名、生成时间戳与 Git 短提交号标签，校验 `linux/amd64`、Docker、Python/Paramiko，精确取得 Digest，同步固定六个 shell 脚本，远端部署后验证公网 HTTPS `/health`。
 - `scripts/remote_ops.py` 自行读取私有 JSON 的 `SshPassword` 并强制要求 `RemoteOpsDir`；只加载 Windows `~/.ssh/known_hosts` 并使用 `RejectPolicy`，密码不进入参数、环境或输出，目录字段缺失时前置失败。
-- 五个脚本通过 SFTP 写入 versioned release，经 `sh -n` 后原子切换 `current`；`status` 对不存在容器友好并展示 image/status/health/created/restarts，`logs` 拒绝非正整数，`stop` 幂等，`restart` 明确检查容器，`deploy` 失败恢复旧容器。
-- `.gitattributes` 强制 `deploy/scripts/*.sh` 使用 LF，避免 Windows checkout 后上传 CRLF 脚本；helper 单元测试使用 fake client/SFTP/channel 覆盖配置校验、Secret 脱敏、五脚本上传、语法校验、原子切换、sudo stdin 和有界超时，不读取真实私有 JSON，也不连接网络。
+- 六个脚本通过 SFTP 写入 versioned release，经 `sh -n` 后原子切换 `current`；`status` 对不存在容器友好并展示 image/status/health/created/restarts，`logs` 拒绝非正整数和超过上限的行数，root wrapper 对普通输出限制 128 KiB、follow 限制 4 KiB 单行与每秒 64 KiB 并回收进程组，`stop` 幂等，`restart` 明确检查固定容器并等待健康，`diagnose` 覆盖 Docker/容器/卷/磁盘/端口/本地与公网健康，`deploy` 失败恢复旧容器。
+- Part 18C ttyd 使用固定版本和 SHA-256，systemd 只在 loopback 启动 `zhice-ops-shell`，最多一个会话，并通过服务器首次生成且跨升级保留的 root-only Basic Auth credential、`zhice-operator`、root-owned wrapper 和精确 sudoers 隔离公网、Docker/root 权限；credential 不进入仓库、参数或部署输出。
+- restricted shell 只接受设计确认的 status/logs/logs-follow/diagnose/config/restart/help/exit 语法，拒绝 Bash、sudo、任意 Docker、任意容器名、任意路径、管道和额外参数。
+- 云端首次从受控镜像安全迁移三份配置到 `/etc/zhice-agent/runtime`，后续 Digest 保留宿主机权威副本并使用三个只读 bind mount；部分文件缺失和 symlink fail closed。
+- 配置 edit 写 root-only pending 并自动备份；validate/diff/backup/restore/apply 使用固定文件名、大小上限、YAML/JSON/env 解析、原子替换和失败回滚，日志/诊断输出二次脱敏。
+- `.gitattributes` 强制 `deploy/scripts/*.sh` 使用 LF，`deploy/ops/.gitattributes` 约束 Ops 文本资产；helper 单元测试使用 fake client/SFTP/channel 覆盖配置校验、Secret 脱敏、六脚本与公开 Ops 资产上传、语法校验、原子切换、sudo stdin 和有界超时，不读取真实私有 JSON，也不连接网络。
 - Paramiko helper 只在导入 Paramiko 时精确抑制 `CryptographyDeprecationWarning`；PowerShell preflight 捕获 native stderr 和退出码，避免 Windows PowerShell 5.1 的 `ErrorActionPreference=Stop` 将弃用警告误判为发布失败，同时缺依赖仍返回明确安装提示。
 - 远端部署与 status 成功后，helper 使用同一 SSH client 执行固定参数 curl 请求公网 `/health`，解析 JSON 并强制要求 `status=ok`；远端检查失败保持发布失败。本机 PowerShell health 只作附加诊断，本机代理、TUN DNS、TLS 或状态异常使用 warning，不覆盖远端已经通过的公网判定。
 
 ## 关键检查点
 
 - 禁止 `COPY . .`。
-- 禁止把完整 config 或完整 workspace 作为云端 volume；只允许微信账号凭据子目录使用专用命名卷。
+- 禁止把完整 config 或完整 workspace 作为云端 volume；三个权威配置只能逐文件只读 bind，微信账号凭据子目录继续使用专用命名卷。
 - 禁止 Dockerfile 预设 `ZHICE_AGENT_SKILL_REPO`，避免镜像环境抢占 dotenv 覆盖值。
 - 禁止在测试中读取或输出三个真实私有文件内容。
 - 禁止在测试中读取或输出真实 `private/cloud-target.json`；只能检查公开 example 和 ignore 规则。
 - 文档静态测试只读取公开 `deploy/README.md`，不得探测或打开 `deploy/private/.env`、`config.yml`、`models.json`。
+- Windows 测试只验证 parser、配置事务、静态 systemd/sudoers/Cloudflare Tunnel/ttyd Basic Auth 契约；真实 systemd、ttyd PTY/resize/idle/auth、Docker 救援和跨 Digest 保留必须在 Linux 云服务器验收。

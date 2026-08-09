@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $deployRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $repoRoot = (Resolve-Path (Join-Path $deployRoot "..")).Path
 $scriptsRoot = Join-Path $deployRoot "scripts"
+$opsRoot = Join-Path $deployRoot "ops"
 $pushScript = Join-Path $scriptsRoot "push-image.ps1"
 $remoteOpsHelper = Join-Path $scriptsRoot "remote_ops.py"
 $imageName = "zhice-agent"
@@ -49,7 +50,7 @@ try {
 } catch {
     throw "Remote operations helper returned invalid public config"
 }
-$requiredKeys = @("Registry", "SshHost", "SshUser", "RemoteOpsDir", "PublicUrl", "Port")
+$requiredKeys = @("Registry", "SshHost", "SshUser", "RemoteOpsDir", "PublicUrl", "OpsUrl", "Port")
 foreach ($key in $requiredKeys) {
     if ($config.PSObject.Properties.Name -notcontains $key -or [string]::IsNullOrWhiteSpace([string]$config.$key)) {
         throw "Missing cloud deployment config value: $key"
@@ -71,6 +72,7 @@ $sshHost = ([string]$config.SshHost).Trim()
 $sshUser = ([string]$config.SshUser).Trim()
 $remoteOpsDir = ([string]$config.RemoteOpsDir).Trim().TrimEnd("/")
 $publicUrl = ([string]$config.PublicUrl).Trim().TrimEnd("/")
+$opsUrl = ([string]$config.OpsUrl).Trim().TrimEnd("/")
 $port = [int]$config.Port
 
 if ($registry -notmatch '^[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._-]+)+$') {
@@ -106,7 +108,7 @@ foreach ($command in @("docker")) {
     }
 }
 
-$remoteScriptNames = @("deploy.sh", "status.sh", "logs.sh", "stop.sh", "restart.sh")
+$remoteScriptNames = @("deploy.sh", "apply.sh", "status.sh", "logs.sh", "stop.sh", "restart.sh", "diagnose.sh")
 $remoteScripts = @($remoteScriptNames | ForEach-Object {
     $scriptPath = Join-Path $scriptsRoot $_
     if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
@@ -114,6 +116,17 @@ $remoteScripts = @($remoteScriptNames | ForEach-Object {
     }
     $scriptPath
 })
+if (-not (Test-Path -LiteralPath (Join-Path $opsRoot "install.sh") -PathType Leaf)) {
+    throw "Missing independent Ops installer: $opsRoot"
+}
+try {
+    $opsUri = [Uri]$opsUrl
+} catch {
+    throw "Invalid operations deployment URL: $opsUrl"
+}
+if ($opsUri.Scheme -ne "https" -or -not $opsUri.Host -or $opsUri.Query -or $opsUri.Fragment -or $opsUri.AbsolutePath -notin @("", "/")) {
+    throw "Operations deployment URL must be an HTTPS origin without path, query, or fragment: $opsUrl"
+}
 
 docker info *> $null
 if ($LASTEXITCODE -ne 0) {
@@ -169,7 +182,7 @@ if ($digest -notmatch ('^' + [regex]::Escape("${registry}/${imageName}") + '@sha
 Write-Output "[cloud 4/6] Uploading versioned remote operations scripts"
 $remoteScripts | ForEach-Object { Write-Verbose "Validated remote operations script: $_" }
 Write-Output "[cloud 5/6] Switching scripts atomically and deploying immutable image digest"
-& python $remoteOpsHelper --config $ConfigPath deploy --scripts-dir $scriptsRoot --release-id $ReleaseTag --digest $digest --port $port
+& python $remoteOpsHelper --config $ConfigPath deploy --scripts-dir $scriptsRoot --ops-dir $opsRoot --release-id $ReleaseTag --digest $digest --port $port
 if ($LASTEXITCODE -ne 0) { throw "Remote operations sync or cloud deployment failed" }
 
 Write-Output "[cloud 6/6] Verifying public HTTPS health"

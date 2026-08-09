@@ -47,8 +47,8 @@ Agent 项目最核心的不是 Web，也不是数据库，也不是部署，而�
 
 - 想读文件？LLM 调 `read_file` 工具。
 - 想搜索项目？LLM 调 `grep` 工具。
-- 想运行脚本？LLM 调 `exec` 工具。
-- 想使用业务能力？LLM 先加载 Skill，再按 Skill 说明执行脚本。
+- 想运行通用工作区命令？LLM 调受控 `exec` 工具。
+- 想使用业务能力？LLM 先加载 Skill；显式可执行型通过 `run_skill`，指令型组合已有 Tool。
 - 想拆任务？LLM 调 `delegate_tasks`，由 Subagent Coordinator 做有界并行 fan-out/fan-in。
 
 AgentLoop 已经是当前系统的稳定核心；新增能力应复用它，而不是建立第二套循环。
@@ -79,6 +79,7 @@ grep          搜索文本
 exec          执行安全命令
 load_skills   读取完整 Skill 说明
 sync_skills   同步已配置 Skill source
+run_skill     执行显式 runtime Skill
 memory_read   按需检索当前 actor 的长期 Memory
 memory_write  执行用户通过对话明确授权的 Memory 修改
 discover_tools 按当前 actor/Profile 发现并激活 Tool
@@ -132,7 +133,7 @@ extends/{source_name}/skills/{skill_name}/
     +-- run.py
 ```
 
-当前落地代码中，`${ZHICE_AGENT_SKILL_REPO}` 表示本地技能仓库根目录；运行时会按 `${ZHICE_AGENT_WORKSPACE}/config/skill_sources.yml` 同步到 `${ZHICE_AGENT_WORKSPACE}/extends/{source_name}/`，`SkillLoader` 固定从各 source 的 `skills/` 目录扫描。Skill 的运行时身份是 `source/name`，其中 `name` 来自 Skill 外层目录名。
+当前落地代码中，`${ZHICE_AGENT_SKILL_REPO}` 表示本地技能仓库根目录；运行时会按 `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `skills` 分区同步到 `${ZHICE_AGENT_WORKSPACE}/extends/{source_name}/`，`SkillLoader` 固定从各 source 的 `skills/` 目录扫描。Skill 的运行时身份是 `source/name`，其中 `name` 来自 Skill 外层目录名。
 
 `SKILL.md` 是给 LLM 看的说明书，里面写：
 
@@ -152,10 +153,10 @@ LLM 的使用流程是：
 1. 看到 skill 摘要
 2. 判断 skill 可能有用
 3. 调 load_skills 读取完整 SKILL.md
-4. 按 SKILL.md 里的命令调用 exec
-5. exec 执行 scripts/*.py --params '{JSON}'
-6. 脚本返回 JSON
-7. LLM 根据结果回答用户
+4. 若存在合法显式 runtime，调用 run_skill
+5. SkillExecutor 以 ndjson-v1 接收 progress/result
+6. 若无 runtime，把 Skill 作为指令组合已有 Tool
+7. LLM 根据结构化 ToolResult 回答用户
 ```
 
 智策 Agent 项目应该完整保留这个思想。
@@ -285,7 +286,7 @@ ZhiCe-Agent（CLI + Web + QQ + 微信）：
 能用稳定 `turn_id` / `turn_index` 串起一轮用户请求、WebSocket 事件和 JSONL 会话消息，
 能在预算内携带完整 Session 历史，并在长会话中组合确定性历史证据、结构化 compaction、混合检索旧 Turn 与最近连续 Turn，
 能用 SQLite FTS5/BM25、可选 embedding 精确 cosine、entity、anchor 和 recency 生成可解释 ContextPlan，
-能通过 RuntimeEvent、分层日志和 workspace `trace.log` 观察 turn、context、LLM、tool、hook、subagent、channel 和 session 生命周期，
+能通过 RuntimeEvent、分层日志和 workspace 每日 JSONL 观察 turn、context、LLM、tool、hook、subagent、channel 和 session 生命周期，
 能通过本地 SQLite 用户、角色、特权和可撤销 cookie 登录态保护 Web API / WebSocket，
 能按内部 user_id 隔离用户上下文、session index 和 session 模型偏好，
 能让登录用户直接使用本人资源与安全工具，并在跨用户、管理、审计和危险操作前进行特权检查，
@@ -308,9 +309,9 @@ ZhiCe-Agent（CLI + Web + QQ + 微信）：
 
 ### 3.2 后续扩展方向
 
-当前代码已经完成到 Part 17。Part 17 的 Provider retry、事故诊断、MCP 动态可靠性、状态恢复和私有部署链已经落地；本地镜像 smoke、阿里云 ACR push、腾讯云按 Digest deploy、Caddy HTTPS 和持久化恢复均已完成真实生产部署验收。2026-08-04 又将日常操作收敛为本地部署、已有镜像上云和源码完整上云三个入口。
+当前代码已经完成 Part 18 的正式 Skill Runtime、source 状态/Web 管理与多运行形态 restricted Ops：本地终端自动启动 loopback supervisor，本地 Docker 启动独立 sidecar，服务器 Ops 由宿主机 systemd 监控固定容器；三者复用“监控面板 / 运维终端”双视图，服务器用同源 Caddy 组合 dashboard adapter 与 `/terminal/` ttyd。
 
-未来核心扩展只保留 Part 18 Skill Runtime、CLI 与本地运维优化，独立承接 SkillExecutor、`skill.*` 与 ProgressSink。Part 17 当前实现见 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，Part 18 继续复用其诊断服务、部署状态和单进程边界。
+Part 18 当前代码事实见 `docs_design/zhice-agent-part18-skill-runtime-and-server-ops-design.md`，纠偏与双视图记录见 `docs_design/2026-08-09-part18-multi-runtime-ops-correction-design.md`、`docs_design/2026-08-10-part18-unified-ops-dual-view-design.md`。本地进程、Docker sidecar 和服务器 HTTP/认证/端口边界真实 smoke 已通过；浏览器 ttyd WebSocket/iframe 与故障救援仍按外部验收清单执行。
 
 ### 3.3 当前目录结构
 
@@ -1085,6 +1086,7 @@ grep          搜索文本
 exec          执行安全命令
 load_skills   读取完整 Skill 说明
 sync_skills   同步已配置 Skill source
+run_skill     执行显式 runtime Skill
 memory_read   检索当前 actor 的长期 Memory
 memory_write  修改当前 actor 的长期 Memory
 discover_tools 发现并激活当前可用 Tool
@@ -1093,7 +1095,7 @@ diagnose_my_recent_activity 诊断本人当前 Session
 MCP tools     从已启用 MCP Server 动态注册
 ```
 
-当前不提供内置 `write_file`；Skill 正文加载通过 `load_skills` 提供，Skill 脚本执行复用受控 `exec`。
+当前不提供内置 `write_file`；Skill 正文加载通过 `load_skills`，显式可执行 Skill 通过 contextual `run_skill`，指令型 Skill 组合已有 Tool。
 
 ### 10.4 exec 工具的安全规则
 
@@ -1145,7 +1147,11 @@ ${ZHICE_AGENT_WORKSPACE}/extends/zhice-official/skills/example_calculator/
 ---
 name: example_calculator
 description: 用 Python 脚本执行基础四则运算。
-category: default
+runtime:
+  type: python
+  entrypoint: scripts/calculate.py
+  protocol: ndjson-v1
+  timeout_seconds: 30
 ---
 
 # Example Calculator
@@ -1162,8 +1168,8 @@ category: default
 
 ## 执行方式
 
-```bash
-python extends/zhice-official/skills/example_calculator/scripts/calculate.py --params '{"operation":"add","a":3,"b":5}'
+```json
+{"skill":"zhice-official/example_calculator","params":{"operation":"add","a":3,"b":5}}
 ```
 
 ## 返回格式
@@ -1379,7 +1385,7 @@ CLI --workspace
 ${ZHICE_AGENT_WORKSPACE}/
 +-- config/
 |   +-- llm_endpoints.json
-|   +-- skill_sources.yml
+|   +-- config.yml       # skills/operations/channels/hooks/mcp 等统一运行配置
 |   +-- mcp.json
 |   +-- subagents.yml
 |   +-- hooks.yml
@@ -1418,13 +1424,13 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 ---
 
-## 15. 当前 Part 17 基线与未来 Part 18
+## 15. 当前 Part 17 与 Part 18 基线
 
-Part 12～17 和 Capability Selection 已进入当前代码基线，其事实和边界分别维护在对应 Part 活文档。Part 17 仍保留在本章用于说明已经稳定的运行可靠性与部署边界；尚未实现的核心路线只剩 Part 18。
+Part 12～18 和 Capability Selection 已进入当前代码基线，其事实和边界分别维护在对应 Part 活文档。Part 18 的外部 Linux/Cloudflare 生产验收仍与已完成的本机自动验证分开记录。
 
 ```text
-Part 17 运行可靠性、系统级诊断、生产部署与发布（实现与生产部署验收完成）
-  -> Part 18 Skill Runtime、CLI 与本地运维优化（下一项）
+Part 17 运行可靠性、系统级诊断、生产部署与发布
+  -> Part 18 正式 Skill Runtime、Skill 管理与独立服务器 Ops
 ```
 
 ### 15.1 Part 17：运行可靠性、系统级诊断、生产部署与发布
@@ -1451,17 +1457,19 @@ Part 17 已在 Part 16 稳定前端产品面和 Part 15 上下文派生状态之
 
 代码落地时的验证结果为 Python 全量 `796 passed, 1 skipped`，Ruff、前端 `29` 项测试、lint/typecheck/build、deploy 静态检查和 compose 校验均通过。随后已完成本地 image build/run smoke、阿里云 ACR push、腾讯云按不可变 Digest deploy、Caddy HTTPS、公网健康、认证初始化和容器重启持久化验收。2026-08-04 新增的三入口发布自动化已通过专项单测与 Windows PowerShell 5.1 解析验证；它复用已验收链路，不把真实目标配置或凭证提交到仓库。
 
-### 15.2 Part 18：Skill Runtime、CLI 与本地运维优化
+### 15.2 Part 18：正式 Skill Runtime、Skill 管理与独立服务器 Ops
 
-Part 18 收敛 Skill source、初始化、本地配置和日常管理入口：
+Part 18 当前实现与已确认后续：
 
-- 增加 /skills status、Skill 索引缓存、健康检查、source 权限过滤和来源/commit/同步时间审计。
-- 增加 Skill source 状态页，并复用 Part 16 的前端工程结构。
-- 增加 Session 归档、搜索、导出等 CLI 管理命令。
-- 增加 endpoint、embedding、context、Skill source、prompt、workspace 权限和会话目录的完整配置体检与修复建议。
-- 增加 CLI local operator / Owner workspace 诊断入口和 zcagent diagnose，复用 Part 17 的诊断引擎。
-- 增加多 profile 初始化、系统 keyring/Secret Manager 接入和不泄露明文的 Secret 状态报告。
-- 如果 source root、来源、commit 和同步状态成为多个模块共享的稳定结构，再把 SkillRoot 提升为协议层数据结构。
+- 指令型/可执行型 Skill 并存；显式 Python runtime、`ndjson-v1`、SkillExecutor、ProgressSink、`run_skill` 和 `skill.*`。
+- source 状态、commit/同步时间/健康/安全错误、指纹索引缓存、actor/Profile 权限交集和 Skills 管理页。
+- Owner-only Ops 配置投影，新窗口与 iframe 回退；Gateway 不代理宿主机控制或终端流。
+- 宿主机 systemd Caddy/dashboard/ttyd、既有 Cloudflare Tunnel、服务器侧 root-only Basic Auth credential、restricted `zhice-ops-shell` 和固定 root wrapper。
+- 云端 `.env`、`config.yml`、`models.json` 迁为宿主机权威副本，逐文件只读 bind mount，并提供备份/验证/diff/restore/apply。
+- 新增宿主机 `diagnose.sh`，固定 `zhice-agent` 容器；真实主站和 Ops 地址迁入 Git 忽略的私有部署配置。
+- 多运行形态纠偏与双视图已实现：终端启动自动拉起 loopback Ops、本地 Compose 同时拉起独立 Ops sidecar，三种形态统一监控面板与 restricted 运维终端；云端 `OpsUrl` 只来自私有配置，容器配置 apply 使用 root-owned 固定规格 recreate。
+
+明确不做：多 profile、keyring/Secret Manager、CLI Session 管理、`zcagent diagnose`、多服务器管理、Skill 市场和宿主机通用 Shell。
 
 
 ---
@@ -1498,7 +1506,7 @@ tests/unit_test/context_engineering/
 当前 LLM 错误相关单元测试至少要覆盖：
 
 - 缺少 `api_key` 和缺少 `${ENV_VAR}` 时返回明确配置提示。
-- CLI 启动时缺少或未正确填写 `llm_endpoints.json` 会阻断聊天入口，而缺少 `skill_sources.yml` 表示 Skill source 未启用，静默跳过同步。
+- CLI 启动时缺少或未正确填写 `models.json` 会阻断聊天入口，而 `config.yml` 缺少 `skills` 分区表示 Skill source 未启用，静默跳过同步。
 - AgentLoop 遇到 provider 错误时保存 `user -> assistant(error)`，如果错误发生在工具调用之后，也保留之前的 `assistant(tool_calls)` 和 `tool` 消息。
 
 Part 17 Provider 错误分类已覆盖：
@@ -1695,11 +1703,11 @@ SkillSourceSync
 SkillLoader
 load_skills tool
 sync_skills tool
-config/skill_sources.example.yml
+config/config.example.yml 的 skills 分区
 prompts/skills_intro.md
 ```
 
-Prompt 文件化是贯穿所有阶段的横向规范；Skill Runtime、ProgressSink 和本地运维优化继续归入 Part 18。
+Prompt 文件化是贯穿所有阶段的横向规范；Skill Runtime、ProgressSink 和独立服务器 Ops 已由 Part 18 落地。
 
 ### Milestone 6：Web 基础运行面（已实现）
 
@@ -1744,7 +1752,7 @@ REST/SSE 兼容接口
 - 终端输出简短、分层、脱敏的 Agent 运行痕迹。
 - 使用 `user_id -> session_id -> turn_id` 串起运行主链。
 - JSONL trace 记录 LLM、Tool、Session 与 RuntimeEvent 生命周期。
-- workspace trace 按日期写入 `logs/YYYY-MM-DD/trace.log`。
+- workspace trace 按日期写入 `logs/log-YYYY-MM-DD.jsonl`。
 
 当前实现依据：`docs_design/zhice-agent-part8-gateway-agent-logging-design.md`。
 
@@ -1835,7 +1843,7 @@ pre_tooluse / post_tooluse
 
 - 不展示思维链或虚假百分比，RuntimeEvent 不写入 Session。
 - pre Hook 修改后的参数仍重新经过 schema、RBAC、危险确认和具体 Tool 安全检查。
-- SkillExecutor、`skill.*` 与 ProgressSink 归入 Part 18。
+- SkillExecutor、`skill.*` 与 ProgressSink 已由 Part 18 独立实现，不回写进 Part 12 Hook 边界。
 
 当前实现依据：`docs_design/zhice-agent-part12-hooks-design.md`。
 
@@ -1939,15 +1947,17 @@ Web 渠道绑定管理
 
 Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费其稳定协议、持久化边界和前端组件。部署不复制完整本地 workspace；只有三个真实配置进入私有镜像，运行数据留在云端 volume。
 
-### Milestone 18：Skill Runtime、CLI 与本地运维优化
+### Milestone 18：正式 Skill Runtime、Skill 管理与多运行形态 Ops（代码与本机自动验证完成）
 
 依赖顺序：
 
-1. SkillExecutor、skill.* RuntimeEvent 和 ProgressSink。
-2. Skill source 状态、索引缓存、权限过滤和同步审计。
-3. CLI Session/Skill/诊断管理命令。
-4. endpoint、embedding、context、prompt、workspace 和 Secret 配置体检。
-5. 多 profile 初始化、keyring/Secret Manager 和本地运维验收。
+1. 显式 runtime、SkillExecutor、`run_skill`、skill.* RuntimeEvent 和 ProgressSink。
+2. Skill source 状态、索引缓存、权限过滤、同步审计和 Web 管理。
+3. 独立 Ops、共享监控/终端双视图、固定 ttyd、restricted shell、既有 Cloudflare Tunnel 与服务器侧 Caddy/ttyd Basic Auth。
+4. 宿主机权威配置首迁、备份/校验/diff/restore/apply 和只读 bind mount。
+5. `diagnose.sh` 与固定容器 status/logs/restart 收敛。
+6. Python/前端/Ops 本机自动验证；真实 Linux/Cloudflare 生产项继续外部验收。
+7. 已按纠偏与统一双视图设计补齐本地进程 supervisor、本地 Docker sidecar、服务器 Caddy/dashboard/ttyd、私有 OpsUrl 投影和安全 recreate；本地与服务器 HTTP/认证 smoke 已通过，浏览器 PTY/iframe 与故障救援继续单列。
 
 
 ## 18. 应该坚持的设计原则
@@ -2165,7 +2175,7 @@ Subagent 验收：
 - Gateway / Agent 日志如何分层。
 - 日志如何截断和脱敏。
 - 终端日志为什么必须带日期时间。
-- workspace `trace.log` 如何按日期落盘并用于回放。
+- workspace `log-YYYY-MM-DD.jsonl` 如何按日期落盘并用于回放。
 - LLM、tool、session 保存和 stop/error 如何通过 `session_id` / `turn_id` 串起来。
 
 开发文档：`docs_design/zhice-agent-part8-gateway-agent-logging-design.md`。
@@ -2175,7 +2185,7 @@ Subagent 验收：
 - 运行日志优化。
 - 日志参数分层。
 - timestamped terminal logs。
-- date-based workspace `trace.log`。
+- date-based workspace `log-YYYY-MM-DD.jsonl`。
 - AgentLoop lifecycle logs 和 AgentLoop tool dispatch logs。
 
 ### 第 10 课：用户权限
@@ -2297,13 +2307,14 @@ Tool 执行经过 actor/Profile、RBAC、确认、Hook、workspace guard、Runti
 Secret、完整外部标识、原始请求和敏感 Tool 参数不得进入普通日志与用户错误提示。
 ```
 
-当前代码基线已经完成到 Part 17；后续只列尚未实现的核心 Part：
+当前代码已完成 Part 18 的 Skill Runtime、source 管理与多运行形态 Ops：
 
 ```text
-Part 18 Skill Runtime、CLI 与本地运维优化（下一项）
+Part 18 正式 Skill Runtime、Skill 管理与服务器 Ops
+  -> 本地进程 supervisor、本地 Docker sidecar、私有 OpsUrl 与安全 recreate（已实现）
 ```
 
-Part 15 已稳定预算内完整历史、确定性历史查询、compaction、本地混合检索和派生状态生命周期，Part 16 已完成 Vue Web 产品面和可发布静态产物，Part 17 已完成 Provider retry、系统诊断、MCP 动态可靠性、恢复边界、私有镜像部署代码与真实云端验收。Part 17 当前实现见 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，三入口发布流水线见 `docs_design/2026-08-04-private-registry-cloud-release-pipeline-design.md`。下一核心实现阶段为 Part 18。
+Part 15 已稳定上下文工程，Part 16 已完成 Vue Web 产品面，Part 17 已完成可靠性、诊断和私有镜像发布基线，Part 18 已完成正式 Skill Runtime、source 管理和多运行形态 restricted Ops 的代码与本机自动验证。本地进程与 Docker sidecar 真实链路已验收；目标 Linux/Cloudflare 外部环境仍需真实验收，不据此扩大新的功能范围。
 
 这样做的好处是：
 

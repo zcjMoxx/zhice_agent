@@ -8,7 +8,7 @@ from typing import Any
 from agent.message import Message
 from agent.prompt_loader import PromptLoader, PromptNotFoundError
 from agent.protocols.llm import ContextBudget
-from agent.protocols.skill import SkillInfo, SkillProvider
+from agent.protocols.skill import SkillError, SkillInfo, SkillProvider
 
 
 class FilteredSkillProvider:
@@ -30,7 +30,11 @@ class FilteredSkillProvider:
     def get_skill(self, name: str, source: str | None = None) -> SkillInfo:
         skill = self.parent.get_skill(name, source)
         if skill.qualified_name not in self.allowed_skills:
-            raise KeyError(f"Subagent Skill is not allowed: {skill.qualified_name}")
+            raise SkillError(
+                "Subagent Skill is not allowed.",
+                "SUBAGENT_SKILL_NOT_ALLOWED",
+                {"skill": skill.qualified_name},
+            )
         return skill
 
     def get_skill_body(self, name: str, source: str | None = None) -> str:

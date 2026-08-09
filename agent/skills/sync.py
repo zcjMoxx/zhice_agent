@@ -13,6 +13,7 @@ from typing import Any
 
 from agent.runtime_config import load_runtime_config
 from agent.skills.loader import SkillRoot
+from agent.skills.status import SkillSourceStatusStore
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _VALID_SOURCE_NAMES = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -45,6 +46,8 @@ class SkillSource:
     local_dir: str = ""
     git_url: str = ""
     target: str = "master"
+    allowed_roles: tuple[str, ...] = ()
+    allowed_permissions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -147,6 +150,7 @@ class SkillSourceSync:
         config_dir: Path | str,
         extends_dir: Path | str,
         skill_repo: Path | str | None = None,
+        status_store: SkillSourceStatusStore | None = None,
     ):
         """Store runtime paths used for Skill source synchronization."""
 
@@ -164,6 +168,9 @@ class SkillSourceSync:
             else _default_skill_repo()
         )
         self.config_path = self.config_dir / "config.yml"
+        self.status_store = status_store or SkillSourceStatusStore(
+            self.workspace / "state" / "skill_sources.json"
+        )
 
     def sync_on_startup(self) -> SkillSyncResult | None:
         """Run startup sync according to config, returning None when disabled."""
@@ -191,31 +198,42 @@ class SkillSourceSync:
         seen_sources: set[str] = set()
         result = SkillSyncResult()
         settings.extends_dir.mkdir(parents=True, exist_ok=True)
+        self.status_store.record_sync_started(
+            [source for source in sources if not selected or source.name in selected]
+        )
 
         for source in sources:
             if selected and source.name not in selected:
                 continue
             seen_sources.add(source.name)
             if not source.sync:
-                result.sources.append(
-                    SkillSourceResult(
+                source_result = SkillSourceResult(
                         name=source.name,
                         status="skipped",
                         message="sync=false",
                     )
+                result.sources.append(source_result)
+                self.status_store.record_sync_result(
+                    source,
+                    source_result,
+                    _source_repo_dir(settings.extends_dir, source),
                 )
                 continue
             try:
-                result.sources.append(self._sync_source(source, settings))
+                source_result = self._sync_source(source, settings)
             except SkillSyncError as exc:
-                result.sources.append(
-                    SkillSourceResult(
+                source_result = SkillSourceResult(
                         name=source.name,
                         status="failed",
                         message=str(exc),
                         error=str(exc),
                     )
-                )
+            result.sources.append(source_result)
+            self.status_store.record_sync_result(
+                source,
+                source_result,
+                _status_commit_root(source, settings.extends_dir),
+            )
         for source_name in sorted(selected - seen_sources):
             result.sources.append(
                 SkillSourceResult(
@@ -225,6 +243,7 @@ class SkillSourceSync:
                     error="Skill source is not configured",
                 )
             )
+            self.status_store.record_unknown_source(source_name)
         return result
 
     def load(self) -> tuple[SkillSyncSettings, list[SkillSource]]:
@@ -267,7 +286,14 @@ class SkillSourceSync:
         for source in sources:
             if not source.sync:
                 continue
-            roots.append(SkillRoot(source=source.name, root=_source_skill_root(settings.extends_dir, source)))
+            roots.append(
+                SkillRoot(
+                    source=source.name,
+                    root=_source_skill_root(settings.extends_dir, source),
+                    allowed_roles=source.allowed_roles,
+                    allowed_permissions=source.allowed_permissions,
+                )
+            )
         return roots
 
     def has_installed_skills(self) -> bool:
@@ -400,6 +426,14 @@ def _parse_sources(raw_sources: object) -> list[SkillSource]:
                 local_dir=local_dir,
                 git_url=git_url,
                 target=str(item.get("target") or "master"),
+                allowed_roles=_string_tuple(
+                    item.get("allowed_roles", ()),
+                    f"sources[{index}].allowed_roles",
+                ),
+                allowed_permissions=_string_tuple(
+                    item.get("allowed_permissions", ()),
+                    f"sources[{index}].allowed_permissions",
+                ),
             )
         )
     return sources
@@ -561,6 +595,16 @@ def _source_skill_root(extends_dir: Path, source: SkillSource) -> Path:
     return (_source_repo_dir(extends_dir, source) / "skills").resolve()
 
 
+def _status_commit_root(source: SkillSource, extends_dir: Path) -> Path:
+    """Prefer the configured local repository for commit-only status metadata."""
+
+    if source.local_dir:
+        candidate = Path(source.local_dir).expanduser().resolve()
+        if candidate.is_dir():
+            return candidate
+    return _source_repo_dir(extends_dir, source)
+
+
 def _checkout_git_source(repo_dir: Path, source: SkillSource) -> None:
     """Fetch and checkout the configured git target."""
 
@@ -637,6 +681,23 @@ def _coerce_bool(value: object, field_name: str) -> bool:
         if normalized in {"false", "0", "no", "off"}:
             return False
     raise SkillSyncError(f"{field_name} must be a boolean")
+
+
+def _string_tuple(value: object, field_name: str) -> tuple[str, ...]:
+    """Parse a unique list of short role or permission identifiers."""
+
+    if value in (None, "", (), []):
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise SkillSyncError(f"{field_name} must be a list")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip() or len(item.strip()) > 100:
+            raise SkillSyncError(f"{field_name} entries must be short strings")
+        normalized = item.strip()
+        if normalized not in result:
+            result.append(normalized)
+    return tuple(result)
 
 
 def _validate_runtime_path(path: Path, workspace: Path, field_name: str) -> None:

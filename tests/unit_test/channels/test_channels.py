@@ -104,7 +104,7 @@ channels:
       - key: main
         app_id: ${QQ_APP}
         app_secret: ${QQ_SECRET}
-        web_base_url: https://agent.zouzhou.xyz
+        web_base_url: https://public.example.test
 """,
         encoding="utf-8",
     )
@@ -113,7 +113,7 @@ channels:
 
     assert config.qq.accounts[0].app_id == "app-123"
     assert config.qq.accounts[0].app_secret == "secret-456"
-    assert config.qq.accounts[0].web_base_url == "https://agent.zouzhou.xyz"
+    assert config.qq.accounts[0].web_base_url == "https://public.example.test"
     assert config.qq.accounts[0].http_timeout_seconds == 15
     assert "secret-456" not in repr(config.qq.accounts[0])
 
@@ -407,7 +407,7 @@ def test_qq_bare_bind_returns_web_authorization_link(tmp_path):
     runtime = _FakeChannelRuntime()
     transport = _FakeTransport()
     adapter = QQChannelAdapter(
-        _Account(web_base_url="https://agent.zouzhou.xyz"),
+        _Account(web_base_url="https://public.example.test"),
         transport,
         ExternalIdentityService(store),
         ChannelConversationService(store, sessions),
@@ -419,10 +419,10 @@ def test_qq_bare_bind_returns_web_authorization_link(tmp_path):
 
     assert runtime.calls == []
     outbound = transport.rich[0]
-    assert "[登录并绑定智策 Agent](https://agent.zouzhou.xyz/bind/qq?token=" in outbound.markdown
+    assert "[登录并绑定智策 Agent](https://public.example.test/bind/qq?token=" in outbound.markdown
     assert outbound.buttons[0].label == "登录并绑定"
     assert outbound.buttons[0].action == "url"
-    assert outbound.buttons[0].data.startswith("https://agent.zouzhou.xyz/bind/qq?token=")
+    assert outbound.buttons[0].data.startswith("https://public.example.test/bind/qq?token=")
 
 
 def test_qq_manual_bind_code_still_binds_directly(tmp_path):

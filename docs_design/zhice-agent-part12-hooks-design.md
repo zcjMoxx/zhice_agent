@@ -12,7 +12,7 @@ ZhiCe-Agent 当前 Web 主聊天通道已经使用 `WebSocket /ws`。AgentLoop �
 
 当前前端在用户发送问题后，主要只显示三个点的等待动画。没有文本增量时，用户看不到系统正在构建上下文、等待 LLM、执行工具还是整理最终回答。这个问题不依赖具体 Skill：即使是普通聊天，运行时也明确知道自己正在处于哪个阶段。
 
-Part 12 同时补齐统一的 Agent 生命周期 Event 和最小真实可运行 Hook Runtime：现有 WS、SSE、CLI 与前端消费 RuntimeEvent；配置化 `pre_tooluse` Hook 可以增加业务阻断或修改参数，`post_tooluse` Hook 可以为最终 Tool Event 增加受限展示。Hook 不替代核心安全，也不直接发送 WebSocket。SkillExecutor、`skill.*` 与 ProgressSink 是独立的未来 Skill Runtime / Part 18 设计，不属于 Part 12 欠账。
+Part 12 同时补齐统一的 Agent 生命周期 Event 和最小真实可运行 Hook Runtime：现有 WS、SSE、CLI 与前端消费 RuntimeEvent；配置化 `pre_tooluse` Hook 可以增加业务阻断或修改参数，`post_tooluse` Hook 可以为最终 Tool Event 增加受限展示。Hook 不替代核心安全，也不直接发送 WebSocket。Part 18 已在独立边界实现 SkillExecutor、`skill.*` 与 ProgressSink；它们不属于 Part 12 Hook 职责。
 
 ## 2. 核心判断
 
@@ -86,7 +86,7 @@ Hook 只能增加业务限制或展示信息，不能减少核心限制、跳过
 - 不用 Hook 替代 RBAC、危险确认、workspace guard 或 Tool 自身安全检查。
 - 不实现递归脚本扫描、热加载、在线安装、远端 Hook 或 Hook 市集；只加载 `${ZHICE_AGENT_WORKSPACE}/config/hooks.yml` 显式注册的本地 Python 脚本。
 - 不通过解析 `exec.command` 猜测 Skill 名作为长期协议。
-- 不在当前阶段实现 SkillExecutor、`skill.*`、ProgressSink、Subagent 或跨进程事件总线；这些能力不作为 Part 12 未完成项。
+- Part 12 本身不实现 SkillExecutor、`skill.*`、ProgressSink、Subagent 或跨进程事件总线；其中正式 Skill Runtime 已由 Part 18 独立实现。
 
 ## 5. 当前代码基线
 
@@ -200,7 +200,7 @@ subagent.completed
 subagent.failed
 ```
 
-这些类型不进入 Part 12 协议白名单。没有明确 SkillExecutor 时，不从命令字符串推断并发出 `skill.*`；其协议、执行器和 ProgressSink 在未来 Skill Runtime / Part 18 中独立设计与验收。
+这些类型不属于 Part 12 原始协议白名单。Part 18 已通过明确 SkillExecutor 扩展 `skill.*`，仍禁止从命令字符串推断 Skill 事件。
 
 ## 7. Turn 状态机
 
@@ -508,9 +508,9 @@ post Hook timeout、异常或非法输出 fail open：保留真实 ToolResult �
 
 ## 13. Skill Runtime 边界
 
-当前 Skill 是 `SKILL.md + scripts` 指令包，系统没有独立、稳定的 SkillExecutor，因此 Part 12 不发 `skill.*`，不从 `exec.command` 推断 Skill，也不定义 ProgressSink。
+Part 12 落地时 Skill 还是 `SKILL.md + scripts` 指令包，因此 Part 12 不发 `skill.*`，不从 `exec.command` 推断 Skill，也不定义 ProgressSink。当前代码已由 Part 18 增加显式 runtime、SkillExecutor 和 `run_skill`。
 
-SkillExecutor、`skill.started/progress/completed/failed`、真实中间进度与 ProgressSink 统一归入未来 Skill Runtime / Part 18 的独立日期设计、实现和验收。Part 12 完成后不会以“Skill Progress 后续补齐”为由保持开放。
+SkillExecutor、`skill.started/progress/completed/failed`、真实中间进度与 ProgressSink 已按 Part 18 独立日期设计实现；Part 12 仍保持关闭。
 
 ## 14. Activity、Audit、trace 与 Session
 
@@ -624,7 +624,7 @@ Hook Runtime 与 RuntimeEvent 同批进入 Part 12 Definition of Done；不保�
 9. 把 pre Hook 接在 schema 初验之后、RBAC/确认/Tool 核心安全之前；修改参数后重新校验。
 10. 把 post Hook 接在最终 ToolResult 之后，只生成受限 Event display/ui_metadata patch。
 11. 补齐 stop/error/confirmation/并发以及 Hook continue/block/modify/enrich/异常测试。
-12. 更新当前活文档并完成 Definition of Done；Skill Runtime 由 Part 18 独立承接。
+12. 更新当前活文档并完成 Definition of Done；Skill Runtime 后续由 Part 18 独立承接且现已落地。
 
 ## 18. 验收标准
 
@@ -642,7 +642,7 @@ Hook Runtime 与 RuntimeEvent 同批进入 Part 12 Definition of Done；不保�
 12. 真实 post Hook 可以补充受限 display/ui_metadata，但不能修改 ToolResult、event identity、sequence、status 或核心失败事实。
 13. Hook Runner 固定 `shell=False`、workspace cwd/path guard、最小环境、输入/输出上限、短 timeout、完整进程树回收、结构校验和稳定异常策略；Tool matcher 只接受精确名称或独立 `*`；角色/权限豁免只按单 Hook 显式配置生效。
 14. pre Hook 失败 fail closed；post Hook 失败 fail open；两者均不泄漏完整参数、结果或 Secret 到 RuntimeEvent/日志。
-15. 当前没有 SkillExecutor 时不伪造 `skill.*`；SkillExecutor 与 ProgressSink 明确属于未来 Skill Runtime / Part 18，不是 Part 12 欠账。
+15. 没有 SkillExecutor 时不得伪造 `skill.*`；当前 Part 18 的 SkillExecutor 与 ProgressSink 仍不是 Part 12 欠账。
 16. pre Hook 最终参数使用完整 JSON Schema 校验，支持本地 `$ref/$defs`；外部、无效或无法解析引用 fail closed，且保持 `INVALID_PARAM` 兼容。
 17. ruff、相关测试和全量 pytest 通过，或明确记录无关历史失败。
 

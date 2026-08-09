@@ -63,7 +63,7 @@ def test_runtime_event_serializes_child_scope_fields():
     ("overrides", "message"),
     [
         ({"protocol_version": 2}, "protocol version"),
-        ({"type": "skill.started"}, "unsupported runtime event type"),
+        ({"type": "skill.unknown"}, "unsupported runtime event type"),
         ({"status": "completed"}, "requires status started"),
         ({"sequence": 0}, "sequence must be positive"),
         ({"timestamp": "not-a-time"}, "ISO-8601"),
@@ -95,3 +95,18 @@ def test_runtime_event_accepts_registered_bounded_presentation():
 
     assert display["title"] == "资料搜索完成"
     assert ui_metadata["detail_type"] == "search_results"
+
+
+def test_runtime_event_serializes_skill_lifecycle_identity():
+    payload = _event(
+        type="skill.progress",
+        status="started",
+        skill_run_id="skill-run-1",
+        tool_call_id="call-1",
+        parent_event_id="event-tool",
+        metadata={"skill_name": "official/demo", "percent": 50},
+    ).to_dict()
+
+    assert payload["skill_run_id"] == "skill-run-1"
+    assert payload["type"] == "skill.progress"
+    assert payload["parent_event_id"] == "event-tool"
