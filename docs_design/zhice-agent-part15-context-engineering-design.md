@@ -10,7 +10,7 @@
 
 ## 1. 背景
 
-当前 `ContextBuilder` 已经实现：
+Part 15 设计前的 `ContextBuilder` 已经实现：
 
 - Session JSONL 保存完整消息真值；
 - 最近 3 个完整 Turn 无条件保留；
@@ -18,9 +18,9 @@
 - 中文短追问、确认和明确回指加分；
 - failover-safe endpoint token 预算和完整 Tool block 裁剪。
 
-这解释了近期效果为什么已经改善：当前方案单轮最多可带最近 3 个 Turn 和更早最多 3 个相关 Turn。截图对应的短会话没有超过这个上限，而且“问了什么/几个问题”等文本让旧 Turn 有机会被词法召回，所以模型这次拿到了足够证据并正确盘点；这属于当前混合策略命中，不代表系统已经实现全历史扫描。
+这解释了当时近期效果为什么已经改善：早期方案单轮最多可带最近 3 个 Turn 和更早最多 3 个相关 Turn。截图对应的短会话没有超过这个上限，而且“问了什么/几个问题”等文本让旧 Turn 有机会被词法召回；这只是旧混合策略命中，不是当前实现。
 
-但真实 QQ Session 也证明当前策略仍会错误删除有价值历史。一次 10 Turn 会话中，完整历史约 3522 tokens，当前“最近 3 + 旧相关 3”约 2853 tokens；系统为了节省约 669 tokens 删除了“介绍一下牛顿”，随后无法回答“我之前让我介绍过谁”。在 18 万级输入预算下，这个取舍不成立。
+真实 QQ Session 随后证明旧策略会错误删除有价值历史。一次 10 Turn 会话中，完整历史约 3522 tokens，“最近 3 + 旧相关 3”约 2853 tokens；系统为了节省约 669 tokens 删除了“介绍一下牛顿”，随后无法回答“我之前让我介绍过谁”。在 18 万级输入预算下，这个取舍不成立。
 
 因此 Part 15 没有继续增加词法 marker，而是把上下文治理升级为完整链路：
 
@@ -130,7 +130,7 @@ AgentLoop 仍只调用统一的 ContextBuilder/ContextPlanner，不 import SQLit
 - SQLite 损坏时仅隔离可重建的 `context_index.sqlite3`/WAL/SHM 为同目录 `.corrupt-*` 文件并从 JSONL 懒重建；不触碰 Session 真值。
 - 没有 turn id 的旧 JSONL 消息按 user 边界生成仅运行时可见的 `legacy-turn-N`，下一新 Turn index 从推导数量继续，不重写旧文件。
 - `/clear`、Web/CLI Session delete 在实际授权 SessionStore 上删除 compaction/index；渠道解绑仍保留 Session 和派生索引。
-- 当前 Auth 只有用户停用/状态管理，没有物理 user delete API，因此本次没有新增跨边界的账户删除流程；普通用户 context 仍按内部 user id 物理隔离。未来若独立设计物理删除，必须把整个用户 context（含 sessions、memory、files 与 context 派生状态）作为同一删除事务/补偿流程处理。
+- 当前 Auth 已实现非 Owner 用户物理删除。删除流程按内部 user id 清理 sessions、memory、files、context 派生状态及关联认证/渠道/运行数据，并通过事务与补偿边界避免残留；仍绑定微信的账号必须先解绑。
 
 ## 6. ContextPlan 中性结构
 

@@ -126,6 +126,18 @@ class RegisterUserRequest(BaseModel):
     password: str
 
 
+class RegistrationPolicyResponse(BaseModel):
+    """Public-safe projection of the self-service registration policy."""
+
+    registration_enabled: bool
+
+
+class RegistrationPolicyUpdateRequest(BaseModel):
+    """Owner-only registration policy mutation."""
+
+    registration_enabled: bool
+
+
 class ProfileUpdateRequest(BaseModel):
     """Current-user profile fields allowed for self-service updates."""
 

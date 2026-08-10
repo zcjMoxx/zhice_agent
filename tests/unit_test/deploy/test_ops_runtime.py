@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import http.client
 import importlib.machinery
 import importlib.util
@@ -7,6 +8,7 @@ import json
 import threading
 from pathlib import Path
 from types import ModuleType
+from urllib.parse import urlencode
 
 import pytest
 
@@ -283,9 +285,14 @@ def test_ops_assets_pin_ttyd_harden_systemd_and_keep_sudo_exact() -> None:
     assert "NoNewPrivileges=true" in gateway_service
     assert "http://:{$ZHICE_OPS_PORT}" in caddy
     assert "bind 127.0.0.1" in caddy
-    assert "basicauth" in caddy
-    assert "handle /terminal/*" in caddy
-    assert "handle /api/*" in caddy
+    assert "basicauth" not in caddy
+    assert "forward_auth 127.0.0.1:{$ZHICE_OPS_DASHBOARD_PORT}" in caddy
+    assert "uri /auth/check" in caddy
+    assert 'header_up Authorization "Basic {$ZHICE_OPS_BASIC_AUTH}"' in caddy
+    assert "ZHICE_OPS_BASIC_AUTH=" in installer
+    assert "caddy hash-password" not in installer
+    assert "route /terminal/*" in caddy
+    assert "route /api/*" in caddy
     assert "zhice_ops_dashboard.py" in dashboard_service
     assert "/usr/bin/python3 -I /usr/local/libexec/zhice-ops/zhice_ops_root.py *" in sudoers
     assert "/bin/bash" not in sudoers
@@ -347,6 +354,127 @@ def test_server_dashboard_parses_only_safe_fixed_status_fields() -> None:
     assert status["restarts"] == 2
 
 
+def test_server_ops_session_is_long_lived_signed_and_rotation_safe(monkeypatch) -> None:
+    first_secret = "a" * 48
+    monkeypatch.setenv("ZHICE_OPS_CREDENTIAL", f"owner:{first_secret}")
+
+    token = dashboard.issue_session_token(now=1_000)
+
+    assert dashboard.validate_session_token(token, now=1_001)
+    assert dashboard.validate_session_token(
+        token, now=1_000 + dashboard.SESSION_MAX_AGE_SECONDS - 1
+    )
+    assert not dashboard.validate_session_token(
+        token, now=1_000 + dashboard.SESSION_MAX_AGE_SECONDS
+    )
+    assert not dashboard.validate_session_token(token + "tampered", now=1_001)
+
+    monkeypatch.setenv("ZHICE_OPS_CREDENTIAL", f"owner:{'b' * 48}")
+    assert not dashboard.validate_session_token(token, now=1_001)
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        ("/", "/"),
+        ("/terminal/", "/terminal/"),
+        ("https://attacker.invalid", "/"),
+        ("//attacker.invalid", "/"),
+        ("/safe\r\nLocation: https://attacker.invalid", "/"),
+        (None, "/"),
+    ],
+)
+def test_server_ops_login_rejects_unsafe_redirects(candidate, expected) -> None:
+    assert dashboard.safe_next_path(candidate) == expected
+
+
+def test_server_ops_login_sets_secure_persistent_cookie_and_can_logout(
+    monkeypatch,
+) -> None:
+    secret = "c" * 48
+    monkeypatch.setenv("ZHICE_OPS_CREDENTIAL", f"owner:{secret}")
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", server.server_address[1], timeout=5
+    )
+    try:
+        connection.request("GET", "/auth/login")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert "长期保持" in response.read().decode("utf-8")
+
+        wrong_body = urlencode(
+            {"username": "owner", "password": "wrong", "next": "/"}
+        )
+        connection.request(
+            "POST",
+            "/auth/login",
+            body=wrong_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response = connection.getresponse()
+        assert response.status == 401
+        assert response.getheader("Set-Cookie") is None
+        response.read()
+
+        login_body = urlencode(
+            {"username": "owner", "password": secret, "next": "/terminal/"}
+        )
+        connection.request(
+            "POST",
+            "/auth/login",
+            body=login_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response = connection.getresponse()
+        assert response.status == 303
+        assert response.getheader("Location") == "/terminal/"
+        set_cookie = response.getheader("Set-Cookie")
+        assert set_cookie is not None
+        assert f"Max-Age={dashboard.SESSION_MAX_AGE_SECONDS}" in set_cookie
+        assert "Secure" in set_cookie
+        assert "HttpOnly" in set_cookie
+        assert "SameSite=Strict" in set_cookie
+        cookie = set_cookie.split(";", 1)[0]
+        response.read()
+
+        basic = base64.b64encode(f"owner:{secret}".encode()).decode()
+        connection.request(
+            "GET",
+            "/auth/check",
+            headers={
+                "Authorization": f"Basic {basic}",
+                "X-Forwarded-Uri": "/terminal/",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 303
+        assert response.getheader("Location") == "/terminal/"
+        migrated_cookie = response.getheader("Set-Cookie")
+        assert migrated_cookie is not None
+        assert dashboard.SESSION_COOKIE_NAME in migrated_cookie
+        assert "HttpOnly" in migrated_cookie
+        response.read()
+
+        connection.request("GET", "/auth/check", headers={"Cookie": cookie})
+        response = connection.getresponse()
+        assert response.status == 204
+        response.read()
+
+        connection.request("GET", "/auth/logout", headers={"Cookie": cookie})
+        response = connection.getresponse()
+        assert response.status == 303
+        assert "Max-Age=0" in response.getheader("Set-Cookie")
+        response.read()
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_server_dashboard_exposes_only_fixed_monitor_routes(monkeypatch) -> None:
     calls: list[tuple[str, ...]] = []
 
@@ -372,6 +500,7 @@ def test_server_dashboard_exposes_only_fixed_monitor_routes(monkeypatch) -> None
         meta = json.loads(connection.getresponse().read())
         assert meta["terminal_kind"] == "ttyd"
         assert meta["terminal_url"] == "/terminal/"
+        assert meta["auth_logout_url"] == "/auth/logout"
 
         connection.request("GET", "/api/logs?lines=20")
         logs = json.loads(connection.getresponse().read())

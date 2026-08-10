@@ -44,7 +44,7 @@ if [ "$machine" != "$TTYD_ARCH" ]; then
   exit 1
 fi
 
-for command in caddy cp curl sha256sum install od tr useradd systemctl; do
+for command in base64 caddy cp curl sha256sum install od tr useradd systemctl; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "Required command is unavailable: $command" >&2
     exit 1
@@ -160,10 +160,9 @@ if [ "${#credential_secret}" -ne 48 ] || [ "$ops_credential" != "owner:$credenti
   fi
   ops_credential="owner:$credential_secret"
 fi
-caddy_hash=$(printf '%s\n' "$credential_secret" | caddy hash-password --algorithm bcrypt)
-case "$caddy_hash" in
-  '$2a$'*|'$2b$'*|'$2y$'*) ;;
-  *) echo "Unable to hash Ops credential for the web gateway" >&2; exit 1 ;;
+ops_basic_auth=$(printf 'owner:%s' "$credential_secret" | base64 | tr -d '\n')
+case "$ops_basic_auth" in
+  *[!A-Za-z0-9+/=]*|"") echo "Unable to encode Ops terminal credential" >&2; exit 1 ;;
 esac
 
 ops_env=$(mktemp /etc/zhice-ops/.ops.env.XXXXXX)
@@ -173,7 +172,7 @@ printf '%s\n' \
   'ZHICE_OPS_DASHBOARD_PORT=7683' \
   'ZHICE_OPS_IDLE_TIMEOUT_SECONDS=900' \
   "ZHICE_OPS_CREDENTIAL=$ops_credential" \
-  "ZHICE_OPS_CADDY_HASH=$caddy_hash" \
+  "ZHICE_OPS_BASIC_AUTH=$ops_basic_auth" \
   "ZHICE_OPS_ALLOWED_ORIGIN=$PUBLIC_URL" \
   "ZHICE_PUBLIC_URL=$PUBLIC_URL" \
   "ZHICE_PUBLIC_HEALTH_URL=$PUBLIC_URL/health" \
@@ -185,7 +184,7 @@ mv "$ops_env" /etc/zhice-ops/ops.env
 ZHICE_OPS_PORT=7681 \
 ZHICE_OPS_TERMINAL_PORT=7682 \
 ZHICE_OPS_DASHBOARD_PORT=7683 \
-ZHICE_OPS_CADDY_HASH="$caddy_hash" \
+ZHICE_OPS_BASIC_AUTH="$ops_basic_auth" \
 ZHICE_PUBLIC_URL="$PUBLIC_URL" \
   caddy validate --config /etc/zhice-ops/Caddyfile --adapter caddyfile >/dev/null
 

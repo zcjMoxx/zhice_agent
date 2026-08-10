@@ -129,7 +129,8 @@ def test_invalid_web_bootstrap_keeps_setup_available(tmp_path, payload):
 
 def test_public_registration_creates_viewer_sets_cookie_and_logs_in(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
-    store.initialize_owner("admin", "Admin", "password-123")
+    owner = store.initialize_owner("admin", "Admin", "password-123")
+    store.set_registration_enabled(True, actor_user_id=owner.id)
     auth = AuthService(store, audit_sink=SqliteAuditSink(store))
     client = _client(tmp_path, _AuthRuntime(auth))
 
@@ -159,7 +160,7 @@ def test_public_registration_creates_viewer_sets_cookie_and_logs_in(tmp_path):
     )
 
 
-def test_public_registration_is_allowed_before_owner_setup(tmp_path):
+def test_public_registration_is_disabled_before_owner_setup(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     client = _client(tmp_path, _AuthRuntime(AuthService(store)))
 
@@ -171,9 +172,9 @@ def test_public_registration_is_allowed_before_owner_setup(tmp_path):
         },
     )
 
-    assert registered.status_code == 200
-    assert registered.json()["user"]["roles"] == ["viewer"]
-    assert store.get_user_by_username("alice") is not None
+    assert registered.status_code == 403
+    assert registered.json()["error"]["code"] == "AUTH_REGISTRATION_DISABLED"
+    assert store.get_user_by_username("alice") is None
 
 
 def test_owner_can_delegate_admin_management_and_delegated_admin_can_promote_without_propagating(tmp_path):
@@ -262,7 +263,8 @@ def test_only_owner_can_update_administrator_role_permissions(tmp_path):
 
 def test_public_registration_rejects_duplicate_username(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
-    store.initialize_owner("admin", "Admin", "password-123")
+    owner = store.initialize_owner("admin", "Admin", "password-123")
+    store.set_registration_enabled(True, actor_user_id=owner.id)
     store.create_user("alice", "Existing Alice", "alice-password")
     client = _client(tmp_path, _AuthRuntime(AuthService(store)))
 
@@ -291,7 +293,8 @@ def test_public_registration_rejects_duplicate_username(tmp_path):
 )
 def test_public_registration_rejects_invalid_fields(tmp_path, payload):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
-    store.initialize_owner("admin", "Admin", "password-123")
+    owner = store.initialize_owner("admin", "Admin", "password-123")
+    store.set_registration_enabled(True, actor_user_id=owner.id)
     client = _client(tmp_path, _AuthRuntime(AuthService(store)))
 
     rejected = client.post("/api/auth/register", json=payload)
@@ -299,6 +302,75 @@ def test_public_registration_rejects_invalid_fields(tmp_path, payload):
     assert rejected.status_code == 400
     assert rejected.json()["error"]["code"] == "REQUEST_VALIDATION_FAILED"
     assert len(store.list_users()) == 1
+
+
+def test_owner_controls_public_registration_and_admin_cannot_override(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    owner = store.initialize_owner("owner", "Owner", "password-123")
+    store.create_user("alice", "Alice", "alice-password", role_keys=["admin"])
+    auth = AuthService(store, audit_sink=SqliteAuditSink(store))
+
+    anonymous = _client(tmp_path, _AuthRuntime(auth))
+    initial = anonymous.get("/api/auth/registration-policy")
+    blocked = anonymous.post(
+        "/api/auth/register",
+        json={"username": "new-user", "password": "new-user-password"},
+    )
+
+    admin_client = _client(tmp_path, _AuthRuntime(auth))
+    admin_client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "alice-password"},
+    )
+    admin_rejected = admin_client.patch(
+        "/api/admin/auth/registration-policy",
+        json={"registration_enabled": True},
+    )
+
+    owner_client = _client(tmp_path, _AuthRuntime(auth))
+    owner_client.post(
+        "/api/auth/login",
+        json={"username": "owner", "password": "password-123"},
+    )
+    owner_read = owner_client.get("/api/admin/auth/registration-policy")
+    enabled = owner_client.patch(
+        "/api/admin/auth/registration-policy",
+        json={"registration_enabled": True},
+    )
+    public_enabled = anonymous.get("/api/auth/registration-policy")
+    registered = anonymous.post(
+        "/api/auth/register",
+        json={"username": "new-user", "password": "new-user-password"},
+    )
+
+    assert initial.json() == {"registration_enabled": False}
+    assert blocked.status_code == 403
+    assert blocked.json()["error"]["code"] == "AUTH_REGISTRATION_DISABLED"
+    assert admin_rejected.status_code == 403
+    assert admin_rejected.json()["error"]["code"] == "AUTH_PERMISSION_DENIED"
+    assert owner_read.json() == {"registration_enabled": False}
+    assert enabled.json() == {"registration_enabled": True}
+    assert public_enabled.json() == {"registration_enabled": True}
+    assert registered.status_code == 200
+    assert store.get_user_by_username("new-user") is not None
+    audit = store.list_audit_events(limit=50)
+    assert any(
+        event["action"] == "auth.registration_failed"
+        and event["reason_code"] == "AUTH_REGISTRATION_DISABLED"
+        for event in audit
+    )
+    assert any(
+        event["action"] == "auth.registration_policy_updated"
+        and event["decision"] == "allow"
+        and event["metadata"]["registration_enabled"] is True
+        for event in audit
+    )
+    assert any(
+        event["action"] == "auth.registration_policy_updated"
+        and event["decision"] == "deny"
+        for event in audit
+    )
+    assert owner.id
 
 
 def test_admin_create_user_defaults_blank_display_name_to_username(tmp_path):

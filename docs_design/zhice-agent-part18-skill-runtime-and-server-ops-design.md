@@ -2,15 +2,15 @@
 
 > 文档类型：当前活文档
 >
-> 当前状态：代码与本机可自动验证部分已进入当前基线；服务器统一 Caddy 入口、Basic Auth、共享监控页、dashboard API、ttyd index、Tunnel 公网 401/200 与 loopback/private 端口边界已真实验收。双视图下的真实浏览器 ttyd WebSocket/iframe 复用、容器故障救援和配置跨 Digest 行为继续单列验收。
+> 当前状态：实现、本机验证与真实服务器部署已进入当前基线。长期签名 Cookie、旧 Basic 自动迁移、dashboard/ttyd index、三个 Ops 服务重启保留登录、主动退出失效、错误 Basic 拒绝、loopback ttyd `401`、固定容器重建、宿主机权威配置只读挂载及 `models.json` 跨 Digest 更新均已验收。真实浏览器 PTY/iframe、15 分钟 idle 后交互和容器故障救援继续作为环境交互验收单列，不属于未实现代码。
 >
 > 日期设计记录：`docs_design/2026-08-09-part18-skill-runtime-and-server-ops-design.md`
 >
-> 当前服务器认证修正：`docs_design/2026-08-10-part18-server-side-ops-auth-design.md` 使用既有 Cloudflare Tunnel，并由服务器 ttyd 强制独立 Basic Auth，不再创建 Access/IdP/MFA。
+> 当前服务器认证修正：`docs_design/2026-08-10-part18-persistent-ops-login-design.md` 使用既有 Cloudflare Tunnel、服务器独立 credential 与长期签名 Cookie；Caddy 认证后只向 loopback ttyd 注入 Basic Auth，不再创建 Access/IdP/MFA，也不依赖浏览器临时 Basic Auth 缓存。
 >
 > 当前统一 Ops 双视图：`docs_design/2026-08-10-part18-unified-ops-dual-view-design.md` 将本地进程、本地 Docker 与服务器统一为“监控面板 / 运维终端”；服务器由 loopback Caddy 在同一 origin 组合 dashboard API 与 `/terminal/` ttyd。
 >
-> 多运行形态纠偏：`docs_design/2026-08-09-part18-multi-runtime-ops-correction-design.md` 已进入代码基线。本地终端自动 Ops 已完成真实进程 smoke；Compose 双镜像 build 与 Docker sidecar 对固定容器的 status/logs/restart 真实 smoke 已通过；Linux/Cloudflare 仍属外部验收。
+> 多运行形态纠偏：`docs_design/2026-08-09-part18-multi-runtime-ops-correction-design.md` 已进入代码基线。本地终端自动 Ops、Compose 双镜像与 Docker sidecar、Linux systemd/Caddy/dashboard/ttyd、既有 Cloudflare Tunnel 和服务器长期认证链均已完成真实部署或 smoke。
 >
 > 前置基线：Part 5 Skill source、Part 12 RuntimeEvent、Part 16 Vue Web、Part 17 诊断与私有镜像部署
 
@@ -176,9 +176,9 @@ Web 先读取有效运行态 state，再读取启动器注入的非敏感环境�
 ```text
 Browser
   +-- configured PublicUrl -> ZhiCe-Agent container
-  +-- configured Ops URL -> existing Cloudflare Tunnel -> host loopback Caddy Basic Auth
+  +-- configured Ops URL -> existing Cloudflare Tunnel -> host loopback Caddy Cookie auth
                                                           +-- dashboard adapter
-                                                          +-- /terminal/ -> ttyd Basic Auth
+                                                          +-- /terminal/ -> proxy-injected ttyd Basic Auth
                                                                             -> zhice-ops-shell
                                                                             -> fixed root wrapper
                                                                             -> zhice-agent only
@@ -186,7 +186,7 @@ Browser
 
 Ops 的 Caddy、dashboard adapter 与 ttyd 由宿主机 systemd 管理，独立于 Agent 容器；既有 cloudflared connector 只负责 Tunnel 传输。`zhice-operator` 使用 nologin、不是 docker group 成员；ttyd 唯一后端是 `zhice-ops-shell`，不是 Bash。
 
-仓库固定 ttyd 版本和 SHA256，提供 systemd、Caddy 同源组合、Origin、单会话、15 分钟 idle、主题和安装模板。服务器首次安装生成 `owner` 独立高熵 credential，root-only 保存并跨升级保留；Caddy bcrypt hash 由 stdin 生成，页面/API/终端先经过 Caddy Basic Auth，ttyd 保留第二层同 credential 认证，Gateway 不接触 credential。真实 systemd、认证、Tunnel 与 WebSocket 行为不能由仓库静态测试替代。
+仓库固定 ttyd 版本和 SHA256，提供 systemd、Caddy 同源组合、Origin、单会话、15 分钟 idle、主题和安装模板。服务器首次安装生成 `owner` 独立高熵 credential，root-only 保存并跨升级保留；首次登录后 dashboard adapter 签发长期 `Secure`/`HttpOnly` Cookie，Caddy 用 `forward_auth` 统一保护页面/API/终端，并只在 loopback 代理层向仍保留第二层认证的 ttyd 注入 Basic header。Cookie 不含 credential，credential 轮换自动撤销旧 Cookie，Gateway 不接触两者。15 分钟 idle 只结束 PTY，不注销浏览器登录。真实 systemd、浏览器重启复用、Tunnel 与 WebSocket 行为不能由仓库静态测试替代。
 
 ### 4.2 Restricted 命令集
 
@@ -232,7 +232,7 @@ parser 不使用 `eval`、`sh -c` 或任意 Docker 参数。固定 wrapper 只�
 
 `status.sh`、`logs.sh`、`restart.sh` 已收敛为固定容器动作；日志行数与字节数有界，Secret 经过脱敏。`stop.sh` 仍只属于发布维护链，不进入 restricted shell。
 
-## 5. 当前验证边界
+## 5. 当前验证与环境交互边界
 
 本机必须通过：
 
@@ -246,17 +246,21 @@ npm run build
 Ops Python/静态/parser/shell syntax/PowerShell parser/compose config
 ```
 
-必须留在目标 Linux/Cloudflare 环境完成：
+目标 Linux/Cloudflare 已自动验收：
 
 - systemd install/start/restart 与 root-owned mode；
-- `zhice-operator` nologin、非 docker group、精确 `sudo -l -U`；
-- ttyd 交互、resize、断开、idle、max session 和 backpressure；
-- Cloudflare Tunnel 路由、ttyd 无/错误 Basic Auth 拒绝、正确认证、Origin 与 iframe 复用；
-- 主 Web iframe 成功和 Access/Cookie 失败回退；
-- running/exited/restarting/missing/Docker unavailable 诊断；
-- Agent 容器退出后直接 Ops URL 救援；
-- 三份配置首迁、只读挂载、编辑/校验/备份/恢复/apply、重启和跨 Digest 保留；
+- `zhice-operator` nologin、非 docker group、固定 sudo wrapper 与 loopback 端口边界；
+- Cloudflare Tunnel 路由、首次/错误登录、长期 Cookie、主动退出和 ttyd 无/错误 Basic Auth 拒绝；
+- 三份配置首迁、只读挂载、编辑/校验/备份/restore/apply、容器重建和跨 Digest 保留；
 - journald、ttyd 和发布日志无 Secret；
 - 最终私有 `PublicUrl` 对应的公网 health 恢复。
 
-在这些真实环境步骤完成前，不把“外部生产验收”标记为已完成。
+仍需人工环境交互验收：
+
+- 真实浏览器重启后的 Cookie 复用；
+- ttyd WebSocket 输入、resize、断开、15 分钟 idle 后免登录重连、max session 和 backpressure；
+- 主 Web iframe 成功、Cookie/浏览器策略失败回退新窗口；
+- running/exited/restarting/missing/Docker unavailable 的完整 UI 呈现；
+- Agent 容器退出后从独立 Ops URL 完成真实救援。
+
+这些项目用于验证浏览器、PTY 和故障场景，不表示核心实现或服务器部署尚未完成。

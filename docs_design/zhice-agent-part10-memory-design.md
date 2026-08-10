@@ -14,20 +14,20 @@
 
 ## 1. 背景
 
-ZhiCe-Agent 当前已经具备稳定的短期上下文链路：
+ZhiCe-Agent 已经具备稳定的 Session 上下文链路：
 
 - `JsonlSessionStore` 以 JSONL 保存聊天消息真值。
 - `Message` 使用 `turn_id`、`turn_index` 和 `parent_turn_id` 标记运行单元。
-- `ContextBuilder` 默认优先保留最近 3 个 Turn，并从更早候选中选择最多 3 个相关 Turn；CLI/Web 还统一受 60 message 与 endpoint ContextBudget 约束。
+- Part 15 `ContextBuilder/ContextPlanner` 在预算内携带完整历史，超长 Session 使用结构化 compaction、连续 recent raw Turn 和 FTS/BM25 + embedding 混合召回；所有入口统一服从 endpoint ContextBudget。
 - Part 9 已建立用户、session、turn、tool call 和 audit 的身份与权限边界。
 - CLI 本地操作者与 Owner Web 是同一个 workspace operator 的两个入口，共用全局 `contexts/sessions/`、`sessions_meta/` 和 workspace；普通登录用户通过内部 `user_id` 解析自己的用户上下文。
 
-这些能力解决了“当前会话里应该带哪些历史”，但还没有解决跨会话长期信息：
+Session 上下文工程解决“当前会话里应该带哪些历史”，Memory 继续独立解决跨会话长期信息：
 
 ```text
 用户在 session A 说明偏好或长期约束
   -> session B 默认看不到
-  -> ContextBuilder 只能从 session B 的历史中选择
+  -> session B 通过受控 Memory 读取长期事实
 ```
 
 如果直接把所有历史无限注入上下文，会带来明显问题：

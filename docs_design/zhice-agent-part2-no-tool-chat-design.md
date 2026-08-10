@@ -461,8 +461,8 @@ sequenceDiagram
 验证：
 
 - 能拼出 system prompt 与当前用户消息
-- 能优先保留最近 3 个 Turn，并从更早候选中最多保留 3 个相关 Turn
-- CLI/Web 均保留 60 message 兜底并服从 endpoint ContextBudget
+- 预算允许时保留完整 Session 历史；超长历史使用 Part 15 的结构化 compaction、recent raw Turn 与混合召回
+- CLI/Web/外部渠道统一服从 endpoint ContextBudget
 - 能截断超长历史消息
 - 合法 Tool 块进入统一 ContextBuilder 后仍保持 call/result 完整
 - 缺少必需 Prompt 时能抛出清晰错误

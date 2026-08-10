@@ -257,6 +257,9 @@ small { color: var(--text-soft); }
 .admin-sidebar nav button:hover, .admin-sidebar nav button.active, .back-chat:hover { background: var(--accent-soft); }
 .back-chat { margin-top: auto; }
 .admin-main { overflow: auto; padding: 30px clamp(24px, 4vw, 58px) 70px; }
+.registration-policy-card { display: flex; align-items: center; justify-content: space-between; gap: 22px; margin-bottom: 16px; padding: 18px 20px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); box-shadow: var(--shadow-soft); }
+.registration-policy-card > span { display: grid; gap: 5px; }.registration-policy-card small { color: var(--text-soft); }
+.policy-switch { display: flex; flex: 0 0 auto; align-items: center; gap: 9px; cursor: pointer; }.policy-switch input { position: absolute; opacity: 0; pointer-events: none; }.policy-switch i { position: relative; width: 44px; height: 24px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--bg-soft); transition: .16s ease; }.policy-switch i::after { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--text-soft); content: ""; transition: .16s ease; }.policy-switch input:checked + i { border-color: var(--accent); background: var(--accent-soft); }.policy-switch input:checked + i::after { left: 23px; background: var(--accent); }.policy-switch input:focus-visible + i { outline: 3px solid color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: 2px; }.policy-switch input:disabled + i { opacity: .55; }.policy-switch em { min-width: 42px; color: var(--text-soft); font-size: 12px; font-style: normal; font-weight: 700; }
 .admin-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 26px; }
 .admin-header-actions { display: flex; align-items: center; gap: 8px; }
 .admin-header h1 { margin: 5px 0 0; font-size: 34px; letter-spacing: -.055em; }

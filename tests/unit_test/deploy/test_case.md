@@ -8,7 +8,8 @@
 - `config apply` 调用内部 `apply.sh`，从 root-owned 固定 deployment spec 使用当前 Digest/mounts 重建容器；不再以单纯 restart 代替 bind-mount 配置生效。
 - Docker Ops 日志页默认每秒刷新固定容器的有界日志并自动滚动；用户向上查看历史时暂停，Continue follow 恢复，不使用无限输出缓冲。
 - 本地 Docker 与本地进程复用同一双视图静态页面和通用 restricted 命令集；页面不能提交容器名、Docker 参数、路径或服务器配置命令。
-- 服务器 Ops 使用 loopback Caddy 统一 Basic Auth，在同一 origin 提供共享监控页、固定 dashboard API 和 `/terminal/` ttyd；dashboard/terminal adapter 分离为受 systemd 保护的非 root 服务。
+- 服务器 Ops 使用 loopback Caddy 的长期签名 Cookie 统一认证，在同一 origin 提供共享监控页、固定 dashboard API 和 `/terminal/` ttyd；Caddy 只在 loopback 代理到仍保留 Basic Auth 的 ttyd 时注入固定认证，dashboard/terminal adapter 分离为受 systemd 保护的非 root 服务。
+- 长期登录 Cookie 使用 credential 派生 HMAC 签名并带 `Secure`、`HttpOnly`、`SameSite=Strict`；覆盖成功、篡改、过期、credential 轮换、开放重定向拒绝、主动退出与十年绝对上限。
 - 服务器 dashboard API 只允许 meta/status/logs/diagnose/restart，restart 必须提交精确 JSON 确认；配置正文继续只在 restricted ttyd 内访问。
 
 ## 测试目标
@@ -41,7 +42,7 @@
 - `pipelines/invoke-cloud-release.ps1` 从 Paramiko helper 取得脱敏后的公开目标，固定镜像名、生成时间戳与 Git 短提交号标签，校验 `linux/amd64`、Docker、Python/Paramiko，精确取得 Digest，同步固定六个 shell 脚本，远端部署后验证公网 HTTPS `/health`。
 - `scripts/remote_ops.py` 自行读取私有 JSON 的 `SshPassword` 并强制要求 `RemoteOpsDir`；只加载 Windows `~/.ssh/known_hosts` 并使用 `RejectPolicy`，密码不进入参数、环境或输出，目录字段缺失时前置失败。
 - 六个脚本通过 SFTP 写入 versioned release，经 `sh -n` 后原子切换 `current`；`status` 对不存在容器友好并展示 image/status/health/created/restarts，`logs` 拒绝非正整数和超过上限的行数，root wrapper 对普通输出限制 128 KiB、follow 限制 4 KiB 单行与每秒 64 KiB 并回收进程组，`stop` 幂等，`restart` 明确检查固定容器并等待健康，`diagnose` 覆盖 Docker/容器/卷/磁盘/端口/本地与公网健康，`deploy` 失败恢复旧容器。
-- Part 18C ttyd 使用固定版本和 SHA-256，systemd 只在 loopback 启动 `zhice-ops-shell`，最多一个会话，并通过服务器首次生成且跨升级保留的 root-only Basic Auth credential、`zhice-operator`、root-owned wrapper 和精确 sudoers 隔离公网、Docker/root 权限；credential 不进入仓库、参数或部署输出。
+- Part 18C ttyd 使用固定版本和 SHA-256，systemd 只在 loopback 启动 `zhice-ops-shell`，最多一个会话，并通过服务器首次生成且跨升级保留的 root-only credential、长期签名 Cookie、`zhice-operator`、root-owned wrapper 和精确 sudoers 隔离公网、Docker/root 权限；credential 不进入 Cookie、网页脚本、仓库或部署输出。
 - restricted shell 只接受设计确认的 status/logs/logs-follow/diagnose/config/restart/help/exit 语法，拒绝 Bash、sudo、任意 Docker、任意容器名、任意路径、管道和额外参数。
 - 云端首次从受控镜像安全迁移三份配置到 `/etc/zhice-agent/runtime`，后续 Digest 保留宿主机权威副本并使用三个只读 bind mount；部分文件缺失和 symlink fail closed。
 - 配置 edit 写 root-only pending 并自动备份；validate/diff/backup/restore/apply 使用固定文件名、大小上限、YAML/JSON/env 解析、原子替换和失败回滚，日志/诊断输出二次脱敏。
@@ -57,4 +58,4 @@
 - 禁止在测试中读取或输出三个真实私有文件内容。
 - 禁止在测试中读取或输出真实 `private/cloud-target.json`；只能检查公开 example 和 ignore 规则。
 - 文档静态测试只读取公开 `deploy/README.md`，不得探测或打开 `deploy/private/.env`、`config.yml`、`models.json`。
-- Windows 测试只验证 parser、配置事务、静态 systemd/sudoers/Cloudflare Tunnel/ttyd Basic Auth 契约；真实 systemd、ttyd PTY/resize/idle/auth、Docker 救援和跨 Digest 保留必须在 Linux 云服务器验收。
+- Windows 测试只验证 parser、配置事务、Cookie/HMAC、静态 systemd/sudoers/Cloudflare Tunnel/Caddy forward auth/ttyd Basic Auth 契约；真实 systemd、浏览器重启登录复用、ttyd PTY/resize/idle/auth、Docker 救援和跨 Digest 保留必须在 Linux 云服务器验收。

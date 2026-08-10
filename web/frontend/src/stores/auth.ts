@@ -8,6 +8,8 @@ export const useAuthStore = defineStore("auth", {
     user: null as PublicUser | null,
     permissions: [] as string[],
     initialized: false,
+    registrationEnabled: false,
+    registrationPolicyLoaded: false,
     loading: false,
     error: "",
   }),
@@ -20,6 +22,16 @@ export const useAuthStore = defineStore("auth", {
     },
   },
   actions: {
+    async fetchRegistrationPolicy() {
+      try {
+        const policy = await api.registrationPolicy();
+        this.registrationEnabled = policy.registration_enabled;
+      } catch {
+        this.registrationEnabled = false;
+      } finally {
+        this.registrationPolicyLoaded = true;
+      }
+    },
     async fetchCurrentUser() {
       this.loading = true;
       try {

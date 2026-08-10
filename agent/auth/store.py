@@ -27,6 +27,7 @@ _AUDIT_EVENT_TYPE_ACTIONS: dict[str, tuple[str, ...]] = {
         "auth.bootstrap_completed",
         "auth.user_registered",
         "auth.registration_failed",
+        "auth.registration_policy_updated",
     ),
     "password": ("auth.password_changed", "auth.password_change_failed"),
     "profile": ("auth.profile_updated",),
@@ -96,6 +97,39 @@ class SQLiteAuthStore:
                 """
             ).fetchone() is not None
 
+    def registration_enabled(self) -> bool:
+        """Return the public registration policy, failing closed."""
+
+        if not self.is_initialized():
+            return False
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT registration_enabled FROM auth_settings WHERE id=1"
+                ).fetchone()
+        except sqlite3.Error:
+            return False
+        return bool(row is not None and int(row["registration_enabled"]) == 1)
+
+    def set_registration_enabled(self, enabled: bool, *, actor_user_id: str) -> bool:
+        """Persist the Owner-controlled public registration policy."""
+
+        self._require_initialized()
+        if not isinstance(enabled, bool):
+            raise AuthStoreError("registration_enabled must be a boolean")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auth_settings
+                SET registration_enabled=?, updated_at=?, updated_by_user_id=?
+                WHERE id=1
+                """,
+                (int(enabled), _utc_now(), str(actor_user_id)),
+            )
+            if cursor.rowcount != 1:
+                raise AuthStoreError("registration policy is unavailable")
+        return enabled
+
     def initialize_schema(self) -> None:
         """Create the schema and idempotently seed built-in permissions and roles."""
 
@@ -104,6 +138,14 @@ class SQLiteAuthStore:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(SCHEMA_SQL)
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO auth_settings(
+                  id, registration_enabled, updated_at, updated_by_user_id
+                ) VALUES (1, 0, ?, '')
+                """,
+                (now,),
+            )
             turn_columns = {
                 str(row[1]) for row in connection.execute("PRAGMA table_info(turn_runs)").fetchall()
             }

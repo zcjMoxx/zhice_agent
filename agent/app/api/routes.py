@@ -45,6 +45,8 @@ from agent.app.api.schemas import (
     ProfileUpdateRequest,
     PublicUserResponse,
     RegisterUserRequest,
+    RegistrationPolicyResponse,
+    RegistrationPolicyUpdateRequest,
     RoleResponse,
     RolesResponse,
     RoleUpdateRequest,
@@ -159,6 +161,25 @@ def register_user(
     """Register one public viewer account and sign it in."""
 
     auth = _auth_service(request, required=True)
+    if not auth.store.registration_enabled():
+        if auth.audit_sink is not None:
+            auth.audit_sink.record(
+                AuditEvent(
+                    action="auth.registration_failed",
+                    resource_type="registration_policy",
+                    request_id=_request_id(request),
+                    channel="web",
+                    route=request.url.path,
+                    status_code=403,
+                    decision="deny",
+                    reason_code=ErrorCode.AUTH_REGISTRATION_DISABLED,
+                )
+            )
+        raise ApiError(
+            ErrorCode.AUTH_REGISTRATION_DISABLED,
+            "Public registration is disabled",
+            status_code=403,
+        )
     try:
         login_result = auth.register_user(
             request_body.username.strip(),
@@ -175,6 +196,16 @@ def register_user(
     return AuthMutationResponse(
         status="authenticated",
         user=_public_actor(login_result.actor),
+    )
+
+
+@router.get("/auth/registration-policy", response_model=RegistrationPolicyResponse)
+def read_public_registration_policy(request: Request) -> RegistrationPolicyResponse:
+    """Return the anonymous-safe public registration policy."""
+
+    auth = _auth_service(request, required=True)
+    return RegistrationPolicyResponse(
+        registration_enabled=auth.store.registration_enabled()
     )
 
 
@@ -756,6 +787,88 @@ def reset_model_preference(request: Request, session_id: str) -> ModelsResponse:
         )
     except Exception as exc:
         raise _api_error_from_exception(exc) from exc
+
+
+@router.get(
+    "/admin/auth/registration-policy",
+    response_model=RegistrationPolicyResponse,
+)
+def read_owner_registration_policy(request: Request) -> RegistrationPolicyResponse:
+    """Return the registration policy to the unique Owner."""
+
+    actor = _actor(request, channel="rest")
+    auth = _auth_service(request, required=True)
+    if "owner" not in actor.role_keys:
+        raise ApiError(
+            ErrorCode.AUTH_PERMISSION_DENIED,
+            "Only Owner can manage public registration",
+            status_code=403,
+            details={"required_role": "owner"},
+        )
+    return RegistrationPolicyResponse(
+        registration_enabled=auth.store.registration_enabled()
+    )
+
+
+@router.patch(
+    "/admin/auth/registration-policy",
+    response_model=RegistrationPolicyResponse,
+)
+def update_owner_registration_policy(
+    request_body: RegistrationPolicyUpdateRequest,
+    request: Request,
+) -> RegistrationPolicyResponse:
+    """Update public registration as the unique Owner."""
+
+    actor = _actor(request, channel="rest")
+    auth = _auth_service(request, required=True)
+    if "owner" not in actor.role_keys:
+        if auth.audit_sink is not None:
+            auth.audit_sink.record(
+                AuditEvent(
+                    action="auth.registration_policy_updated",
+                    resource_type="registration_policy",
+                    actor=actor,
+                    request_id=_request_id(request),
+                    channel="rest",
+                    route=request.url.path,
+                    status_code=403,
+                    decision="deny",
+                    reason_code=ErrorCode.AUTH_PERMISSION_DENIED,
+                )
+            )
+        raise ApiError(
+            ErrorCode.AUTH_PERMISSION_DENIED,
+            "Only Owner can manage public registration",
+            status_code=403,
+            details={"required_role": "owner"},
+        )
+    try:
+        enabled = auth.store.set_registration_enabled(
+            request_body.registration_enabled,
+            actor_user_id=actor.user_id,
+        )
+    except AuthStoreError as exc:
+        raise ApiError(
+            ErrorCode.AUTH_UNAVAILABLE,
+            "Registration policy is unavailable",
+            status_code=503,
+        ) from exc
+    if auth.audit_sink is not None:
+        auth.audit_sink.record(
+            AuditEvent(
+                action="auth.registration_policy_updated",
+                resource_type="registration_policy",
+                actor=actor,
+                request_id=_request_id(request),
+                channel="rest",
+                route=request.url.path,
+                status_code=200,
+                decision="allow",
+                metadata={"registration_enabled": enabled},
+            )
+        )
+    return RegistrationPolicyResponse(registration_enabled=enabled)
 
 
 @router.get("/admin/users", response_model=AdminUsersResponse)

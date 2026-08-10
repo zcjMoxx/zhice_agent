@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 
 import { api } from "@/api/client";
-import type { MonitorSnapshot, OperationsTerminal, PublicUser, Role, SkillSourcesSnapshot, SystemDiagnosticsSnapshot } from "@/api/types";
+import type { MonitorSnapshot, OperationsTerminal, PublicUser, RegistrationPolicy, Role, SkillSourcesSnapshot, SystemDiagnosticsSnapshot } from "@/api/types";
 
 export const useAdminStore = defineStore("admin", {
   state: () => ({
@@ -10,6 +10,8 @@ export const useAdminStore = defineStore("admin", {
     permissions: [] as string[],
     skillSources: null as SkillSourcesSnapshot | null,
     operationsTerminal: null as OperationsTerminal | null,
+    registrationPolicy: null as RegistrationPolicy | null,
+    registrationPolicyBusy: false,
     skillActionSource: "",
     monitor: null as MonitorSnapshot | null,
     diagnostics: null as SystemDiagnosticsSnapshot | null,
@@ -23,6 +25,12 @@ export const useAdminStore = defineStore("admin", {
   }),
   actions: {
     async loadUsers() { this.users = (await api.users()).users; },
+    async loadRegistrationPolicy() { this.registrationPolicy = await api.ownerRegistrationPolicy(); },
+    async updateRegistrationPolicy(enabled: boolean) {
+      this.registrationPolicyBusy = true;
+      try { this.registrationPolicy = await api.updateOwnerRegistrationPolicy(enabled); }
+      finally { this.registrationPolicyBusy = false; }
+    },
     async loadRoles() { const result = await api.roles(); this.roles = result.roles; this.permissions = result.permissions; },
     async updateRole(id: string, keys: string[]) {
       const updated = await api.updateRole(id, keys);

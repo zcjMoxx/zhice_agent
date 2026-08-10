@@ -1,5 +1,7 @@
 # 登录与注册表单简化设计
 
+> 说明：本文的表单简化仍有效；注册入口是否展示现由 Owner 持久开关决定并默认关闭，见 `2026-08-10-owner-registration-control-design.md`。本文正文保留当时方案。
+
 > 说明：本文的表单简化仍有效；首个特权账号已从 admin 改为部署 Secret 保护的唯一 Owner，普通用户可在 Owner 初始化前后注册。当前权限口径参考 `docs_design/2026-07-10-owner-admin-delegation-design.md` 和 Part 9 活文档。
 
 > 日期：2026-07-10

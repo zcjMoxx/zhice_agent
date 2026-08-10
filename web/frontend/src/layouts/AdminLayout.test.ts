@@ -23,6 +23,11 @@ describe("AdminLayout", () => {
     vi.stubGlobal("open", vi.fn());
     vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.startsWith("/api/admin/auth/registration-policy") && init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body));
+        return Promise.resolve(response({ registration_enabled: body.registration_enabled }));
+      }
+      if (url.startsWith("/api/admin/auth/registration-policy")) return Promise.resolve(response({ registration_enabled: false }));
       if (url.startsWith("/api/admin/users/user-disabled") && init?.method === "DELETE") return Promise.resolve(response({ status: "deleted" }));
       if (url.startsWith("/api/admin/users")) return Promise.resolve(response({ users: [
         { id: "actor", username: "actor", display_name: "Actor", status: "active", roles: ["owner"], can_manage_admins: true },
@@ -68,6 +73,28 @@ describe("AdminLayout", () => {
     await mounted.get('.permission-group input[type="checkbox"]').setValue(true);
     await flushPromises();
     expect(fetch).toHaveBeenCalledWith("/api/admin/roles/role-dev", expect.objectContaining({ method: "PATCH" }));
+  });
+
+  it("lets only Owner control public registration from account management", async () => {
+    const mounted = await wrapper();
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "账号管理")!.trigger("click");
+    await flushPromises();
+
+    const policy = mounted.get(".registration-policy-card");
+    expect(policy.text()).toContain("允许新用户注册");
+    expect(policy.text()).toContain("已关闭");
+    await policy.get('input[type="checkbox"]').setValue(true);
+    await flushPromises();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/admin/auth/registration-policy",
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ registration_enabled: true }) }),
+    );
+    expect(policy.text()).toContain("已开放");
+
+    const adminMounted = await wrapper(["admin"]);
+    await adminMounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "账号管理")!.trigger("click");
+    await flushPromises();
+    expect(adminMounted.find(".registration-policy-card").exists()).toBe(false);
   });
 
   it("locks system role permissions in both UI and event handling", async () => {

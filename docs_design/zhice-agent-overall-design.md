@@ -17,7 +17,7 @@ ZhiCe-Agent 已经形成 CLI、Web、用户权限、Tool、Skill、Memory、MCP�
 
 > 保持一个小而清楚的 Agent 内核，让所有产品能力通过协议、运行时适配器、Tool 或 Skill 扩展。
 
-这份文档描述当前系统，而不是尚未落地的教学草案。已实现能力以真实代码和对应 Part 活文档为准；未来能力集中维护在第 15 节，实施历史集中维护在第 17 节。
+这份文档描述当前系统，而不是尚未落地的教学草案。已实现能力以真实代码和对应 Part 活文档为准；Part 17～18 的当前生产基线集中维护在第 15 节，实施路线集中维护在第 17 节。
 
 ---
 
@@ -307,13 +307,7 @@ ZhiCe-Agent（CLI + Web + QQ + 微信）：
 
 这就是当前代码基线。ZhiCe-Agent 已经不是聊天原型，而是具备身份、权限、长期 Memory、外部 Tool、运行扩展、子任务编排和多渠道接入的完整本地优先 Agent Runtime。
 
-### 3.2 后续扩展方向
-
-当前代码已经完成 Part 18 的正式 Skill Runtime、source 状态/Web 管理与多运行形态 restricted Ops：本地终端自动启动 loopback supervisor，本地 Docker 启动独立 sidecar，服务器 Ops 由宿主机 systemd 监控固定容器；三者复用“监控面板 / 运维终端”双视图，服务器用同源 Caddy 组合 dashboard adapter 与 `/terminal/` ttyd。
-
-Part 18 当前代码事实见 `docs_design/zhice-agent-part18-skill-runtime-and-server-ops-design.md`，纠偏与双视图记录见 `docs_design/2026-08-09-part18-multi-runtime-ops-correction-design.md`、`docs_design/2026-08-10-part18-unified-ops-dual-view-design.md`。本地进程、Docker sidecar 和服务器 HTTP/认证/端口边界真实 smoke 已通过；浏览器 ttyd WebSocket/iframe 与故障救援仍按外部验收清单执行。
-
-### 3.3 当前目录结构
+### 3.2 当前目录结构
 
 ```text
 zhice_agent/
@@ -383,27 +377,6 @@ protocols       -> LLMProvider / ToolProvider / SkillProvider / SessionStore 等
 - `integrations/weixin_sidecar/` 是微信官方 Transport 的 Node 进程边界，不运行第二套 Agent Runtime。
 - `agent/cli.py` 属于入口层；gateway 实现直接位于 `agent/app/gateway.py`，不再保留顶层 re-export 文件。
 - `agent/protocols/` 已经承担协议层职责，应该保持只放接口和数据结构。
-
-后续的 OAuth/SSO、生产部署、完整前端工程和新渠道继续在现有边界上扩展：
-
-```text
-agent/
-+-- app/
-|   +-- gateway.py
-|   +-- api/
-|       +-- routes.py
-|       +-- ws.py
-+-- core/
-|   +-- loop.py
-|   +-- context.py
-|   +-- turns.py
-|   +-- context_relevance.py
-+-- protocols/
-+-- tools/
-+-- llm/
-+-- session/
-+-- config.py
-```
 
 迁移原则：
 
@@ -603,52 +576,29 @@ actor/Profile-filtered ToolProvider
 
 ### 6.2 LLM 错误结构
 
-LLM 错误也属于 provider 边界的一部分。`AgentLoop` 不应该靠解析 HTTP body 或字符串片段判断错误原因；当前只接收 provider 抛出的安全错误文本，保存会话并展示用户可读提示。
+LLM 错误也属于 provider 边界的一部分。`AgentLoop` 不解析 HTTP body 或字符串片段判断错误原因；Provider 已将供应商异常转换为结构化、可脱敏且可用于重试决策的 `LLMProviderError`，AgentLoop 只负责稳定收尾、保存会话并展示安全提示。
 
 #### 当前已实现
 
 ```python
 class LLMProviderError(RuntimeError):
-    """Base error raised by LLM providers."""
-
-
-class LLMConfigurationError(LLMProviderError):
-    """Raised when LLM configuration is missing or invalid."""
-```
-
-`LLMConfigurationError` 用于本地配置错误，例如缺少 `api_key`、`${ENV_VAR}` 未定义、endpoint 配置字段非法等。`LLMProviderError` 用于运行时 LLM 调用失败。两者都只携带安全文本，不包含结构化错误元信息。
-
-错误文本必须脱敏。Provider 可以保留短错误摘要，但不能把真实 API key、Authorization header、完整请求体或长 traceback 直接交给 `AgentLoop`。
-
-#### 后续目标：结构化错误分类
-
-后续错误分类阶段应把 `LLMProviderError` 扩展为携带结构化元信息：
-
-```python
-LLMErrorCode = Literal[
-    "CONFIG_INVALID",
-    "AUTH_FAILED",
-    "MODEL_NOT_FOUND",
-    "RATE_LIMITED",
-    "NETWORK_ERROR",
-    "INVALID_RESPONSE",
-    "PROVIDER_HTTP_ERROR",
-    "PROVIDER_ERROR",
-]
-
-
-class LLMProviderError(RuntimeError):
     def __init__(
         self,
         message: str,
         *,
-        code: LLMErrorCode = "PROVIDER_ERROR",
-        status_code: int | None = None,
+        code: str = "PROVIDER_ERROR",
+        http_status: int | None = None,
         retryable: bool = False,
-        user_hint: str = "",
+        safe_message: str | None = None,
+        endpoint: str = "",
+        model: str = "",
+        attempts: list[dict[str, Any]] | None = None,
+        retry_after_seconds: float | None = None,
     ):
         ...
 ```
+
+`LLMConfigurationError` 与 `LLMContextBudgetError` 继承该结构。`safe_message` 有界且必须脱敏；`attempts` 只保存安全的 endpoint、错误码、耗时和重试决策，不能包含 API key、Authorization header、完整请求体、原始响应或长 traceback。
 
 Provider 层负责把具体供应商错误转换为稳定错误码：
 
@@ -663,7 +613,7 @@ JSON decode failed          -> INVALID_RESPONSE
 未知异常                    -> PROVIDER_ERROR
 ```
 
-配置错误通常不是 retryable；限流、网络抖动、部分 5xx 可以标记为 `retryable=True`，供后续自动重试或提示用户稍后再试。
+配置错误不是 retryable；限流、网络抖动和部分 5xx 可标记为 `retryable=True`，由 Provider 在总 deadline 内执行同 endpoint 有界重试、`Retry-After`、退避与 cooldown，并把安全 attempts 交给 Activity/诊断链。
 
 ### 6.3 Tool
 
@@ -874,7 +824,7 @@ class AgentLoop:
 - 对 `LLMProviderError` 使用 provider 给出的安全错误文本格式化提示。
 - 对未知异常只展示错误类型，不展示原始异常正文，避免泄露 secret。
 - 不在 `AgentLoop` 里解析 HTTP body、供应商错误 JSON 或模型私有字段。
-- `code`、`status_code`、`retryable`、`user_hint` 等结构化错误字段是后续 Provider 错误分类阶段要补的能力。
+- `code`、`http_status`、`retryable`、`safe_message`、`attempts` 等结构化字段只由 Provider 产生；AgentLoop 不重新解释供应商错误。
 
 ---
 
@@ -1249,9 +1199,7 @@ class SkillLoader:
         ...
 ```
 
-当前 source-aware root 只作为 `SkillSourceSync` 和 `SkillLoader` 之间的内部输入，不放入 `agent/protocols/skill.py`。对外稳定协议仍然是 `SkillInfo`、`SkillProvider` 和 `SkillError`。
-
-后续如果多个模块都稳定依赖 source root 信息，例如 `/skills status`、Skill 索引缓存、Skill 健康检查、source 权限过滤、同步来源审计等，再把 `SkillRoot` 提升为协议层数据结构。提升前应先确认它不再只是“扫描目录”的内部细节，而是多个模块共同消费的稳定契约。
+source-aware `SkillRoot` 仍是 `agent.skills.loader` 的内部扫描输入，不放入协议层。Part 18 已通过独立的 source 状态存储、指纹索引、权限投影和同步审计提供管理能力；对外稳定协议是 `SkillInfo`、`ExecutableSkillInfo`、`SkillRunRequest`、`SkillResult`、`ProgressSink`、`SkillExecutor`、`SkillProvider` 和 `SkillError`，不需要暴露目录扫描细节。
 
 ---
 
@@ -1426,7 +1374,7 @@ ${ZHICE_AGENT_WORKSPACE}/
 
 ## 15. 当前 Part 17 与 Part 18 基线
 
-Part 12～18 和 Capability Selection 已进入当前代码基线，其事实和边界分别维护在对应 Part 活文档。Part 18 的外部 Linux/Cloudflare 生产验收仍与已完成的本机自动验证分开记录。
+Part 12～18 和 Capability Selection 已进入当前代码基线，其事实和边界分别维护在对应 Part 活文档。Part 18 已完成代码、本机验证、服务器部署、长期 Cookie 认证和宿主机权威配置跨 Digest 应用；浏览器 PTY/iframe、idle 后重连和容器故障救援仍作为真实环境交互验收单列。
 
 ```text
 Part 17 运行可靠性、系统级诊断、生产部署与发布
@@ -1455,16 +1403,16 @@ Part 17 已在 Part 16 稳定前端产品面和 Part 15 上下文派生状态之
 
 部署层继续保持 `app -> core -> protocols`，core 不依赖容器、反向代理、向量数据库或平台 SDK。Part 17 的诊断数据接入 Part 16 已有管理页面，不建立第二套 Web。
 
-代码落地时的验证结果为 Python 全量 `796 passed, 1 skipped`，Ruff、前端 `29` 项测试、lint/typecheck/build、deploy 静态检查和 compose 校验均通过。随后已完成本地 image build/run smoke、阿里云 ACR push、腾讯云按不可变 Digest deploy、Caddy HTTPS、公网健康、认证初始化和容器重启持久化验收。2026-08-04 新增的三入口发布自动化已通过专项单测与 Windows PowerShell 5.1 解析验证；它复用已验收链路，不把真实目标配置或凭证提交到仓库。
+当前全量验证为 Python `986 passed, 2 skipped`、Ruff、前端 `56 passed`、lint/typecheck/build、deploy/Ops 专项 `123 passed`、Shell syntax 与 Python 静态编译全部通过。随后已完成本地 image build/run smoke、阿里云 ACR push、腾讯云按不可变 Digest deploy、Caddy HTTPS、公网健康、认证初始化、容器重启持久化和 Part 18 宿主机权威配置跨 Digest 应用验收。三入口发布自动化复用已验收链路，不把真实目标配置或凭证提交到仓库。
 
 ### 15.2 Part 18：正式 Skill Runtime、Skill 管理与独立服务器 Ops
 
-Part 18 当前实现与已确认后续：
+Part 18 当前实现与固定范围：
 
 - 指令型/可执行型 Skill 并存；显式 Python runtime、`ndjson-v1`、SkillExecutor、ProgressSink、`run_skill` 和 `skill.*`。
 - source 状态、commit/同步时间/健康/安全错误、指纹索引缓存、actor/Profile 权限交集和 Skills 管理页。
 - Owner-only Ops 配置投影，新窗口与 iframe 回退；Gateway 不代理宿主机控制或终端流。
-- 宿主机 systemd Caddy/dashboard/ttyd、既有 Cloudflare Tunnel、服务器侧 root-only Basic Auth credential、restricted `zhice-ops-shell` 和固定 root wrapper。
+- 宿主机 systemd Caddy/dashboard/ttyd、既有 Cloudflare Tunnel、服务器侧 root-only credential、长期签名 Cookie、loopback ttyd Basic Auth、restricted `zhice-ops-shell` 和固定 root wrapper。
 - 云端 `.env`、`config.yml`、`models.json` 迁为宿主机权威副本，逐文件只读 bind mount，并提供备份/验证/diff/restore/apply。
 - 新增宿主机 `diagnose.sh`，固定 `zhice-agent` 容器；真实主站和 Ops 地址迁入 Git 忽略的私有部署配置。
 - 多运行形态纠偏与双视图已实现：终端启动自动拉起 loopback Ops、本地 Compose 同时拉起独立 Ops sidecar，三种形态统一监控面板与 restricted 运维终端；云端 `OpsUrl` 只来自私有配置，容器配置 apply 使用 root-owned 固定规格 recreate。
@@ -1922,7 +1870,7 @@ Web 渠道绑定管理
 依赖顺序：
 
 1. Vue/Vite/TypeScript、Router、Pinia、Design Tokens 和 build/wheel 链路。
-2. 登录、注册、Owner 初始化和路由守卫。
+2. 登录、Owner 初始化、Owner 控制且默认关闭的普通注册，以及路由守卫。
 3. 聊天壳、Session、WebSocket、RuntimeEvent、confirmation 和 stop。
 4. 账号菜单、设置中心、QQ/微信绑定和明暗曜石主题。
 5. 账号、角色、失败优先的运行诊断，以及高级设置中的安全审计。
@@ -1947,17 +1895,17 @@ Web 渠道绑定管理
 
 Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费其稳定协议、持久化边界和前端组件。部署不复制完整本地 workspace；只有三个真实配置进入私有镜像，运行数据留在云端 volume。
 
-### Milestone 18：正式 Skill Runtime、Skill 管理与多运行形态 Ops（代码与本机自动验证完成）
+### Milestone 18：正式 Skill Runtime、Skill 管理与多运行形态 Ops（实现与生产部署完成）
 
 依赖顺序：
 
 1. 显式 runtime、SkillExecutor、`run_skill`、skill.* RuntimeEvent 和 ProgressSink。
 2. Skill source 状态、索引缓存、权限过滤、同步审计和 Web 管理。
-3. 独立 Ops、共享监控/终端双视图、固定 ttyd、restricted shell、既有 Cloudflare Tunnel 与服务器侧 Caddy/ttyd Basic Auth。
+3. 独立 Ops、共享监控/终端双视图、固定 ttyd、restricted shell、既有 Cloudflare Tunnel、服务器侧 Caddy 长期 Cookie 登录与 loopback ttyd Basic Auth。
 4. 宿主机权威配置首迁、备份/校验/diff/restore/apply 和只读 bind mount。
 5. `diagnose.sh` 与固定容器 status/logs/restart 收敛。
-6. Python/前端/Ops 本机自动验证；真实 Linux/Cloudflare 生产项继续外部验收。
-7. 已按纠偏与统一双视图设计补齐本地进程 supervisor、本地 Docker sidecar、服务器 Caddy/dashboard/ttyd、私有 OpsUrl 投影和安全 recreate；本地与服务器 HTTP/认证 smoke 已通过，浏览器 PTY/iframe 与故障救援继续单列。
+6. Python/前端/Ops 本机自动验证，以及真实 Linux 部署、Cloudflare Tunnel、长期 Cookie 认证、固定容器重建与配置跨 Digest 保留。
+7. 已按纠偏与统一双视图设计补齐本地进程 supervisor、本地 Docker sidecar、服务器 Caddy/dashboard/ttyd、私有 OpsUrl 投影和安全 recreate；浏览器 PTY/iframe、idle 后重连与容器故障救援作为环境交互验收继续单列，不属于未实现代码。
 
 
 ## 18. 应该坚持的设计原则
@@ -2002,7 +1950,7 @@ Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费
 
 用户、权限与诊断验收：
 
-1. `state/auth.sqlite3`、唯一 Owner 初始化、登录/登出、普通注册、用户上下文、session_index、渠道身份映射和 Owner CLI session 索引对账。
+1. `state/auth.sqlite3`、唯一 Owner 初始化、登录/登出、Owner 注册策略、普通注册、用户上下文、session_index、渠道身份映射和 Owner CLI session 索引对账。
 2. session 级模型偏好、turn-local provider、登录用户安全工具基础能力、危险确认、当前 Session 自助诊断，以及拆分后的 Runtime Activity / Security Audit。
 3. 所有 Web、CLI 索引和渠道 Session 访问都经过 ownership 与 `SessionAccess`，不同用户数据互相隔离。
 
@@ -2314,11 +2262,11 @@ Part 18 正式 Skill Runtime、Skill 管理与服务器 Ops
   -> 本地进程 supervisor、本地 Docker sidecar、私有 OpsUrl 与安全 recreate（已实现）
 ```
 
-Part 15 已稳定上下文工程，Part 16 已完成 Vue Web 产品面，Part 17 已完成可靠性、诊断和私有镜像发布基线，Part 18 已完成正式 Skill Runtime、source 管理和多运行形态 restricted Ops 的代码与本机自动验证。本地进程与 Docker sidecar 真实链路已验收；目标 Linux/Cloudflare 外部环境仍需真实验收，不据此扩大新的功能范围。
+Part 15 已稳定上下文工程，Part 16 已完成 Vue Web 产品面，Part 17 已完成可靠性、诊断和私有镜像发布基线，Part 18 已完成正式 Skill Runtime、source 管理、多运行形态 restricted Ops、服务器部署与宿主机权威配置链。本地进程、Docker sidecar、Linux systemd、Cloudflare Tunnel、HTTP/认证和配置 apply 已验收；只把浏览器 PTY/iframe、idle 后重连与故障救援保留为环境交互验收，不再列为未来功能计划。
 
 这样做的好处是：
 
 - 当前事实只写入活文档，历史取舍保留在日期设计记录。
-- 已实现能力继续留在第 17 节作为实施记录，不占用第 15 节未来设计。
+- 已实现能力继续留在第 17 节作为实施记录，第 15 节只维护 Part 17～18 当前生产基线。
 - 新能力继续遵循 `app -> core -> protocols`，不得把业务、渠道 SDK 或部署细节写入 AgentLoop。
 - 每个 Part 必须以真实代码、正常/异常/边界测试和可诊断运行链闭环。

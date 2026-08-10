@@ -149,7 +149,7 @@ Copy-Item deploy\private\cloud-target.example.json deploy\private\cloud-target.j
 | `SshPassword` | SSH 登录密码；当前流程同时假设它也是该用户的 sudo 密码 |
 | `RemoteOpsDir` | 云服务器上的绝对运维脚本目录，必须填写 |
 | `PublicUrl` | Caddy 对外提供的 HTTPS 访问地址，不带 `/health` |
-| `OpsUrl` | 既有 Cloudflare Tunnel 转发、由服务器 Caddy/ttyd Basic Auth 保护的独立 Ops HTTPS origin，不带路径 |
+| `OpsUrl` | 既有 Cloudflare Tunnel 转发、由服务器 Caddy 长期 Cookie 登录与 loopback ttyd Basic Auth 保护的独立 Ops HTTPS origin，不带路径 |
 | `Port` | Gateway 在云服务器 loopback 上监听的宿主机端口；默认 `10086`，没有端口冲突可直接保留 |
 
 这个文件允许保存 SSH 密码，但它是本机明文 Secret：只依赖 `deploy/.gitignore` 与本机文件权限保护，不会进入 Docker 镜像。不要复制到公开位置、提交 Git、粘贴到日志或对话中。
@@ -225,10 +225,10 @@ sudo sh restart.sh
 sudo sh deploy/ops/install.sh
 ```
 
-正式公网入口复用服务器已有 Cloudflare Tunnel，发布一条 `${OpsUrl} -> http://127.0.0.1:7681` 路由；不再为 Ops 新建 connector 或 Access/IdP/MFA。Caddy 在 `7681` 强制独立 `owner` Basic Auth并同源提供监控页、`/api/*` 和 `/terminal/`，ttyd 在 `7682` 保留第二层同 credential 认证，dashboard adapter 在 `7683`；三端口均受 loopback/systemd 网络边界保护。首次安装生成高熵密码并保存于 root-only `/etc/zhice-ops/ops.env`，升级时保留且不进入发布日志。安全组禁止裸露这些端口；真实认证、iframe 缓存和 WebSocket Origin 验收见 `deploy/ops/README.md`。
+正式公网入口复用服务器已有 Cloudflare Tunnel，发布一条 `${OpsUrl} -> http://127.0.0.1:7681` 路由；不再为 Ops 新建 connector 或 Access/IdP/MFA。Caddy 在 `7681` 先通过 dashboard adapter 校验长期签名 `HttpOnly` Cookie，再同源提供监控页、`/api/*` 和 `/terminal/`；只在 loopback 代理到 `7682` ttyd 时注入后端 Basic Auth，dashboard adapter 位于 `7683`。三端口均受 loopback/systemd 网络边界保护。首次安装生成高熵密码并保存于 root-only `/etc/zhice-ops/ops.env`，升级时保留且不进入 Cookie、网页脚本或发布日志。首次输入一次后浏览器重启继续登录；主动退出、清理站点数据或 credential 轮换才会失效。安全组禁止裸露这些端口；真实认证、长期 Cookie 和 WebSocket Origin 验收见 `deploy/ops/README.md`。
 
 终端只允许 `status`、有界 `logs`、`logs-follow`、`diagnose`、固定三文件的 `config view/edit/validate/diff/backup/restore/apply`、二次确认的 `restart`、`help` 和 `exit`。它不提供 Bash、`sudo -i`、任意 Docker、任意容器名或任意路径。`zhice-operator` 不加入 docker group；需要提权的动作只能经过参数结构化校验后的 root wrapper。
 
 配置编辑先进入 `/var/lib/zhice-ops/pending`，保存时自动备份。只有三份配置一起校验成功后才能 `config apply`；apply 原子替换宿主机权威文件并重启固定容器，失败会恢复备份。journald 只记录动作和结果，不记录配置正文；原始容器日志和 diagnose 输出还会经过已知 Secret 与敏感键模式的二次脱敏。
 
-真实 Linux/Cloudflare 验收必须覆盖：systemd 独立存活、ttyd resize/15 分钟 idle/最多一个会话、无/错误 Basic Auth 拒绝、正确认证与跨升级保留、Agent 容器退出后的直接救援、Docker unavailable 诊断、只读挂载、跨 restart/Digest 保留、备份恢复、通用 Shell/Docker/路径逃逸全部失败，以及私有 `PublicUrl` 的 `/health` 恢复。Windows 静态与单元测试不能替代这些外部验收。
+真实 Linux/Cloudflare 已完成 systemd 独立存活、首次/错误登录、长期 Cookie 签发、主动退出、loopback ttyd 无/错误 Basic Auth 拒绝、只读挂载、配置事务、跨 restart/Digest 保留、固定容器重建及私有 `PublicUrl` `/health` 恢复验收。仍需在真实浏览器中人工覆盖 Cookie 跨浏览器重启复用、ttyd resize/15 分钟 idle 后免登录重连/最多一个会话、iframe 回退，以及 Agent 容器退出或 Docker unavailable 时的直接救援；这些是环境交互验收，不是待实现功能。通用 Shell、任意 Docker/容器名/路径逃逸必须始终失败。

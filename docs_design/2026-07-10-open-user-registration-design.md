@@ -1,5 +1,7 @@
 # 公开用户自助注册设计
 
+> 说明：本文记录公开注册初版；当前普通注册已增加 Owner 总开关并默认关闭，前后端共同执行，见 `2026-08-10-owner-registration-control-design.md` 与 Part 9 活文档。本文正文保留当时方案。
+
 > 说明：本文记录公开注册初版及当时“首管理员优先”的边界。当前 Web 注册只填写用户名和密码、固定获得 `viewer`，并允许在 Owner 初始化前注册；请参考 `docs_design/2026-07-10-registration-form-simplification-design.md`、`docs_design/2026-07-10-owner-admin-delegation-design.md` 和 Part 9 活文档。
 >
 > 日期：2026-07-10

@@ -590,4 +590,4 @@ python -m pytest --basetemp .tmp/pytest_basetemp
 - `docs_design/2026-07-02-gateway-runtime-logging-design.md` 是本阶段的历史设计记录，保留早期参数和分层思路；本文是第八部分当前实现口径。
 - `docs_design/zhice-agent-part7-turn-context-design.md` 已经提供统一 `turn_id`，第八部分必须复用它，不重新设计 turn 模型。
 - 用户、登录与权限执行边界已在第九部分完成设计和第一版实现，详见 `docs_design/zhice-agent-part9-user-auth-permission-design.md`；第九部分基于 `User -> Session -> Turn -> ToolCall / AuditLog` 建模，并复用第八部分的 `session_id` / `turn_id` 关联字段。
-- 第八部分已经成为当前实现能力；未来只保留日志查询面板、audit log、清理归档等尚未实现增强项。
+- 第八部分已经成为当前实现能力；运行 Activity、系统诊断页面和 Security Audit 已由 Part 9、16、17 落地。日志清理/归档仍属于运维策略，不并入 AgentLoop。

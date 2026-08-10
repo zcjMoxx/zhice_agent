@@ -2,11 +2,11 @@
 
 > 说明：本文确定的三种运行形态与固定目标语义继续有效；当前共享“监控面板 / 运维终端”双视图和服务器 Caddy/ttyd 同源组合以 `2026-08-10-part18-unified-ops-dual-view-design.md` 为准。
 
-> 说明：本文的多运行形态、私有 `OpsUrl` 与固定目标语义继续有效；公网认证层已由 `2026-08-10-part18-server-side-ops-auth-design.md` 改为复用既有 Cloudflare Tunnel 并由服务器 ttyd 强制 Basic Auth。本文 Access/MFA 相关正文保留为当时记录。
+> 说明：本文的多运行形态、私有 `OpsUrl` 与固定目标语义继续有效；公网认证层先由 `2026-08-10-part18-server-side-ops-auth-design.md` 收敛为既有 Cloudflare Tunnel 和服务器独立 credential，随后由 `2026-08-10-part18-persistent-ops-login-design.md` 改为长期签名 Cookie。本文 Access/MFA 相关正文保留为当时记录。
 
 > 日期：2026-08-09
 >
-> 状态：代码与本机自动验证已完成；本地进程真实 smoke、Compose 双镜像 build、Docker sidecar 固定目标 status/logs/restart smoke 已通过；目标 Linux/Cloudflare 真实验收待外部环境
+> 状态：已实现并完成本地进程、Compose/Docker sidecar 与真实 Linux/Cloudflare 部署验收；浏览器 PTY/iframe、idle 后重连与故障救援继续按 Part 18 活文档单列
 >
 > 修正对象：`2026-08-09-part18-skill-runtime-and-server-ops-design.md` 中 Part 18C 的运行形态、地址来源与配置 apply 语义
 >

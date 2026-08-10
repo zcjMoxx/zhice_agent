@@ -210,8 +210,8 @@ Part 18 已实现正式 Skill Runtime、Skill source 管理和独立服务器 Op
 ## 14. 当前验证状态
 
 - `python -m ruff check .`：通过。
-- Python 首轮全量并行测试：`798 passed, 1 skipped, 1 failed`；唯一失败是 Memory Windows retry 用例的并行偶发失败，该用例随后单独复跑通过。
-- 前端测试：`37 passed`；lint、typecheck、production build 均通过。
+- 当前全量 Python 回归：`986 passed, 2 skipped`；Ruff 通过。提交前同时修复了 Console 自动配色检测跨测试输出环境缓存导致的 ANSI 串扰。
+- 当前前端测试：`56 passed`；lint、typecheck、production build 均通过。
 - deploy 静态检查与 compose 配置校验：通过。
 - 微信 Sidecar Node 测试：`14 passed`，build 通过；真实子进程覆盖 hello、health、二维码连接与 shutdown。
 - 既有 Docker image build/run 基线：通过，镜像内 `websockets=15.0.1`，日志包含 `[weixin] channel ready`，Gateway routes 包含 `/ws`。2026-07-31 新增的可配置 APT 镜像参数已通过静态测试，真实参数化构建由本地部署教学流程继续验收。

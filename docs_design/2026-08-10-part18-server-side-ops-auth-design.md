@@ -1,10 +1,12 @@
 # ZhiCe-Agent Part 18 服务器侧 Ops 认证收敛设计
 
+> 说明：本文确定的“既有 Tunnel + 服务器独立 credential”边界继续有效，但依赖浏览器 Basic Auth 临时缓存的交互已被 `2026-08-10-part18-persistent-ops-login-design.md` 修正为长期签名 Cookie；旧方案正文保留当时记录。
+
 > 说明：本文确定的“既有 Tunnel + 服务器 Basic Auth”继续有效；当前代码已按 `2026-08-10-part18-unified-ops-dual-view-design.md` 在 ttyd 前增加 loopback Caddy 统一认证入口，并在同一 origin 提供监控面板与 `/terminal/` restricted ttyd。本文正文保留认证收敛时的单 ttyd 拓扑记录。
 
 > 日期：2026-08-10
 >
-> 状态：已确认，替代 Part 18C 中 Cloudflare Access/MFA 作为首选认证层的口径
+> 状态：已落地后由长期签名 Cookie 方案继续修正；当前部署口径以 `2026-08-10-part18-persistent-ops-login-design.md` 和 Part 18 活文档为准
 >
 > 前置记录：`2026-08-09-part18-skill-runtime-and-server-ops-design.md`、`2026-08-09-part18-multi-runtime-ops-correction-design.md`
 

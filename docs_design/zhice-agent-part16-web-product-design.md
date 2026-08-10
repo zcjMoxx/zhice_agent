@@ -20,7 +20,7 @@ Part 16 把原路线中的 Web、会话与用户治理优化前移，建立 ZhiC
 
 Part 16 已用 Vue 3、Vite 和 TypeScript 取代原生 `web/static` 单体应用，同时保持现有 FastAPI、REST、WebSocket、Session、RBAC 和 Agent 内核边界不变。源码位于 `web/frontend`，production build 位于 `agent/web/static`，旧原生入口已删除。
 
-当前实现还增加了两个 app 层只读出口：`GET /api/admin/monitor` 聚合 Gateway、Capability 与结构化 Runtime Activity 真值；Audit 列表兼容原接口并扩展筛选、游标分页和 CSV 导出。两者都不进入 AgentLoop，也不实现 Part 17 根因诊断。
+当前实现还增加了两个 app 层只读出口：`GET /api/admin/monitor` 聚合 Gateway、Capability 与结构化 Runtime Activity 真值；Audit 列表兼容原接口并扩展筛选、游标分页和 CSV 导出。两者都不进入 AgentLoop；Part 17 已在同一管理产品面接入系统事故聚合、根因证据和跨组件时间线。
 
 ## 2. 稳定边界
 
@@ -63,7 +63,7 @@ WebSocket client 和 RuntimeEvent reducer 为独立 typed module，组件不能�
 
 ```text
 /
-├─ 未登录：登录 / 注册
+├─ 未登录：登录；仅在 Owner 开放注册时显示注册
 └─ 已登录：聊天应用壳
 
 /_setup
@@ -95,7 +95,7 @@ FastAPI 继续显式提供三个 SPA 入口。Vue Router 负责页面选择，AP
 
 ### 6.1 登录与注册
 
-桌面端使用品牌区和表单区横向滑动换位；移动端使用同一卡片内容切换。Owner 初始化复用视觉组件，但保留独立 URL 和安全条件。
+桌面端在注册开放时使用品牌区和表单区横向滑动换位；移动端使用同一卡片内容切换。注册策略默认关闭且读取失败 fail closed，普通首页和 QQ 绑定认证页共用同一匿名安全投影。Owner 初始化复用视觉组件，但保留独立 URL 和安全条件。
 
 ### 6.2 聊天与 Session
 

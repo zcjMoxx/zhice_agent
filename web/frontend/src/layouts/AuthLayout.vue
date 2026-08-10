@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ArrowRight, Eye, EyeOff, ShieldCheck, Sparkles } from "@lucide/vue";
-import { computed, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 
 import { uiText } from "@/i18n";
 import QuickPreferences from "@/components/QuickPreferences.vue";
@@ -28,6 +28,10 @@ const usernameValid = computed(() => /^[A-Za-z0-9_.-]{3,64}$/.test(username.valu
 const passwordValid = computed(() => password.value.length >= 8 && password.value.length <= 1024);
 const confirmationValid = computed(() => confirmation.value.length > 0 && confirmation.value === password.value);
 const registrationValid = computed(() => usernameValid.value && passwordValid.value && confirmationValid.value);
+onMounted(() => { if (!props.setup) void auth.fetchRegistrationPolicy(); });
+watch(() => auth.registrationEnabled, (enabled) => {
+  if (!enabled && mode.value === "register") switchMode("login");
+});
 const panelTitle = computed(() => {
   if (props.setup) return tr("初始化系统所有者", "Initialize system owner");
   if (props.flow === "qq-binding") return mode.value === "login" ? tr("登录并绑定 QQ", "Sign in and connect QQ") : tr("创建账号并绑定 QQ", "Create account and connect QQ");
@@ -81,7 +85,7 @@ function switchMode(next: "login" | "register") {
           <h1>{{ setup ? tr('建立你的本地智能工作台', 'Build your local intelligent workspace') : mode === 'login' ? tr('继续与智能同行', 'Continue with intelligence') : tr('从一个清晰的对话开始', 'Start with a clear conversation') }}</h1>
           <p>{{ setup ? tr('此入口只在 Owner 尚未创建且配置了初始化凭据时可用。', 'This entry is available only before the Owner exists and with setup credentials configured.') : tr('让每一次对话，都离完成更近一步。', 'Let every conversation bring you one step closer to completion.') }}</p>
         </div>
-        <button v-if="!setup" class="ghost-inverse" type="button" @click="switchMode(mode === 'login' ? 'register' : 'login')">
+        <button v-if="!setup && auth.registrationEnabled" class="ghost-inverse" type="button" @click="switchMode(mode === 'login' ? 'register' : 'login')">
           {{ mode === 'login' ? tr('创建账号', 'Create account') : tr('已有账号', 'I have an account') }} <ArrowRight :size="17" />
         </button>
       </div>
@@ -110,7 +114,7 @@ function switchMode(next: "login" | "register") {
         <label v-if="setup"><span>{{ tr('初始化凭据', 'Setup credential') }}</span><span class="password-field"><input v-model="setupToken" :type="setupTokenVisible ? 'text' : 'password'" autocomplete="off" required /><button type="button" tabindex="-1" :aria-label="setupTokenVisible ? tr('隐藏初始化凭据', 'Hide setup credential') : tr('显示初始化凭据', 'Show setup credential')" @click="setupTokenVisible = !setupTokenVisible"><EyeOff v-if="setupTokenVisible" :size="18" /><Eye v-else :size="18" /></button></span></label>
         <p v-if="failure" class="form-error" role="alert">{{ failure }}</p>
         <button class="primary-button auth-submit" :disabled="busy || (registering && !registrationValid)" type="submit">{{ busy ? tr('处理中…', 'Working…') : setup ? tr('创建 Owner 并登录', 'Create Owner and sign in') : flow === 'qq-binding' ? mode === 'login' ? tr('登录并继续', 'Sign in and continue') : tr('创建账号并继续', 'Create account and continue') : mode === 'login' ? tr('登录', 'Sign in') : tr('创建并登录', 'Create and sign in') }}</button>
-        <button v-if="!setup" class="mobile-mode-switch" type="button" @click="switchMode(mode === 'login' ? 'register' : 'login')"><span>{{ mode === 'login' ? tr('没有账号？', 'No account?') : tr('已有账号？', 'Already have an account?') }}</span><strong>{{ mode === 'login' ? tr('立即创建', 'Create one') : tr('返回登录', 'Sign in') }}</strong></button>
+        <button v-if="!setup && auth.registrationEnabled" class="mobile-mode-switch" type="button" @click="switchMode(mode === 'login' ? 'register' : 'login')"><span>{{ mode === 'login' ? tr('没有账号？', 'No account?') : tr('已有账号？', 'Already have an account?') }}</span><strong>{{ mode === 'login' ? tr('立即创建', 'Create one') : tr('返回登录', 'Sign in') }}</strong></button>
         <a v-if="setup" class="mobile-mode-switch" href="/">{{ tr('返回登录', 'Back to sign in') }}</a>
       </form>
     </section>

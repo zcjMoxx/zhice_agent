@@ -39,6 +39,21 @@ def test_initialize_schema_adds_session_conversation_type_to_legacy_database(tmp
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(session_index)")}
     assert "conversation_type" in columns
+    assert SQLiteAuthStore(path).registration_enabled() is False
+
+
+def test_registration_policy_defaults_closed_and_persists_across_reinitialization(tmp_path):
+    path = tmp_path / "auth.sqlite3"
+    store = SQLiteAuthStore(path)
+    owner = store.initialize_owner("owner", "Owner", "password-123")
+
+    assert store.registration_enabled() is False
+    assert store.set_registration_enabled(True, actor_user_id=owner.id) is True
+    assert SQLiteAuthStore(path).registration_enabled() is True
+
+    store.initialize_schema()
+
+    assert store.registration_enabled() is True
 
 
 def test_init_owner_seeds_roles_permissions_and_authenticates(tmp_path):

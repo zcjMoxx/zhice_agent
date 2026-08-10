@@ -58,13 +58,11 @@ def _style(text: object, code: str) -> str:
 
 
 def _colors_enabled() -> bool:
-    """Cache whether this process should emit ANSI color sequences."""
+    """Return an explicit override or detect the current output environment."""
 
-    global _COLOR_ENABLED
     if _COLOR_ENABLED is not None:
         return _COLOR_ENABLED
-    _COLOR_ENABLED = _detect_color_support()
-    return _COLOR_ENABLED
+    return _detect_color_support()
 
 
 def _detect_color_support() -> bool:

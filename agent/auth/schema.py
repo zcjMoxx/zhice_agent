@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
   remote_addr_preview TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS auth_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  registration_enabled INTEGER NOT NULL DEFAULT 0
+    CHECK (registration_enabled IN (0, 1)),
+  updated_at TEXT NOT NULL,
+  updated_by_user_id TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS external_identities (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),

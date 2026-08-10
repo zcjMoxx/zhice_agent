@@ -8,7 +8,7 @@
 >
 > 设计依据：`docs_design/2026-07-06-next-stage-sequencing-design.md`、`docs_design/2026-07-08-user-auth-permission-boundary-design.md`、`docs_design/2026-07-10-session-model-preference-scope-design.md`、`docs_design/2026-07-10-owner-admin-delegation-design.md`、`docs_design/2026-07-11-password-change-reauthentication-design.md`、`docs_design/2026-07-16-authenticated-user-baseline-capabilities-design.md`
 >
-> 当前状态：第九部分身份与特权边界已落地。登录用户默认拥有账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 等基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。Owner 是 CLI 本地 workspace operator 在 Web 端的登录身份：认证表示不同，但共用全局 workspace、sessions、metadata 和 Memory，不拥有独立的 `contexts/users/{owner_id}`。当前用户管理支持已停用非 Owner 账号的用户名二次确认永久删除；删除覆盖独立用户目录和关联认证/Session/渠道/运行数据，仍绑定微信的账号必须先解绑。详细边界见 `docs_design/2026-08-08-qq-return-and-user-deletion-design.md`。仍不包含通用审批流、OAuth/SSO、多租户或工程化前端。
+> 当前状态：第九部分身份与特权边界已落地。登录用户默认拥有账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 等基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。Owner 是 CLI 本地 workspace operator 在 Web 端的登录身份：认证表示不同，但共用全局 workspace、sessions、metadata 和 Memory，不拥有独立的 `contexts/users/{owner_id}`。当前用户管理支持已停用非 Owner 账号的用户名二次确认永久删除；普通自助注册默认关闭并由 Owner 独占控制。Vue 工程化前端已由 Part 16 落地；通用审批流、OAuth/SSO 和多租户仍不在当前范围。
 
 ---
 
@@ -806,15 +806,17 @@ POST /api/auth/bootstrap
 
 ### 9.2 普通用户自助注册
 
-普通用户注册不依赖 Owner 是否已经初始化：
+普通用户自助注册由 Owner 独占的持久策略控制，默认关闭。Owner 在管理后台“账号管理”中开启后，匿名页面才展示注册入口，后端才接受：
 
 ```text
+GET /api/auth/registration-policy
 POST /api/auth/register
+GET/PATCH /api/admin/auth/registration-policy  # Owner only
 ```
 
-请求只接受 `username`、`password`。服务端令 `display_name = username`，并固定调用 `create_user(..., role_keys=["viewer"])`；客户端额外提交的显示名、角色或权限字段不会改变派生显示名和最终角色。注册成功后创建 HttpOnly cookie 并自动登录，用户可在 Account settings 修改显示名。
+关闭时前端登录页和 QQ 绑定认证页都不展示注册切换，`POST /api/auth/register` 独立返回 `403 AUTH_REGISTRATION_DISABLED` 并记录拒绝审计，不能通过直接调用接口绕过。管理员手工创建账号不受影响。策略保存在 `auth.sqlite3.auth_settings`，跨 Gateway 和容器重启保留；读取异常 fail closed。
 
-数据库尚未初始化时，普通注册会先按需初始化 schema，再创建固定 `viewer` 用户。重复用户名返回 `409 USER_USERNAME_ALREADY_EXISTS`。该入口不代表已经具备公网注册所需的验证码、限流、反滥用和账号验证能力。
+开放后，请求仍只接受 `username`、`password`。服务端令 `display_name = username`，并固定调用 `create_user(..., role_keys=["viewer"])`；客户端额外提交的显示名、角色或权限字段不会改变派生显示名和最终角色。注册成功后创建 HttpOnly cookie 并自动登录，用户可在 Account settings 修改显示名。重复用户名返回 `409 USER_USERNAME_ALREADY_EXISTS`。当前仍未实现验证码、限流、邀请、反滥用和账号验证能力，因此生产公网建议保持关闭，仅在明确时间窗口内开放。
 
 ### 9.3 登录 API
 
@@ -1397,7 +1399,7 @@ POST 请求体至少包含 `session_id` 和 `model`。服务端按当前 session
 需要新增：
 
 - 登录页或登录视图。
-- Owner 初始化前后都开放普通用户自助注册，注册用户固定为 `viewer`。
+- 普通用户自助注册默认关闭，只有 Owner 可持久开启；开放后注册用户固定为 `viewer`。
 - Web 注册不要求 display name；登录、Owner 初始化和普通注册输入框使用图标与灰色 placeholder。
 - Owner 可为指定 Admin 开关 `auth.admin.manage`；普通 Admin 默认不能任命管理员，委派不会传播。
 - 左下角用户入口显示当前用户和 logout。
@@ -1733,7 +1735,7 @@ LLM tool_call exec(command="pip install ...")
 
 1. CLI 保留本地 no-login 管理/开发入口，继续使用全局 session 路径：`${ZHICE_AGENT_WORKSPACE}/contexts/sessions` 和 `${ZHICE_AGENT_WORKSPACE}/contexts/sessions_meta`；Owner 的 Web 会话也复用该路径，但仍通过 `session_index.owner_user_id` 标记归属。
 2. 未启用 auth DB 前，当前 CLI / gateway 仍可按本地单用户开发形态运行；第九部分实现 Web 鉴权后，gateway 默认要求 auth。
-3. 如果 gateway 尚无 Owner，普通用户仍可注册；配置 `ZHICE_AGENT_SETUP_TOKEN` 后可通过隐藏路径 `/_setup` 或 `zcagent auth init-owner` 初始化，两种入口都要求该授权码。
+3. 如果 gateway 尚无 Owner，普通注册保持关闭；配置 `ZHICE_AGENT_SETUP_TOKEN` 后可通过隐藏路径 `/_setup` 或 `zcagent auth init-owner` 初始化，Owner 随后决定是否开放注册。
 4. 普通用户注册始终固定获得 `viewer`，不能通过请求字段获得更高权限。
 5. `zcagent auth init-owner` 创建唯一永久 Owner，供 Web / 外部渠道登录使用；Owner 与 CLI 共享会话物理目录，Owner 列表会为未索引的全局 CLI 历史补充 Owner session index。
 6. CLI 在 trace / audit 中可表示为本地操作者：
@@ -1828,7 +1830,8 @@ tests/unit_test/tools/*
 | duplicate init-owner | 已有 Owner | 默认拒绝重复初始化 |
 | duplicate web bootstrap | 已有 Owner | 409 `AUTH_ALREADY_INITIALIZED`，不创建第二个 Owner |
 | invalid setup credential | Secret 缺失或错误 | 503/401，不能创建 Owner |
-| public register | Owner 初始化前后，合法字段 | 创建固定 `viewer` 用户、设置 cookie 并自动登录 |
+| public register | Owner 已开启策略且字段合法 | 创建固定 `viewer` 用户、设置 cookie 并自动登录 |
+| public register disabled | 默认关闭或 Owner 已关闭 | `403 AUTH_REGISTRATION_DISABLED`，不创建用户 |
 | register before setup | 无用户 | 503 `AUTH_SETUP_REQUIRED` |
 | duplicate username | 用户名已存在 | 409 `USER_USERNAME_ALREADY_EXISTS` |
 | password verify | 正确密码 | 登录成功 |
@@ -2028,7 +2031,7 @@ git diff --check
 25. Web / 外部渠道身份通过内部 `user_id` 统一权限和用户目录，不按渠道拆权限边界。
 26. CLI 本地操作者继续使用全局 `contexts/sessions` 和 `contexts/sessions_meta`，不被自动迁入 DB 用户目录。
 27. 现有 CLI、Web、AgentLoop、ToolRegistry、日志相关测试继续通过。
-28. Owner 初始化前后，匿名用户都可以自定义用户名和密码注册；服务端令 `display_name=username`、固定授予 `viewer`，注册请求不能覆盖显示名或提升角色权限。
+28. 普通自助注册默认关闭并由 Owner 独占控制；关闭时前端隐藏且后端返回 `403 AUTH_REGISTRATION_DISABLED`。开放后匿名用户可以自定义用户名和密码注册；服务端令 `display_name=username`、固定授予 `viewer`，注册请求不能覆盖显示名或提升角色权限。
 29. `viewer` 作为普通用户即使 `permission_keys` 为空，也默认拥有自己的 session 增删读写、聊天、模型切换、只读工具、低风险 exec 和本人 Memory；管理、审计、跨用户和危险执行特权仍被隔离。
 30. schema 初始化会清理已废弃的基础 permission key 及其角色/用户关联，但不删除用户、角色或用户角色绑定。
 

@@ -18,7 +18,7 @@
 - `zhice-agent-part6-web-ui-design.md`：Part 6，前端 UI、流式反馈、Markdown 渲染与会话操作。
 - `zhice-agent-part7-turn-context-design.md`：Part 7，Turn 运行单元、持久化字段和 endpoint token 预算；其中“最近 3 + 旧相关最多 3”是历史基线，当前上下文选择已由 Part 15 替代。
 - `zhice-agent-part8-gateway-agent-logging-design.md`：Part 8，Gateway / Agent 运行日志优化。
-- `zhice-agent-part9-user-auth-permission-design.md`：Part 9，用户、登录与权限执行边界设计。
+- `zhice-agent-part9-user-auth-permission-design.md`：Part 9，用户、登录与权限执行边界设计；普通自助注册默认关闭并由 Owner 独占控制，前端展示和后端注册接口使用同一持久策略。
 - `zhice-agent-part10-memory-design.md`：Part 10，已实现的 CLI/Owner workspace Memory、普通用户私有 Memory、对话式用户授权写入、服从 ContextBudget 的后台高置信提取与受控检索。
 - `zhice-agent-part11-mcp-design.md`：Part 11，已实现并进入当前代码基线，包含 stdio / Streamable HTTP / SSE、常见 `mcpServers` 直贴、自动 Tool 发现、共享 Runtime、ArtifactGateway、Elicitation 与 `/mcp`；Windows OS 级 stdio 读取隔离仍待硬化。
 - `zhice-agent-part12-hooks-design.md`：Part 12，已实现并关闭；当前基线包含 Agent 生命周期 RuntimeEvent、现有 WS/SSE/CLI、前端真实状态，以及显式配置、无 shell、受限执行的 pre/post Tool Hook Runtime。
@@ -27,9 +27,9 @@
 - `zhice-agent-part15-context-engineering-design.md`：Part 15 已实现并进入当前代码基线，覆盖预算内完整历史、确定性 Session 历史查询、结构化 compaction、FTS/BM25 + embedding 混合召回、本地向量存储和选择 trace。
 - `zhice-agent-part16-web-product-design.md`：Part 16 已实现并关闭；Vue 3/Vite/TypeScript 已成为唯一正式 Web 前端，包含六套主题家族与独立明暗模式、登录/聊天/Session、五栏设置、渠道连接，以及失败优先的运行诊断；安全审计作为敏感操作账本收在高级设置中，并以 `agent/web/static` 随 Python wheel 发布。
 - `zhice-agent-part17-reliability-diagnostics-deployment-design.md`：Part 17 已实现并关闭；Provider/MCP 可靠性、系统诊断、恢复边界、私有镜像与单机云发布基线。
-- `zhice-agent-part18-skill-runtime-and-server-ops-design.md`：Part 18 当前活文档；正式 Skill Runtime、Skill source 状态/Web 管理与多运行形态 restricted Ops。三种运行形态已统一“监控面板 / 运维终端”双视图；服务器使用既有 Tunnel、loopback Caddy Basic Auth 与 `/terminal/` ttyd。见 `2026-08-09-part18-multi-runtime-ops-correction-design.md`、`2026-08-10-part18-server-side-ops-auth-design.md` 与 `2026-08-10-part18-unified-ops-dual-view-design.md`。
+- `zhice-agent-part18-skill-runtime-and-server-ops-design.md`：Part 18 已实现并完成生产部署；正式 Skill Runtime、Skill source 状态/Web 管理与多运行形态 restricted Ops。三种运行形态已统一“监控面板 / 运维终端”双视图；服务器使用既有 Tunnel、loopback Caddy 长期签名 Cookie 与 `/terminal/` ttyd，云端配置采用宿主机权威副本与容器只读挂载。见 `2026-08-09-part18-multi-runtime-ops-correction-design.md`、`2026-08-10-part18-server-side-ops-auth-design.md`、`2026-08-10-part18-unified-ops-dual-view-design.md` 与 `2026-08-10-part18-persistent-ops-login-design.md`。
 
-第九部分用户、登录与权限执行边界已经落地：登录用户的账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 是基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。基础能力收敛见 `2026-07-16-authenticated-user-baseline-capabilities-design.md`；当前自助诊断和 Runtime Activity / Security Audit 拆分见 `2026-07-16-self-diagnostics-activity-audit-separation-design.md`。
+第九部分用户、登录与权限执行边界已经落地：登录用户的账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 是基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。普通自助注册现由 `auth.sqlite3` 持久策略控制、默认关闭且只有 Owner 可修改，见 `2026-08-10-owner-registration-control-design.md`。基础能力收敛见 `2026-07-16-authenticated-user-baseline-capabilities-design.md`；当前自助诊断和 Runtime Activity / Security Audit 拆分见 `2026-07-16-self-diagnostics-activity-audit-separation-design.md`。
 
 第十部分 Memory 已完成代码落地并进入当前基线。当前实现口径以 `zhice-agent-part10-memory-design.md` 为准；初始作用域设计见 `2026-07-15-memory-boundary-design.md`，当前对话式授权调整见 `2026-07-16-conversational-memory-consent-design.md`，Memory list/search、核心运行 ID 和终端日志收敛见 `2026-07-16-memory-read-runtime-id-terminal-log-convergence-design.md`。后台 extraction 使用 session 模型的 failover-safe ContextBudget，来源 Turn 过多时先缩减输入，不绕过 endpoint token 上限。
 
@@ -37,7 +37,7 @@
 
 第十二部分生命周期事件与 Hook Runtime 已实现并关闭。当前实现口径以 `zhice-agent-part12-hooks-design.md` 为准，最终边界与取舍记录见 `2026-07-20-hook-runtime-boundary-design.md`，单 Hook 显式角色/权限豁免作用域见 `2026-07-21-hook-role-scope-design.md`。Part 18 已在独立边界实现 SkillExecutor、`skill.*` 和 ProgressSink；它们不是 Part 12 的 Hook 职责，也不从 `exec.command` 推断。
 
-第十三部分并行 Subagent 编排已经实现并进入当前代码基线。当前实现口径以 `zhice-agent-part13-subagent-design.md` 为准，边界取舍记录见 `2026-07-21-subagent-runtime-boundary-design.md`，启动能力分级与诊断证据闭环见 `2026-07-21-startup-capability-and-subagent-diagnostics-design.md`，可选能力告警出口收敛见 `2026-07-22-optional-capability-warning-surface-design.md`，内置能力与可选扩展启用状态见 `2026-07-22-built-in-capability-enable-state-design.md`，人类命令与机器错误载荷分层见 `2026-07-22-human-command-error-presentation-design.md`，按身份展示内部详情的边界见 `2026-07-22-role-aware-capability-error-presentation-design.md`。主 Agent默认直接完成简单任务；只有并行、上下文隔离、专业能力或独立复核收益明确时，才通过批量 `delegate_tasks` 在同一 Turn 内并行运行 child，再 fan-in 返回稳定、有界且允许 partial 的结果供父 Agent归纳。`/subagent` 的 `auto/off/once` 使用 Session sidecar 真值和原子 one-shot 消费；child 使用独立 AgentLoop、内部 Session、RuntimeEvent scope 和取消 token，以新鲜 child Session 开始任务，但继承父 Turn 的 failover-safe ContextBudget。Tool/Skill/MCP 能力经过父可见集合、Profile allow/deny 与内核 deny 三重收窄；可写任务进入独立 worktree，共享状态任务进入进程级 shared-exclusive lane。现有 RBAC、确认、Hook、workspace guard、MCP artifact 与审计链保持不变。核心启动依赖继续阻断；未配置的 Skill source、Subagent、MCP 作为正常 disabled，不报警；显式启用的可选扩展依赖异常和内置 Memory extraction Prompt 异常只局部禁用并通过结构化终端 WARNING 与 trace 告警；显式 Hook 安全策略非法时仍阻断。`/api/health` 只保留通用 capability 状态，聊天 Web 不常驻展示启动告警。CLI、本地操作者、Owner 和具备 `audit.read` 的管理员可查看真实原因；普通 Web 用户的 `/subagent`、force-once、unavailable Tool 和自助诊断只返回暂时不可用并联系管理员，真实 cause 继续保留在终端、trace 和有权限的诊断出口。当前上下文统一采用最近 3 个 Turn 加旧相关最多 3 个，并受 60 message 与 endpoint token budget 双重约束；详细设计见 `2026-07-22-endpoint-context-budget-and-hybrid-turn-selection-design.md`。自助诊断可沿父 Turn 的 root 关联读取安全 child terminal trace，旧 trace 若没有 child 终态证据则不能事后恢复具体根因。
+第十三部分并行 Subagent 编排已经实现并进入当前代码基线。当前实现口径以 `zhice-agent-part13-subagent-design.md` 为准，边界取舍记录见 `2026-07-21-subagent-runtime-boundary-design.md`，启动能力分级与诊断证据闭环见 `2026-07-21-startup-capability-and-subagent-diagnostics-design.md`。主 Agent 默认直接完成简单任务；只有并行、上下文隔离、专业能力或独立复核收益明确时，才通过批量 `delegate_tasks` 在同一 Turn 内并行运行 child，再 fan-in 返回稳定、有界且允许 partial 的结果供父 Agent 归纳。`/subagent` 的 `auto/off/once` 使用 Session sidecar 真值和原子 one-shot 消费；child 使用独立 AgentLoop、内部 Session、RuntimeEvent scope 和取消 token，以新鲜 child Session 开始任务，但继承父 Turn 的 failover-safe ContextBudget。Tool/Skill/MCP 能力经过父可见集合、Profile allow/deny 与内核 deny 三重收窄；可写任务进入独立 worktree，共享状态任务进入进程级 shared-exclusive lane。现有 RBAC、确认、Hook、workspace guard、MCP artifact 与审计链保持不变。当前上下文统一使用 Part 15 的预算内完整历史、确定性历史查询、结构化 compaction 与混合检索，不再采用“最近 3 + 旧相关最多 3”的早期基线。
 
 第十四部分外部渠道第一版已经实现并进入当前代码基线。当前方案以 `zhice-agent-part14-external-channel-design.md` 为准，初始边界取舍记录见 `2026-07-23-qq-external-channel-boundary-design.md`，跨渠道 Session、用户自助解绑和 QQ Markdown 收敛见 `2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`，群聊手动一次性码边界见 `2026-07-24-qq-group-manual-binding-design.md`，群聊回复归属见 `2026-07-24-qq-group-reply-attribution-design.md`，真实客户端的 Markdown 引用兼容修复见 `2026-07-24-qq-group-markdown-reference-compatibility-fix.md`，共享纯文本展示与 QQ 回复序号见 `2026-07-24-plain-text-presentation-and-qq-reply-sequence-design.md`，出站投递确认见 `2026-07-24-qq-outbound-delivery-confirmation-design.md`，Session 清空命令统一改名见 `2026-07-24-clear-session-command-rename-design.md`，公网部署绑定地址修复见 `2026-08-04-qq-public-binding-url-deployment-fix.md`，微信扫码凭据的容器持久化修复见 `2026-08-06-weixin-credential-volume-design.md`。第一条真实渠道选择 QQ：运行态使用官方 Python SDK 的 WebSocket 连接；渠道层已经建立中性事件、能力声明、外部身份绑定、conversation route、持久去重、per-conversation 串行、附件 guard 和 RuntimeEvent 出站渲染。Web/CLI 作为私有控制面可见本人跨渠道历史，QQ 私聊可跨端继续，QQ群聊在 Web 只读并通过派生新 Web Session 继续；外部入口不能反向管理其它渠道 Session。QQ 裸 `/bind` 直接使用账号级 `web_base_url`；本地缺省仍为 `127.0.0.1`，公网启用时每个账号必须显式配置来自私有部署配置的 HTTPS origin。QQ 群聊 Runtime 回答经共享 renderer 转为可读纯文本并使用递增 `msg_seq`，CLI 复用同一 renderer；QQ 私聊继续按内容选择 Markdown。QQ Transport 只有在平台返回有效响应时才确认发送成功，botpy 返回 `None` 时记录 `send_unconfirmed` 并将 receipt 标记为 error，且不盲目重试同一 `msg_id + msg_seq`。CLI、Web、external WebSocket 与 QQ 当前统一使用 `/clear` 清空当前 Session，旧 `/reset` 不再执行清空。
 
@@ -90,50 +90,29 @@ Part 17 运行可靠性、系统级诊断与私有镜像部署的代码、测试
 16. `zhice-agent-part14-external-channel-design.md`
 17. `zhice-agent-part15-context-engineering-design.md`
 18. `zhice-agent-part16-web-product-design.md`
-19. `2026-07-27-web-product-experience-and-vue-frontend-design.md`
-20. `2026-07-26-full-session-context-engineering-design.md`
-21. `2026-07-24-weixin-clawbot-channel-design.md`
-22. `2026-07-24-qq-group-reply-attribution-design.md`
-23. `2026-07-24-qq-group-manual-binding-design.md`
-24. `2026-07-24-qq-binding-keyboard-rendering-fix.md`
-25. `2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`
-26. `2026-07-23-qq-external-channel-boundary-design.md`
-27. `2026-07-22-endpoint-context-budget-and-hybrid-turn-selection-design.md`
-28. `2026-07-22-endpoint-budget-config-simplification-design.md`
-29. `2026-07-22-immediate-turn-reference-retention-design.md`
-30. `2026-07-22-human-command-error-presentation-design.md`
-31. `2026-07-22-built-in-capability-enable-state-design.md`
-32. `2026-07-22-optional-capability-warning-surface-design.md`
-33. `2026-07-21-startup-capability-and-subagent-diagnostics-design.md`
-34. `2026-07-21-subagent-runtime-boundary-design.md`
-35. `2026-07-21-hook-role-scope-design.md`
-36. `2026-07-21-on-demand-tool-discovery-design.md`
-37. `2026-07-20-hook-runtime-boundary-design.md`
-38. `2026-07-17-mcp-tool-runtime-boundary-design.md`
-39. `2026-07-16-memory-extraction-concurrency-design.md`
-40. `2026-07-16-prompt-language-convergence-design.md`
-41. `2026-07-16-minimal-memory-content-protocol-design.md`
-42. `2026-07-16-turn-done-output-preview-design.md`
-43. `2026-07-16-terminal-adaptive-duration-design.md`
-44. `2026-07-16-remove-unclosed-session-summary-design.md`
-45. `2026-07-16-memory-command-display-and-session-summary-design.md`
-46. `2026-07-16-memory-command-semantics-design.md`
-47. `2026-07-16-background-memory-extraction-and-trace-convergence-design.md`
-48. `2026-07-16-memory-read-runtime-id-terminal-log-convergence-design.md`
-49. `2026-07-16-conversational-memory-consent-design.md`
-50. `2026-07-15-memory-boundary-design.md`
-51. `2026-07-10-session-model-preference-scope-design.md`
-52. `2026-07-08-user-auth-permission-boundary-design.md`
-53. `2026-07-06-context-relevance-selection-design.md`
-54. `2026-07-06-next-stage-sequencing-design.md`
-55. `2026-07-04-turn-runtime-and-context-design.md`
-56. `2026-07-02-gateway-runtime-logging-design.md`
-57. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
+19. `zhice-agent-part17-reliability-diagnostics-deployment-design.md`
+20. `zhice-agent-part18-skill-runtime-and-server-ops-design.md`
+21. `2026-08-10-owner-registration-control-design.md`
+22. `2026-08-10-part18-persistent-ops-login-design.md`
+23. `2026-08-10-part18-unified-ops-dual-view-design.md`
+24. `2026-08-09-part18-multi-runtime-ops-correction-design.md`
+25. `2026-08-09-part18-skill-runtime-and-server-ops-design.md`
+26. `2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`
+27. `2026-07-27-web-product-experience-and-vue-frontend-design.md`
+28. `2026-07-26-full-session-context-engineering-design.md`
+29. `2026-07-24-weixin-clawbot-channel-design.md`
+30. `2026-07-23-qq-external-channel-boundary-design.md`
+31. `2026-07-21-subagent-runtime-boundary-design.md`
+32. `2026-07-20-hook-runtime-boundary-design.md`
+33. `2026-07-17-mcp-tool-runtime-boundary-design.md`
+34. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
 
 ## 日期设计记录清单
 
 - `2026-08-10-part18-unified-ops-dual-view-design.md`
 - `2026-08-10-part18-server-side-ops-auth-design.md`
+- `2026-08-10-part18-persistent-ops-login-design.md`
+- `2026-08-10-owner-registration-control-design.md`
 - `2026-08-09-admin-overview-drilldown-design.md`
 - `2026-08-09-ops-visual-consistency-design.md`
 - `2026-08-09-local-ops-button-feedback-design.md`

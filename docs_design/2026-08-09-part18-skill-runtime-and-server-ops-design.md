@@ -1,10 +1,10 @@
 # ZhiCe-Agent Part 18 Skill Runtime 与服务器运维控制设计
 
-> 说明：本记录中的 Part 18A/18B 与 restricted Ops 安全边界继续有效；Part 18C 的运行形态先由 `2026-08-09-part18-multi-runtime-ops-correction-design.md` 修正，公网认证又由 `2026-08-10-part18-server-side-ops-auth-design.md` 收敛为“复用既有 Tunnel + 服务器 ttyd Basic Auth”。本文 Cloudflare Access/MFA 正文保留为当时方案记录，不再代表当前部署口径。
+> 说明：本记录中的 Part 18A/18B 与 restricted Ops 安全边界继续有效；Part 18C 的运行形态由 `2026-08-09-part18-multi-runtime-ops-correction-design.md` 修正，双视图与公网认证最终由 `2026-08-10-part18-unified-ops-dual-view-design.md`、`2026-08-10-part18-persistent-ops-login-design.md` 收敛为“既有 Tunnel + 同源 Caddy 长期 Cookie + loopback ttyd Basic Auth”。本文 Cloudflare Access/MFA 正文保留为当时方案记录，不再代表当前部署口径。
 
 > 日期：2026-08-09
 >
-> 状态：方案已确认并完成代码落地与本机自动验证；真实 Linux/Cloudflare 外部验收仍按第 11 节执行
+> 状态：方案已完成代码落地、本机验证和真实 Linux/Cloudflare 部署；剩余浏览器 PTY/iframe、idle 后重连与故障救援按当前 Part 18 活文档单列交互验收
 >
 > 归属：Part 18 Skill Runtime、Skill 管理与服务器运维控制
 >

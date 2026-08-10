@@ -1,14 +1,23 @@
 import { createPinia, setActivePinia } from "pinia";
-import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useAuthStore } from "@/stores/auth";
 import { useUiStore } from "@/stores/ui";
 import AuthLayout from "./AuthLayout.vue";
 
 describe("AuthLayout", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ registration_enabled: true }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )));
+  });
+
   function mountLayout(options: { setup?: boolean; language?: "zh-CN" | "en" } = {}) {
     const pinia = createPinia();
     setActivePinia(pinia);
+    useAuthStore().registrationEnabled = true;
     useUiStore().language = options.language ?? "zh-CN";
     return mount(AuthLayout, {
       props: { setup: options.setup ?? false },
@@ -96,6 +105,7 @@ describe("AuthLayout", () => {
   it("uses the compact dedicated copy for QQ binding authentication", () => {
     const pinia = createPinia();
     setActivePinia(pinia);
+    useAuthStore().registrationEnabled = true;
     const wrapper = mount(AuthLayout, {
       props: { flow: "qq-binding" },
       global: { plugins: [pinia] },
@@ -107,5 +117,29 @@ describe("AuthLayout", () => {
     expect(wrapper.get(".auth-submit").text()).toBe("登录并继续");
     expect(wrapper.get(".mobile-mode-switch span").text()).toBe("没有账号？");
     expect(wrapper.get(".mobile-mode-switch strong").text()).toBe("立即创建");
+  });
+
+  it("fails closed and hides registration in default and QQ binding flows", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ registration_enabled: false }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )));
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const normal = mount(AuthLayout, { global: { plugins: [pinia] } });
+    await flushPromises();
+
+    expect(normal.find(".ghost-inverse").exists()).toBe(false);
+    expect(normal.find(".mobile-mode-switch").exists()).toBe(false);
+    expect(normal.text()).not.toContain("创建账号");
+
+    const binding = mount(AuthLayout, {
+      props: { flow: "qq-binding" },
+      global: { plugins: [pinia] },
+    });
+    await flushPromises();
+    expect(binding.find(".ghost-inverse").exists()).toBe(false);
+    expect(binding.find(".mobile-mode-switch").exists()).toBe(false);
+    expect(binding.text()).toContain("登录并绑定 QQ");
   });
 });

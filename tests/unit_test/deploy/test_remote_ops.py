@@ -188,7 +188,7 @@ def test_upload_release_includes_fixed_public_ops_assets(
     assert any("ops/install.sh" in command for command in commands)
 
 
-def test_ops_service_requires_server_generated_basic_auth() -> None:
+def test_ops_service_requires_persistent_cookie_and_loopback_basic_auth() -> None:
     gateway = (ROOT / "deploy/ops/systemd/zhice-ops.service").read_text(encoding="utf-8")
     terminal = (ROOT / "deploy/ops/systemd/zhice-ops-terminal.service").read_text(
         encoding="utf-8"
@@ -203,11 +203,14 @@ def test_ops_service_requires_server_generated_basic_auth() -> None:
     assert "IPAddressDeny=any" in terminal
     assert "IPAddressAllow=localhost" in terminal
     assert "/usr/bin/caddy run" in gateway
-    assert "basicauth" in caddy
-    assert "{$ZHICE_OPS_CADDY_HASH}" in caddy
+    assert "basicauth" not in caddy
+    assert "forward_auth 127.0.0.1:{$ZHICE_OPS_DASHBOARD_PORT}" in caddy
+    assert "uri /auth/check" in caddy
+    assert 'header_up Authorization "Basic {$ZHICE_OPS_BASIC_AUTH}"' in caddy
     assert "ZHICE_OPS_CREDENTIAL=$ops_credential" in installer
-    assert "ZHICE_OPS_CADDY_HASH=$caddy_hash" in installer
-    assert "printf '%s\\n' \"$credential_secret\" | caddy hash-password" in installer
+    assert "ZHICE_OPS_BASIC_AUTH=$ops_basic_auth" in installer
+    assert "printf 'owner:%s' \"$credential_secret\" | base64" in installer
+    assert "caddy hash-password" not in installer
     assert "od -An -N24 -tx1 /dev/urandom" in installer
     assert "chmod 0600" in installer
     assert "root-only Ops credential was preserved or generated" in installer

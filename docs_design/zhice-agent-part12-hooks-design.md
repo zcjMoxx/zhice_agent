@@ -10,7 +10,7 @@
 
 ZhiCe-Agent 当前 Web 主聊天通道已经使用 `WebSocket /ws`。AgentLoop 通过 `on_event` 实时发出 `text_delta` 和工具确认事件，MCP Runtime 也能通过同一回调转发 Elicitation；WebSocket 层再把内部事件映射为 `channel_text`、`tool_confirmation_required` 和 `mcp_elicitation_requested`。
 
-当前前端在用户发送问题后，主要只显示三个点的等待动画。没有文本增量时，用户看不到系统正在构建上下文、等待 LLM、执行工具还是整理最终回答。这个问题不依赖具体 Skill：即使是普通聊天，运行时也明确知道自己正在处于哪个阶段。
+Part 12 落地前，前端在用户发送问题后主要只显示三个点的等待动画；当前 RuntimeEvent 已把上下文构建、等待 LLM、执行工具和整理回答映射为真实运行状态。该事件边界不依赖具体 Skill，Part 18 的 `skill.*` 事件也通过同一传输链进入前端，但由独立 SkillExecutor 产生。
 
 Part 12 同时补齐统一的 Agent 生命周期 Event 和最小真实可运行 Hook Runtime：现有 WS、SSE、CLI 与前端消费 RuntimeEvent；配置化 `pre_tooluse` Hook 可以增加业务阻断或修改参数，`post_tooluse` Hook 可以为最终 Tool Event 增加受限展示。Hook 不替代核心安全，也不直接发送 WebSocket。Part 18 已在独立边界实现 SkillExecutor、`skill.*` 与 ProgressSink；它们不属于 Part 12 Hook 职责。
 

@@ -1,8 +1,10 @@
 # ZhiCe-Agent Part 18 统一 Ops 双视图设计
 
+> 说明：本文的三端同构双视图与服务器同源 Caddy/dashboard/ttyd 拓扑继续有效；服务器浏览器认证已由 `2026-08-10-part18-persistent-ops-login-design.md` 从 Basic Auth 临时缓存改为长期签名 Cookie，正文保留当时方案。
+
 > 日期：2026-08-10
 >
-> 状态：已确认，进入实现
+> 状态：已实现并进入本地进程、本地 Docker 与服务器生产基线
 >
 > 前置记录：`2026-08-09-part18-multi-runtime-ops-correction-design.md`、`2026-08-10-part18-server-side-ops-auth-design.md`
 

@@ -204,6 +204,7 @@ def create_app(
             "/api/auth/bootstrap",
             "/api/auth/login",
             "/api/auth/register",
+            "/api/auth/registration-policy",
             "/api/health",
         }
         if protected_api and auth_service is not None:

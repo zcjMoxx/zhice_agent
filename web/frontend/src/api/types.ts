@@ -56,6 +56,10 @@ export interface Role {
   permission_keys: string[];
 }
 
+export interface RegistrationPolicy {
+  registration_enabled: boolean;
+}
+
 export interface SkillSummary {
   qualified_name: string;
   source: string;

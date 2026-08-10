@@ -152,7 +152,11 @@ async function loadTab(next: string) {
       if (auth.can("diagnostics.system.use")) loads.push(admin.loadDiagnostics());
       await Promise.all(loads);
     }
-    if (next === "users") await admin.loadUsers();
+    if (next === "users") {
+      const loads: Promise<unknown>[] = [admin.loadUsers()];
+      if (auth.isOwner) loads.push(admin.loadRegistrationPolicy());
+      await Promise.all(loads);
+    }
     if (next === "roles") { await admin.loadRoles(); selectedRole.value ||= orderedRoles.value[0]?.id || ""; }
     if (next === "skills") await admin.loadSkillSources();
     if (next === "monitor") {
@@ -193,6 +197,14 @@ async function openMonitorSection(target: "failures" | "incidents") {
 async function createUser() {
   try { await import("@/api/client").then(({ api }) => api.createUser({ ...newUser })); Object.assign(newUser, { username: "", display_name: "", password: "", roles: ["viewer"] }); await admin.loadUsers(); }
   catch (error) { failure.value = errorMessage(error); }
+}
+async function toggleRegistrationPolicy(enabled: boolean) {
+  failure.value = "";
+  try {
+    await admin.updateRegistrationPolicy(enabled);
+    auth.registrationEnabled = enabled;
+    auth.registrationPolicyLoaded = true;
+  } catch (error) { failure.value = errorMessage(error); }
 }
 async function updateUser(id: string, payload: Record<string, unknown>) {
   try { await import("@/api/client").then(({ api }) => api.updateUser(id, payload)); await admin.loadUsers(); }
@@ -399,6 +411,10 @@ function toggleTimelineEvent(evidenceId: unknown) {
       </section>
 
       <section v-else-if="tab === 'users'" class="admin-section">
+        <div v-if="auth.isOwner && admin.registrationPolicy" class="registration-policy-card">
+          <span><strong>{{ tr('允许新用户注册', 'Allow new user registration') }}</strong><small>{{ admin.registrationPolicy.registration_enabled ? tr('公网登录页和注册接口当前已开放。', 'The public registration page and API are currently open.') : tr('注册入口和接口均已关闭；管理员仍可在下方手工创建账号。', 'The registration entry and API are closed. Administrators can still create accounts below.') }}</small></span>
+          <label class="policy-switch"><input type="checkbox" :checked="admin.registrationPolicy.registration_enabled" :disabled="admin.registrationPolicyBusy" :aria-label="tr('允许新用户注册', 'Allow new user registration')" @change="toggleRegistrationPolicy(($event.target as HTMLInputElement).checked)" /><i></i><em>{{ admin.registrationPolicy.registration_enabled ? tr('已开放', 'Open') : tr('已关闭', 'Closed') }}</em></label>
+        </div>
         <form v-if="auth.can('auth.users.manage')" class="admin-create-form" autocomplete="off" @submit.prevent="createUser"><h2>{{ tr('创建账号', 'Create account') }}</h2><input v-model="newUser.username" name="admin-new-username" autocomplete="off" required :placeholder="tr('新账号', 'New account')" /><input v-model="newUser.display_name" name="admin-new-display-name" autocomplete="off" :placeholder="tr('昵称（可选）', 'Nickname (optional)')" /><input v-model="newUser.password" name="admin-new-password" type="password" autocomplete="new-password" minlength="8" required :placeholder="tr('设置初始密码', 'Set initial password')" /><select v-model="newUser.roles[0]"><option v-for="role in ['viewer','developer','auditor','admin']" :key="role" :value="role">{{ roleName(role, ui.language) }}</option></select><button class="primary-button">{{ tr('创建', 'Create') }}</button></form>
         <div class="data-table user-table"><div class="table-head"><span>{{ tr('账号', 'Account') }}</span><span>{{ tr('角色', 'Role') }}</span><span>{{ tr('状态', 'Status') }}</span><span>{{ tr('管理', 'Actions') }}</span></div><div v-for="user in admin.users" :key="user.id" class="table-row"><span><strong>{{ user.display_name }}</strong><small>@{{ user.username }}</small></span><span><select v-if="auth.can('auth.users.manage') && !user.roles.includes('owner')" :value="user.roles[0]" @change="updateUser(user.id, { roles: [($event.target as HTMLSelectElement).value] })"><option v-for="role in ['viewer','developer','auditor','admin']" :key="role" :value="role">{{ roleName(role, ui.language) }}</option></select><template v-else>{{ user.roles.map((role) => roleName(role, ui.language)).join('、') }}</template></span><span><i :class="`status-dot ${user.status}`"></i>{{ user.status === 'active' ? tr('启用', 'Active') : tr('停用', 'Disabled') }}</span><span class="row-actions"><button v-if="auth.can('auth.users.manage') && !user.roles.includes('owner')" @click="updateUser(user.id, { status: user.status === 'active' ? 'disabled' : 'active' })">{{ user.status === 'active' ? tr('停用', 'Disable') : tr('启用', 'Enable') }}</button><button v-if="auth.can('auth.admin.manage') && user.roles.includes('admin')" @click="updateUser(user.id, { can_manage_admins: !user.can_manage_admins })">{{ user.can_manage_admins ? tr('撤销委派', 'Revoke delegation') : tr('委派管理', 'Delegate management') }}</button><button v-if="auth.user?.roles.includes('owner') && user.status === 'disabled' && !user.roles.includes('owner')" class="danger-text-button" @click="openDeleteUser(user)"><Trash2 :size="14" />{{ tr('永久删除', 'Delete permanently') }}</button><span v-if="user.roles.includes('owner')" class="readonly-pill">{{ tr('固定只读', 'Read-only') }}</span></span></div></div>
       </section>

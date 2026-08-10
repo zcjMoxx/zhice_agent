@@ -10,7 +10,7 @@
 
 ## 1. 背景
 
-当前 ZhiCe-Agent 已经具备 CLI、Web、REST/SSE、WebSocket、用户身份、权限、Session、Turn、RuntimeEvent、确认、Memory、MCP、Hook 和 Subagent，但还没有真实 IM / 协作平台适配器。
+Part 14 启动时，ZhiCe-Agent 已具备 CLI、Web、REST/SSE、WebSocket、用户身份、权限、Session、Turn、RuntimeEvent、确认、Memory、MCP、Hook 和 Subagent，但尚无真实 IM / 协作平台适配器。当前 QQ 官方 Python SDK Adapter 与微信 ClawBot Node sidecar 均已进入代码基线。
 
 Part 14 选择 QQ 机器人作为第一条真实外部渠道，原因是：
 

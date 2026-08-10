@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码已具备 Part 18 正式 Skill Runtime、Skill source 管理与多运行形态 restricted Ops：本地终端自动 supervisor、本地 Docker sidecar、服务器 systemd Ops 分别监控实际启动目标，并统一提供“监控面板 / 运维终端”双视图；本地进程、Docker sidecar 与服务器 HTTP/认证链已完成真实 smoke，浏览器 ttyd WebSocket/iframe 等外部行为继续按环境边界单列。主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码已具备 Part 18 正式 Skill Runtime、Skill source 管理与多运行形态 restricted Ops：本地终端自动 supervisor、本地 Docker sidecar、服务器 systemd Ops 分别监控实际启动目标，并统一提供“监控面板 / 运维终端”双视图；本地进程、Docker sidecar、Linux systemd、Cloudflare Tunnel、服务器长期认证和宿主机权威配置链已完成真实部署或 smoke，浏览器 ttyd WebSocket/iframe、idle 后重连与故障救援继续按环境交互边界单列。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -16,7 +16,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码已具备 Par
 - CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道，以及支持安全 Markdown、KaTeX 公式和明暗曜石主题的 Vue Web UI
 - `turn_id` / `turn_index` 持久化、WebSocket turn 对齐、预算内完整 Session 历史、确定性历史查询、结构化 compaction、SQLite FTS/embedding 混合检索和 endpoint token 预算
 - Gateway / Agent 分层运行日志、Web/QQ/微信渠道启动结果、终端时间戳格式和 workspace `logs/log-YYYY-MM-DD.jsonl`
-- SQLite 本地用户、角色、特权权限、可撤销登录态、唯一永久 Owner、Owner 管理权委派、普通用户自助注册和个人设置
+- SQLite 本地用户、角色、特权权限、可撤销登录态、唯一永久 Owner、Owner 管理权委派、默认关闭且由 Owner 独占控制的普通用户自助注册，以及个人设置
 - 用户上下文目录、session owner/index、session 级模型偏好和 call-scoped provider
 - 登录用户基础能力、跨用户/管理/审计特权、高风险 `exec` 明确确认、独立 Runtime Activity/Security Audit 和当前 Session 自助诊断
 - CLI/Owner 共用 workspace Memory、普通用户私有 Memory、明确 list/search 的 `memory_read` 与对话授权 `memory_write`
@@ -26,7 +26,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码已具备 Par
 - `/subagent` 的 `auto/off/once` Session 语义、Web child task 状态和可选能力结构化启动告警
 - 中性 Channel 协议、外部身份绑定、持久 conversation route/event receipt，以及 QQ 私聊/群聊 `@` WebSocket adapter
 - 微信 `channel_accounts` 所有权、本人扫码 API/UI、stdio NDJSON Node sidecar、基于腾讯 `2.4.6` 审计来源的 direct-text Transport 和多用户隔离
-- Owner-only Skills/Ops 管理入口、运行态 Ops endpoint、新窗口与 iframe 回退，共享监控/终端双视图、本地 loopback supervisor、固定 Docker sidecar，以及宿主机 Caddy/dashboard/ttyd、restricted `zhice-ops-shell`、复用既有 Cloudflare Tunnel 的服务器双层 Basic Auth 和跨 Digest 持久配置链
+- Owner-only Skills/Ops 管理入口、运行态 Ops endpoint、新窗口与 iframe 回退，共享监控/终端双视图、本地 loopback supervisor、固定 Docker sidecar，以及宿主机 Caddy/dashboard/ttyd、restricted `zhice-ops-shell`、复用既有 Cloudflare Tunnel 的服务器长期签名 Cookie 登录、loopback ttyd Basic Auth 和跨 Digest 持久配置链
 
 当前仍保持轻量边界：已有本地多用户、QQ/微信渠道、私有镜像部署和受限单机 Ops，但不等于生产级托管平台；项目没有面向公网的 OAuth/SSO、组织/租户、多 workspace 隔离、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge、Skill 市场、多服务器管理、多 profile 初始化、keyring/Secret Manager、CLI Session 管理或宿主机通用 Shell。Part 12 的 turn/context/LLM/tool RuntimeEvent 与 Hook 安全边界继续有效；Part 18 在独立 SkillExecutor 中增加 `skill.*` 和 ProgressSink，不从 `exec.command` 猜 Skill。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口；主 Web 只投影独立 Ops URL，不代理 PTY/WebSocket、Docker、日志或重启。
 
@@ -48,7 +48,7 @@ Tool capability selection 已从原可靠性路线提前进入当前基线。每
 - 第十四部分实现二微信 ClawBot 已落地，当前口径见 `docs_design/zhice-agent-part14-external-channel-design.md`，完整取舍和真实 POC 证据见 `docs_design/2026-07-24-weixin-clawbot-channel-design.md`。一个 Web 用户独立拥有一个微信 AI 账号，共享 Node Transport sidecar 接入现有 Channel Runtime，不引入第二套 AgentLoop。2026-07-24 已用真实微信验证 AI 标识、扫码、direct text 收发、context token、游标恢复和 notifyStop；双真实账号并发仍需第二名用户验收。
 - Part 15 完整 Session 上下文工程已进入当前代码基线，设计入口是 `docs_design/zhice-agent-part15-context-engineering-design.md`。本地第一实现不要求独立向量数据库服务：用户隔离 SQLite 保存 FTS5 文档、metadata 和 float32 embedding BLOB，Session 内用精确 cosine 与 RRF 混合排序；embedding 未配置时 health 诚实标记 degraded，但完整历史、历史查询、compaction 和 FTS 继续工作。
 - Part 16 Web 产品体验与 Vue 前端工程已实现并进入当前基线，当前活文档是 `docs_design/zhice-agent-part16-web-product-design.md`，完整方案记录见 `docs_design/2026-07-27-web-product-experience-and-vue-frontend-design.md`。Vue 3/Vite/TypeScript 源码位于 `web/frontend`，构建产物位于 `agent/web/static` 并随 Python wheel 发布；登录、聊天、Session、五栏设置、渠道连接和中文管理后台共用明暗曜石主题，同时保持现有 API、WebSocket、Session 与 RBAC 兼容。
-- Part 17 代码与测试已进入当前基线：Provider 错误分类/有限重试/deadline/cooldown/failover 证据、系统级诊断、MCP 动态可靠性、重启恢复和 `deploy/` 私有镜像部署链均已落地。当前活文档是 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案记录见 `docs_design/2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`；本地构建、隔离 smoke、阿里云 ACR 推送、腾讯云按 Digest 运行、Caddy HTTPS、公网健康、认证初始化和容器重启持久化均已真实验收。2026-08-04 又按 `docs_design/2026-08-04-private-registry-cloud-release-pipeline-design.md` 收敛为本地、已有镜像上云和源码完整上云三个入口；新增自动化入口已通过静态与脚本兼容性验证，首次真实执行仍由操作者使用本机私有配置触发。
+- Part 17 代码与测试已进入当前基线：Provider 错误分类/有限重试/deadline/cooldown/failover 证据、系统级诊断、MCP 动态可靠性、重启恢复和 `deploy/` 私有镜像部署链均已落地。当前活文档是 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案记录见 `docs_design/2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`；本地构建、隔离 smoke、阿里云 ACR 推送、腾讯云按 Digest 运行、Caddy HTTPS、公网健康、认证初始化和容器重启持久化均已真实验收。2026-08-04 又按 `docs_design/2026-08-04-private-registry-cloud-release-pipeline-design.md` 收敛为本地、已有镜像上云和源码完整上云三个入口；三条自动化入口均已使用本机 Git 忽略的私有配置完成真实端到端验收。
 - 按需 Tool 发现与动态 Capability Selection 已提前落地，设计记录见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md`；它是通用运行时能力，不归入 Part 13 的业务委派判断。
 
 Subagent运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`subagents`分区，仓库模板为`config/config.example.yml`。缺少分区时功能默认关闭；启用后可用裸`/subagent`查看当前模式和Profile。能力不可用时，CLI、本地操作者和Owner会看到真实原因与修复建议；普通Web用户只会看到能力暂时不可用并联系管理员，不暴露内部配置。
@@ -364,7 +364,7 @@ docker compose -f deploy/docker-compose.yml up --build
 
 Compose 固定启动 `zhice-agent` 与 `zhice-agent-ops`，默认入口分别为 `http://127.0.0.1:10086` 和 `http://127.0.0.1:17681`；可通过本地环境的 `ZHICE_PORT`、`ZHICE_OPS_PORT` 覆盖端口。sidecar 复用相同双视图页面和通用 restricted 命令，只监控固定 Agent 容器。
 
-普通用户可以在 Owner 初始化前后通过 “Create account” 注册，新账号固定获得 `viewer`，不能通过请求字段自选权限。唯一 Owner 可在服务器运行 `zcagent auth init-owner` 创建；云端如需 Web 初始化，应注入随机 `ZHICE_AGENT_SETUP_TOKEN`，再访问隐藏入口 `http://127.0.0.1:10086/_setup`。Web 用户名固定为 `owner`，页面只填写一次 Owner 密码和一次 setup credential。普通登录页和账号菜单不展示该入口。
+普通用户自助注册默认关闭；Owner 可在管理后台“账号管理”中开启“允许新用户注册”。关闭时前端隐藏注册入口，后端 `POST /api/auth/register` 同时返回 `403 AUTH_REGISTRATION_DISABLED`，管理员手工创建账号不受影响。开放后新账号仍固定获得 `viewer`，不能通过请求字段自选权限。唯一 Owner 可在服务器运行 `zcagent auth init-owner` 创建；云端如需 Web 初始化，应注入随机 `ZHICE_AGENT_SETUP_TOKEN`，再访问隐藏入口 `http://127.0.0.1:10086/_setup`。Web 用户名固定为 `owner`，页面只填写一次 Owner 密码和一次 setup credential。普通登录页和账号菜单不展示该入口。
 
 用户在 Account settings 修改密码成功后，当前及其它登录态会全部撤销，浏览器立即返回登录页，必须使用新密码重新登录。
 

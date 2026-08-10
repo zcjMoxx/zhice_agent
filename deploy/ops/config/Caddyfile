@@ -6,10 +6,6 @@
 http://:{$ZHICE_OPS_PORT} {
 	bind 127.0.0.1
 
-	basicauth {
-		owner {$ZHICE_OPS_CADDY_HASH}
-	}
-
 	header {
 		Cache-Control "no-store"
 		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-src 'self'; frame-ancestors 'self' {$ZHICE_PUBLIC_URL}"
@@ -18,17 +14,29 @@ http://:{$ZHICE_OPS_PORT} {
 		-Server
 	}
 
-	handle /api/* {
+	handle /auth/* {
 		reverse_proxy 127.0.0.1:{$ZHICE_OPS_DASHBOARD_PORT}
 	}
 
-	handle /terminal/* {
-		reverse_proxy 127.0.0.1:{$ZHICE_OPS_TERMINAL_PORT}
-	}
-
 	handle {
-		root * /usr/local/share/zhice-ops
-		try_files {path} /index.html
-		file_server
+		forward_auth 127.0.0.1:{$ZHICE_OPS_DASHBOARD_PORT} {
+			uri /auth/check
+		}
+
+		route /api/* {
+			reverse_proxy 127.0.0.1:{$ZHICE_OPS_DASHBOARD_PORT}
+		}
+
+		route /terminal/* {
+			reverse_proxy 127.0.0.1:{$ZHICE_OPS_TERMINAL_PORT} {
+				header_up Authorization "Basic {$ZHICE_OPS_BASIC_AUTH}"
+			}
+		}
+
+		route {
+			root * /usr/local/share/zhice-ops
+			try_files {path} /index.html
+			file_server
+		}
 	}
 }

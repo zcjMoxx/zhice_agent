@@ -396,17 +396,17 @@ web/
 
 静态 HTML/CSS/JS 不是长期限定，而是第六部分的最小可用入口。它的作用是先验证 Web API、会话读取、聊天提交和 gateway 服务边界，避免在 API 还没稳定前同时引入前端工程化、构建产物、Node 依赖和开发代理。
 
-为了以后好升级，第一版静态前端要遵守这些约束：
+第一版静态前端遵守了以下迁移约束：
 
 - API 路径固定在 `/api/*`，前端页面路径固定由 gateway 服务，避免后续 Vue/Vite 改造时改 API。
 - `app.js` 内部把 API 调用集中成小函数，例如 `fetchSessions()`、`fetchSession(sessionId)`、`sendMessage(payload)`。
 - 不把大量业务状态写进 HTML inline script，避免以后迁移组件时难拆。
 - CSS 使用少量语义类名和基础变量，避免写成不可维护的临时样式堆。
-- gateway 的静态资源服务逻辑保留 `static_dir` 概念，第一版服务 `web/static`，后续可以服务前端构建后的 `web/dist`。
+- gateway 的静态资源服务逻辑保留 `static_dir` 概念；当前默认服务随 Python wheel 发布的 `agent/web/static` Vue build。
 
-### 6.2 什么时候升级到 Vue/Vite
+### 6.2 当前 Vue/Vite 工程
 
-出现以下情况时，再单独设计并引入工程化前端：
+Part 16 已在以下条件出现后完成工程化升级：
 
 - 页面超过聊天主界面，开始包含 `/model` 控制面、Skill source 状态页、工具调用日志、设置页等多个视图。
 - 前端状态明显复杂，需要组件化、路由、状态管理或系统化表单。
@@ -414,27 +414,23 @@ web/
 - 需要前端单元测试、类型检查、热更新和独立设计系统。
 - 静态 `app.js` 已经变得难以阅读，继续维护成本高于引入构建链。
 
-如果升级，建议使用根目录独立前端工程：
+当前目录为：
 
 ```text
-web/
+web/frontend/
   package.json
   vite.config.ts
   src/
-    main.ts
-    api/
-    components/
-    views/
-  dist/
+agent/web/static/       # 提交并随 wheel 发布的 production build
 ```
 
 运行方式：
 
-- 开发态：`web` 使用 Vite dev server，代理 `/api` 到 `zcagent gateway`。
-- 生产态或本地单命令态：`npm run build` 生成 `web/dist`，gateway 服务 `web/dist`。
+- 开发态：`web/frontend` 使用 Vite dev server，代理 `/api` 与 `/ws` 到 `zcagent gateway`。
+- 生产态或本地单命令态：前端 build 刷新 `agent/web/static`，gateway 同源服务该包内资源。
 - API 合约仍由 `agent/app/api/schemas.py` 和 `/api/*` 路由定义，前端工程不能反向影响 Agent core。
 
-这意味着第六部分静态版不是死路，而是可替换的第一层 UI 壳。真正需要 Vue/Vite 时，迁移重点是替换页面资源，不是重写 AgentLoop 或 API。
+第六部分静态版已经完成其 API/WS 壳验证职责；Vue 替换页面资源时没有重写 AgentLoop 或核心协议。
 
 ---
 
@@ -646,16 +642,12 @@ http://127.0.0.1:10086/api/sessions
 
 ---
 
-## 13. 后续演进
+## 13. 后续 Part 已完成的演进
 
-第六部分完成后已由第七部分补齐 turn 运行单元，由第八部分补齐 Gateway / Agent 运行日志，并由第九部分落地用户、登录与权限执行边界第一版；后续再考虑：
+第六部分完成后，第七部分补齐 Turn 运行单元，第八部分补齐 Gateway / Agent 运行日志，第九部分落地用户、登录与权限执行边界，Part 16 完成 Vue 产品前端，Part 17～18 完成诊断、部署、Skill 管理和 Ops。原计划中的以下能力已经落地：
 
-- CLI `/stop`，等待 active turn registry 和并发输入通道稳定后再做。
-- 会话自动标题、归档和全文搜索。
-- 工具调用日志面板。
-- `/model` Web 控制面。
-- Skill source 状态页。
-- 更完整的账号设置、审计分页、权限模板和工具调用日志视图。
-- Dockerfile 和本地容器运行方式。
+- Session 自动标题和管理、运行 Activity/系统诊断页面、`/model` Web 控制面、Skill source 状态页、账号设置、审计筛选/分页、Dockerfile 与本地/云端容器运行方式。
+- CLI 继续不提供运行中 `/stop`；聊天取消由声明支持该能力的 Web/WS 等交互入口处理。
+- Session 归档和通用全文搜索、知识库、市场与定时任务仍不属于 Web 最小版或当前轻量边界。
 
-Memory、MCP、Hooks 和 Subagent 继续按后续里程碑单独设计，不并入 Web 最小版。
+Memory、MCP、Hooks 和 Subagent 已分别由 Part 10～13 落地，仍保持独立 Runtime 边界，不并入 Web 最小版职责。
