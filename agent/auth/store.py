@@ -1648,9 +1648,13 @@ class SQLiteAuthStore:
             )
 
     def session_index_delete(self, session_id: str) -> None:
-        """Delete one index row after its files were removed."""
+        """Delete routes targeting one Session, then delete its index row."""
 
         with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM channel_conversations WHERE current_session_id=?",
+                (session_id,),
+            )
             connection.execute("DELETE FROM session_index WHERE session_id=?", (session_id,))
 
     def record_audit(self, event: AuditEvent) -> str:

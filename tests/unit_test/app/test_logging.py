@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -17,6 +17,7 @@ from agent.app.logging import (
     reset_gateway_logging,
     terminal_color_override,
 )
+from agent.log_paths import BEIJING_TIMEZONE
 from agent.logging_utils import (
     DeferredConsoleHandler,
     begin_console_log_deferral,
@@ -64,7 +65,7 @@ def test_terminal_formatter_uses_bracketed_seconds_and_pipe_separator():
         (),
         None,
     )
-    record.created = datetime(2026, 7, 7, 21, 34, 12).timestamp()
+    record.created = datetime(2026, 7, 7, 13, 34, 12, tzinfo=UTC).timestamp()
     record.event = "turn.start"  # type: ignore[attr-defined]
     record.fields = {"session": "chat-20260707", "turn": "turn-abc"}  # type: ignore[attr-defined]
 
@@ -244,7 +245,7 @@ def test_configure_gateway_logging_writes_flat_daily_trace_jsonl(tmp_path):
 
     assert result.trace_path is not None
     assert result.trace_path.name == (
-        f"log-{datetime.now().astimezone().date().isoformat()}.jsonl"
+        f"log-{datetime.now(BEIJING_TIMEZONE).date().isoformat()}.jsonl"
     )
     assert result.trace_path.parent == (tmp_path / "logs").resolve()
     payload = json.loads(result.trace_path.read_text(encoding="utf-8").splitlines()[-1])
@@ -255,6 +256,7 @@ def test_configure_gateway_logging_writes_flat_daily_trace_jsonl(tmp_path):
     assert payload["session_id"] == "chat-20260707"
     assert payload["turn_id"] == "turn-abc"
     assert payload["api_key"] == "***"
+    assert payload["ts"].endswith("+08:00")
     assert "secret" not in result.trace_path.read_text(encoding="utf-8")
     assert "[20" in stream.getvalue()
 
@@ -456,7 +458,7 @@ def _format_record(
     level: int = logging.INFO,
 ) -> str:
     record = logging.LogRecord(logger_name, level, __file__, 1, event, (), None)
-    record.created = datetime(2026, 7, 7, 21, 34, 12).timestamp()
+    record.created = datetime(2026, 7, 7, 13, 34, 12, tzinfo=UTC).timestamp()
     record.event = event  # type: ignore[attr-defined]
     if fields is not None:
         record.fields = fields  # type: ignore[attr-defined]

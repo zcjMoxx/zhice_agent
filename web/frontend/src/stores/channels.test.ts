@@ -14,6 +14,10 @@ vi.mock("@/api/client", async (importOriginal) => {
       startWeixin: vi.fn(),
       pollWeixin: vi.fn(),
       cancelWeixin: vi.fn(),
+      qqCode: vi.fn(),
+      unlinkBinding: vi.fn(),
+      unlinkWeixin: vi.fn(),
+      reconnectWeixin: vi.fn(),
     },
   };
 });
@@ -90,5 +94,19 @@ describe("channel store", () => {
     store.weixinAttempt = waitingAttempt;
     await store.cancelWeixin();
     expect(store.weixinAttempt?.status).toBe("cancelled");
+  });
+
+  it("surfaces QQ and Weixin mutation failures instead of rejecting silently", async () => {
+    vi.mocked(api.qqCode).mockRejectedValue(new ApiError(503, "QQ_CODE_FAILED", "绑定码服务不可用"));
+    vi.mocked(api.unlinkWeixin).mockRejectedValue(new ApiError(503, "WEIXIN_UNLINK_FAILED", "微信解绑失败"));
+    const store = useChannelStore();
+
+    await store.generateQqCode();
+    expect(store.error).toBe("绑定码服务不可用");
+    expect(store.busy).toBe(false);
+
+    await store.unlinkWeixin();
+    expect(store.weixinError).toEqual({ code: "WEIXIN_UNLINK_FAILED", message: "微信解绑失败" });
+    expect(store.weixinBusy).toBe(false);
   });
 });

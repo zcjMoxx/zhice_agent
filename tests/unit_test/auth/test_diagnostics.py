@@ -10,6 +10,7 @@ from agent.auth.diagnostics import (
     _trace_paths,
 )
 from agent.auth.store import SQLiteAuthStore
+from agent.log_paths import BEIJING_TIMEZONE
 from agent.protocols.activity import RuntimeActivityEvent
 from agent.protocols.auth import ActorContext
 from agent.protocols.diagnostics import DiagnosticContext
@@ -363,7 +364,7 @@ def test_generic_subagent_failure_without_child_terminal_is_not_high_confidence(
 
 
 def test_trace_paths_read_only_daily_jsonl_files(tmp_path):
-    today = datetime.now().astimezone()
+    today = datetime.now(BEIJING_TIMEZONE)
     logs_dir = tmp_path / "logs"
     legacy = logs_dir / today.date().isoformat() / "trace.log"
     current = logs_dir / f"log-{today.date().isoformat()}.jsonl"
@@ -493,13 +494,13 @@ def _record_delegate_failure(activity, actor, turn_id):
         )
     )
 def _write_trace(tmp_path, events):
-    path = tmp_path / "logs" / f"log-{datetime.now().astimezone().date().isoformat()}.jsonl"
+    path = tmp_path / "logs" / f"log-{datetime.now(BEIJING_TIMEZONE).date().isoformat()}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     normalized = []
     for event in events:
         normalized.append(
             {
-                "ts": datetime.now().astimezone().isoformat(),
+                "ts": datetime.now(BEIJING_TIMEZONE).isoformat(),
                 "level": "INFO",
                 "component": "agent",
                 **event,

@@ -18,6 +18,7 @@ const newPassword = ref("");
 const confirmPassword = ref("");
 const status = ref("");
 const failure = ref("");
+const settingsAction = ref<"" | "profile" | "password">("");
 const qqToken = computed({
   get: () => channels.pendingQqToken,
   set: (value: string) => { channels.pendingQqToken = value; },
@@ -76,13 +77,21 @@ const weixinAttemptLabel = computed(() => {
 onMounted(() => { if (ui.settingsSection === "channels") void channels.refresh(); });
 
 async function saveProfile() {
+  if (settingsAction.value) return;
+  settingsAction.value = "profile";
+  failure.value = ""; status.value = "";
   try { await auth.updateProfile(displayName.value); status.value = tr("个人资料已保存", "Profile saved"); }
   catch (error) { failure.value = errorMessage(error); }
+  finally { settingsAction.value = ""; }
 }
 async function changePassword() {
   if (newPassword.value !== confirmPassword.value) { failure.value = tr("两次输入的新密码不一致", "The new passwords do not match"); return; }
+  if (settingsAction.value) return;
+  settingsAction.value = "password";
+  failure.value = ""; status.value = "";
   try { await auth.changePassword(currentPassword.value, newPassword.value); ui.settingsOpen = false; }
   catch (error) { failure.value = errorMessage(error); }
+  finally { settingsAction.value = ""; }
 }
 async function authorizeQq() {
   try {
@@ -110,7 +119,7 @@ function chooseLanguage(language: UiLanguage) { ui.setLanguage(language, userId(
       </aside>
       <main class="settings-detail">
         <header><div><span class="eyebrow">ZhiCe-Agent</span><h2>{{ title }}</h2></div><button class="icon-button" :aria-label="tr('关闭设置', 'Close settings')" @click="ui.settingsOpen = false"><X :size="20" /></button></header>
-        <p v-if="failure" class="form-error">{{ failure }}</p><p v-if="status" class="form-success">{{ status }}</p>
+        <p v-if="failure" class="form-error" role="alert" aria-live="assertive">{{ failure }}</p><p v-if="status" class="form-success" role="status" aria-live="polite">{{ status }}</p>
         <section v-if="ui.settingsSection === 'general'" class="setting-section">
           <div class="setting-row"><span><strong>{{ tr('语言', 'Language') }}</strong><small>{{ tr('当前产品界面语言', 'Interface language') }}</small></span><select :value="ui.language" @change="chooseLanguage(($event.target as HTMLSelectElement).value as UiLanguage)"><option value="zh-CN">简体中文</option><option value="en">English</option></select></div>
           <div class="setting-row"><span><strong>{{ tr('界面密度', 'Interface density') }}</strong><small>{{ tr('调整列表和表单的间距', 'Adjust spacing in lists and forms') }}</small></span><select v-model="ui.density" @change="ui.persist(userId())"><option value="comfortable">{{ tr('舒适', 'Comfortable') }}</option><option value="compact">{{ tr('紧凑', 'Compact') }}</option></select></div>
@@ -140,11 +149,11 @@ function chooseLanguage(language: UiLanguage) { ui.setLanguage(language, userId(
         </section>
         <form v-else-if="ui.settingsSection === 'profile'" class="setting-section" @submit.prevent="saveProfile">
           <div class="profile-preview"><UserAvatar :name="displayName || auth.user?.username || ''" /><div><strong>{{ displayName || auth.user?.username }}</strong><small>@{{ auth.user?.username }}</small></div></div>
-          <label><span>{{ tr('账号', 'Account') }}</span><input :value="auth.user?.username" disabled /></label><label><span>{{ tr('昵称', 'Nickname') }}</span><input v-model="displayName" maxlength="120" required /></label><button class="primary-button">{{ tr('保存资料', 'Save profile') }}</button>
+          <label><span>{{ tr('账号', 'Account') }}</span><input :value="auth.user?.username" disabled /></label><label><span>{{ tr('昵称', 'Nickname') }}</span><input v-model="displayName" maxlength="120" required /></label><button class="primary-button" :disabled="Boolean(settingsAction)">{{ settingsAction === 'profile' ? tr('保存中…', 'Saving…') : tr('保存资料', 'Save profile') }}</button>
         </form>
         <form v-else-if="ui.settingsSection === 'security'" class="setting-section" @submit.prevent="changePassword">
           <div class="security-note"><KeyRound :size="21" /><span><strong>{{ tr('修改密码后将退出当前账号', 'Changing your password signs you out') }}</strong><small>{{ tr('所有现有登录 Session 会被撤销，需要重新登录。', 'All active login sessions will be revoked.') }}</small></span></div>
-          <label><span>{{ tr('当前密码', 'Current password') }}</span><input v-model="currentPassword" type="password" autocomplete="current-password" required /></label><label><span>{{ tr('新密码', 'New password') }}</span><input v-model="newPassword" type="password" autocomplete="new-password" minlength="8" required /></label><label><span>{{ tr('确认新密码', 'Confirm new password') }}</span><input v-model="confirmPassword" type="password" autocomplete="new-password" minlength="8" required /></label><button class="primary-button">{{ tr('修改密码', 'Change password') }}</button>
+          <label><span>{{ tr('当前密码', 'Current password') }}</span><input v-model="currentPassword" type="password" autocomplete="current-password" required /></label><label><span>{{ tr('新密码', 'New password') }}</span><input v-model="newPassword" type="password" autocomplete="new-password" minlength="8" required /></label><label><span>{{ tr('确认新密码', 'Confirm new password') }}</span><input v-model="confirmPassword" type="password" autocomplete="new-password" minlength="8" required /></label><button class="primary-button" :disabled="Boolean(settingsAction)">{{ settingsAction === 'password' ? tr('修改中…', 'Changing…') : tr('修改密码', 'Change password') }}</button>
         </form>
         <section v-else class="setting-section channel-settings">
           <p v-if="channels.error" class="form-error">{{ channels.error }}</p>
@@ -152,13 +161,13 @@ function chooseLanguage(language: UiLanguage) { ui.setLanguage(language, userId(
           <div class="channel-card">
             <div><span class="channel-icon qq">QQ</span><span><strong>{{ tr('QQ 机器人', 'QQ bot') }}</strong><small>{{ qqBindings.length ? tr('已连接', 'Connected') : tr('未连接', 'Not connected') }}</small></span></div>
             <p class="muted">{{ tr('群聊：先 @机器人，再发送生成的 /bind 命令。私聊：直接发送该命令。', 'Group chat: @mention the bot first, then send the generated /bind command. Direct chat: send the command directly.') }}</p>
-            <button @click="channels.generateQqCode">{{ tr('生成绑定码', 'Generate binding code') }}</button>
+            <button :disabled="channels.busy" @click="channels.generateQqCode">{{ channels.busy ? tr('处理中…', 'Working…') : tr('生成绑定码', 'Generate binding code') }}</button>
             <template v-if="channels.qqCommand">
               <pre>{{ channels.qqCommand }}</pre>
               <small>{{ tr('绑定码为一次性短期凭据，请勿转发给他人。', 'The binding code is a short-lived one-time credential. Do not share it.') }}</small>
             </template>
-            <div v-if="qqToken" class="inline-bind"><input v-model="qqToken" /><button class="primary-button channel-bind-action" @click="authorizeQq">{{ tr('完成绑定', 'Complete binding') }}</button></div>
-            <div v-for="binding in qqBindings" :key="binding.binding_id" class="binding-row"><span>{{ binding.display_name || tr('QQ 身份', 'QQ identity') }}</span><button class="danger-text" @click="channels.unlink(binding.binding_id)">{{ tr('解绑', 'Unlink') }}</button></div>
+            <div v-if="qqToken" class="inline-bind"><input v-model="qqToken" /><button class="primary-button channel-bind-action" :disabled="channels.busy" @click="authorizeQq">{{ channels.busy ? tr('绑定中…', 'Connecting…') : tr('完成绑定', 'Complete binding') }}</button></div>
+            <div v-for="binding in qqBindings" :key="binding.binding_id" class="binding-row"><span>{{ binding.display_name || tr('QQ 身份', 'QQ identity') }}</span><button class="danger-text" :disabled="channels.busy" @click="channels.unlink(binding.binding_id)">{{ channels.busy ? tr('处理中…', 'Working…') : tr('解绑', 'Unlink') }}</button></div>
           </div>
           <div class="channel-card">
             <div><span class="channel-icon weixin">微</span><span><strong>{{ tr('微信', 'Weixin') }}</strong><small>{{ channels.weixin.status }}</small></span></div>

@@ -55,8 +55,8 @@
 ## Part 8 Logging Coverage
 
 - Gateway logging options split Agent lifecycle log, HTTP access log, HTTP server log, and workspace trace log.
-- Terminal Agent log lines use `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` without milliseconds；TTY 下 WARNING 整行使用高亮红色，ERROR/CRITICAL 整行使用红色，普通日志继续按组件着色。
-- Workspace trace writes JSONL to `logs/log-YYYY-MM-DD.jsonl` with `component` and no full internal logger name.
+- Terminal Agent log lines use fixed Beijing time `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` without milliseconds；TTY 下 WARNING 整行使用高亮红色，ERROR/CRITICAL 整行使用红色，普通日志继续按组件着色。
+- Workspace trace writes JSONL with `+08:00` timestamps to Beijing-date `logs/log-YYYY-MM-DD.jsonl`, with `component` and no full internal logger name.
 - 本地 Ops supervisor 的受控 Gateway child 可在 PIPE 后恢复原终端 ANSI 配色；`NO_COLOR` 仍具有最高优先级。
 - Logging configuration is idempotent and can disable terminal Agent logs while keeping trace on.
 - Preview helpers redact sensitive fields, collapse multiline text, and truncate long values.

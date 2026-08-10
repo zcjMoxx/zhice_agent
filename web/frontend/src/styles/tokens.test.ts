@@ -33,4 +33,9 @@ describe("Theme family tokens", () => {
     expect(appCss).toContain("var(--avatar-tail)");
     expect(appCss).toContain(':root[data-theme="dark"] body { -webkit-font-smoothing: auto; }');
   });
+
+  it("gives all enabled buttons a tactile pressed state and disabled feedback", () => {
+    expect(appCss).toContain("button:not(:disabled):active");
+    expect(appCss).toContain("cursor: not-allowed");
+  });
 });

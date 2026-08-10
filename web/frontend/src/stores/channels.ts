@@ -58,12 +58,22 @@ export const useChannelStore = defineStore("channels", {
       }
     },
     async generateQqCode() {
-      const result = await api.qqCode();
-      this.qqCode = result.code;
-      this.qqCommand = result.command;
+      this.busy = true;
+      this.error = "";
+      try {
+        const result = await api.qqCode();
+        this.qqCode = result.code;
+        this.qqCommand = result.command;
+      } catch (error) {
+        this.error = requestFailure(error, "QQ 绑定码生成失败").message;
+      } finally {
+        this.busy = false;
+      }
     },
     async authorizeQq(token?: string) {
       const authorizationToken = token ?? this.pendingQqToken;
+      this.busy = true;
+      this.error = "";
       this.qqAuthorizationError = "";
       try {
         await api.qqAuthorize(authorizationToken);
@@ -72,9 +82,17 @@ export const useChannelStore = defineStore("channels", {
       } catch (error) {
         this.qqAuthorizationError = requestFailure(error, "QQ 绑定失败").message;
         throw error;
+      } finally {
+        this.busy = false;
       }
     },
-    async unlink(id: string) { await api.unlinkBinding(id); await this.refresh(); },
+    async unlink(id: string) {
+      this.busy = true;
+      this.error = "";
+      try { await api.unlinkBinding(id); await this.refresh(); }
+      catch (error) { this.error = requestFailure(error, "QQ 解绑失败").message; }
+      finally { this.busy = false; }
+    },
     async startWeixin() {
       window.clearTimeout(this.pollTimer);
       this.weixinBusy = true;
@@ -142,7 +160,19 @@ export const useChannelStore = defineStore("channels", {
         this.weixinBusy = false;
       }
     },
-    async unlinkWeixin() { await api.unlinkWeixin(); await this.refresh(); },
-    async reconnectWeixin() { await api.reconnectWeixin(); await this.refresh(); },
+    async unlinkWeixin() {
+      this.weixinBusy = true;
+      this.weixinError = null;
+      try { await api.unlinkWeixin(); await this.refresh(); }
+      catch (error) { this.weixinError = requestFailure(error, "微信解绑失败"); }
+      finally { this.weixinBusy = false; }
+    },
+    async reconnectWeixin() {
+      this.weixinBusy = true;
+      this.weixinError = null;
+      try { await api.reconnectWeixin(); await this.refresh(); }
+      catch (error) { this.weixinError = requestFailure(error, "微信重连失败"); }
+      finally { this.weixinBusy = false; }
+    },
   },
 });

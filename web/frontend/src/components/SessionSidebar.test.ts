@@ -1,14 +1,15 @@
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
-import { mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { ApiError, api } from "@/api/client";
 import { useAuthStore } from "@/stores/auth";
 import { useSessionStore } from "@/stores/sessions";
 import SessionSidebar from "./SessionSidebar.vue";
 
 describe("SessionSidebar", () => {
-  afterEach(() => { document.body.innerHTML = ""; });
+  afterEach(() => { document.body.innerHTML = ""; vi.restoreAllMocks(); });
 
   it("opens the three-dot menu and closes it with Escape", async () => {
     const pinia = createPinia();
@@ -84,6 +85,28 @@ describe("SessionSidebar", () => {
     expect(sessions.activeId).toBe("");
     expect(sessions.messages).toEqual([]);
     expect(sessions.items.map((item) => item.session_id)).toEqual(["existing"]);
+  });
+
+  it("shows a visible error and re-enables delete when deletion fails", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.user = { id: "u1", username: "owner", display_name: "系统所有者", status: "active", roles: ["owner"], can_manage_admins: true };
+    const sessions = useSessionStore();
+    sessions.items = [{ session_id: "weixin-1", title: "微信会话", preview: "", updated_at: "", message_count: 2, channel: "weixin", conversation_type: "private", continuation_mode: "writable" }];
+    vi.spyOn(api, "deleteSession").mockRejectedValue(new ApiError(503, "SESSION_DELETE_FAILED", "删除暂时失败"));
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/", component: { template: "<div />" } }] });
+    const wrapper = mount(SessionSidebar, { global: { plugins: [pinia, router] } });
+
+    await wrapper.get(".ellipsis-button").trigger("click");
+    await wrapper.get(".session-menu .danger-text").trigger("click");
+    await wrapper.get(".danger-button").trigger("click");
+    expect(wrapper.get(".danger-button").attributes("disabled")).toBeDefined();
+    await flushPromises();
+
+    expect(wrapper.get('[role="alert"]').text()).toContain("删除暂时失败");
+    expect(wrapper.get(".danger-button").attributes("disabled")).toBeUndefined();
+    expect(wrapper.text()).toContain("微信会话");
   });
 
 });

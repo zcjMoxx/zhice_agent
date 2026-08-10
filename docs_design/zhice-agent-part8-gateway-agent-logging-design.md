@@ -8,7 +8,7 @@
 >
 > 设计依据：`docs_design/2026-07-02-gateway-runtime-logging-design.md`、`docs_design/2026-07-06-next-stage-sequencing-design.md`、`docs_design/2026-07-25-channel-lifecycle-startup-logging-design.md`
 >
-> 当前状态：第八部分代码已落地。当前代码已经具备分层 gateway 日志参数、安全 preview / redaction helper、`AgentLoop` / WebRuntime / tool dispatch 运行打点、按 `channels.yml` 顺序输出的 Web/QQ/微信渠道生命周期、Agent 执行的 `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` 格式、渠道连接的 Uvicorn `LEVEL: [channel] event` 格式，以及 `${ZHICE_AGENT_WORKSPACE}/logs/log-YYYY-MM-DD.jsonl` JSONL trace。
+> 当前状态：第八部分代码已落地。当前代码已经具备分层 gateway 日志参数、安全 preview / redaction helper、`AgentLoop` / WebRuntime / tool dispatch 运行打点、按 `channels.yml` 顺序输出的 Web/QQ/微信渠道生命周期、固定北京时间（UTC+08:00）的 `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` 格式、渠道连接的 Uvicorn `LEVEL: [channel] event` 格式，以及按北京时间日期命名的 `${ZHICE_AGENT_WORKSPACE}/logs/log-YYYY-MM-DD.jsonl` JSONL trace。
 
 ---
 
@@ -49,7 +49,7 @@
 
 1. `zcagent gateway` 默认打印简短、可读、脱敏的 Agent 运行痕迹。
 2. 分离 Agent lifecycle log、HTTP access log 和 HTTP server log，避免一个 `--log-level` 同时表达多件事。
-3. 终端日志每行必须带本地日期时间、等级、`component.event` 和关键字段，避免只看到零散消息。
+3. 终端日志每行必须带北京时间、等级、`component.event` 和关键字段，避免容器 UTC 与操作者时间错位。
 4. 在 `${ZHICE_AGENT_WORKSPACE}/logs/log-YYYY-MM-DD.jsonl` 写入结构化 JSONL trace。
 5. JSONL trace 使用 `session_id` 和可用时的 `turn_id` 关联运行轨迹；人读终端日志不重复展开完整内部 ID。
 6. `AgentLoop` 打印 turn、LLM、tool decision、session save 和 stop/error 关键生命周期。
@@ -191,7 +191,7 @@ C:\Users\84953\ZhiCe_Agent_Workspace\logs\log-2026-07-07.jsonl
 
 规则：
 
-- `ts` 使用带时区的 ISO 8601，本地时区即可。
+- `ts` 使用带 `+08:00` 的 ISO 8601 北京时间；每日文件名也按同一时区跨日，不依赖宿主机或容器 timezone。
 - `component` 使用和终端一致的短模块名，不额外写完整内部 logger，避免字段重复。
 - `event` 使用稳定点号命名，例如 `turn.start`、`llm.call`、`tool.done`、`session.save_failed`。
 - `session_id`、`turn_id`、`turn_index` 能拿到就写。

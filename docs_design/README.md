@@ -109,6 +109,7 @@ Part 17 运行可靠性、系统级诊断与私有镜像部署的代码、测试
 
 ## 日期设计记录清单
 
+- `2026-08-10-beijing-log-session-deletion-action-feedback-design.md`
 - `2026-08-10-part18-unified-ops-dual-view-design.md`
 - `2026-08-10-part18-server-side-ops-auth-design.md`
 - `2026-08-10-part18-persistent-ops-login-design.md`

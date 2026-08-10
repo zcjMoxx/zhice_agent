@@ -19,6 +19,7 @@ const router = useRouter();
 const ui = useUiStore();
 const tab = ref("overview");
 const failure = ref("");
+const actionStatus = ref("");
 const recentRunStatus = ref("error");
 const timelineScope = ref<"errors" | "all">("errors");
 const openRunRecords = ref<Record<string, boolean>>({});
@@ -145,6 +146,7 @@ onBeforeUnmount(() => { if (opsFrameTimer) clearTimeout(opsFrameTimer); });
 async function loadTab(next: string) {
   tab.value = next;
   failure.value = "";
+  actionStatus.value = "";
   try {
     if (next === "overview") {
       const loads: Promise<unknown>[] = [];
@@ -195,19 +197,23 @@ async function openMonitorSection(target: "failures" | "incidents") {
   section?.scrollIntoView?.({ behavior: "smooth", block: "start" });
 }
 async function createUser() {
-  try { await import("@/api/client").then(({ api }) => api.createUser({ ...newUser })); Object.assign(newUser, { username: "", display_name: "", password: "", roles: ["viewer"] }); await admin.loadUsers(); }
+  failure.value = ""; actionStatus.value = "";
+  try { await import("@/api/client").then(({ api }) => api.createUser({ ...newUser })); Object.assign(newUser, { username: "", display_name: "", password: "", roles: ["viewer"] }); await admin.loadUsers(); actionStatus.value = tr("账号已创建", "Account created"); }
   catch (error) { failure.value = errorMessage(error); }
 }
 async function toggleRegistrationPolicy(enabled: boolean) {
   failure.value = "";
+  actionStatus.value = "";
   try {
     await admin.updateRegistrationPolicy(enabled);
     auth.registrationEnabled = enabled;
     auth.registrationPolicyLoaded = true;
+    actionStatus.value = enabled ? tr("注册已开放", "Registration opened") : tr("注册已关闭", "Registration closed");
   } catch (error) { failure.value = errorMessage(error); }
 }
 async function updateUser(id: string, payload: Record<string, unknown>) {
-  try { await import("@/api/client").then(({ api }) => api.updateUser(id, payload)); await admin.loadUsers(); }
+  failure.value = ""; actionStatus.value = "";
+  try { await import("@/api/client").then(({ api }) => api.updateUser(id, payload)); await admin.loadUsers(); actionStatus.value = tr("账号设置已更新", "Account settings updated"); }
   catch (error) { failure.value = errorMessage(error); }
 }
 async function loadRecentRuns() {
@@ -243,6 +249,7 @@ async function confirmDeleteUser() {
     deleteConfirmation.value = "";
     deleteConfirmationError.value = "";
     await admin.loadUsers();
+    actionStatus.value = tr("账号已永久删除", "Account permanently deleted");
   } catch (error) { failure.value = errorMessage(error); }
   finally { deleteBusy.value = false; }
 }
@@ -250,18 +257,21 @@ async function togglePermission(key: string, enabled: boolean) {
   const role = selectedRoleValue.value;
   if (!role || !canEditSelectedRole.value) return;
   const keys = enabled ? [...role.permission_keys, key] : role.permission_keys.filter((item) => item !== key);
-  try { await admin.updateRole(role.id, [...new Set(keys)]); }
+  failure.value = ""; actionStatus.value = "";
+  try { await admin.updateRole(role.id, [...new Set(keys)]); actionStatus.value = tr("角色权限已更新", "Role permissions updated"); }
   catch (error) { failure.value = errorMessage(error); }
 }
 function skillsForSource(source: string) {
   return (admin.skillSources?.skills || []).filter((skill) => skill.source === source);
 }
 async function syncSkillSource(source: string) {
-  try { await admin.syncSkillSource(source); }
+  failure.value = ""; actionStatus.value = "";
+  try { await admin.syncSkillSource(source); actionStatus.value = tr("Skill source 已同步", "Skill source synced"); }
   catch (error) { failure.value = errorMessage(error); }
 }
 async function refreshSkillSourceIndex(source: string) {
-  try { await admin.refreshSkillSourceIndex(source); }
+  failure.value = ""; actionStatus.value = "";
+  try { await admin.refreshSkillSourceIndex(source); actionStatus.value = tr("Skill 索引已刷新", "Skill index refreshed"); }
   catch (error) { failure.value = errorMessage(error); }
 }
 function openOpsWindow() {
@@ -397,7 +407,7 @@ function toggleTimelineEvent(evidenceId: unknown) {
     </aside>
     <main class="admin-main">
       <header class="admin-header"><div><span class="eyebrow">{{ tr('管理后台', 'Administration') }}</span><h1>{{ tabs.find((item) => item.key === tab)?.label }}</h1></div><div class="admin-header-actions"><QuickPreferences /><button v-if="tab !== 'overview'" class="icon-button" :title="tr('刷新', 'Refresh')" @click="loadTab(tab)"><RefreshCw :size="18" /></button></div></header>
-      <p v-if="failure" class="form-error">{{ failure }}</p>
+      <p v-if="failure" class="form-error admin-action-feedback" role="alert" aria-live="assertive">{{ failure }}</p><p v-if="actionStatus" class="form-success admin-action-feedback" role="status" aria-live="polite">{{ actionStatus }}</p>
 
       <section v-if="tab === 'overview'" class="admin-overview">
         <div class="overview-hero"><div><span class="eyebrow">{{ tr('系统运行概览', 'System overview') }}</span><h2>{{ (admin.diagnostics?.summary.incidents || admin.monitor?.activity.summary.failed) ? tr('发现需要关注的运行问题', 'Runtime issues need attention') : tr('系统运行正常', 'System is operating normally') }}</h2><p>{{ tr('先看服务、模型和近期异常；需要排查时进入运行诊断查看事故证据与跨组件时间线。', 'Review services, model, and recent failures first. Open Runtime diagnostics for incident evidence and the cross-component timeline.') }}</p></div><Activity :size="52" /></div>
@@ -431,7 +441,7 @@ function toggleTimelineEvent(evidenceId: unknown) {
             <header><div><span class="eyebrow">Skill source</span><h2>{{ source.source }}</h2></div><span class="source-health"><i :class="`status-dot ${source.health === 'healthy' ? 'available' : source.health}`"></i>{{ source.health }}</span></header>
             <dl class="skill-source-facts"><dt>{{ tr('启用', 'Enabled') }}</dt><dd>{{ source.enabled ? tr('是', 'Yes') : tr('否', 'No') }}</dd><dt>{{ tr('同步', 'Sync') }}</dt><dd>{{ source.sync_enabled ? tr('启用', 'Enabled') : tr('停用', 'Disabled') }}</dd><dt>Target</dt><dd><code>{{ source.configured_target || '—' }}</code></dd><dt>Commit</dt><dd><code>{{ source.current_commit || '—' }}</code></dd><dt>{{ tr('上次同步', 'Last sync') }}</dt><dd>{{ fmt(source.last_sync_finished_at) }}</dd><dt>{{ tr('状态', 'Status') }}</dt><dd>{{ source.last_status }}</dd><dt>Skills</dt><dd>{{ source.skill_count }}</dd><dt>{{ tr('加载错误', 'Load errors') }}</dt><dd>{{ source.load_error_count }}</dd></dl>
             <div v-if="source.last_error_code || source.last_error_message_safe" class="source-safe-error"><code>{{ source.last_error_code || 'SKILL_SOURCE_ERROR' }}</code><span>{{ source.last_error_message_safe }}</span></div>
-            <div class="row-actions skill-source-actions"><button v-if="auth.can('skill.sync')" :disabled="admin.skillActionSource === source.source || !source.sync_enabled" @click="syncSkillSource(source.source)">{{ tr('同步', 'Sync') }}</button><button :disabled="admin.skillActionSource === source.source" @click="refreshSkillSourceIndex(source.source)">{{ tr('刷新索引', 'Refresh index') }}</button><button @click="expandedSkillSources[source.source] = !expandedSkillSources[source.source]">{{ expandedSkillSources[source.source] ? tr('收起 Skills', 'Hide Skills') : tr('查看 Skills', 'View Skills') }}</button></div>
+            <div class="row-actions skill-source-actions"><button v-if="auth.can('skill.sync')" :disabled="admin.skillActionSource === source.source || !source.sync_enabled" @click="syncSkillSource(source.source)">{{ admin.skillActionSource === source.source ? tr('处理中…', 'Working…') : tr('同步', 'Sync') }}</button><button :disabled="admin.skillActionSource === source.source" @click="refreshSkillSourceIndex(source.source)">{{ admin.skillActionSource === source.source ? tr('处理中…', 'Working…') : tr('刷新索引', 'Refresh index') }}</button><button @click="expandedSkillSources[source.source] = !expandedSkillSources[source.source]">{{ expandedSkillSources[source.source] ? tr('收起 Skills', 'Hide Skills') : tr('查看 Skills', 'View Skills') }}</button></div>
             <div v-if="expandedSkillSources[source.source]" class="source-skill-list"><article v-for="skill in skillsForSource(source.source)" :key="skill.qualified_name"><span><strong>{{ skill.qualified_name }}</strong><small>{{ skill.description }}</small></span><span v-if="skill.executable" class="readonly-pill">{{ tr('可执行', 'Executable') }}</span></article><p v-if="!skillsForSource(source.source).length" class="empty-note">{{ tr('当前账号没有可见 Skill。', 'No Skills are visible to this account.') }}</p></div>
           </article>
           <p v-if="!admin.skillSources?.sources.length" class="empty-note">{{ tr('没有已配置的 Skill source。', 'No Skill sources are configured.') }}</p>

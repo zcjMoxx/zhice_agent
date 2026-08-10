@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.auth.store import SQLiteAuthStore
-from agent.log_paths import daily_trace_path
+from agent.log_paths import BEIJING_TIMEZONE, daily_trace_path
 from agent.logging_utils import redact_value
 from agent.protocols.auth import ActorContext
 from agent.protocols.diagnostics import DiagnosticContext, SystemDiagnosticQuery
@@ -684,8 +684,8 @@ def _row_in_range(row: dict[str, Any], since: datetime, key: str) -> bool:
 
 
 def _trace_paths(logs_dir: Path, since: datetime) -> list[Path]:
-    current = since.astimezone().date()
-    today = datetime.now().astimezone().date()
+    current = since.astimezone(BEIJING_TIMEZONE).date()
+    today = datetime.now(BEIJING_TIMEZONE).date()
     paths: list[Path] = []
     while current <= today:
         path = daily_trace_path(logs_dir, current)

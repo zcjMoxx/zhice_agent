@@ -2,6 +2,8 @@
 
 ## 测试目标
 
+- 验证外部渠道 Session 删除后同步释放 conversation route，下一条消息创建新的 Session，而不影响内部账号所有权。
+
 - 中性 Channel 数据结构不依赖 QQ SDK。
 - `config.yml.channels`缺失时默认禁用，环境变量引用、非法配置和Secret repr安全。
 - 一次性绑定码只保存 hash，按 channel/account 限定、过期和重放 fail closed。

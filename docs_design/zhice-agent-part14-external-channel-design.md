@@ -460,7 +460,7 @@ metadata_json = conversation capabilities 等非敏感 allowlist 信息
 
 ## 12. 会话路由与群聊边界
 
-跨渠道 Session 采用“账号统一、历史可见、会话有来源、继续受限制”：Web/CLI 作为私有控制面，可以查看当前内部用户的 Web、CLI、QQ 私聊和 QQ 群聊历史；外部渠道只使用当前 conversation route，不能反向浏览或管理其它渠道 Session。QQ 私聊 Session 可在 Web/CLI 继续；QQ 群聊 Session 在 Web 只读，只能复制历史派生新的 Web Session，防止 Web 私密上下文随后进入公开群回复。
+跨渠道 Session 采用“账号统一、历史可见、会话有来源、继续受限制”：Web/CLI 作为私有控制面，可以查看当前内部用户的 Web、CLI、QQ 私聊和 QQ 群聊历史；外部渠道只使用当前 conversation route，不能反向浏览或管理其它渠道 Session。QQ 私聊 Session 可在 Web/CLI 继续；QQ 群聊 Session 在 Web 只读，只能复制历史派生新的 Web Session，防止 Web 私密上下文随后进入公开群回复。Session 所有者仍可在 Web 删除 QQ/微信历史；删除同步移除当前 route，下一条渠道消息创建全新 Session，账号绑定、receipt、审计与平台侧消息保持不变。
 
 ### 12.1 新表 channel_conversations
 

@@ -225,6 +225,9 @@ def test_group_channel_session_is_visible_read_only_and_forkable_to_web(tmp_path
     assert service.load_session(actor, "qq-group-session").messages[0].content == (
         "public group context"
     )
-    with pytest.raises(SessionAccessError) as delete_error:
-        service.delete_session(actor, "qq-group-session")
-    assert delete_error.value.code == "SESSION_CHANNEL_READ_ONLY"
+    service.delete_session(actor, "qq-group-session")
+
+    assert store.session_index_get("qq-group-session") is None
+    assert "qq-group-session" not in {
+        item.session_id for item in service.list_sessions(actor)
+    }

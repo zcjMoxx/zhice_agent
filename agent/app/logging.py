@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
-from agent.log_paths import daily_trace_path
+from agent.log_paths import BEIJING_TIMEZONE, daily_trace_path
 from agent.logging_utils import redact_mapping
 
 _AGENT_LOGGER_NAME = "zcagent.agent"
@@ -62,7 +62,9 @@ class TerminalLogFormatter(logging.Formatter):
         self.color = color
 
     def format(self, record: logging.LogRecord) -> str:
-        timestamp = datetime.fromtimestamp(record.created).strftime("[%Y-%m-%d %H:%M:%S]")
+        timestamp = datetime.fromtimestamp(record.created, BEIJING_TIMEZONE).strftime(
+            "[%Y-%m-%d %H:%M:%S]"
+        )
         component = _component_for_logger(record.name)
         event = str(getattr(record, "event", record.getMessage()))
         server_message = _channel_server_message(
@@ -113,7 +115,9 @@ class JsonlTraceFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {
-            "ts": datetime.fromtimestamp(record.created).astimezone().isoformat(timespec="milliseconds"),
+            "ts": datetime.fromtimestamp(record.created, BEIJING_TIMEZONE).isoformat(
+                timespec="milliseconds"
+            ),
             "level": record.levelname,
             "component": _component_for_logger(record.name),
             "event": str(getattr(record, "event", record.getMessage())),
@@ -135,7 +139,7 @@ class DailyTraceFileHandler(logging.Handler):
     def current_path(self) -> Path:
         """Return today's trace log path."""
 
-        return daily_trace_path(self.logs_dir, datetime.now().astimezone().date())
+        return daily_trace_path(self.logs_dir, datetime.now(BEIJING_TIMEZONE).date())
 
     def emit(self, record: logging.LogRecord) -> None:
         """Write one formatted log record to the current daily trace file."""

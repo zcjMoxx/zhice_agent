@@ -5,7 +5,7 @@
 - 验证 `auth_settings` 在新库/旧库迁移中默认关闭注册，并在显式切换与 schema 重初始化后持久保留。
 
 - Session index 保留来源 channel、conversation type 和跨端续写模式。
-- QQ 群 Session 对 Web/CLI 只读，并可安全派生为新的 Web Session。
+- QQ 群 Session 对 Web/CLI 只读并可安全派生为新的 Web Session；其所有者仍可删除历史，删除时同步移除渠道路由，下一条渠道消息创建新 Session。
 - 当前用户只能查询和解绑自己的 external identity，解绑保留历史。
 
 - 验证 SQLite auth schema、唯一 Owner 初始化、密码校验和可撤销登录态。

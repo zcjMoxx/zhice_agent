@@ -246,21 +246,9 @@ class SessionAccessService:
         self.refresh_index(actor, session_id)
 
     def delete_session(self, actor: ActorContext, session_id: str) -> None:
-        """Delete JSONL, metadata, and the owner index row."""
+        """Delete JSONL, metadata, owner index, and retained channel routes."""
 
         resolved = self.resolve_session(actor, session_id, delete=True)
-        row = self.store.session_index_get(session_id)
-        if row is not None and str(row.get("channel") or "") not in {
-            "",
-            "web",
-            "cli",
-            "cli_legacy",
-        }:
-            raise SessionAccessError(
-                ErrorCode.SESSION_CHANNEL_READ_ONLY,
-                "External-channel session history cannot be deleted while its route is retained.",
-                status_code=409,
-            )
         resolved.store.delete(session_id)
         self.store.session_index_delete(session_id)
 

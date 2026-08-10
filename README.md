@@ -15,7 +15,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码已具备 Par
 - 指令型/可执行型 Skill 并存，显式 Python runtime、`ndjson-v1`、SkillExecutor、ProgressSink、取消/timeout/输出上限/进程树回收和 `skill.*` RuntimeEvent
 - CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道，以及支持安全 Markdown、KaTeX 公式和明暗曜石主题的 Vue Web UI
 - `turn_id` / `turn_index` 持久化、WebSocket turn 对齐、预算内完整 Session 历史、确定性历史查询、结构化 compaction、SQLite FTS/embedding 混合检索和 endpoint token 预算
-- Gateway / Agent 分层运行日志、Web/QQ/微信渠道启动结果、终端时间戳格式和 workspace `logs/log-YYYY-MM-DD.jsonl`
+- Gateway / Agent 分层运行日志、Web/QQ/微信渠道启动结果、固定北京时间（UTC+08:00）终端/JSONL 时间戳和 workspace `logs/log-YYYY-MM-DD.jsonl`
 - SQLite 本地用户、角色、特权权限、可撤销登录态、唯一永久 Owner、Owner 管理权委派、默认关闭且由 Owner 独占控制的普通用户自助注册，以及个人设置
 - 用户上下文目录、session owner/index、session 级模型偏好和 call-scoped provider
 - 登录用户基础能力、跨用户/管理/审计特权、高风险 `exec` 明确确认、独立 Runtime Activity/Security Audit 和当前 Session 自助诊断
@@ -158,7 +158,7 @@ zcagent channels status
 zcagent channels link-code qq --user alice --account main
 ```
 
-未绑定 QQ 用户会看到“绑定”按钮；裸 `/bind` 返回一次性 Web Markdown 登录链接和 URL 按钮，登录成功后自动绑定当前 Web 用户，也可以在 Web“个人设置”生成一次性绑定码后发送 `/bind <code>`。个人设置会显示当前用户自己的 QQ 绑定并允许解绑，解绑保留历史 Session。Web/CLI 可以查看本人跨渠道历史，QQ 私聊 Session 可跨端继续；QQ 群 Session 在 Web/CLI 只读，只能派生新的 Web Session。QQ 不提供跨渠道 `/sessions` 管理。QQ 私聊的普通结构化回复在安全长度内使用 Markdown；QQ 群聊和 CLI 通过共享 renderer 把 Markdown 转为可读纯文本。QQ 被动回复分块使用递增 `msg_seq`，群聊最多 5 块、单聊最多 4 块。当前 `qq-botpy 1.2.1` 未使用不稳定的原生 token stream。
+未绑定 QQ 用户会看到“绑定”按钮；裸 `/bind` 返回一次性 Web Markdown 登录链接和 URL 按钮，登录成功后自动绑定当前 Web 用户，也可以在 Web“个人设置”生成一次性绑定码后发送 `/bind <code>`。个人设置会显示当前用户自己的 QQ 绑定并允许解绑，解绑保留历史 Session。Web/CLI 可以查看本人跨渠道历史，QQ 私聊 Session 可跨端继续；QQ 群 Session 在 Web/CLI 只读，只能派生新的 Web Session。Session 所有者可以在 Web 删除 QQ/微信历史；删除会同步移除渠道路由，下一条外部消息创建新的 Session，不影响账号绑定。QQ 不提供跨渠道 `/sessions` 管理。QQ 私聊的普通结构化回复在安全长度内使用 Markdown；QQ 群聊和 CLI 通过共享 renderer 把 Markdown 转为可读纯文本。QQ 被动回复分块使用递增 `msg_seq`，群聊最多 5 块、单聊最多 4 块。当前 `qq-botpy 1.2.1` 未使用不稳定的原生 token stream。
 
 ## 微信 ClawBot 外部渠道
 

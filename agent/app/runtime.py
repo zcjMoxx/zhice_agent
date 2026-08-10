@@ -836,6 +836,8 @@ class WebRuntime:
         """Cancel then delete one Web session."""
 
         actor, session_id = _normalize_actor_session(actor, session_id)
+        if self.session_access is not None and actor.user_id is not None:
+            self.session_access.resolve_session(actor, session_id, delete=True)
         self._cancel_memory_extraction(actor, session_id)
         self.cancel_session(actor, session_id)
         self._invalidate_session_context(actor, session_id)

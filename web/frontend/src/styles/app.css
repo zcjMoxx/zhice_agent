@@ -4,7 +4,9 @@ body { overflow: hidden; color: var(--text); background: var(--bg); font-family:
 :root[data-theme="dark"] body { -webkit-font-smoothing: auto; }
 button, input, textarea, select { color: inherit; font: inherit; }
 button, select { cursor: pointer; }
-button { border: 0; }
+button { border: 0; transition: transform .08s ease, filter .12s ease, opacity .12s ease, background-color .12s ease, box-shadow .12s ease; }
+button:not(:disabled):active { transform: translateY(1px) scale(.985); filter: brightness(.94); }
+button:disabled { cursor: not-allowed; opacity: .55; }
 a { color: inherit; }
 input, textarea, select { border: 1px solid var(--line-strong); border-radius: 10px; outline: none; background: var(--surface-solid); }
 input:focus, textarea:focus, select:focus { border-color: color-mix(in srgb, var(--focus) 70%, transparent); box-shadow: 0 0 0 3px var(--focus-soft); }
@@ -400,6 +402,9 @@ small { color: var(--text-soft); }
 .operations-close-button { min-height: 34px; padding: 0 11px; color: #e5edf8; border: 1px solid #ffffff26; border-radius: 9px; background: #ffffff12; font-size: 12px; font-weight: 700; transition: background .14s ease, border-color .14s ease; }
 .operations-close-button:hover { border-color: #ffffff40; background: #ffffff20; }
 .operations-close-button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+.sidebar-action-feedback { margin: 8px 12px; }
+.admin-action-feedback { position: sticky; top: 8px; z-index: 20; box-shadow: var(--shadow-soft); }
+button:not(:disabled):active { transform: translateY(1px) scale(.985); filter: brightness(.94); box-shadow: none; }
 .operations-frame-wrap iframe { display: block; width: 100%; min-height: 680px; border: 0; background: #0b1220; color-scheme: dark; }
 
 @media (max-width: 760px) {

@@ -900,6 +900,8 @@ DELETE /api/sessions/{session_id}
   -> owner match, or require session.manage.any for cross-user access
 ```
 
+外部渠道 Session 同样允许其内部所有者删除。删除事务先移除所有 `current_session_id` 指向该 Session 的 `channel_conversations` 路由，再删除 index；下一条 QQ/微信消息通过既有 resolve 流程创建新 Session。账号绑定、receipt、审计和平台消息不随 Session 删除。
+
 删除当前 active turn 时，active turn key 必须包含 owner：
 
 ```text

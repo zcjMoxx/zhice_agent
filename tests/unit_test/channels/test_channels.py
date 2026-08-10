@@ -337,6 +337,26 @@ def test_conversation_route_reuses_and_rotates_session(tmp_path):
     assert "openid" not in rotated.session_id
 
 
+def test_deleting_external_session_drops_route_and_next_message_starts_fresh(tmp_path):
+    store, user, sessions = _services(tmp_path)
+    actor = store.actor_for_user(user.id, channel="weixin")
+    service = ChannelConversationService(store, sessions)
+    context = replace(
+        _context("c2c", "weixin-peer"),
+        channel="weixin",
+        account_key="owner",
+        capabilities=ChannelCapabilities(command_profile="weixin_c2c"),
+    )
+    first = service.resolve(actor, context)
+
+    sessions.delete_session(actor, first.session_id)
+    replacement = service.resolve(actor, context)
+
+    assert store.session_index_get(first.session_id) is None
+    assert replacement.session_id != first.session_id
+    assert replacement.session_id.startswith("weixin_")
+
+
 def test_group_routes_are_isolated_by_internal_user(tmp_path):
     store, first, sessions = _services(tmp_path)
     second = store.create_user("bob", "Bob", "bob-password")

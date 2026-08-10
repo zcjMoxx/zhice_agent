@@ -29,7 +29,7 @@ from agent.app.logging import (
 from agent.app.runtime import WebRuntime, build_web_runtime
 from agent.config import AppConfig
 from agent.console import console
-from agent.log_paths import daily_trace_path
+from agent.log_paths import BEIJING_TIMEZONE, daily_trace_path
 from agent.logging_utils import (
     begin_console_log_deferral,
     flush_deferred_console_logs,
@@ -79,7 +79,7 @@ def run_gateway(
     )
     trace_path = logging_result.trace_path or daily_trace_path(
         config.logs_dir,
-        datetime.now().astimezone().date(),
+        datetime.now(BEIJING_TIMEZONE).date(),
     )
     print(f"trace-log: {'on' if resolved_log_options.trace_log else 'off'} path={console.path(trace_path)}")
     server_config = uvicorn.Config(
