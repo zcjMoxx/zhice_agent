@@ -7,15 +7,28 @@ PUBLIC_URL="${3:?public-url is required}"
 OPS_URL="${4:?ops-url is required}"
 CONTAINER_NAME=zhice-agent
 PREVIOUS_NAME=${CONTAINER_NAME}-previous
+XHS_CONTAINER_NAME=zhice-xhs-readonly
+XHS_PREVIOUS_NAME=${XHS_CONTAINER_NAME}-previous
+TRAVEL_NETWORK=zhice-travel
+XHS_DATA_VOLUME=zhice-xhs-data
+XHS_CACHE_VOLUME=zhice-xhs-cache
+TRAVEL_DATA_VOLUME=zhice-travel-data
 RUNTIME_PARENT=/etc/zhice-agent
 RUNTIME_DIR=$RUNTIME_PARENT/runtime
+XHS_SEED_DIR=$RUNTIME_PARENT/xhs
+XHS_SEED_FILE=$XHS_SEED_DIR/cookies.json
 HAS_PREVIOUS=0
+XHS_HAS_PREVIOUS=0
 INIT_DIR=
 SEED_CONTAINER=
+XHS_SEED_CONTAINER=
 
 cleanup_seed() {
   if [ -n "$SEED_CONTAINER" ]; then
     /usr/bin/docker rm -f "$SEED_CONTAINER" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$XHS_SEED_CONTAINER" ]; then
+    /usr/bin/docker rm -f "$XHS_SEED_CONTAINER" >/dev/null 2>&1 || true
   fi
   if [ -n "$INIT_DIR" ] && [ -d "$INIT_DIR" ] && [ ! -L "$INIT_DIR" ]; then
     case "$INIT_DIR" in
@@ -31,6 +44,15 @@ rollback() {
     /usr/bin/docker rename "$PREVIOUS_NAME" "$CONTAINER_NAME"
     /usr/bin/docker start "$CONTAINER_NAME" >/dev/null
     echo "Deployment failed; restored previous container" >&2
+  fi
+}
+
+rollback_xhs() {
+  /usr/bin/docker rm -f "$XHS_CONTAINER_NAME" >/dev/null 2>&1 || true
+  if [ "$XHS_HAS_PREVIOUS" -eq 1 ] && /usr/bin/docker container inspect "$XHS_PREVIOUS_NAME" >/dev/null 2>&1; then
+    /usr/bin/docker rename "$XHS_PREVIOUS_NAME" "$XHS_CONTAINER_NAME"
+    /usr/bin/docker start "$XHS_CONTAINER_NAME" >/dev/null
+    echo "Xiaohongshu sidecar update failed; restored previous container" >&2
   fi
 }
 
@@ -149,13 +171,66 @@ initialize_runtime_config
 chown "$IMAGE_UID:$IMAGE_GID" \
   "$RUNTIME_DIR/.env" "$RUNTIME_DIR/config.yml" "$RUNTIME_DIR/models.json"
 chmod 0400 "$RUNTIME_DIR/.env" "$RUNTIME_DIR/config.yml" "$RUNTIME_DIR/models.json"
-for volume in zhice-contexts zhice-state zhice-logs zhice-extends zhice-weixin-credentials; do
+for volume in zhice-contexts zhice-state zhice-logs zhice-extends zhice-weixin-credentials "$TRAVEL_DATA_VOLUME" "$XHS_DATA_VOLUME" "$XHS_CACHE_VOLUME"; do
   /usr/bin/docker volume create "$volume" >/dev/null
 done
+/usr/bin/docker network inspect "$TRAVEL_NETWORK" >/dev/null 2>&1 || \
+  /usr/bin/docker network create "$TRAVEL_NETWORK" >/dev/null
 /usr/bin/docker run --rm --user root --entrypoint sh \
   -v zhice-weixin-credentials:/home/zhice/.zhice/config/channels/weixin/accounts \
   "$IMAGE_REF" -c \
   'chown -R zhice:zhice /home/zhice/.zhice/config/channels/weixin/accounts && chmod 700 /home/zhice/.zhice/config/channels/weixin/accounts'
+
+XHS_COOKIE_PRESENT=$(/usr/bin/docker run --rm --entrypoint sh \
+  -v "$XHS_DATA_VOLUME":/xhs-data "$IMAGE_REF" -c \
+  'if [ -s /xhs-data/cookies.json ]; then printf yes; else printf no; fi')
+if [ "$XHS_COOKIE_PRESENT" = "no" ] && [ -s "$XHS_SEED_FILE" ] && [ ! -L "$XHS_SEED_FILE" ]; then
+  XHS_SEED_CONTAINER="zhice-xhs-seed-$$"
+  /usr/bin/docker create --name "$XHS_SEED_CONTAINER" \
+    -v "$XHS_DATA_VOLUME":/home/zhice/.zhice/integrations/xhs/data "$IMAGE_REF" >/dev/null
+  /usr/bin/docker cp "$XHS_SEED_FILE" \
+    "$XHS_SEED_CONTAINER:/home/zhice/.zhice/integrations/xhs/data/cookies.json"
+  /usr/bin/docker rm "$XHS_SEED_CONTAINER" >/dev/null
+  XHS_SEED_CONTAINER=
+fi
+/usr/bin/docker run --rm --user root --entrypoint sh \
+  -v "$XHS_DATA_VOLUME":/home/zhice/.zhice/integrations/xhs/data \
+  -v "$XHS_CACHE_VOLUME":/home/zhice/.cache/xiaohongshu-mcp \
+  "$IMAGE_REF" -c \
+  'chown -R zhice:zhice /home/zhice/.zhice/integrations/xhs/data /home/zhice/.cache/xiaohongshu-mcp && chmod 700 /home/zhice/.zhice/integrations/xhs/data /home/zhice/.cache/xiaohongshu-mcp && if [ -f /home/zhice/.zhice/integrations/xhs/data/cookies.json ]; then chmod 600 /home/zhice/.zhice/integrations/xhs/data/cookies.json; fi'
+
+if /usr/bin/docker container inspect "$XHS_CONTAINER_NAME" >/dev/null 2>&1; then
+  /usr/bin/docker rm -f "$XHS_PREVIOUS_NAME" >/dev/null 2>&1 || true
+  /usr/bin/docker stop --time 30 "$XHS_CONTAINER_NAME" >/dev/null
+  if ! /usr/bin/docker rename "$XHS_CONTAINER_NAME" "$XHS_PREVIOUS_NAME"; then
+    /usr/bin/docker start "$XHS_CONTAINER_NAME" >/dev/null 2>&1 || true
+    exit 1
+  fi
+  XHS_HAS_PREVIOUS=1
+fi
+if ! /usr/bin/docker run -d --name "$XHS_CONTAINER_NAME" --init --restart unless-stopped \
+  --network "$TRAVEL_NETWORK" \
+  --security-opt no-new-privileges:true --cap-drop ALL \
+  -e COOKIES_PATH=/home/zhice/.zhice/integrations/xhs/data/cookies.json \
+  -v "$XHS_DATA_VOLUME":/home/zhice/.zhice/integrations/xhs/data \
+  -v "$XHS_CACHE_VOLUME":/home/zhice/.cache/xiaohongshu-mcp \
+  --entrypoint /opt/zhice/bin/xiaohongshu-mcp-rednote \
+  "$IMAGE_REF" -headless=true -port=:18060 >/dev/null; then
+  echo "Xiaohongshu sidecar failed to start" >&2
+  rollback_xhs
+  exit 1
+fi
+attempt=0
+until /usr/bin/docker exec "$XHS_CONTAINER_NAME" python -c \
+  "import socket; socket.create_connection(('127.0.0.1', 18060), 3).close()" >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 90 ]; then
+    echo "Xiaohongshu sidecar failed readiness verification" >&2
+    rollback_xhs
+    exit 1
+  fi
+  sleep 2
+done
 
 if /usr/bin/docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
   /usr/bin/docker rm -f "$PREVIOUS_NAME" >/dev/null 2>&1 || true
@@ -168,21 +243,29 @@ if /usr/bin/docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
 fi
 
 if ! /usr/bin/docker run -d --name "$CONTAINER_NAME" --init --restart unless-stopped \
+  --network "$TRAVEL_NETWORK" \
   -e ZHICE_OPS_MODE=server_docker \
   -e ZHICE_OPS_URL="$OPS_URL" \
   -e ZHICE_OPS_TARGET_TYPE=container \
   -e ZHICE_OPS_TARGET_NAME=zhice-agent \
+  -e XHS_READONLY_UPSTREAM_URL=http://zhice-xhs-readonly:18060/mcp \
+  -e XHS_READONLY_HTTP_HOST_ALLOWLIST=zhice-xhs-readonly \
+  -e XHS_READONLY_COOKIE_DIR=/home/zhice/.zhice/integrations/xhs/data \
+  -e XHS_READONLY_COOKIE_FILE=/home/zhice/.zhice/integrations/xhs/data/cookies.json \
   -p "127.0.0.1:${HOST_PORT}:10086" \
   -v zhice-contexts:/home/zhice/.zhice/contexts \
   -v zhice-state:/home/zhice/.zhice/state \
+  -v "$TRAVEL_DATA_VOLUME":/home/zhice/.zhice/travel \
   -v zhice-logs:/home/zhice/.zhice/logs \
   -v zhice-extends:/home/zhice/.zhice/extends \
   -v zhice-weixin-credentials:/home/zhice/.zhice/config/channels/weixin/accounts \
+  -v "$XHS_DATA_VOLUME":/home/zhice/.zhice/integrations/xhs/data:ro \
   --mount "type=bind,src=$RUNTIME_DIR/.env,dst=/home/zhice/.zhice/config/.env,readonly" \
   --mount "type=bind,src=$RUNTIME_DIR/config.yml,dst=/home/zhice/.zhice/config/config.yml,readonly" \
   --mount "type=bind,src=$RUNTIME_DIR/models.json,dst=/home/zhice/.zhice/config/models.json,readonly" \
   "$IMAGE_REF" >/dev/null; then
   rollback
+  rollback_xhs
   exit 1
 fi
 
@@ -192,12 +275,14 @@ until [ "$(/usr/bin/docker inspect --format '{{.State.Health.Status}}' "$CONTAIN
   if [ "$attempt" -ge 30 ]; then
     echo "New container failed health verification; logs remain available through restricted Ops" >&2
     rollback
+    rollback_xhs
     exit 1
   fi
   sleep 2
 done
 
 /usr/bin/docker rm "$PREVIOUS_NAME" >/dev/null 2>&1 || true
+/usr/bin/docker rm "$XHS_PREVIOUS_NAME" >/dev/null 2>&1 || true
 umask 077
 printf '%s\n%s\n%s\n%s\n' "$IMAGE_REF" "$HOST_PORT" "$PUBLIC_URL" "$OPS_URL" > "$RUNTIME_PARENT/deployment.spec.tmp"
 mv "$RUNTIME_PARENT/deployment.spec.tmp" "$RUNTIME_PARENT/deployment.spec"

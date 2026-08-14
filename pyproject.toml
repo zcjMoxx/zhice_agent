@@ -45,9 +45,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 artifacts = ["agent/web/static/**"]
+exclude = [
+    "/integrations/**/coverage/**",
+    "/integrations/**/node_modules/**",
+    "/integrations/**/test/**",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["agent"]
+packages = ["agent", "integrations"]
 
 [tool.ruff]
 line-length = 100

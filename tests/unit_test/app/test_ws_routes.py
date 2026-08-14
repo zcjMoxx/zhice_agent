@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from agent.app.gateway import create_app
 from agent.app.runtime import ChatTurnResult
+from agent.applications.travel.service import TravelApplicationError
 from agent.config import AppConfig
 
 
@@ -67,6 +68,91 @@ def test_ws_forwards_runtime_event_envelope(tmp_path):
     assert runtime_frame["data"]["skill_run_id"] == "skill-run-1"
     assert text["event"] == "channel_text"
     assert done["data"]["type"] == "done"
+
+
+def test_ws_creates_travel_application_session_with_isolated_channel(tmp_path):
+    runtime = _WsRuntime()
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "new_session", "application": "travel"})
+        created = websocket.receive_json()
+
+    assert created["event"] == "session_created"
+    assert runtime.created_sessions == [(created["data"]["session_id"], "travel")]
+
+
+def test_ws_auto_continues_a_travel_turn_until_plan_ready(tmp_path):
+    runtime = _TravelWsRuntime(outcomes=["text", "plan"])
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "message", "session_id": "travel-a", "content": "plan"})
+        frames = _receive_until_terminal(websocket)
+
+    assert frames[-1]["data"]["type"] == "done"
+    assert any(frame.get("event") == "runtime_event" and frame["data"]["type"] == "travel.plan_ready" for frame in frames)
+    assert len(runtime.chat_calls) == 2
+    assert runtime.chat_calls[1][1] == "continue travel"
+
+
+def test_ws_returns_structured_error_when_travel_continuations_are_exhausted(tmp_path):
+    runtime = _TravelWsRuntime(outcomes=["text", "text", "text"])
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "message", "session_id": "travel-a", "content": "plan"})
+        frames = _receive_until_terminal(websocket)
+
+    assert frames[-1]["data"]["type"] == "error"
+    assert frames[-1]["data"]["error"]["code"] == "TRAVEL_PLAN_NOT_FINALIZED"
+    assert len(runtime.chat_calls) == 3
+
+
+def test_ws_clarification_event_pauses_travel_without_auto_continuation(tmp_path):
+    runtime = _TravelWsRuntime(outcomes=["clarification"])
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "message", "session_id": "travel-a", "content": "plan"})
+        frames = _receive_until_terminal(websocket)
+
+    clarification = next(frame for frame in frames if frame.get("event") == "runtime_event")
+    assert clarification["data"]["type"] == "travel.clarification_required"
+    assert frames[-1]["data"]["type"] == "done"
+    assert len(runtime.chat_calls) == 1
+
+
+def test_ws_rejects_unknown_session_application_without_creating_session(tmp_path):
+    runtime = _WsRuntime()
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "new_session", "application": "unknown"})
+        error = websocket.receive_json()
+
+    assert error["event"] == "channel_status"
+    assert error["data"]["type"] == "error"
+    assert runtime.created_sessions == []
+
+
+def test_ws_new_session_without_application_preserves_external_profile(tmp_path):
+    runtime = _WsRuntime()
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "hello", "client": "external"})
+        websocket.receive_json()
+        websocket.send_json({"type": "new_session"})
+        created = websocket.receive_json()
+
+    assert runtime.created_sessions == [(created["data"]["session_id"], "external")]
 
 
 def test_ws_stop_frame_calls_runtime_cancel(tmp_path):
@@ -258,6 +344,10 @@ class _WsRuntime:
         self.request_ids: list[str] = []
         self.cancelled_sessions: list[str] = []
         self.mcp_interactions: list[tuple[str, str, dict | None]] = []
+        self.created_sessions: list[tuple[str, str]] = []
+
+    def create_session(self, session_id: str, channel: str = "web"):
+        self.created_sessions.append((session_id, channel))
 
     def run_chat_events(
         self,
@@ -289,6 +379,61 @@ class _WsRuntime:
     def submit_mcp_interaction(self, interaction_id: str, action: str, content=None):
         self.mcp_interactions.append((interaction_id, action, content))
         return True
+
+
+class _TravelWsRuntime(_WsRuntime):
+    def __init__(self, outcomes: list[str]):
+        super().__init__(chunks=[])
+        self.outcomes = outcomes
+
+    def travel_continuation_message(self, session_id: str) -> str:
+        if session_id != "travel-a":
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND", "not travel", status_code=404
+            )
+        return "continue travel"
+
+    def run_chat_events(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        turn_id: str | None = None,
+        on_event=None,
+        command_profile: str = "web",
+        request_id: str = "",
+    ):
+        self.chat_calls.append((session_id, message, command_profile, turn_id or ""))
+        self.request_ids.append(request_id)
+        outcome = self.outcomes[len(self.chat_calls) - 1]
+        if outcome == "plan" and on_event is not None:
+            on_event(_travel_runtime_event("travel.plan_ready", turn_id or "turn-ws"))
+        elif outcome == "clarification" and on_event is not None:
+            on_event(_travel_runtime_event("travel.clarification_required", turn_id or "turn-ws"))
+        return ChatTurnResult(content=outcome, turn_id=turn_id or "turn-ws")
+
+
+def _receive_until_terminal(websocket):
+    frames = []
+    while True:
+        frame = websocket.receive_json()
+        frames.append(frame)
+        if frame.get("event") == "channel_status" and frame.get("data", {}).get("type") in {
+            "done", "error", "stopped"
+        }:
+            return frames
+
+
+def _travel_runtime_event(event_type: str, turn_id: str) -> dict:
+    event = _runtime_event(event_type, 1)
+    event["session_id"] = "travel-a"
+    event["turn_id"] = turn_id
+    event["status"] = "completed" if event_type == "travel.plan_ready" else "waiting"
+    event["metadata"] = {"plan_id": "plan-a"} if event_type == "travel.plan_ready" else {"question_count": 1}
+    event["ui_metadata"] = (
+        {} if event_type == "travel.plan_ready" else {"detail_type": "summary", "detail_data": {"questions": ["预算档位？"]}}
+    )
+    return event
 
 
 def _runtime_event(event_type: str, sequence: int) -> dict:

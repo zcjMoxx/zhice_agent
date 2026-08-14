@@ -27,9 +27,9 @@ class LLMEndpoint:
     supported_models: tuple[str, ...] = ()
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
-    request_timeout_seconds: float = 60.0
+    request_timeout_seconds: float = 180.0
     max_attempts: int = 2
-    total_deadline_seconds: float = 120.0
+    total_deadline_seconds: float = 180.0
     retry_backoff_seconds: float = 0.5
     retry_backoff_max_seconds: float = 8.0
     retry_jitter_ratio: float = 0.1
@@ -63,6 +63,38 @@ class LLMResponse:
 
         if self.content is None:
             self.content = ""
+
+
+@dataclass(frozen=True)
+class LLMResponseFormat:
+    """Provider-neutral strict JSON Schema requested for one LLM call."""
+
+    name: str
+    schema: dict[str, Any]
+    strict: bool = True
+
+    def to_openai(self) -> dict[str, Any]:
+        """Return the OpenAI-compatible response_format request shape."""
+
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": self.name,
+                "strict": self.strict,
+                "schema": self.schema,
+            },
+        }
+
+
+@dataclass(frozen=True)
+class LLMGenerationOptions:
+    """Optional call-scoped generation controls independent of endpoint defaults."""
+
+    temperature: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.temperature is not None and not 0.0 <= self.temperature <= 2.0:
+            raise ValueError("temperature must be between 0 and 2")
 
 
 @dataclass
@@ -134,6 +166,8 @@ class LLMProvider(Protocol):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: LLMResponseFormat | None = None,
+        generation_options: LLMGenerationOptions | None = None,
     ) -> LLMResponse:
         """Return one assistant response for the provided messages."""
 

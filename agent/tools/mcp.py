@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agent.protocols.auth import ActorContext
 from agent.protocols.mcp import McpInteractionNotifier, McpRuntimeFacade, McpToolDescriptor
@@ -22,6 +22,7 @@ class McpToolAdapter:
         files_dir: Path,
         session_id: str = "",
         interaction_notifier: McpInteractionNotifier | None = None,
+        result_observer: Callable[[str, str, ToolResult], None] | None = None,
     ) -> None:
         self.name = descriptor.local_name
         self.description = descriptor.description
@@ -32,11 +33,12 @@ class McpToolAdapter:
         self._files_dir = files_dir
         self._session_id = session_id
         self._interaction_notifier = interaction_notifier
+        self._result_observer = result_observer
 
     def execute(self, args: dict[str, Any]) -> ToolResult:
         """Call the remote Tool through the shared runtime."""
 
-        return self._runtime.call_tool_sync(
+        result = self._runtime.call_tool_sync(
             self._descriptor,
             args,
             actor=self._actor,
@@ -44,3 +46,9 @@ class McpToolAdapter:
             session_id=self._session_id,
             interaction_notifier=self._interaction_notifier,
         )
+        if self._result_observer is not None:
+            try:
+                self._result_observer(self._session_id, self.name, result)
+            except Exception:  # noqa: BLE001 - observation must not change Tool execution.
+                pass
+        return result

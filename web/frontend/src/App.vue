@@ -4,10 +4,12 @@ import { RouterView, useRouter } from "vue-router";
 
 import { uiText } from "@/i18n";
 import { installAuthorizationRefresh, useAuthStore } from "@/stores/auth";
+import { useTravelStore } from "@/stores/travel";
 import { useUiStore } from "@/stores/ui";
 
 const auth = useAuthStore();
 const ui = useUiStore();
+const travel = useTravelStore();
 const router = useRouter();
 
 installAuthorizationRefresh();
@@ -19,7 +21,9 @@ onMounted(async () => {
 
 watch(() => auth.user?.id, (id) => {
   ui.load(id || "pre-auth");
-  if (!id && router.currentRoute.value.path === "/admin") void router.replace("/");
+  if (id) void travel.initialize(id);
+  else travel.resetForIdentity();
+  if (!id && ["/admin", "/travel"].includes(router.currentRoute.value.path)) void router.replace("/");
 });
 </script>
 

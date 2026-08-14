@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/api/client";
 import type { ChatMessage } from "@/api/types";
 import { useAuthStore } from "@/stores/auth";
+import { useModelStore } from "@/stores/models";
 import { useSessionStore } from "@/stores/sessions";
 import { useUiStore } from "@/stores/ui";
 import { webSocket } from "@/websocket/client";
+import { CHAT_HANDOFF_KEY } from "@/travel/chatHandoff";
 import ChatPage from "./ChatPage.vue";
 
 describe("ChatPage", () => {
@@ -52,7 +54,7 @@ describe("ChatPage", () => {
     wrapper.unmount();
   });
 
-  it("keeps New Session as a draft until the first message is sent", async () => {
+  it("keeps New Session as a draft while allowing a model choice before the first message", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
     const auth = useAuthStore();
@@ -63,7 +65,8 @@ describe("ChatPage", () => {
       sessions: [{ session_id: "recent", title: "最近", preview: "", updated_at: "", message_count: 1, channel: "web", conversation_type: "private", continuation_mode: "writable" }],
     });
     const sessionSpy = vi.spyOn(api, "session");
-    vi.spyOn(api, "models").mockResolvedValue({ endpoint: "local", current_model: "demo", models: ["demo"] });
+    vi.spyOn(api, "models").mockResolvedValue({ endpoint: "local", current_model: "demo", models: ["demo", "model-b"] });
+    const setModel = vi.spyOn(api, "setModel").mockResolvedValue({ endpoint: "local", current_model: "model-b", models: ["demo", "model-b"] });
     vi.spyOn(webSocket, "subscribe").mockReturnValue(() => undefined);
     vi.spyOn(webSocket, "connect").mockResolvedValue({} as WebSocket);
     const createSession = vi.spyOn(webSocket, "createSession").mockResolvedValue("fresh-session");
@@ -77,12 +80,59 @@ describe("ChatPage", () => {
     expect(useSessionStore().activeId).toBe("");
     expect(useSessionStore().messages).toEqual([]);
     expect(wrapper.text()).toContain("今天想一起完成什么？");
+    await vi.waitFor(() => expect(wrapper.get(".model-picker select").attributes("disabled")).toBeUndefined());
+    await wrapper.get(".model-picker select").setValue("model-b");
+    expect(setModel).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
     await wrapper.get(".composer textarea").setValue("你好");
     await wrapper.get(".composer").trigger("submit");
     await vi.waitFor(() => expect(createSession).toHaveBeenCalledOnce());
 
     expect(useSessionStore().activeId).toBe("fresh-session");
-    expect(sendMessage).toHaveBeenCalledWith("fresh-session", "你好", "demo");
+    expect(setModel).toHaveBeenCalledWith("fresh-session", "model-b");
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith("fresh-session", "你好", "model-b"));
+    expect(useModelStore().current).toBe("model-b");
+    wrapper.unmount();
+  });
+
+  it("prefills a one-time travel handoff in a new local draft without auto-sending", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.user = { id: "starter", username: "starter", display_name: "Starter", status: "active", roles: ["viewer"], can_manage_admins: false };
+    vi.spyOn(api, "sessions").mockResolvedValue({ sessions: [{ session_id: "recent", title: "最近", preview: "", updated_at: "", message_count: 1, channel: "web", conversation_type: "private", continuation_mode: "writable" }] });
+    vi.spyOn(api, "models").mockResolvedValue({ endpoint: "local", current_model: "demo", models: ["demo"] });
+    vi.spyOn(webSocket, "subscribe").mockReturnValue(() => undefined);
+    vi.spyOn(webSocket, "connect").mockResolvedValue({} as WebSocket);
+    const createSession = vi.spyOn(webSocket, "createSession").mockResolvedValue("fresh-session");
+    const sendMessage = vi.spyOn(webSocket, "sendMessage").mockResolvedValue();
+    sessionStorage.setItem(CHAT_HANDOFF_KEY, "帮我写一段 Python 代码");
+
+    const wrapper = mount(ChatPage, { global: { plugins: [pinia] } });
+    await vi.waitFor(() => expect((wrapper.get(".composer textarea").element as HTMLTextAreaElement).value).toBe("帮我写一段 Python 代码"));
+
+    expect(sessionStorage.getItem(CHAT_HANDOFF_KEY)).toBeNull();
+    expect(useSessionStore().activeId).toBe("");
+    expect(createSession).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("shows a travel handoff before a slow session refresh finishes", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.user = { id: "starter", username: "starter", display_name: "Starter", status: "active", roles: ["viewer"], can_manage_admins: false };
+    vi.spyOn(api, "sessions").mockImplementation(() => new Promise(() => undefined));
+    vi.spyOn(api, "models").mockResolvedValue({ endpoint: "local", current_model: "demo", models: ["demo"] });
+    vi.spyOn(webSocket, "subscribe").mockReturnValue(() => undefined);
+    vi.spyOn(webSocket, "connect").mockResolvedValue({} as WebSocket);
+    sessionStorage.setItem(CHAT_HANDOFF_KEY, "继续讨论这段代码");
+
+    const wrapper = mount(ChatPage, { global: { plugins: [pinia] } });
+    await vi.waitFor(() => expect((wrapper.get(".composer textarea").element as HTMLTextAreaElement).value).toBe("继续讨论这段代码"));
+
+    expect(useSessionStore().activeId).toBe("");
     wrapper.unmount();
   });
 });

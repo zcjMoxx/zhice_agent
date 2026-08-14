@@ -341,6 +341,24 @@ def test_models_json_supports_litellm_endpoint(tmp_path):
     assert loaded.model == "claude-test"
 
 
+def test_models_json_defaults_request_timeout_to_three_minutes(tmp_path):
+    config_dir = tmp_path / "config"
+    _write_models(config_dir, _models({"primary": _endpoint()}))
+    loaded = load_llm_endpoint(config_dir)
+    assert loaded.request_timeout_seconds == 180
+    assert loaded.total_deadline_seconds == 180
+
+
+def test_models_json_keeps_explicit_longer_request_timeout(tmp_path):
+    config_dir = tmp_path / "config"
+    _write_models(
+        config_dir,
+        _models({"primary": _endpoint(request_timeout_seconds=240)}),
+    )
+    loaded = load_llm_endpoint(config_dir)
+    assert loaded.request_timeout_seconds == 240
+
+
 @pytest.mark.parametrize(
     "change,match",
     [

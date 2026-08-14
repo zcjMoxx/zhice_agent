@@ -10,6 +10,7 @@ from agent.protocols.auth import ActorContext
 from agent.protocols.tool import Tool, ToolResult
 
 McpTransport = Literal["stdio", "streamable_http", "sse"]
+McpProxyMode = Literal["direct", "environment"]
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class McpServerSpec:
     env: dict[str, str] = field(default_factory=dict)
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    proxy_mode: McpProxyMode = "direct"
     oauth: McpOAuthSpec | None = None
     startup_timeout_seconds: float = 15.0
     connect_timeout_seconds: float = 15.0

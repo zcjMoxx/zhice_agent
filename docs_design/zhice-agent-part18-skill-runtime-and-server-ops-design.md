@@ -103,6 +103,8 @@ Skill Event 使用顶层 `skill_run_id`，并关联外层 `run_skill` 的 `tool_
 
 瞬态 progress 不写 Session JSONL；最终 Tool 调用事实仍随 Tool message、Runtime Activity 和 trace 留证。
 
+Part 19 已用该正式 Runtime 交付 `zhice-official/travel-planner`。其 optimizer 使用严格 object `params_schema`、UTF-8 `ndjson-v1` progress/result、60 秒 timeout 和无网络纯计算；`run_skill` 外层继续关联 Tool/Skill Event，最终计划由独立内部 `finalize_travel_plan` Tool 收口。当前应用口径见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。
+
 ## 3. Skill source 状态与管理
 
 ### 3.1 持久状态

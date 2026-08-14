@@ -314,6 +314,51 @@ class SkillSourcesResponse(BaseModel):
     skills: list[SkillSummaryResponse] = Field(default_factory=list)
 
 
+class McpServerMonitorResponse(BaseModel):
+    """Credential-free aggregate health for one configured MCP Server."""
+
+    server_id: str
+    state: str
+    tool_count: int = 0
+    error_code: str = ""
+    call_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    cancelled_count: int = 0
+    last_tool_error_code: str = ""
+    last_connection_state: str = ""
+    last_connection_at: float = 0.0
+    last_connection_reason_code: str = ""
+    oauth_state: str = "disabled"
+
+
+class McpMonitorResponse(BaseModel):
+    """Current bounded MCP runtime projection for the administration UI."""
+
+    status: str
+    catalog_version: int = 0
+    generated_at: float = 0.0
+    active_calls: int = 0
+    catalog_refresh_count: int = 0
+    list_changed_count: int = 0
+    reconnect_count: int = 0
+    servers: list[McpServerMonitorResponse] = Field(default_factory=list)
+
+
+class XhsReadonlyAdminStatusResponse(BaseModel):
+    """Credential-free Owner projection for the local Xiaohongshu MCP."""
+
+    server_id: str = "xhs-readonly"
+    state: str = "unknown"
+    code: str = ""
+    message: str = ""
+    enabled: bool = False
+    login_supported: bool = False
+    login_in_progress: bool = False
+    restart_supported: bool = False
+    cookie_updated_at: str = ""
+
+
 class OperationsTerminalResponse(BaseModel):
     """Non-secret link projection for the independently protected Ops UI."""
 
@@ -392,3 +437,148 @@ class ConfirmationMutationResponse(BaseModel):
 
     confirmation_id: str
     status: str
+
+
+class TravelPlanSummaryResponse(BaseModel):
+    """Metadata-only projection for one actor-owned travel plan."""
+
+    plan_id: str
+    owner_user_id: str
+    source_session_id: str
+    source_turn_id: str
+    schema_version: str
+    title: str
+    destination_summary: str
+    created_at: str
+    updated_at: str
+
+
+class TravelPlansResponse(BaseModel):
+    """Current actor's private travel plan list."""
+
+    plans: list[TravelPlanSummaryResponse] = Field(default_factory=list)
+
+
+class TravelPlanResponse(BaseModel):
+    """One complete current-actor TravelPlanV1."""
+
+    plan: dict[str, Any]
+
+
+class TravelPlanMutationResponse(BaseModel):
+    """Travel plan delete mutation result."""
+
+    plan_id: str
+    status: str
+
+
+class TravelRequirementExtractionRequest(BaseModel):
+    """Untrusted natural-language request for a reviewable travel draft."""
+
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class TravelRequirementExtractionResponse(BaseModel):
+    """Strict semantic extraction projection without starting a plan."""
+
+    draft: dict[str, Any]
+    missing_fields: list[str] = Field(default_factory=list)
+
+
+class TravelConversationMessageRequest(BaseModel):
+    """One bounded user-visible requirement message persisted before planning."""
+
+    role: str
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class TravelConversationRequest(BaseModel):
+    """Bounded requirement conversation for one newly created travel Session."""
+
+    messages: list[TravelConversationMessageRequest] = Field(min_length=1, max_length=20)
+    draft: dict[str, Any] = Field(default_factory=dict)
+
+
+class TravelConversationResponse(BaseModel):
+    """Idempotent persistence result for a travel requirement conversation."""
+
+    session_id: str
+    message_count: int
+    status: str
+
+
+class TravelDraftResponse(BaseModel):
+    """Refresh-safe collecting state for one actor-owned travel Session."""
+
+    session_id: str
+    messages: list[TravelConversationMessageRequest] = Field(default_factory=list)
+    draft: dict[str, Any] = Field(default_factory=dict)
+    phase: str = "intake"
+    handoff_question: str = ""
+
+
+class TravelPlanningConfirmationRequest(BaseModel):
+    """Final reviewed draft used to open formal planning capabilities."""
+
+    draft: dict[str, Any]
+
+
+class TravelPlanningConfirmationResponse(BaseModel):
+    """Public result of the intake-to-planning phase transition."""
+
+    session_id: str
+    phase: str
+    status: str
+
+
+class TravelWorkItemResponse(BaseModel):
+    """One unified sidebar item across the travel lifecycle."""
+
+    session_id: str
+    plan_id: str = ""
+    status: str
+    title: str
+    preview: str
+    updated_at: str
+    error_code: str = ""
+
+
+class TravelWorkItemsResponse(BaseModel):
+    """Current actor's unified private travel work list."""
+
+    items: list[TravelWorkItemResponse] = Field(default_factory=list)
+
+
+class TravelWorkItemMutationResponse(BaseModel):
+    """Delete result for an unfinished travel work item."""
+
+    session_id: str
+    status: str
+
+
+class TravelGenerationStatusResponse(BaseModel):
+    """Actor-owned travel generation state safe for browser recovery."""
+
+    status: str
+    session_id: str = ""
+    turn_id: str = ""
+    plan_id: str = ""
+    error_code: str = ""
+
+
+class TravelCandidateSelectionRequest(BaseModel):
+    """One candidate chosen from an actor-owned pending travel review."""
+
+    candidate_id: str = Field(min_length=1, max_length=100)
+
+
+class TravelCandidateReviewResponse(BaseModel):
+    """Refresh-safe bounded candidate review without source bodies."""
+
+    session_id: str
+    status: str
+    recommended_candidate_id: str = ""
+    selected_candidate_id: str = ""
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""

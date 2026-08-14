@@ -237,3 +237,19 @@ def test_delete_removes_session_file_and_metadata(tmp_path):
     assert not (store.metadata_dir / "alpha.json").exists()
     assert store.load("alpha").messages == []
     assert store.load("alpha").metadata == {}
+
+
+def test_replace_messages_preserves_and_can_update_sidecar_metadata(tmp_path):
+    """Collecting applications can atomically replace messages without losing metadata."""
+
+    store = JsonlSessionStore(tmp_path)
+    store.append("alpha", [Message(role="user", content="old")])
+    store.rename("alpha", "Old title")
+
+    store.replace("alpha", [Message(role="user", content="new")])
+    store.update_metadata("alpha", {"travel_draft_version": 1, "title": "New title"})
+
+    state = store.load("alpha")
+    assert [message.content for message in state.messages] == ["new"]
+    assert state.metadata == {"title": "New title", "travel_draft_version": 1}
+    assert not (tmp_path / "alpha.jsonl.tmp").exists()

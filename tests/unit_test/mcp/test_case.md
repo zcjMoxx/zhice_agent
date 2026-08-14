@@ -7,8 +7,11 @@
 - 验证 MCP 结果归一化与 actor-scoped artifact 落盘。
 - 使用本地 fake stdio Server 验证 initialize、`tools/list`、`tools/call`、同步 Adapter 和关闭流程。
 - 验证 Part17 版本化 Catalog 的手动刷新、`tools/list_changed` 等价入口、非法 Catalog 原子拒绝和单 Server 重连。
+- 验证初始化/transport 瞬时失败后按有界退避自动重连，成功后恢复 Catalog；ExceptionGroup 仅记录安全叶子异常类型。
+- 验证远程 MCP 默认 `proxy_mode: direct`，坏的终端代理不会污染 Streamable HTTP、SSE 或 OAuth refresh；确需环境代理时必须显式配置。
 - 验证活动调用取消会传播到远端请求，并形成稳定 `MCP_TOOL_CANCELLED` 结果。
 - 验证连接历史、OAuth 状态、Tool 调用次数、延迟、错误码与取消次数均以无凭据快照暴露。
+- 验证管理端 MCP 状态接口只聚合 Server/Catalog/调用/重连安全字段，并沿用 `skill.sources.read` 权限，不暴露配置和凭据。
 - 验证 artifact 使用有界流式导入、有界预览和仅作用于 actor MCP 目录的保留策略。
 - 验证无配置时 Runtime 保持禁用，不启动线程、不记录启停日志，也不影响内置 Tool。
 - 验证startup checker将缺失/空分区标记为disabled，将非法分区、placeholder和安全配置标记为unavailable，并返回空specs；旧`mcp.json`不再读取。
@@ -20,6 +23,7 @@
 - 绝对 cwd、父目录 cwd、越界临时文件和超大 artifact 被拒绝。
 - 参数 schema 在远端调用前执行基础校验。
 - 当前调用 timeout/transport error 不自动重放。
+- degraded 自动恢复不重放当前未知结果调用；退避可被 shutdown、手动 reconnect 或新请求打断。
 - Catalog 仅在完整校验成功后增加版本并替换；失败刷新保留上一可用 snapshot。
 - 单 Server refresh/reconnect 失败不清空其它 Server Catalog，也不影响本地 Tool。
 - 取消只匹配指定 Server/用户的活动调用，不重放未知远端结果。

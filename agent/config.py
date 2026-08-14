@@ -526,7 +526,7 @@ def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
             "LLM endpoint max_tokens must be less than context_window"
         )
     request_timeout_seconds = _positive_float(
-        data.get("request_timeout_seconds"), 60.0, "request_timeout_seconds"
+        data.get("request_timeout_seconds"), 180.0, "request_timeout_seconds"
     )
     max_attempts = _coerce_int(data.get("max_attempts"), 2, "max_attempts")
     if max_attempts < 1:
@@ -534,7 +534,7 @@ def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
     if max_attempts > 5:
         raise LLMConfigurationError("LLM endpoint field must be <= 5: max_attempts")
     total_deadline_seconds = _positive_float(
-        data.get("total_deadline_seconds"), 120.0, "total_deadline_seconds"
+        data.get("total_deadline_seconds"), 180.0, "total_deadline_seconds"
     )
     retry_backoff_seconds = _positive_float(
         data.get("retry_backoff_seconds"), 0.5, "retry_backoff_seconds", allow_zero=True

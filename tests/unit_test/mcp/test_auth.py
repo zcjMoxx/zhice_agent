@@ -27,7 +27,10 @@ class _TokenHandler(BaseHTTPRequestHandler):
 
 
 @pytest.mark.integration
-def test_refreshes_oauth_token_and_builds_bearer_header():
+def test_refreshes_oauth_token_and_builds_bearer_header(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
     server = ThreadingHTTPServer(("127.0.0.1", 0), _TokenHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

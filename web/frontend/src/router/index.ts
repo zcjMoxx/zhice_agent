@@ -7,6 +7,7 @@ const router = createRouter({
     { path: "/bind/qq", name: "qq-binding", component: () => import("@/pages/QqBindingPage.vue") },
     { path: "/_setup", name: "setup", component: () => import("@/pages/OwnerSetupPage.vue") },
     { path: "/admin", name: "admin", component: () => import("@/pages/AdminPage.vue") },
+    { path: "/travel", name: "travel", component: () => import("@/pages/TravelPlannerPage.vue") },
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
 });

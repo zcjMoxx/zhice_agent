@@ -22,6 +22,18 @@ else
   DOCKER_AVAILABLE=1
 fi
 
+echo "section=xhs_sidecar"
+if [ "$DOCKER_AVAILABLE" -eq 0 ]; then
+  echo "name=zhice-xhs-readonly status=unknown reason=docker-unavailable"
+elif ! "$DOCKER" container inspect zhice-xhs-readonly >/dev/null 2>&1; then
+  echo "name=zhice-xhs-readonly exists=false"
+else
+  "$DOCKER" inspect --format 'name={{.Name}} exists=true image={{.Config.Image}} image_id={{.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started_at={{.State.StartedAt}} restarts={{.RestartCount}}' zhice-xhs-readonly 2>/dev/null || true
+  echo "section=xhs_bounded_logs tail=30"
+  "$DOCKER" logs --tail 30 zhice-xhs-readonly 2>&1 | head -c 32768 || true
+  echo
+fi
+
 echo "section=container"
 if [ "$DOCKER_AVAILABLE" -eq 0 ]; then
   echo "name=$CONTAINER_NAME status=unknown reason=docker-unavailable"
@@ -35,7 +47,7 @@ else
 fi
 
 echo "section=volumes"
-for volume in zhice-contexts zhice-state zhice-logs zhice-extends zhice-weixin-credentials; do
+for volume in zhice-contexts zhice-state zhice-logs zhice-extends zhice-weixin-credentials zhice-xhs-data zhice-xhs-cache; do
   if [ "$DOCKER_AVAILABLE" -eq 0 ]; then
     echo "volume=$volume exists=unknown reason=docker-unavailable"
   elif "$DOCKER" volume inspect "$volume" >/dev/null 2>&1; then

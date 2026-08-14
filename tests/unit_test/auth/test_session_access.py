@@ -82,6 +82,19 @@ def test_ensure_session_reports_creation_only_for_the_first_resolution(tmp_path)
     assert existing.created is False
 
 
+def test_ensure_session_returns_the_persisted_application_channel(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("admin", "Admin", "password-123")
+    service = SessionAccessService(store, FilesystemUserContextResolver(tmp_path / "contexts"))
+    actor = store.actor_for_user(user.id, channel="web")
+
+    created = service.ensure_session(actor, "session-travel", channel="travel", write=True)
+    existing = service.ensure_session(actor, "session-travel", channel="web", write=True)
+
+    assert created.channel == "travel"
+    assert existing.channel == "travel"
+
+
 def test_owner_sessions_use_cli_storage_while_other_users_remain_isolated(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     owner = store.initialize_owner("owner", "Owner", "password-123")
@@ -173,6 +186,23 @@ def test_ensure_session_uses_authenticated_ownership_without_own_permission_keys
     assert resolved.created is True
     assert resolved.owner_user_id == user.id
     assert store.session_index_get("session-created")["owner_user_id"] == user.id
+
+
+def test_travel_application_session_is_persisted_but_hidden_from_chat_listing(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("owner", "Owner", "password-123")
+    service = SessionAccessService(store, FilesystemUserContextResolver(tmp_path / "contexts"))
+    actor = store.actor_for_user(user.id, channel="web")
+    travel = service.ensure_session(actor, "travel-session", channel="travel", write=True)
+    travel.store.append("travel-session", [Message(role="user", content="plan a trip")])
+    service.refresh_index(actor, "travel-session")
+    web = service.ensure_session(actor, "web-session", channel="web", write=True)
+    web.store.append("web-session", [Message(role="user", content="normal chat")])
+    service.refresh_index(actor, "web-session")
+
+    assert [item.session_id for item in service.list_sessions(actor)] == ["web-session"]
+    assert service.load_session(actor, "travel-session").messages[0].content == "plan a trip"
+    assert store.session_index_get("travel-session")["channel"] == "travel"
 
 
 def test_group_channel_session_is_visible_read_only_and_forkable_to_web(tmp_path):

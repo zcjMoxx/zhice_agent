@@ -34,7 +34,16 @@ export const useChatStore = defineStore("chat", {
       const models = useModelStore();
       const text = content.trim();
       if (!text || this.sending || !sessions.writable) return;
-      if (!sessions.activeId) await sessions.create();
+      const selectedModel = models.current || "auto";
+      if (!sessions.activeId) {
+        try {
+          const createdSessionId = await sessions.create();
+          if (selectedModel !== "auto") await models.select(createdSessionId, selectedModel);
+        } catch (error) {
+          this.error = error instanceof Error ? error.message : "无法创建新对话";
+          return;
+        }
+      }
       const sessionId = sessions.activeId;
       sessions.messages.push({ role: "user", content: text });
       sessions.messages.push({ role: "assistant", content: "", pending: true, runtime: emptyRuntimeState() });
@@ -42,7 +51,7 @@ export const useChatStore = defineStore("chat", {
       this.error = "";
       this.runtime = emptyRuntimeState();
       this.activeTurn = { sessionId, turnId: "" };
-      try { await webSocket.sendMessage(sessionId, text, models.current || "auto"); }
+      try { await webSocket.sendMessage(sessionId, text, selectedModel); }
       catch (error) { this.fail(error instanceof Error ? error.message : "发送失败"); }
     },
     async stop() {

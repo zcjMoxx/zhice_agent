@@ -10,21 +10,62 @@ services:
         ZHICE_REVISION: ${ZHICE_REVISION:-unknown}
         ZHICE_BUILD_DATE: ${ZHICE_BUILD_DATE:-unknown}
         APT_MIRROR: ${ZHICE_APT_MIRROR:-}
+        VITE_AMAP_JS_API_KEY: ${VITE_AMAP_JS_API_KEY:-}
+        VITE_AMAP_JS_SECURITY_CODE: ${VITE_AMAP_JS_SECURITY_CODE:-}
     restart: unless-stopped
     environment:
       ZHICE_OPS_MODE: local_docker
       ZHICE_OPS_URL: http://127.0.0.1:${ZHICE_OPS_PORT:-17681}
       ZHICE_OPS_TARGET_TYPE: container
       ZHICE_OPS_TARGET_NAME: zhice-agent
+      XHS_READONLY_UPSTREAM_URL: http://zhice-xhs-readonly:18060/mcp
+      XHS_READONLY_HTTP_HOST_ALLOWLIST: zhice-xhs-readonly
+      XHS_READONLY_COOKIE_DIR: /home/zhice/.zhice/integrations/xhs/data
+      XHS_READONLY_COOKIE_FILE: /home/zhice/.zhice/integrations/xhs/data/cookies.json
+    depends_on:
+      zhice-xhs-readonly:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${ZHICE_PORT:-10086}:10086"
     volumes:
       - zhice-contexts:/home/zhice/.zhice/contexts
       - zhice-state:/home/zhice/.zhice/state
+      - zhice-travel-data:/home/zhice/.zhice/travel
       - zhice-logs:/home/zhice/.zhice/logs
       - zhice-extends:/home/zhice/.zhice/extends
       - zhice-weixin-credentials:/home/zhice/.zhice/config/channels/weixin/accounts
+      - zhice-xhs-data:/home/zhice/.zhice/integrations/xhs/data:ro
+    networks:
+      - default
+      - zhice-travel
     init: true
+
+  zhice-xhs-readonly:
+    container_name: zhice-xhs-readonly
+    image: ${ZHICE_IMAGE:-zhice-agent:local}
+    restart: unless-stopped
+    entrypoint: ["/opt/zhice/bin/xiaohongshu-mcp-rednote"]
+    command: ["-headless=true", "-port=:18060"]
+    environment:
+      COOKIES_PATH: /home/zhice/.zhice/integrations/xhs/data/cookies.json
+    expose:
+      - "18060"
+    volumes:
+      - zhice-xhs-data:/home/zhice/.zhice/integrations/xhs/data
+      - zhice-xhs-cache:/home/zhice/.cache/xiaohongshu-mcp
+    networks:
+      - zhice-travel
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 18060), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 180s
+      retries: 3
 
   zhice-ops:
     container_name: zhice-agent-ops
@@ -47,6 +88,12 @@ services:
 volumes:
   zhice-contexts:
   zhice-state:
+  zhice-travel-data:
   zhice-logs:
   zhice-extends:
   zhice-weixin-credentials:
+  zhice-xhs-data:
+  zhice-xhs-cache:
+
+networks:
+  zhice-travel:

@@ -28,6 +28,9 @@
 - `zhice-agent-part16-web-product-design.md`：Part 16 已实现并关闭；Vue 3/Vite/TypeScript 已成为唯一正式 Web 前端，包含六套主题家族与独立明暗模式、登录/聊天/Session、五栏设置、渠道连接，以及失败优先的运行诊断；安全审计作为敏感操作账本收在高级设置中，并以 `agent/web/static` 随 Python wheel 发布。
 - `zhice-agent-part17-reliability-diagnostics-deployment-design.md`：Part 17 已实现并关闭；Provider/MCP 可靠性、系统诊断、恢复边界、私有镜像与单机云发布基线。
 - `zhice-agent-part18-skill-runtime-and-server-ops-design.md`：Part 18 已实现并完成生产部署；正式 Skill Runtime、Skill source 状态/Web 管理与多运行形态 restricted Ops。三种运行形态已统一“监控面板 / 运维终端”双视图；服务器使用既有 Tunnel、loopback Caddy 长期签名 Cookie 与 `/terminal/` ttyd，云端配置采用宿主机权威副本与容器只读挂载。见 `2026-08-09-part18-multi-runtime-ops-correction-design.md`、`2026-08-10-part18-server-side-ops-auth-design.md`、`2026-08-10-part18-unified-ops-dual-view-design.md` 与 `2026-08-10-part18-persistent-ops-login-design.md`。
+- `zhice-agent-part19-intelligent-travel-planner-design.md`：Milestone 19 已完成代码与本地/Fake MCP 全链；旅行领域协议、正式 optimizer Skill、只读 MCP 适配、quick/deep、用户隔离 Store/API、RuntimeEvent 与 Vue 旅行页面基线。真实外部 smoke 继续按显式凭据单列。
+
+Part 18 后进入特色应用阶段。Milestone 19 智能旅行规划已按 `2026-08-10-intelligent-travel-planner-application-design.md` 完成代码落地，当前事实以 Part 19 活文档为准；真实外部 smoke 不等于未实现功能，仍需显式凭据与服务登录态执行。Milestone 20 拖拽工作流、定时调度与用户连接仍只有已确认且尚未实现的日期方案 `2026-08-10-visual-workflow-scheduler-design.md`，不得写成当前代码能力。
 
 第九部分用户、登录与权限执行边界已经落地：登录用户的账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 是基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。普通自助注册现由 `auth.sqlite3` 持久策略控制、默认关闭且只有 Owner 可修改，见 `2026-08-10-owner-registration-control-design.md`。基础能力收敛见 `2026-07-16-authenticated-user-baseline-capabilities-design.md`；当前自助诊断和 Runtime Activity / Security Audit 拆分见 `2026-07-16-self-diagnostics-activity-audit-separation-design.md`。
 
@@ -92,23 +95,28 @@ Part 17 运行可靠性、系统级诊断与私有镜像部署的代码、测试
 18. `zhice-agent-part16-web-product-design.md`
 19. `zhice-agent-part17-reliability-diagnostics-deployment-design.md`
 20. `zhice-agent-part18-skill-runtime-and-server-ops-design.md`
-21. `2026-08-10-owner-registration-control-design.md`
-22. `2026-08-10-part18-persistent-ops-login-design.md`
-23. `2026-08-10-part18-unified-ops-dual-view-design.md`
-24. `2026-08-09-part18-multi-runtime-ops-correction-design.md`
-25. `2026-08-09-part18-skill-runtime-and-server-ops-design.md`
-26. `2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`
-27. `2026-07-27-web-product-experience-and-vue-frontend-design.md`
-28. `2026-07-26-full-session-context-engineering-design.md`
-29. `2026-07-24-weixin-clawbot-channel-design.md`
-30. `2026-07-23-qq-external-channel-boundary-design.md`
-31. `2026-07-21-subagent-runtime-boundary-design.md`
-32. `2026-07-20-hook-runtime-boundary-design.md`
-33. `2026-07-17-mcp-tool-runtime-boundary-design.md`
-34. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
+21. `zhice-agent-part19-intelligent-travel-planner-design.md`
+22. `2026-08-10-intelligent-travel-planner-application-design.md`
+23. `2026-08-10-visual-workflow-scheduler-design.md`
+24. `2026-08-10-owner-registration-control-design.md`
+25. `2026-08-10-part18-persistent-ops-login-design.md`
+26. `2026-08-10-part18-unified-ops-dual-view-design.md`
+27. `2026-08-09-part18-multi-runtime-ops-correction-design.md`
+28. `2026-08-09-part18-skill-runtime-and-server-ops-design.md`
+29. `2026-07-29-part17-runtime-reliability-diagnostics-deployment-design.md`
+30. `2026-07-27-web-product-experience-and-vue-frontend-design.md`
+31. `2026-07-26-full-session-context-engineering-design.md`
+32. `2026-07-24-weixin-clawbot-channel-design.md`
+33. `2026-07-23-qq-external-channel-boundary-design.md`
+34. `2026-07-21-subagent-runtime-boundary-design.md`
+35. `2026-07-20-hook-runtime-boundary-design.md`
+36. `2026-07-17-mcp-tool-runtime-boundary-design.md`
+37. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
 
 ## 日期设计记录清单
 
+- `2026-08-10-intelligent-travel-planner-application-design.md`
+- `2026-08-10-visual-workflow-scheduler-design.md`
 - `2026-08-10-beijing-log-session-deletion-action-feedback-design.md`
 - `2026-08-10-part18-unified-ops-dual-view-design.md`
 - `2026-08-10-part18-server-side-ops-auth-design.md`

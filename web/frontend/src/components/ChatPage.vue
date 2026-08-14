@@ -8,6 +8,7 @@ import { useModelStore } from "@/stores/models";
 import { useSessionStore } from "@/stores/sessions";
 import { useUiStore } from "@/stores/ui";
 import { uiText } from "@/i18n";
+import { consumeChatHandoff } from "@/travel/chatHandoff";
 import MarkdownMessage from "./MarkdownMessage.vue";
 import QuickPreferences from "./QuickPreferences.vue";
 import RuntimeStatus from "./RuntimeStatus.vue";
@@ -78,6 +79,13 @@ function handleScroll(): void {
 
 onMounted(async () => {
   chat.initialize();
+  const handoff = consumeChatHandoff();
+  if (handoff) {
+    sessions.startDraft();
+    message.value = handoff;
+    await sessions.refresh();
+    return;
+  }
   await sessions.refresh();
   if (ui.startPage === "new") {
     sessions.startDraft();
@@ -91,7 +99,7 @@ watch(() => sessions.activeId, async (id, previousId) => {
   const modelRefresh = models.refresh(id);
   if (id) await restorePosition(id);
   await modelRefresh;
-});
+}, { immediate: true });
 watch(
   () => sessions.messages.map((item) => `${item.content}\u0000${item.pending ? "1" : "0"}`).join("\u0001"),
   async () => {
@@ -121,7 +129,7 @@ async function submit() {
     <button v-if="ui.sidebarCollapsed" class="icon-button" @click="ui.sidebarCollapsed = false"><Menu :size="20" /></button>
     <div class="chat-heading"><strong>{{ sessions.active?.title || tr('新对话', 'New chat') }}</strong><small>{{ activeSource() }}</small></div>
     <QuickPreferences />
-    <label class="model-picker"><select v-model="models.current" :aria-label="tr('模型', 'Model')" :disabled="!sessions.activeId || chat.sending" @change="models.select(sessions.activeId, models.current)"><option v-for="model in models.models" :key="model">{{ model }}</option></select></label>
+    <label class="model-picker"><select v-model="models.current" :aria-label="tr('模型', 'Model')" :disabled="chat.sending || models.loading || !models.models.length" @change="models.select(sessions.activeId, models.current)"><option v-for="model in models.models" :key="model">{{ model }}</option></select></label>
   </header>
   <section ref="list" class="message-scroll" @scroll="handleScroll">
     <div class="message-column">

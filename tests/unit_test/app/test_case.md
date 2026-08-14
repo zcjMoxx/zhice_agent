@@ -21,6 +21,7 @@
 - `POST /api/chat/stream` 返回 SSE `status`、`delta`、`done` 或 `error` 事件。
 - `GET /api/models` 返回当前 endpoint 和可选模型。
 - `POST /api/model/preference` 设置当前 endpoint 的模型偏好。
+- 新对话模型预选：登录用户可在无 Session 时只读获取默认模型目录且不创建 Session；偏好写入仍要求 actor-owned Session，前端在首次发送创建 Session 后再落盘草稿预选模型。
 - 空消息、缺失字段和非法 session id 返回 `REQUEST_VALIDATION_FAILED`，字段问题放入安全的 `details.issues`。
 - HTTP 错误统一返回 `error.status/code/message/request_id/details`，body status 与真实 HTTP status 一致，body request_id 与 `X-Request-ID` 一致。
 - runtime 抛出配置、LLM 和未知错误时返回领域化稳定错误码，不暴露堆栈。
@@ -107,6 +108,10 @@
 - `GET /api/admin/diagnostics` 独立要求 `diagnostics.system.use`；Owner 默认可查，普通角色不能用 `turn.read.any` 替代该权限，并支持 component/error_code 等有界筛选。
 - `GET /api/audit/events` 保持旧 `limit/session_id/turn_id` 兼容，并增加事件、操作者、结果、时间和 cursor 筛选；`audit.export` 独立保护 CSV 导出。
 - Gateway lifespan 对同一 workspace 持有跨平台单实例锁；关闭时拒绝新 Turn、取消 active Turn 与 MCP 调用，并在释放锁前关闭渠道、Memory 和 MCP。
+- `run_gateway` 在构造 Runtime 前取得 workspace 单实例锁；Uvicorn 启动、绑定或 lifespan 进入失败时仍幂等关闭 Runtime 并释放锁，不遗留已初始化的后台组件。
+- 删除仍有活动 Turn 的 Session 时，Runtime 先发送取消并等待 Turn 注销完成，再删除 Session 文件和索引；超时则保留 Session 并返回失败，避免后台回写形成孤儿 CLI 会话。
+- “MCP 与 Skills”中的小红书登录管理仅 Owner 可用：安全状态、检查登录、启动固定扫码程序和重启自有 sidecar；非 Owner API 返回 403，响应和审计不包含 Cookie、路径、PID 或原始工具输出。
+- 小红书登录检查兼容 MCP structured content 与 text content 形成的连续 JSON 文档；真实 success/OK 结果缓存为 authenticated，页面刷新不再误判为 unavailable。
 
 ## Part 18B Skill 与 Ops Web 投影覆盖
 

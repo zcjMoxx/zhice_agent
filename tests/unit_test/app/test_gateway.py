@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import uvicorn
 from fastapi.testclient import TestClient
 
@@ -20,6 +21,7 @@ from agent.app.gateway import (
     gateway_status,
     run_gateway,
 )
+from agent.app.instance_lock import WorkspaceGatewayLock, WorkspaceGatewayLockError
 from agent.app.logging import (
     GatewayLoggingResult,
     GatewayLogOptions,
@@ -464,6 +466,48 @@ def test_run_gateway_swallows_keyboard_interrupt_during_server_shutdown(tmp_path
     run_gateway(config, log_options=GatewayLogOptions())
 
 
+def test_run_gateway_closes_runtime_when_server_start_fails(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    runtime = _ShutdownRuntime()
+
+    monkeypatch.setattr("agent.app.gateway.build_web_runtime", lambda _config: runtime)
+    monkeypatch.setattr(
+        "agent.app.gateway.configure_gateway_logging",
+        lambda _options, *, logs_dir: GatewayLoggingResult(trace_path=None),
+    )
+
+    def fail_start(_self):
+        raise RuntimeError("bind failed")
+
+    monkeypatch.setattr("agent.app.gateway._OrderedGatewayServer.run", fail_start)
+
+    with pytest.raises(RuntimeError, match="bind failed"):
+        run_gateway(config, log_options=GatewayLogOptions())
+
+    assert runtime.shutdown_calls == 1
+    lock = WorkspaceGatewayLock(tmp_path)
+    lock.acquire()
+    lock.release()
+
+
+def test_run_gateway_checks_workspace_lock_before_building_runtime(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    lock = WorkspaceGatewayLock(tmp_path)
+    lock.acquire()
+    built = []
+    monkeypatch.setattr(
+        "agent.app.gateway.build_web_runtime",
+        lambda _config: built.append(True),
+    )
+    try:
+        with pytest.raises(WorkspaceGatewayLockError, match="active Gateway"):
+            run_gateway(config, log_options=GatewayLogOptions())
+    finally:
+        lock.release()
+
+    assert built == []
+
+
 def test_ordered_gateway_server_groups_channel_logs_outside_uvicorn_status(
     tmp_path, monkeypatch
 ):
@@ -621,6 +665,15 @@ class _FakeRuntime:
 
     def current_model_label(self) -> str:
         return "default/model-a"
+
+
+class _ShutdownRuntime(_FakeRuntime):
+    def __init__(self):
+        super().__init__()
+        self.shutdown_calls = 0
+
+    def shutdown(self):
+        self.shutdown_calls += 1
 
 
 class _LifecycleManager:

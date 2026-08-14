@@ -14,9 +14,11 @@ from agent.protocols.llm import (
     ContextBudget,
     LLMConfigurationError,
     LLMEndpoint,
+    LLMGenerationOptions,
     LLMProvider,
     LLMProviderError,
     LLMResponse,
+    LLMResponseFormat,
     effective_input_token_limit,
 )
 
@@ -154,6 +156,8 @@ class EndpointFailoverProvider:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: LLMResponseFormat | None = None,
+        generation_options: LLMGenerationOptions | None = None,
     ) -> LLMResponse:
         """Retry transient failures, then fail over within one total deadline."""
 
@@ -194,10 +198,19 @@ class EndpointFailoverProvider:
                 attempt_started = self._clock()
                 started_at = _utc_now()
                 try:
-                    response = self._provider_factory(request_endpoint).chat(
-                        messages=messages,
-                        tools=tools,
-                    )
+                    provider = self._provider_factory(request_endpoint)
+                    if response_format is None and generation_options is None:
+                        response = provider.chat(messages=messages, tools=tools)
+                    else:
+                        call_kwargs: dict[str, Any] = {
+                            "messages": messages,
+                            "tools": tools,
+                        }
+                        if response_format is not None:
+                            call_kwargs["response_format"] = response_format
+                        if generation_options is not None:
+                            call_kwargs["generation_options"] = generation_options
+                        response = provider.chat(**call_kwargs)
                 except Exception as exc:  # noqa: BLE001 - provider boundary normalization.
                     error = _normalize_provider_error(exc, endpoint)
                     failures.append((endpoint, error))

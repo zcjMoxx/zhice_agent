@@ -18,7 +18,16 @@ from agent.config import AppConfig
 from agent.protocols.activity import RuntimeActivityEvent
 from agent.protocols.auth import AuditEvent
 from agent.protocols.capability import CapabilityStatus
+from agent.protocols.mcp import (
+    McpCatalogSnapshot,
+    McpConnectionEvent,
+    McpOAuthStatus,
+    McpRuntimeStatsSnapshot,
+    McpServerStatus,
+    McpToolStats,
+)
 from agent.protocols.session import SessionState
+from agent.protocols.tool import ToolResult
 
 
 def test_web_bootstrap_creates_owner_sets_cookie_and_logs_in(tmp_path):
@@ -706,15 +715,22 @@ def test_model_api_is_session_aware_and_permission_checked(tmp_path):
         json={"username": "viewer", "password": "viewer-password"},
     )
 
+    draft_viewed = client.get("/api/models")
     viewed = client.get("/api/models?session_id=session-a")
     switched = client.post(
         "/api/model/preference",
         json={"session_id": "session-a", "model": "model-b"},
     )
+    missing_session = client.post(
+        "/api/model/preference",
+        json={"model": "model-b"},
+    )
     reset = client.delete("/api/model/preference?session_id=session-a")
 
-    assert viewed.status_code == switched.status_code == reset.status_code == 200
+    assert draft_viewed.status_code == viewed.status_code == switched.status_code == reset.status_code == 200
+    assert missing_session.status_code == 400
     assert runtime.model_calls == [
+        ("view", "viewer", "", ""),
         ("view", "viewer", "session-a", ""),
         ("set", "viewer", "session-a", "model-b"),
         ("reset", "viewer", "session-a", ""),
@@ -1058,6 +1074,164 @@ def test_skill_source_admin_api_filters_fields_syncs_and_audits_safely(tmp_path)
     assert completed["metadata"] == {"source": "official"}
     assert "url" not in completed["metadata"]
     assert "path" not in completed["metadata"]
+
+
+def test_mcp_admin_status_aggregates_safe_runtime_monitoring(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_owner("owner", "Owner", "password-123")
+    runtime = _AuthRuntime(AuthService(store), tmp_path)
+    runtime.mcp_runtime = _FakeMcpRuntime()
+    client = _client(tmp_path, runtime)
+    client.post("/api/auth/login", json={"username": "owner", "password": "password-123"})
+
+    response = client.get("/api/admin/mcp/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["reconnect_count"] == 3
+    assert payload["servers"] == [
+        {
+            "server_id": "tavily",
+            "state": "degraded",
+            "tool_count": 2,
+            "error_code": "MCP_TRANSPORT_ERROR",
+            "call_count": 5,
+            "success_count": 3,
+            "failure_count": 1,
+            "cancelled_count": 1,
+            "last_tool_error_code": "MCP_TOOL_TIMEOUT",
+            "last_connection_state": "degraded",
+            "last_connection_at": 10.0,
+            "last_connection_reason_code": "MCP_TRANSPORT_ERROR",
+            "oauth_state": "ready",
+        }
+    ]
+    assert "secret" not in response.text.lower()
+
+
+def test_xhs_mcp_login_management_is_owner_only_and_credential_free(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_owner("owner", "Owner", "password-123")
+    store.create_user("ops-admin", "Ops Admin", "password-456", role_keys=("admin",))
+    admin_role = next(role for role in store.list_roles() if role["key"] == "admin")
+    store.update_role_permissions(
+        admin_role["id"],
+        [*admin_role["permission_keys"], "skill.sources.read"],
+    )
+    runtime = _AuthRuntime(AuthService(store, audit_sink=SqliteAuditSink(store)), tmp_path)
+    runtime.config = _config(tmp_path)
+    runtime.xhs_sidecar = _FakeXhsSupervisor()
+    runtime.mcp_runtime = _FakeXhsMcpRuntime()
+    client = _client(tmp_path, runtime)
+    client.post("/api/auth/login", json={"username": "owner", "password": "password-123"})
+
+    status = client.get("/api/admin/mcp/xhs-readonly/status")
+    checked = client.post("/api/admin/mcp/xhs-readonly/check-login")
+    persisted = client.get("/api/admin/mcp/xhs-readonly/status")
+    started = client.post("/api/admin/mcp/xhs-readonly/login")
+    restarted = client.post("/api/admin/mcp/xhs-readonly/restart")
+
+    assert status.status_code == 200
+    assert checked.json()["state"] == "authenticated"
+    assert checked.json()["code"] == "OK"
+    assert persisted.json()["state"] == "authenticated"
+    assert started.json()["code"] == "XHS_LOGIN_STARTED"
+    assert started.json()["login_in_progress"] is True
+    assert restarted.json()["code"] == "XHS_RESTARTED"
+    serialized = status.text + checked.text + started.text + restarted.text
+    assert "cookies.json" not in serialized
+    assert str(tmp_path) not in serialized
+    assert "process" not in serialized.casefold()
+
+    client.post("/api/auth/logout")
+    client.post(
+        "/api/auth/login",
+        json={"username": "ops-admin", "password": "password-456"},
+    )
+    denied = client.post("/api/admin/mcp/xhs-readonly/login")
+
+    assert denied.status_code == 403
+    assert denied.json()["error"]["details"] == {"required_role": "owner"}
+    actions = {item["action"] for item in store.list_audit_events(limit=50)}
+    assert {
+        "mcp.xhs.login_checked",
+        "mcp.xhs.login_started",
+        "mcp.xhs.restarted",
+    }.issubset(actions)
+
+
+class _FakeMcpRuntime:
+    def snapshot(self):
+        return McpCatalogSnapshot(
+            servers=(McpServerStatus("tavily", "degraded", 2, "MCP_TRANSPORT_ERROR"),),
+            version=4,
+            generated_at=9.0,
+        )
+
+    def stats_snapshot(self):
+        return McpRuntimeStatsSnapshot(
+            active_calls=1,
+            reconnect_count=3,
+            connection_history=(McpConnectionEvent("tavily", "degraded", 10.0, "MCP_TRANSPORT_ERROR"),),
+            tools=(McpToolStats("tavily", "search", 5, 3, 1, 1, last_error_code="MCP_TOOL_TIMEOUT"),),
+            oauth=(McpOAuthStatus("tavily", "ready"),),
+        )
+
+
+class _FakeXhsTool:
+    name = "mcp__xhs-readonly__check_login_status"
+
+    def execute(self, args):
+        assert args == {}
+        return ToolResult(
+            output=(
+                '{"status":"success","code":"OK"}\n\n'
+                '{"status":"success","code":"OK"}'
+            )
+        )
+
+
+class _FakeXhsMcpRuntime:
+    def tools_for_actor(self, actor, files_dir):
+        assert actor.username == "owner"
+        assert files_dir
+        return [_FakeXhsTool()]
+
+
+class _FakeXhsSupervisor:
+    def __init__(self):
+        self.login_in_progress = False
+        self.state = "unknown"
+        self.code = "XHS_AUTH_NOT_CHECKED"
+        self.message = "not checked"
+
+    def admin_snapshot(self):
+        return {
+            "enabled": True,
+            "login_supported": True,
+            "login_in_progress": self.login_in_progress,
+            "restart_supported": True,
+            "cookie_updated_at": "2026-08-14T04:42:18+00:00",
+            "state": self.state,
+            "code": self.code,
+            "message": self.message,
+        }
+
+    def record_login_status(self, state, code, message):
+        self.state = state
+        self.code = code
+        self.message = message
+
+    def start_login(self):
+        self.login_in_progress = True
+        self.state = "login_pending"
+        self.code = "XHS_LOGIN_STARTED"
+        return "XHS_LOGIN_STARTED"
+
+    def restart(self):
+        self.state = "unknown"
+        self.code = "XHS_AUTH_RECHECK_PENDING"
+        return "XHS_RESTARTED"
 
 
 def test_skill_source_permissions_and_owner_only_operations_projection(tmp_path):

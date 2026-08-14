@@ -437,3 +437,5 @@ Windows 本机可能因为系统临时目录或 `.pytest_cache` 权限导致普�
 - 自然语言“更新技能仓库”已通过受控 `sync_skills` Tool 和 `/skills sync` 命令进入当前基线。
 
 当前闭环是配置来源、同步到 `extends`、source 状态与健康、指纹索引、actor 可见性、同步审计、Web 管理、按需读取说明，以及对显式 runtime 的正式可观测执行。周期轮询、签名/依赖声明和用户私有覆盖层仍不在当前范围。
+
+Part 19 已在官方 `skill_repo` 增加 `travel-planner`：它通过现有 source sync 进入 `extends/zhice-official`，先由 `load_skills` 读取完整说明，再由 `run_skill` 执行严格 `params_schema` 的纯计算 optimizer；旅行外部查询与计划持久化不进入 SkillLoader。当前应用口径见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。

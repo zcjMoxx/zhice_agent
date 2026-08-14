@@ -90,6 +90,26 @@ class JsonlSessionStore:
                 file.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
                 file.write("\n")
 
+    def replace(self, session_id: str, messages: list[Message]) -> None:
+        """Atomically replace one session message file while preserving metadata."""
+
+        path = self._path_for(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".jsonl.tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as file:
+            for message in messages:
+                record = self._record_from_message(message)
+                file.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+                file.write("\n")
+        temporary.replace(path)
+
+    def update_metadata(self, session_id: str, values: dict[str, Any]) -> None:
+        """Merge bounded application metadata into the Session sidecar."""
+
+        metadata = self._read_metadata(session_id)
+        metadata.update(values)
+        self._write_metadata(session_id, metadata)
+
     def clear(self, session_id: str) -> None:
         """Delete the persisted JSONL file for a session if it exists."""
 

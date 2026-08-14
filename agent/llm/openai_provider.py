@@ -12,8 +12,10 @@ from urllib import error, request
 from agent.protocols.llm import (
     LLMConfigurationError,
     LLMEndpoint,
+    LLMGenerationOptions,
     LLMProviderError,
     LLMResponse,
+    LLMResponseFormat,
 )
 
 _ALLOWED_MESSAGE_KEYS = {"role", "content", "tool_calls", "tool_call_id", "name"}
@@ -27,18 +29,24 @@ class OpenAIProvider:
         self,
         endpoint: LLMEndpoint,
         urlopen: Callable[..., Any] | None = None,
-        timeout: float = 60.0,
+        timeout: float | None = None,
     ):
         """Store endpoint config and injectable HTTP transport for tests."""
 
         self.endpoint = endpoint
         self._urlopen = urlopen or _default_urlopen
-        self._timeout = min(timeout, endpoint.request_timeout_seconds)
+        self._timeout = (
+            endpoint.request_timeout_seconds
+            if timeout is None
+            else min(timeout, endpoint.request_timeout_seconds)
+        )
 
     def chat(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: LLMResponseFormat | None = None,
+        generation_options: LLMGenerationOptions | None = None,
     ) -> LLMResponse:
         """Send one chat completion request to an OpenAI-compatible endpoint."""
 
@@ -47,10 +55,17 @@ class OpenAIProvider:
             "model": self.endpoint.model,
             "messages": [_clean_message(message) for message in messages],
             "max_tokens": self.endpoint.max_tokens,
-            "temperature": self.endpoint.temperature,
+            "temperature": (
+                generation_options.temperature
+                if generation_options is not None
+                and generation_options.temperature is not None
+                else self.endpoint.temperature
+            ),
         }
         if tools:
             payload["tools"] = tools
+        if response_format is not None:
+            payload["response_format"] = response_format.to_openai()
 
         raw = self._post_json("chat/completions", payload, api_key)
         return _parse_openai_response(raw, self.endpoint.model, endpoint=self.endpoint)

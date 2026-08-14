@@ -28,7 +28,11 @@ def test_loads_stdio_http_sse_and_env_credentials(tmp_path, monkeypatch):
                         "url": "https://example.com/mcp",
                         "headers": {"Authorization": "Bearer ${MCP_TEST_TOKEN}"},
                     },
-                    "legacy": {"url": "https://example.com/sse", "transport": "sse"},
+                    "legacy": {
+                        "url": "https://example.com/sse",
+                        "transport": "sse",
+                        "proxy_mode": "environment",
+                    },
         },
     )
 
@@ -36,6 +40,8 @@ def test_loads_stdio_http_sse_and_env_credentials(tmp_path, monkeypatch):
 
     assert [spec.transport for spec in specs] == ["stdio", "streamable_http", "sse"]
     assert specs[1].headers["Authorization"] == "Bearer secret-token"
+    assert specs[1].proxy_mode == "direct"
+    assert specs[2].proxy_mode == "environment"
     assert specs[0].cwd == "work"
 
 
@@ -53,4 +59,32 @@ def test_rejects_unknown_fields(tmp_path):
     _write_mcp(config_dir, {"local": {"command": "python", "tools": []}})
 
     with pytest.raises(McpConfigError, match="Unknown MCP config fields"):
+        load_mcp_server_specs(config_dir)
+
+
+@pytest.mark.parametrize("proxy_mode", ["auto", "", True])
+def test_rejects_invalid_remote_proxy_mode(tmp_path, proxy_mode):
+    config_dir = tmp_path / "config"
+    _write_mcp(
+        config_dir,
+        {
+            "remote": {
+                "url": "https://example.com/mcp",
+                "proxy_mode": proxy_mode,
+            }
+        },
+    )
+
+    with pytest.raises(McpConfigError, match="proxy_mode"):
+        load_mcp_server_specs(config_dir)
+
+
+def test_rejects_proxy_mode_for_stdio_server(tmp_path):
+    config_dir = tmp_path / "config"
+    _write_mcp(
+        config_dir,
+        {"local": {"command": "python", "proxy_mode": "environment"}},
+    )
+
+    with pytest.raises(McpConfigError, match="only valid for remote"):
         load_mcp_server_specs(config_dir)

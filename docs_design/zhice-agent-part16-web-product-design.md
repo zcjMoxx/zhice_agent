@@ -198,3 +198,5 @@ Part 16 完成时：
 Part 17 负责运行可靠性、系统级诊断、MCP 动态可靠性和私有镜像部署；它复用 Part 16 的 Vue 页面和组件，不建立第二套管理界面。当前设计见 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`。
 
 Part 18 已复用 Part 16 的管理后台结构落地 Skill source 状态页和 Owner-only 服务器 Ops 投影；主 Web 只显示配置化独立 Ops URL，不代理终端字节流或宿主机操作。
+
+Part 19 已复用同一 Vue Router、Pinia、登录、主题、API/WebSocket client 和 RuntimeEvent reducer增加 `/travel`：结构化表单仍发送正常 Session 消息，计划正文通过 actor-scoped API 读取；地图脚本失败时保留文字路线，来源抽屉只安全跳转 HTTP(S)。当前应用口径见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。

@@ -952,3 +952,5 @@ Part 13 关闭必须满足：
 - Part 18 独立 SkillExecutor、`skill.*` 和 ProgressSink 已落地；Part 13 只负责能力交集，不拥有执行器。
 
 第一阶段先完成并行 manager/worker 闭环及真实工具安全边界，再根据运行数据扩展。
+
+Part 19 已增加仓库模板 `travel-research` Profile：shared-readonly，只允许高德、Tavily、12306、Open-Meteo 和 xhs-readonly 五类 MCP server pattern，最多三个 child、depth 仍为 1。quick 模式明确不委派；deep 模式只做交通天气、住宿景点、攻略避坑三个独立分支，部分失败由父 Agent写入 unknowns 后继续 fan-in。当前应用口径见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。

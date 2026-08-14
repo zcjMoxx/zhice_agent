@@ -18,6 +18,12 @@ from agent.protocols.tool import ToolResult
 from agent.tools.base import truncate_text
 
 MAX_STRUCTURED_RESULT_CHARS = 16000
+MAX_STRUCTURED_LIST_ITEMS = 5
+MAX_STRUCTURED_STRING_CHARS = 1000
+MAX_STRUCTURED_OUTPUT_CHARS = 10000
+_LARGE_CONTENT_KEYS = frozenset(
+    {"raw_content", "rawcontent", "raw_html", "html", "images", "image_descriptions"}
+)
 
 
 def normalize_mcp_result(
@@ -33,13 +39,24 @@ def normalize_mcp_result(
     parts: list[str] = []
     artifacts: list[str] = []
     artifact_bytes = 0
+    structured_truncated = False
     structured = getattr(result, "structuredContent", None)
     if structured is None:
         structured = getattr(result, "structured_content", None)
     if structured is not None:
         encoded = json.dumps(structured, ensure_ascii=False, separators=(",", ":"), default=str)
         if len(encoded) > MAX_STRUCTURED_RESULT_CHARS:
-            return _error("MCP structured output exceeds the size limit", "MCP_OUTPUT_TOO_LARGE")
+            structured = _compact_structured(structured)
+            encoded = json.dumps(structured, ensure_ascii=False, separators=(",", ":"), default=str)
+            if len(encoded) > MAX_STRUCTURED_OUTPUT_CHARS:
+                structured = {
+                    "truncated": True,
+                    "preview": encoded[: MAX_STRUCTURED_OUTPUT_CHARS - 100],
+                }
+                encoded = json.dumps(
+                    structured, ensure_ascii=False, separators=(",", ":"), default=str
+                )
+            structured_truncated = True
         parts.append(encoded)
     try:
         for index, item in enumerate(getattr(result, "content", ()) or ()):
@@ -101,6 +118,7 @@ def normalize_mcp_result(
         "code": "MCP_REMOTE_ERROR" if is_error else "MCP_OK",
         "server_id": server_id,
         "artifacts": artifacts,
+        **({"structured_truncated": True} if structured_truncated else {}),
         **truncation,
     }
     return ToolResult(output=output, is_error=is_error, metadata=metadata)
@@ -115,6 +133,33 @@ def _model_dump(value: Any) -> dict[str, Any]:
         return value
     method = getattr(value, "model_dump", None)
     return method(exclude_none=True) if callable(method) else {}
+
+
+def _compact_structured(value: Any, *, depth: int = 0) -> Any:
+    """Preserve useful JSON shape while removing high-volume untrusted fields."""
+
+    if depth > 8:
+        return "[truncated]"
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).casefold().replace("-", "_")
+            if normalized in _LARGE_CONTENT_KEYS:
+                continue
+            compact[str(key)] = _compact_structured(item, depth=depth + 1)
+        if depth == 0:
+            compact["truncated"] = True
+        return compact
+    if isinstance(value, list | tuple):
+        return [
+            _compact_structured(item, depth=depth + 1)
+            for item in value[:MAX_STRUCTURED_LIST_ITEMS]
+        ]
+    if isinstance(value, str) and len(value) > MAX_STRUCTURED_STRING_CHARS:
+        return value[:MAX_STRUCTURED_STRING_CHARS] + "…"
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    return str(value)[:MAX_STRUCTURED_STRING_CHARS]
 
 
 def _mime_suffix(mime: str, fallback: str) -> str:

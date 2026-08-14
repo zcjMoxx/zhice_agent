@@ -39,4 +39,19 @@ describe("ZhiCeWebSocket", () => {
     expect(sockets).toHaveLength(2);
     expect(JSON.parse(sockets[1].sent.at(-1)!)).toEqual({ type: "message", session_id: "session-a", content: "hello", model: "model-a" });
   });
+
+  it("labels travel application sessions explicitly", async () => {
+    const sockets: MockSocket[] = [];
+    vi.stubGlobal("WebSocket", class extends MockSocket {
+      constructor(url: string) { super(url); sockets.push(this); }
+      static OPEN = MockSocket.OPEN;
+    });
+    const client = new ZhiCeWebSocket();
+    const pending = client.createSession("travel");
+    await vi.waitFor(() => expect(sockets[0].sent).toHaveLength(2));
+
+    expect(JSON.parse(sockets[0].sent[1])).toEqual({ type: "new_session", application: "travel" });
+    sockets[0].dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ event: "session_created", data: { session_id: "travel-one" } }) }));
+    await expect(pending).resolves.toBe("travel-one");
+  });
 });

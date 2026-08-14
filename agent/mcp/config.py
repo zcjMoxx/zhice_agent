@@ -5,10 +5,10 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
-from agent.protocols.mcp import McpOAuthSpec, McpServerSpec
+from agent.protocols.mcp import McpOAuthSpec, McpProxyMode, McpServerSpec
 from agent.runtime_config import load_runtime_section
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -21,6 +21,7 @@ _SERVER_FIELDS = {
     "env",
     "url",
     "headers",
+    "proxy_mode",
     "transport",
     "type",
     "oauth",
@@ -94,6 +95,11 @@ def _parse_server(server_id: str, raw: Any) -> McpServerSpec:
         raise McpConfigError(f"stdio MCP server {server_id!r} requires command")
     if transport != "stdio" and not _valid_http_url(url):
         raise McpConfigError(f"Remote MCP server {server_id!r} requires an http(s) URL")
+    proxy_mode = _proxy_mode(raw.get("proxy_mode"), server_id)
+    if transport == "stdio" and "proxy_mode" in raw:
+        raise McpConfigError(
+            f"MCP server {server_id!r} proxy_mode is only valid for remote transports"
+        )
     args = raw.get("args", [])
     if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
         raise McpConfigError(f"MCP server {server_id!r} args must be a string array")
@@ -111,6 +117,7 @@ def _parse_server(server_id: str, raw: Any) -> McpServerSpec:
         env=_string_map(raw.get("env"), f"{server_id}.env"),
         url=_expand(url, f"{server_id}.url"),
         headers=_string_map(raw.get("headers"), f"{server_id}.headers"),
+        proxy_mode=proxy_mode,
         oauth=_parse_oauth(server_id, raw.get("oauth")),
         startup_timeout_seconds=_positive_number(raw.get("startup_timeout_seconds"), 15, server_id),
         connect_timeout_seconds=_positive_number(raw.get("connect_timeout_seconds"), 15, server_id),
@@ -170,6 +177,16 @@ def _positive_number(raw: Any, default: float, server_id: str) -> float:
     if value <= 0 or value > 3600:
         raise McpConfigError(f"MCP timeout for {server_id!r} must be within (0, 3600]")
     return value
+
+
+def _proxy_mode(raw: Any, server_id: str) -> McpProxyMode:
+    if raw is None:
+        return "direct"
+    if not isinstance(raw, str) or raw.strip().lower() not in {"direct", "environment"}:
+        raise McpConfigError(
+            f"MCP proxy_mode for {server_id!r} must be 'direct' or 'environment'"
+        )
+    return cast(McpProxyMode, raw.strip().lower())
 
 
 def _reject_unknown(raw: dict[str, Any], allowed: set[str], field: str) -> None:

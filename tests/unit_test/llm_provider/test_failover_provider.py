@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 
 from agent.llm.failover_provider import EndpointFailoverProvider
-from agent.protocols.llm import LLMEndpoint, LLMProviderError, LLMResponse
+from agent.protocols.llm import (
+    LLMEndpoint,
+    LLMProviderError,
+    LLMResponse,
+    LLMResponseFormat,
+)
 
 
 def test_failover_provider_tries_preferred_endpoint_first():
@@ -43,6 +48,71 @@ def test_failover_provider_falls_back_by_priority_after_failure():
     assert response.content == "from-first"
     assert calls == ["slow", "first"]
     assert response.metadata["attempted_endpoints"] == ["slow", "first"]
+
+
+def test_failover_provider_preserves_response_format_across_endpoints():
+    """Structured output must survive primary failure and backup selection."""
+
+    calls = []
+    response_format = LLMResponseFormat(
+        name="travel_requirement_draft",
+        schema={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+
+    def factory(endpoint):
+        class Provider:
+            def chat(self, messages, tools=None, response_format=None):
+                del messages, tools
+                calls.append((endpoint.name, response_format))
+                if endpoint.name == "primary":
+                    raise LLMProviderError("failed")
+                return LLMResponse(content="{}")
+
+        return Provider()
+
+    provider = EndpointFailoverProvider(
+        [_endpoint("primary", "model-a"), _endpoint("backup", "model-b")],
+        provider_factory=factory,
+    )
+
+    provider.chat(
+        messages=[{"role": "user", "content": "hello"}],
+        response_format=response_format,
+    )
+
+    assert calls == [("primary", response_format), ("backup", response_format)]
+
+
+def test_failover_provider_preserves_generation_options_across_endpoints():
+    """Call-scoped deterministic settings must survive endpoint failover."""
+
+    from agent.protocols.llm import LLMGenerationOptions
+
+    calls = []
+    options = LLMGenerationOptions(temperature=0.0)
+
+    def factory(endpoint):
+        class Provider:
+            def chat(self, messages, tools=None, generation_options=None):
+                del messages, tools
+                calls.append((endpoint.name, generation_options))
+                if endpoint.name == "primary":
+                    raise LLMProviderError("failed")
+                return LLMResponse(content="{}")
+
+        return Provider()
+
+    provider = EndpointFailoverProvider(
+        [_endpoint("primary", "model-a"), _endpoint("backup", "model-b")],
+        provider_factory=factory,
+    )
+
+    provider.chat(
+        messages=[{"role": "user", "content": "hello"}],
+        generation_options=options,
+    )
+
+    assert calls == [("primary", options), ("backup", options)]
 
 
 def test_failover_provider_reset_returns_to_priority_order():

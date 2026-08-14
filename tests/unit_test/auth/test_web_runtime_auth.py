@@ -35,6 +35,20 @@ def test_web_runtime_model_preference_isolated_by_session_and_user_directory(tmp
     assert admin.id != viewer.id
 
 
+def test_web_runtime_reads_default_model_catalog_without_creating_a_session(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "state" / "auth.sqlite3")
+    store.initialize_schema()
+    viewer = store.create_user("viewer", "Viewer", "viewer-password")
+    runtime = _runtime(tmp_path, store)
+    actor = store.actor_for_user(viewer.id, channel="web")
+
+    state = runtime.model_state(actor, "")
+
+    assert state.current_model == "model-a"
+    assert state.models == ["model-a", "model-b"]
+    assert store.session_index_list(viewer.id) == []
+
+
 def test_same_model_preference_does_not_emit_switched_event(tmp_path, caplog):
     store = SQLiteAuthStore(tmp_path / "state" / "auth.sqlite3")
     store.initialize_schema()

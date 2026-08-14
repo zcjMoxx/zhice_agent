@@ -145,13 +145,14 @@ Runtime 管连接、发现、调用、Elicitation、重连和关闭；Catalog �
 | --- | --- |
 | `command` / `args` / `cwd` / `env` | stdio |
 | `url` / `headers` | Streamable HTTP 或 SSE |
+| `proxy_mode` | 远程 transport 的 `direct`（默认）或显式 `environment` |
 | `transport` / `type` | 显式指定 transport |
 | `oauth` | access/refresh token、token URL 和 client credential |
 | `startup_timeout_seconds` | 默认 15 |
 | `connect_timeout_seconds` | 默认 15 |
 | `call_timeout_seconds` | 默认 60 |
 
-存在 `command` 时识别为 stdio；存在 `url` 且未指定 transport 时识别为 Streamable HTTP；明确写 `sse` 时使用 SSE。Server 专有参数放在 args、env、headers 或 oauth。未识别字段返回明确配置错误。
+存在 `command` 时识别为 stdio；存在 `url` 且未指定 transport 时识别为 Streamable HTTP；明确写 `sse` 时使用 SSE。远程 transport 默认 `proxy_mode: direct`，不会因启动终端残留代理变量而改变路由；确需读取 httpx 支持的代理、CA 或 netrc 环境时必须显式写 `proxy_mode: environment`。Server 专有参数放在 args、env、headers 或 oauth。未识别字段返回明确配置错误。
 
 其它 MCP Client 的 JSON 配置可以直接使用常见字段；TOML、YAML 或客户端专有占位符需要先转换为 JSON。
 
@@ -330,6 +331,8 @@ mcp.reconnect_started
 mcp.reconnect_done
 mcp.runtime_closed
 ```
+
+远程 Server 在初始化或 transport 异常后不得永久停留在 degraded。Runtime 按 1/2/4/8/16/30 秒上限的有界指数退避自动重连；手动 reconnect、shutdown 和新排队请求可打断等待。当前失败 Tool 调用不自动重放。日志记录稳定 reason code、顶层异常类型和脱敏叶子异常类型，详细口径见 `2026-08-12-mcp-degraded-auto-recovery-design.md`。
 
 所有 MCP Tool 调用和 artifact 导入进入 Runtime Activity。stdio sandbox 拒绝、artifact 路径/配额拒绝、credential 配置变更和 Elicitation 用户响应进入 Security Audit。远端 Tool 的业务效果由外部系统审计。
 
@@ -510,3 +513,4 @@ docs_design/zhice-agent-overall-design.md
 - Part 9 提供 actor、Runtime Activity 和 Security Audit。
 - Part 10 提供普通用户目录与 Owner/workspace operator 边界。
 - Part 12 为 MCP Tool 和内置 Tool 增加统一 `tool.started/completed/failed` RuntimeEvent，并通过真实 post Hook 为 MCP 归一化结果补充受限业务展示 metadata；pre Hook 修改参数后仍重新经过核心 schema、RBAC 和 MCP/ArtifactGateway 边界，不能改变“不自动重放当前远端调用”的规则。当前设计见 `docs_design/zhice-agent-part12-hooks-design.md`。
+- Part 19 复用本 Part 的 workspace-shared Runtime 和 actor-scoped Tool adapter 接入高德、Tavily、12306，并交付 Open-Meteo 与小红书只读适配。小红书写操作在远端 Catalog 层不存在；任一旅行 Server degraded 不改变其它 MCP、内置 Tool 或普通聊天。当前应用口径见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。

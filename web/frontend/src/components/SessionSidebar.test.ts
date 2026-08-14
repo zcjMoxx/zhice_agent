@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, api } from "@/api/client";
 import { useAuthStore } from "@/stores/auth";
 import { useSessionStore } from "@/stores/sessions";
+import { useTravelStore } from "@/stores/travel";
 import SessionSidebar from "./SessionSidebar.vue";
 
 describe("SessionSidebar", () => {
@@ -107,6 +108,19 @@ describe("SessionSidebar", () => {
     expect(wrapper.get('[role="alert"]').text()).toContain("删除暂时失败");
     expect(wrapper.get(".danger-button").attributes("disabled")).toBeUndefined();
     expect(wrapper.text()).toContain("微信会话");
+  });
+
+  it("shows one unread travel completion badge", () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.user = { id: "u1", username: "owner", display_name: "系统所有者", status: "active", roles: ["owner"], can_manage_admins: true };
+    useTravelStore().unreadCompleted = true;
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/", component: { template: "<div />" } }, { path: "/travel", component: { template: "<div />" } }] });
+    const wrapper = mount(SessionSidebar, { global: { plugins: [pinia, router] } });
+
+    expect(wrapper.get(".travel-unread-badge").text()).toBe("1");
+    expect(wrapper.get(".travel-unread-badge").attributes("aria-label")).toContain("1 条");
   });
 
 });

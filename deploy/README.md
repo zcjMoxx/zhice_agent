@@ -84,7 +84,7 @@ HOME=/home/zhice
 /home/zhice/.zhice/config/models.json
 ```
 
-镜像不设置 `ZHICE_AGENT_WORKSPACE` 和 `ZHICE_AGENT_SKILL_REPO`；通用默认规则自然得到 `/home/zhice/.zhice`，Skill 同步器根据镜像内代码位置得到 `/app/skill_repo`。镜像声明 `contexts`、`state`、`logs`、`extends` 四个通用运行数据 volume，并为运行时扫码生成的微信账号凭据声明独立的 `config/channels/weixin/accounts` volume。一个 workspace 只允许一个 Gateway 容器写入。
+镜像不设置 `ZHICE_AGENT_WORKSPACE` 和 `ZHICE_AGENT_SKILL_REPO`；通用默认规则自然得到 `/home/zhice/.zhice`，Skill 同步器根据镜像内代码位置得到 `/app/skill_repo`。镜像声明 `contexts`、`state`、`travel`、`logs`、`extends` 运行数据 volume，其中 `zhice-travel-data` 专门持久化已保存的 TravelPlanV1；并为运行时扫码生成的微信账号凭据声明独立的 `config/channels/weixin/accounts` volume。一个 workspace 只允许一个 Gateway 容器写入。
 
 私有镜像里的 `.env`、`config.yml`、`models.json` 现在只作为云服务器首次迁移和灾难恢复基线。云端第一次执行 `deploy.sh` 时，会在不显示正文的前提下，从受控 Digest 临时容器复制并校验三份文件，再原子建立宿主机权威目录：
 
@@ -216,6 +216,142 @@ sudo sh restart.sh
 共享 `pipelines/invoke-cloud-release.ps1` 通过 Python Paramiko helper 自动同步六个远端运维脚本和公开 Ops 安装资产、执行部署、安装/升级 root-owned Ops 服务并读取远端状态。部署与 status 成功后，同一 Paramiko 连接会从云服务器执行受控 `curl --fail --silent --show-error --max-time 20` 访问 `${PublicUrl}/health`，解析 JSON 并强制要求 `status=ok`；该远端公网 HTTPS 检查失败仍会使发布失败。本机随后再做一次附加 health 检查：成功会明确输出 passed；若本机代理、TUN DNS 或 TLS 环境异常，或返回状态异常，只输出 warning，因为远端公网链路已经通过。`RemoteOpsDir` 不是 Docker 部署目录：镜像、容器和命名卷仍由 Docker 管理。任一 build、smoke、push、SSH、远端容器健康、Ops 安装或远端公网 HTTPS 步骤失败都会以非零退出码结束；容器健康失败由 `deploy.sh` 恢复上一容器，数据卷不会删除。
 
 也可以用 `docker compose -f deploy/docker-compose.yml up -d --build` 做单机开发验证；正式云端发布仍应使用 digest。
+
+## 旅行外部服务
+
+私有镜像固定包含：
+
+- `mcp-amap`，来源 `@amap/amap-maps-mcp-server@0.0.8`；
+- `12306-mcp`，固定 `12306-mcp@0.3.1`，只用于查询；
+- RedNote 兼容的小红书 MCP/Login Linux 二进制，固定上游提交 `c2fc4dde2c45f26f6f9de288b7423a2bdfa7af1c` 并应用仓库内可审计 patch；
+- 小红书内置浏览器所需 Debian 运行库。
+
+### 准备私有运行配置
+
+本机 durable Secret 写在 `${ZHICE_AGENT_WORKSPACE}/config/.env`。至少确认：
+
+```dotenv
+AMAP_MAPS_API_KEY=<高德 Web 服务 Key>
+TAVILY_API_KEY=<Tavily API Key>
+```
+
+高德浏览器地图使用另外一组构建凭据：`VITE_AMAP_JS_API_KEY` 和 `VITE_AMAP_JS_SECURITY_CODE`。它们与 `AMAP_MAPS_API_KEY` 不同，不能混用。两项都必须写入 Git 忽略的 `deploy/private/.env`；`build-image.ps1` 会在缺失、空值或重复时前置失败，并仅将它们注入 Vite web-build。真实值不写公开模板或构建摘要。直接使用 Compose 的 `--build` 时，需要先把两项投影为当前进程环境变量；标准本地/云端流水线会从私有文件安全读取。
+
+服务器使用镜像内固定 binary，`deploy/private/config.yml` 的旅行 MCP 形态应为：
+
+```yaml
+mcp:
+  servers:
+    open-meteo:
+      command: python
+      args: [-m, integrations.open_meteo_mcp.server]
+    amap-maps:
+      command: mcp-amap
+      args: []
+      env:
+        AMAP_MAPS_API_KEY: "${AMAP_MAPS_API_KEY}"
+    tavily:
+      url: https://mcp.tavily.com/mcp
+      transport: streamable_http
+      headers:
+        Authorization: "Bearer ${TAVILY_API_KEY}"
+    12306:
+      command: 12306-mcp
+      args: []
+    xhs-readonly:
+      command: python
+      args: [-m, integrations.xhs_readonly_mcp.server]
+      env:
+        XHS_READONLY_UPSTREAM_URL: "${XHS_READONLY_UPSTREAM_URL}"
+        XHS_READONLY_HTTP_HOST_ALLOWLIST: "${XHS_READONLY_HTTP_HOST_ALLOWLIST}"
+        XHS_READONLY_COOKIE_DIR: "${XHS_READONLY_COOKIE_DIR}"
+        XHS_READONLY_COOKIE_FILE: "${XHS_READONLY_COOKIE_FILE}"
+        XHS_READONLY_TIMEOUT_SECONDS: "120"
+
+travel:
+  enabled: true
+  default_mode: quick
+  max_search_results: 8
+  max_evidence_items: 40
+  deep_subagent_count: 3
+  xhs_readonly_enabled: true
+  max_plan_bytes: 524288
+```
+
+服务器 `.env` 中的小红书容器值固定为：
+
+```dotenv
+XHS_READONLY_UPSTREAM_URL=http://zhice-xhs-readonly:18060/mcp
+XHS_READONLY_HTTP_HOST_ALLOWLIST=zhice-xhs-readonly
+XHS_READONLY_COOKIE_DIR=/home/zhice/.zhice/integrations/xhs/data
+XHS_READONLY_COOKIE_FILE=/home/zhice/.zhice/integrations/xhs/data/cookies.json
+```
+
+本地源码运行仍可使用 `npx -y @amap/amap-maps-mcp-server@0.0.8` 和 `npx -y 12306-mcp@0.3.1`；不要把这个需要在线解析的形态复制到服务器私有配置。
+
+### 首次迁移小红书 Cookie
+
+小红书 Cookie 不进入镜像或 `deploy/private/`。在本地完成登录并确认只读 smoke 通过后，使用受控 SSH/SCP 上传到服务器 root-only 种子路径：
+
+```powershell
+scp "$env:USERPROFILE\.zhice\integrations\xhs\data\cookies.json" `
+  <ssh-user>@<server>:/tmp/zhice-xhs-cookies.json
+ssh <ssh-user>@<server> `
+  "sudo install -d -o root -g root -m 0700 /etc/zhice-agent/xhs && sudo install -o root -g root -m 0600 /tmp/zhice-xhs-cookies.json /etc/zhice-agent/xhs/cookies.json && rm -f /tmp/zhice-xhs-cookies.json"
+```
+
+不要把 Cookie 内容粘贴到终端参数、日志或对话中。`deploy.sh` 只在 `zhice-xhs-data` volume 尚无有效 `cookies.json` 时导入该种子；后续发布不会用旧种子覆盖 sidecar volume 中的新登录态。
+
+### 容器边界
+
+云发布仍只推送一个 `zhice-agent@sha256:...` 私有镜像。服务器运行两个固定容器：
+
+- `zhice-agent`：Gateway 与 Python 只读适配器；
+- `zhice-xhs-readonly`：浏览器自动化 sidecar。
+
+两个容器加入固定 `zhice-travel` bridge network。sidecar 容器监听容器内 `18060`，没有 `-p`，安全组和反向代理都不应发布此端口。Cookie volume 在 sidecar 中读写，在主容器中只读；浏览器 cache 使用独立 volume，避免每次 Digest 发布重新下载约 140～190MB 浏览器。
+
+受限运维 `restart` 会先重启 sidecar 并等待其 `18060` 就绪，再重启主容器。Digest 发布若在主容器启动或健康检查阶段失败，会同时回滚主容器与 sidecar；首次部署无旧版本可回滚时会移除失败容器，避免保留不完整拓扑。Cookie seed 临时容器由退出 trap 清理，已有持久 Cookie 始终不会被旧 seed 覆盖。
+
+### 发布后验证
+
+完整多日旅行计划在 optimizer 通过后可能需要较长的结构化输出时间。服务器 `models.json` 中所有启用 endpoint 应统一设置：
+
+```json
+{
+  "request_timeout_seconds": 240,
+  "total_deadline_seconds": 300,
+  "max_attempts": 1
+}
+```
+
+反向代理、平台请求和健康检查不得把旅行规划请求截断在 300 秒以内；客户端可使用异步事件流等待结果。不要只修改一个 endpoint，因为 Failover 总 deadline 取所有启用 endpoint 的最小值。
+
+正常的一键发布入口不变。完成后在服务器检查：
+
+```sh
+sudo sh <RemoteOpsDir>/current/status.sh
+sudo docker inspect zhice-agent zhice-xhs-readonly \
+  --format '{{.Name}} {{.State.Status}} {{.Config.Image}}'
+sudo docker network inspect zhice-travel \
+  --format '{{range .Containers}}{{.Name}} {{end}}'
+sudo docker volume inspect zhice-travel-data zhice-xhs-data zhice-xhs-cache >/dev/null
+sudo docker port zhice-xhs-readonly
+```
+
+最后一条必须无输出，证明 sidecar 没有发布宿主机端口。随后通过主应用运行真实登录状态、搜索和详情 smoke。若返回 `TRAVEL_SOURCE_AUTH_REQUIRED`，使用服务器内兼容登录程序完成一次扫码：
+
+```sh
+sudo docker run --rm -it \
+  --network zhice-travel \
+  -e COOKIES_PATH=/home/zhice/.zhice/integrations/xhs/data/cookies.json \
+  -v zhice-xhs-data:/home/zhice/.zhice/integrations/xhs/data \
+  -v zhice-xhs-cache:/home/zhice/.cache/xiaohongshu-mcp \
+  --entrypoint /opt/zhice/bin/xiaohongshu-login-rednote \
+  "$(sudo docker inspect --format '{{.Config.Image}}' zhice-xhs-readonly)"
+```
+
+无 GUI 服务器优先从已验证本地 Cookie 做首次迁移；CLI 登录是否能显示可扫码内容取决于上游当前版本，不能把未实际显示的二维码宣称为成功。
 
 ## 独立受限服务器 Ops
 

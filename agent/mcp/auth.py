@@ -54,6 +54,7 @@ class McpCredentialManager:
                 spec.server_id,
                 spec.oauth,
                 spec.connect_timeout_seconds,
+                trust_env=spec.proxy_mode == "environment",
             )
         except McpAuthError:
             previous = self.status_for(spec)
@@ -73,6 +74,8 @@ class McpCredentialManager:
         server_id: str,
         oauth: McpOAuthSpec,
         timeout: float,
+        *,
+        trust_env: bool,
     ) -> str:
         state = self._tokens.get(server_id)
         if state is None:
@@ -108,7 +111,7 @@ class McpCredentialManager:
         if oauth.scope:
             payload["scope"] = oauth.scope
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=trust_env) as client:
                 response = await client.post(oauth.token_url, data=payload)
                 response.raise_for_status()
                 body = response.json()

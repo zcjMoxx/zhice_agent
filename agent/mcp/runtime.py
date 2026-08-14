@@ -34,6 +34,7 @@ from agent.protocols.mcp import (
     McpInteractionNotifier,
     McpInteractionRequest,
     McpInteractionResponse,
+    McpProxyMode,
     McpRuntimeStatsSnapshot,
     McpServerSpec,
     McpServerStatus,
@@ -44,6 +45,7 @@ from agent.protocols.tool import Tool, ToolResult
 
 mcp_logger = logging.getLogger("zcagent.agent.mcp")
 MAX_TOOLS_TOTAL = 128
+MCP_RECONNECT_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 _RECONNECT = object()
 
 
@@ -302,6 +304,7 @@ class McpRuntime:
         *,
         session_id: str = "",
         interaction_notifier: McpInteractionNotifier | None = None,
+        result_observer=None,
     ) -> list[Tool]:
         """Bind every valid discovered Tool to the current actor."""
 
@@ -315,6 +318,7 @@ class McpRuntime:
                 files_dir=Path(files_dir),
                 session_id=session_id,
                 interaction_notifier=interaction_notifier,
+                result_observer=result_observer,
             )
             for descriptor in self.snapshot().tools
         ]
@@ -460,6 +464,7 @@ class McpRuntime:
 
     async def _server_worker(self, connection: _ServerConnection) -> None:
         first_attempt = True
+        consecutive_failures = 0
         while not self._closed:
             connection.status = McpServerStatus(connection.spec.server_id, "connecting")
             self._record_connection_state(connection.spec.server_id, "connecting")
@@ -493,6 +498,7 @@ class McpRuntime:
                     if first_attempt:
                         connection.initial_ready.set()
                         first_attempt = False
+                    consecutive_failures = 0
                     reconnect = await self._serve_calls(connection, session)
                     if not reconnect:
                         return
@@ -516,18 +522,34 @@ class McpRuntime:
                     "mcp.server_degraded",
                     server_id=connection.spec.server_id,
                     error_type=type(exc).__name__,
+                    leaf_error_type=_leaf_exception_type(exc),
+                    reason_code=_exception_code(exc),
                 )
                 if first_attempt:
                     connection.initial_ready.set()
                     first_attempt = False
-                request = await self._next_request(connection)
-                if request is None:
-                    return
-                if request is _RECONNECT:
+                delay = MCP_RECONNECT_BACKOFF_SECONDS[
+                    min(consecutive_failures, len(MCP_RECONNECT_BACKOFF_SECONDS) - 1)
+                ]
+                consecutive_failures += 1
+                log_event(
+                    mcp_logger,
+                    logging.INFO,
+                    "mcp.server_reconnect_scheduled",
+                    server_id=connection.spec.server_id,
+                    delay_seconds=delay,
+                    attempt=consecutive_failures,
+                )
+                wake = await self._next_request(connection, timeout=delay)
+                if wake is None:
+                    if self._closed:
+                        return
+                    continue
+                if wake is _RECONNECT:
                     connection.reconnect_requested.clear()
                     continue
-                if not request.future.done():
-                    request.future.set_result(
+                if not wake.future.done():
+                    wake.future.set_result(
                         _error("MCP Server is unavailable", "MCP_SERVER_UNAVAILABLE")
                     )
             finally:
@@ -618,7 +640,12 @@ class McpRuntime:
         )
         return await future
 
-    async def _next_request(self, connection: _ServerConnection) -> _CallRequest | object | None:
+    async def _next_request(
+        self,
+        connection: _ServerConnection,
+        *,
+        timeout: float | None = None,
+    ) -> _CallRequest | object | None:
         """Wake a worker for either a queued call, shutdown, or reconnect."""
 
         queue_task = asyncio.create_task(connection.queue.get())
@@ -626,9 +653,12 @@ class McpRuntime:
         done, pending = await asyncio.wait(
             {queue_task, reconnect_task},
             return_when=asyncio.FIRST_COMPLETED,
+            timeout=timeout,
         )
         for task in pending:
             task.cancel()
+        if not done:
+            return None
         if reconnect_task in done and reconnect_task.result():
             if queue_task in done:
                 request = queue_task.result()
@@ -796,11 +826,16 @@ class McpRuntime:
                         headers=headers,
                         timeout=spec.connect_timeout_seconds,
                         sse_read_timeout=max(spec.call_timeout_seconds, 300),
+                        httpx_client_factory=_sse_http_client_factory(spec.proxy_mode),
                     )
                 )
             else:
                 client = await stack.enter_async_context(
-                    httpx.AsyncClient(headers=headers, timeout=spec.connect_timeout_seconds)
+                    httpx.AsyncClient(
+                        headers=headers,
+                        timeout=spec.connect_timeout_seconds,
+                        trust_env=_trust_environment(spec.proxy_mode),
+                    )
                 )
                 read_stream, write_stream, _ = await stack.enter_async_context(
                     streamable_http_client(spec.url, http_client=client)
@@ -1059,6 +1094,43 @@ def _error(message: str, code: str, **metadata: Any) -> ToolResult:
 
 def _exception_code(exc: Exception) -> str:
     return str(getattr(exc, "code", "") or "MCP_TRANSPORT_ERROR")
+
+
+def _leaf_exception_type(exc: BaseException) -> str:
+    """Return one safe leaf type from nested ExceptionGroup instances."""
+
+    if isinstance(exc, BaseExceptionGroup):
+        for nested in exc.exceptions:
+            leaf = _leaf_exception_type(nested)
+            if leaf:
+                return leaf
+        return type(exc).__name__
+    return type(exc).__name__
+
+
+def _trust_environment(proxy_mode: McpProxyMode) -> bool:
+    """Translate the explicit MCP proxy policy into httpx semantics."""
+
+    return proxy_mode == "environment"
+
+
+def _sse_http_client_factory(proxy_mode: McpProxyMode):
+    """Build the SDK-compatible SSE client factory with explicit proxy behavior."""
+
+    def create_client(
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+            follow_redirects=True,
+            trust_env=_trust_environment(proxy_mode),
+        )
+
+    return create_client
 
 
 def _arguments_match_schema(args: dict[str, Any], schema: dict[str, Any]) -> bool:

@@ -123,6 +123,8 @@ def test_dockerfile_builds_repository_assets_and_only_private_config() -> None:
     assert "COPY prompts/ ./prompts/" in dockerfile
     assert "COPY skill_repo/ ./skill_repo/" in dockerfile
     assert "npm run build" in dockerfile
+    assert 'ARG VITE_AMAP_JS_API_KEY=""' in dockerfile
+    assert 'ARG VITE_AMAP_JS_SECURITY_CODE=""' in dockerfile
     assert "ZHICE_AGENT_SKILL_REPO=" not in dockerfile
     assert "HOME=/home/zhice" in dockerfile
     assert "ZHICE_AGENT_WORKSPACE=" not in dockerfile
@@ -168,7 +170,7 @@ def test_apt_mirror_is_optional_validated_and_shared_by_build_entrypoints() -> N
     compose = (DEPLOY / "docker-compose.yml").read_text(encoding="utf-8")
     readme = (DEPLOY / "README.md").read_text(encoding="utf-8")
 
-    assert 'ARG APT_MIRROR=""' in dockerfile
+    assert dockerfile.count('ARG APT_MIRROR=""') == 2
     assert "Invalid APT_MIRROR host" in dockerfile
     assert 's|deb.debian.org|${APT_MIRROR}|g' in dockerfile
     assert '[string]$AptMirror = ""' in build_script
@@ -179,20 +181,51 @@ def test_apt_mirror_is_optional_validated_and_shared_by_build_entrypoints() -> N
     assert "只影响 Docker 构建阶段" in readme
 
 
-def test_compose_persists_runtime_and_weixin_credentials_only() -> None:
+def test_amap_browser_credentials_are_private_build_inputs() -> None:
+    dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
+    build_script = (DEPLOY / "scripts" / "build-image.ps1").read_text(
+        encoding="utf-8"
+    )
+    compose = (DEPLOY / "docker-compose.yml").read_text(encoding="utf-8")
+    env_example = (ROOT / "config" / ".env.example").read_text(encoding="utf-8")
+
+    for name in ("VITE_AMAP_JS_API_KEY", "VITE_AMAP_JS_SECURITY_CODE"):
+        assert f'ARG {name}=""' in dockerfile
+        assert f'"--build-arg", "{name}=$' in build_script
+        assert f"{name}: ${{{name}:-}}" in compose
+        assert f"{name}=" in env_example
+    assert "function Read-DotEnvValue" in build_script
+    assert 'Read-DotEnvValue -Path $privateEnvPath' in build_script
+    assert "Missing private environment key" in build_script
+
+
+def test_compose_persists_runtime_channel_and_xhs_state_only() -> None:
     compose = (DEPLOY / "docker-compose.yml").read_text(encoding="utf-8")
     mounts = {
         "/home/zhice/.zhice/contexts",
         "/home/zhice/.zhice/state",
+        "/home/zhice/.zhice/travel",
         "/home/zhice/.zhice/logs",
         "/home/zhice/.zhice/extends",
         "/home/zhice/.zhice/config/channels/weixin/accounts",
+        "/home/zhice/.zhice/integrations/xhs/data",
+        "/home/zhice/.cache/xiaohongshu-mcp",
     }
     assert all(path in compose for path in mounts)
     assert "zhice-weixin-credentials:" in compose
+    assert "zhice-travel-data:" in compose
+    assert "zhice-travel-data:/home/zhice/.zhice/travel" in compose
     assert "zhice-weixin-credentials:/home/zhice/.zhice/config/channels/weixin/accounts" in compose
+    assert "zhice-xhs-data:" in compose
+    assert "zhice-xhs-cache:" in compose
+    assert "zhice-xhs-data:/home/zhice/.zhice/integrations/xhs/data:ro" in compose
     assert "zhice-config:/home/zhice/.zhice/config" not in compose
     assert "/home/zhice/.zhice/prompts" not in compose
+
+
+def test_private_image_state_scan_allows_travel_store_directory() -> None:
+    script = (DEPLOY / "scripts" / "build-image.ps1").read_text(encoding="utf-8")
+    assert '"/home/zhice/.zhice/travel"' in script
 
 
 def test_docker_and_cloud_deploy_persist_weixin_credentials() -> None:
@@ -209,7 +242,7 @@ def test_docker_and_cloud_deploy_persist_weixin_credentials() -> None:
     assert "docker volume rm" not in script
 
 
-def test_cloud_deploy_requires_digest_and_single_container() -> None:
+def test_cloud_deploy_requires_digest_and_fixed_gateway_plus_xhs_sidecar() -> None:
     script = (DEPLOY / "scripts" / "deploy.sh").read_text(encoding="utf-8")
     assert "@sha256:" in script
     assert "--restart unless-stopped" in script
@@ -217,6 +250,57 @@ def test_cloud_deploy_requires_digest_and_single_container() -> None:
     assert '-p "127.0.0.1:${HOST_PORT}:10086"' in script
     assert '-p "${HOST_PORT}:10086"' not in script
     assert "--scale" not in script
+    assert "XHS_CONTAINER_NAME=zhice-xhs-readonly" in script
+    assert "XHS_PREVIOUS_NAME=${XHS_CONTAINER_NAME}-previous" in script
+    assert 'TRAVEL_NETWORK=zhice-travel' in script
+    assert 'XHS_DATA_VOLUME=zhice-xhs-data' in script
+    assert 'XHS_CACHE_VOLUME=zhice-xhs-cache' in script
+    assert 'TRAVEL_DATA_VOLUME=zhice-travel-data' in script
+    assert '"$TRAVEL_DATA_VOLUME":/home/zhice/.zhice/travel' in script
+    assert '--entrypoint /opt/zhice/bin/xiaohongshu-mcp-rednote' in script
+    assert '-port=:18060' in script
+    assert 'rollback_xhs' in script
+    assert 'XHS_SEED_CONTAINER=' in script
+    assert 'rm -f "$XHS_SEED_CONTAINER"' in script
+    assert '-p "18060:18060"' not in script
+
+
+def test_travel_runtime_dependencies_are_pinned_and_xhs_patch_is_auditable() -> None:
+    dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
+    patch = (
+        DEPLOY / "patches" / "xiaohongshu-mcp-rednote-v2.4.3.patch"
+    ).read_text(encoding="utf-8")
+    smoke = (DEPLOY / "scripts" / "run-local.ps1").read_text(encoding="utf-8")
+
+    assert "@amap/amap-maps-mcp-server@0.0.8" in dockerfile
+    assert "12306-mcp@0.3.1" in dockerfile
+    assert "c2fc4dde2c45f26f6f9de288b7423a2bdfa7af1c" in dockerfile
+    assert "git apply --check /tmp/xhs-rednote.patch" in dockerfile
+    assert "for attempt in 1 2 3" in dockerfile
+    assert "go mod download && break" in dockerfile
+    assert "go test ./xiaohongshu" in dockerfile
+    assert "siteBaseURL = \"https://www.rednote.com\"" in patch
+    assert "userInfo" in patch and "!info.guest" in patch
+    assert "command -v mcp-amap" in smoke
+    assert "command -v 12306-mcp" in smoke
+
+
+def test_xhs_sidecar_is_private_persistent_and_explicitly_allowlisted() -> None:
+    compose = (DEPLOY / "docker-compose.yml").read_text(encoding="utf-8")
+    script = (DEPLOY / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    assert "container_name: zhice-xhs-readonly" in compose
+    assert "XHS_READONLY_HTTP_HOST_ALLOWLIST: zhice-xhs-readonly" in compose
+    assert 'expose:\n      - "18060"' in compose
+    assert "ports:" not in compose.split("\n  zhice-xhs-readonly:\n", 1)[1].split(
+        "\n  zhice-ops:\n", 1
+    )[0]
+    assert "COOKIES_PATH=/home/zhice/.zhice/integrations/xhs/data/cookies.json" in script
+    assert 'XHS_COOKIE_PRESENT=' in script
+    assert '[ "$XHS_COOKIE_PRESENT" = "no" ]' in script
+    assert 'XHS_READONLY_HTTP_HOST_ALLOWLIST=zhice-xhs-readonly' in script
+    assert '"$XHS_DATA_VOLUME":/home/zhice/.zhice/integrations/xhs/data:ro' in script
+    assert "docker volume rm" not in script
 
 
 def test_push_image_selects_digest_for_exact_target_repository() -> None:
@@ -435,8 +519,12 @@ def test_remote_operations_scripts_have_safe_maintenance_semantics() -> None:
     assert "already absent" in stop
     assert "already stopped" in stop
     assert '"$DOCKER" restart --time 30' in restart
+    assert 'XHS_CONTAINER_NAME=zhice-xhs-readonly' in restart
+    assert '"$DOCKER" restart --time 30 "$XHS_CONTAINER_NAME"' in restart
+    assert "socket.create_connection(('127.0.0.1', 18060), 3)" in restart
     assert "rollback()" in deploy
     assert "restored previous container" in deploy
+    assert "rollback\n  rollback_xhs" in deploy
 
 
 def test_cloud_cmd_files_are_thin_double_click_launchers() -> None:

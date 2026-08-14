@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码已具备 Part 18 正式 Skill Runtime、Skill source 管理与多运行形态 restricted Ops：本地终端自动 supervisor、本地 Docker sidecar、服务器 systemd Ops 分别监控实际启动目标，并统一提供“监控面板 / 运维终端”双视图；本地进程、Docker sidecar、Linux systemd、Cloudflare Tunnel、服务器长期认证和宿主机权威配置链已完成真实部署或 smoke，浏览器 ttyd WebSocket/iframe、idle 后重连与故障救援继续按环境交互边界单列。主线能力包括：
+ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码基线已完成到 Part 19 智能旅行规划；Part 18 正式 Skill Runtime、Skill source 管理与多运行形态 restricted Ops 继续作为底座：本地终端自动 supervisor、本地 Docker sidecar、服务器 systemd Ops 分别监控实际启动目标，并统一提供“监控面板 / 运维终端”双视图；本地进程、Docker sidecar、Linux systemd、Cloudflare Tunnel、服务器长期认证和宿主机权威配置链已完成真实部署或 smoke，浏览器 ttyd WebSocket/iframe、idle 后重连与故障救援继续按环境交互边界单列。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -27,6 +27,7 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码已具备 Par
 - 中性 Channel 协议、外部身份绑定、持久 conversation route/event receipt，以及 QQ 私聊/群聊 `@` WebSocket adapter
 - 微信 `channel_accounts` 所有权、本人扫码 API/UI、stdio NDJSON Node sidecar、基于腾讯 `2.4.6` 审计来源的 direct-text Transport 和多用户隔离
 - Owner-only Skills/Ops 管理入口、运行态 Ops endpoint、新窗口与 iframe 回退，共享监控/终端双视图、本地 loopback supervisor、固定 Docker sidecar，以及宿主机 Caddy/dashboard/ttyd、restricted `zhice-ops-shell`、复用既有 Cloudflare Tunnel 的服务器长期签名 Cookie 登录、loopback ttyd Basic Auth 和跨 Digest 持久配置链
+- 智能旅行规划特色应用：地图/天气/交通/网页/小红书只读来源、quick/deep、正式 optimizer Skill、`TravelPlanV1`、用户隔离 Store/API、`travel.plan_ready` 和 Vue `/travel`
 
 当前仍保持轻量边界：已有本地多用户、QQ/微信渠道、私有镜像部署和受限单机 Ops，但不等于生产级托管平台；项目没有面向公网的 OAuth/SSO、组织/租户、多 workspace 隔离、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge、Skill 市场、多服务器管理、多 profile 初始化、keyring/Secret Manager、CLI Session 管理或宿主机通用 Shell。Part 12 的 turn/context/LLM/tool RuntimeEvent 与 Hook 安全边界继续有效；Part 18 在独立 SkillExecutor 中增加 `skill.*` 和 ProgressSink，不从 `exec.command` 猜 Skill。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口；主 Web 只投影独立 Ops URL，不代理 PTY/WebSocket、Docker、日志或重启。
 
@@ -49,6 +50,7 @@ Tool capability selection 已从原可靠性路线提前进入当前基线。每
 - Part 15 完整 Session 上下文工程已进入当前代码基线，设计入口是 `docs_design/zhice-agent-part15-context-engineering-design.md`。本地第一实现不要求独立向量数据库服务：用户隔离 SQLite 保存 FTS5 文档、metadata 和 float32 embedding BLOB，Session 内用精确 cosine 与 RRF 混合排序；embedding 未配置时 health 诚实标记 degraded，但完整历史、历史查询、compaction 和 FTS 继续工作。
 - Part 16 Web 产品体验与 Vue 前端工程已实现并进入当前基线，当前活文档是 `docs_design/zhice-agent-part16-web-product-design.md`，完整方案记录见 `docs_design/2026-07-27-web-product-experience-and-vue-frontend-design.md`。Vue 3/Vite/TypeScript 源码位于 `web/frontend`，构建产物位于 `agent/web/static` 并随 Python wheel 发布；登录、聊天、Session、五栏设置、渠道连接和中文管理后台共用明暗曜石主题，同时保持现有 API、WebSocket、Session 与 RBAC 兼容。
 - Part 17 代码与测试已进入当前基线：Provider 错误分类/有限重试/deadline/cooldown/failover 证据、系统级诊断、MCP 动态可靠性、重启恢复和 `deploy/` 私有镜像部署链均已落地。当前活文档是 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案记录见 `docs_design/2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`；本地构建、隔离 smoke、阿里云 ACR 推送、腾讯云按 Digest 运行、Caddy HTTPS、公网健康、认证初始化和容器重启持久化均已真实验收。2026-08-04 又按 `docs_design/2026-08-04-private-registry-cloud-release-pipeline-design.md` 收敛为本地、已有镜像上云和源码完整上云三个入口；三条自动化入口均已使用本机 Git 忽略的私有配置完成真实端到端验收。
+- Milestone 19 智能旅行规划已完成代码落地：复用同一 AgentLoop，组合地图/天气/12306/网页/小红书只读 MCP、正式 `travel-planner` Skill、quick/deep 调研、`TravelPlanV1`、actor-scoped SQLite Store、`finalize_travel_plan`、Travel REST API 和 Vue 专属页面；当前活文档是 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`，原方案记录见 `docs_design/2026-08-10-intelligent-travel-planner-application-design.md`。默认测试使用 Fake MCP；真实高德、Tavily、12306、小红书登录态和高德 JS 地图 smoke 由显式环境变量与运行时凭据开启。Milestone 20 可视化工作流仍是已确认但尚未实现的下一项特色应用，见 `docs_design/2026-08-10-visual-workflow-scheduler-design.md`。
 - 按需 Tool 发现与动态 Capability Selection 已提前落地，设计记录见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md`；它是通用运行时能力，不归入 Part 13 的业务委派判断。
 
 Subagent运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`subagents`分区，仓库模板为`config/config.example.yml`。缺少分区时功能默认关闭；启用后可用裸`/subagent`查看当前模式和Profile。能力不可用时，CLI、本地操作者和Owner会看到真实原因与修复建议；普通Web用户只会看到能力暂时不可用并联系管理员，不暴露内部配置。
@@ -141,6 +143,16 @@ Linux:   ~/.zhice
 
 Skill source、MCP 和 Subagent 都是可选扩展：未配置时作为 disabled 静默关闭，不影响基础聊天；只有显式配置后内容非法或依赖失败时才记录 WARNING。Hook 未配置时同样 disabled，但显式配置代表已声明安全策略，非法时会阻断启动。
 
+## 智能旅行规划
+
+登录 Web 后访问 `/travel`，填写出发地、目的地、日期、人数、预算/预算档位、偏好和 quick/deep 模式。表单会把这些字段转换为一条用户可见的正常聊天消息；Agent 通过现有 MCP、`travel-planner` Skill 和 `finalize_travel_plan` 保存计划，页面随后通过 `/api/travel/plans/{plan_id}` 读取结构化结果。计划数据库位于当前 actor context root 的 `travel/plans.sqlite3`，不同用户不能互相读取或删除。
+
+模板默认启用无 Secret 的 Open-Meteo stdio 适配器和 `travel-research` shared-readonly Subagent Profile。高德、Tavily、12306 和小红书只读 upstream 需要在运行态 `${ZHICE_AGENT_WORKSPACE}/config/config.yml`/`.env` 中配置；真实 key、Cookie 和 Authorization 不进入仓库。小红书适配器 Catalog 只有登录状态、搜索和详情，写操作不存在。高德 JS 地图构建变量为 `VITE_AMAP_JS_API_KEY` 和 `VITE_AMAP_JS_SECURITY_CODE`；未配置或加载失败时页面继续显示文字路线、距离和时长。
+
+服务器私有镜像固定预装 `mcp-amap`、`12306-mcp@0.3.1` 和 RedNote 兼容的小红书 Linux 二进制。云端小红书运行在独立 `zhice-xhs-readonly` sidecar 中，与主容器共享只读/读写分离的 Cookie volume，只通过 `zhice-travel` Docker 网络访问，不发布宿主机或公网端口。完整操作见 `deploy/README.md` 的“旅行外部服务”章节。
+
+真实外部 smoke 由 `tests/integration_test/travel/test_external_smoke.py` 的分源环境变量显式开启。默认 `python -m pytest` 使用 Fake MCP，不访问真实网络。完整当前边界、错误码、TTL 和 smoke 条件见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。
+
 ## QQ 外部渠道
 
 安装可选 SDK：
@@ -216,9 +228,9 @@ ${ZHICE_AGENT_WORKSPACE}/config/models.json
       "context_window": 131072,
       "max_tokens": 16384,
       "temperature": 0.7,
-      "request_timeout_seconds": 60,
+      "request_timeout_seconds": 180,
       "max_attempts": 2,
-      "total_deadline_seconds": 120,
+      "total_deadline_seconds": 180,
       "retry_backoff_seconds": 0.5,
       "retry_backoff_max_seconds": 8,
       "retry_jitter_ratio": 0.1,

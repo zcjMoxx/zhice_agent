@@ -3,13 +3,27 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import os
-from dataclasses import asdict, dataclass
-from threading import Lock
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from threading import Event, Lock
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from agent.app.auth import AuthService, local_operator_actor
+from agent.applications.travel import (
+    TravelApplicationService,
+    TravelRequirementExtractor,
+    load_travel_config,
+)
+from agent.applications.travel.config import TravelConfig, TravelConfigurationError
+from agent.applications.travel.progress import TravelProgressHookRuntime
+from agent.applications.travel.requirements import TravelRequirementDraft
+from agent.applications.travel.service import TravelApplicationError
+from agent.applications.travel.source_ledger import preferred_travel_tool_names
+from agent.applications.travel.xhs_sidecar import LocalXhsSidecarSupervisor
 from agent.auth.activity import SqliteRuntimeActivitySink
 from agent.auth.audit import SqliteAuditSink
 from agent.auth.confirmation import SQLiteToolConfirmationBroker
@@ -40,6 +54,7 @@ from agent.memory.presentation import format_memory_list
 from agent.memory.safety import MemorySafetyPolicy
 from agent.memory.scheduler import MemoryExtractionJob, MemoryExtractionScheduler
 from agent.memory.startup import check_memory_extraction_startup
+from agent.message import Message
 from agent.prompt_loader import PromptLoader
 from agent.protocols.auth import ActorContext, AuditEvent
 from agent.protocols.capability import CapabilityStatus
@@ -73,8 +88,11 @@ from agent.subagents.runtime import (
 )
 from agent.subagents.startup import check_subagent_startup
 from agent.tools import UserScopedToolProvider, create_default_tool_registry, with_tool_discovery
+from agent.tools.registry import ToolRegistry
 
 DEFAULT_WEB_HISTORY_MESSAGES = 60
+TRAVEL_INTAKE_PHASE = "intake"
+TRAVEL_PLANNING_PHASE = "planning"
 RuntimeEventCallback = Callable[[dict[str, Any]], None]
 web_logger = logging.getLogger("zcagent.agent.web")
 session_logger = logging.getLogger("zcagent.agent.session")
@@ -114,6 +132,7 @@ class ActiveTurn:
     turn_id: str
     token: CancellationToken
     subagent_force_once: bool = False
+    completed: Event = field(default_factory=Event)
 
 
 @dataclass
@@ -134,6 +153,7 @@ class WebRuntime:
     mcp_status: CapabilityStatus | None = None
     memory_extraction_status: CapabilityStatus | None = None
     context_engineering_status: CapabilityStatus | None = None
+    travel_status: CapabilityStatus | None = None
     llm_resolver: ConfiguredLLMProviderResolver | None = None
     tool_policy: RbacToolExecutionPolicy | None = None
     confirmation_broker: SQLiteToolConfirmationBroker | None = None
@@ -157,6 +177,9 @@ class WebRuntime:
     channel_identity: Any | None = None
     channel_config: Any | None = None
     channel_weixin_binding: Any | None = None
+    travel_service: TravelApplicationService | None = None
+    travel_requirement_extractor: TravelRequirementExtractor | None = None
+    xhs_sidecar: LocalXhsSidecarSupervisor | None = None
 
     def __post_init__(self) -> None:
         self._active_turns: dict[tuple[str, str], ActiveTurn] = {}
@@ -205,6 +228,8 @@ class WebRuntime:
             statuses["memory_extraction"] = self.memory_extraction_status
         if self.context_engineering_status is not None:
             statuses["context_engineering"] = self.context_engineering_status
+        if self.travel_status is not None:
+            statuses["travel"] = self.travel_status
         if self.channel_status is not None:
             statuses["channel.qq"] = self.channel_status
         if self.channel_statuses is not None:
@@ -264,6 +289,614 @@ class WebRuntime:
                     actor_user_id=actor.user_id,
                     session_id=session_id,
                 )
+            if channel == "travel":
+                state = resolved.store.load(session_id)
+                if state.metadata.get("travel_phase") not in {
+                    TRAVEL_INTAKE_PHASE,
+                    TRAVEL_PLANNING_PHASE,
+                }:
+                    resolved.store.update_metadata(
+                        session_id,
+                        {"travel_phase": TRAVEL_INTAKE_PHASE, "travel_draft_version": 1},
+                    )
+                    self.session_access.refresh_index(actor, session_id)
+
+    def persist_travel_conversation(
+        self,
+        actor: ActorContext,
+        session_id: str,
+        messages: list[dict[str, object]],
+        *,
+        draft: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Create or update bounded requirement chat in one travel Session."""
+
+        if self.session_access is None or actor.user_id is None:
+            raise TravelApplicationError(
+                "TRAVEL_CONVERSATION_UNAVAILABLE",
+                "旅行需求对话暂时无法保存。",
+                status_code=503,
+            )
+        try:
+            resolved = self.session_access.resolve_session(actor, session_id, write=True)
+        except SessionAccessError as exc:
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND",
+                "旅行规划任务不存在。",
+                status_code=404,
+            ) from exc
+        if resolved.channel != "travel":
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND",
+                "旅行规划任务不存在。",
+                status_code=404,
+            )
+        if str(resolved.owner_user_id) != str(actor.user_id):
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND",
+                "旅行规划任务不存在。",
+                status_code=404,
+            )
+        normalized: list[Message] = []
+        total_chars = 0
+        for item in messages:
+            role = str(item.get("role") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if role not in {"user", "assistant"} or not content or len(content) > 2000:
+                raise TravelApplicationError(
+                    "TRAVEL_CONVERSATION_INVALID",
+                    "旅行需求对话格式无效。",
+                    status_code=422,
+                )
+            total_chars += len(content)
+            normalized.append(
+                Message(
+                    role=role,
+                    content=content,
+                    metadata={
+                        "travel_visibility": "conversation",
+                        "travel_phase": "requirements",
+                    },
+                )
+            )
+        if not normalized or len(normalized) > 20 or total_chars > 8000:
+            raise TravelApplicationError(
+                "TRAVEL_CONVERSATION_INVALID",
+                "旅行需求对话超出允许范围。",
+                status_code=422,
+            )
+        normalized_draft: dict[str, Any] = {}
+        if draft:
+            try:
+                parsed_draft = TravelRequirementDraft.from_dict(dict(draft))
+            except (TravelApplicationError, TypeError, ValueError) as exc:
+                raise TravelApplicationError(
+                    "TRAVEL_DRAFT_INVALID",
+                    "旅行草稿格式无效。",
+                    status_code=422,
+                ) from exc
+            if parsed_draft.intent != "travel_requirement":
+                raise TravelApplicationError(
+                    "TRAVEL_DRAFT_INVALID",
+                    "旅行草稿格式无效。",
+                    status_code=422,
+                )
+            normalized_draft = parsed_draft.to_dict()
+        state = resolved.store.load(session_id)
+        existing_messages = [
+            message
+            for message in state.messages
+            if message.metadata.get("travel_visibility") == "conversation"
+            and message.metadata.get("travel_phase") == "requirements"
+        ]
+        existing = [(message.role, message.content) for message in existing_messages]
+        requested = [(message.role, message.content) for message in normalized]
+        store = getattr(self.auth, "store", None)
+        list_turns = getattr(store, "list_turn_runs", None)
+        turns = (
+            list_turns(actor_user_id=str(actor.user_id), session_id=session_id, limit=1)
+            if callable(list_turns)
+            else []
+        )
+        if existing == requested and (
+            not normalized_draft or state.metadata.get("travel_draft") == normalized_draft
+        ):
+            return {
+                "session_id": session_id,
+                "message_count": len(existing),
+                "status": "unchanged",
+            }
+        if turns:
+            if requested[: len(existing)] != existing:
+                raise TravelApplicationError(
+                    "TRAVEL_CONVERSATION_CONFLICT",
+                    "已经开始的旅行需求记录不能被覆盖。",
+                    status_code=409,
+                )
+            if self._travel_session_is_running(actor, session_id):
+                raise TravelApplicationError(
+                    "TRAVEL_CONVERSATION_CONFLICT",
+                    "旅行规划正在进行，暂时不能修改需求。",
+                    status_code=409,
+                )
+            if self._travel_plan_for_session(actor, session_id) or self._travel_review_pending(
+                actor, session_id
+            ):
+                raise TravelApplicationError(
+                    "TRAVEL_CONVERSATION_CONFLICT",
+                    "旅行规划已经进入确认或完成阶段，不能覆盖需求对话。",
+                    status_code=409,
+                )
+            suffix = normalized[len(existing) :]
+            if suffix:
+                resolved.store.append(session_id, suffix)
+            status = "updated"
+        else:
+            resolved.store.replace(session_id, normalized)
+            status = "saved" if not existing else "updated"
+        metadata: dict[str, Any] = {"travel_draft_version": 1}
+        if normalized_draft:
+            metadata["travel_draft"] = normalized_draft
+        title = _travel_draft_title(normalized_draft, normalized)
+        if title:
+            metadata["title"] = title
+        resolved.store.update_metadata(session_id, metadata)
+        self.session_access.refresh_index(actor, session_id)
+        return {
+            "session_id": session_id,
+            "message_count": len(normalized),
+            "status": status,
+        }
+
+    def travel_draft(self, actor: ActorContext, session_id: str) -> dict[str, object]:
+        """Return refresh-safe requirement messages and structured draft."""
+
+        resolved = self._resolve_travel_session(actor, session_id)
+        state = resolved.store.load(session_id)
+        intake_turn_ids = {
+            str(item)
+            for item in state.metadata.get("travel_intake_turn_ids", [])
+            if str(item).strip()
+        }
+        messages = [
+            {"role": message.role, "content": message.content}
+            for message in state.messages
+            if message.role in {"user", "assistant"}
+            and message.content.strip()
+            and not message.tool_calls
+            and (
+                (
+                    message.metadata.get("travel_visibility") == "conversation"
+                    and message.metadata.get("travel_phase") == "requirements"
+                )
+                or (message.turn_id is not None and message.turn_id in intake_turn_ids)
+            )
+        ]
+        draft = state.metadata.get("travel_draft")
+        return {
+            "session_id": session_id,
+            "messages": messages[-20:],
+            "draft": dict(draft) if isinstance(draft, dict) else {},
+            "phase": self._travel_phase(actor, session_id, resolved=resolved),
+            "handoff_question": str(state.metadata.get("travel_handoff_question") or ""),
+        }
+
+    def confirm_travel_planning(
+        self,
+        actor: ActorContext,
+        session_id: str,
+        draft: dict[str, object],
+    ) -> dict[str, str]:
+        """Validate the reviewed draft and atomically open formal planning capabilities."""
+
+        resolved = self._resolve_travel_session(actor, session_id)
+        try:
+            parsed = TravelRequirementDraft.from_dict(dict(draft))
+        except (TravelApplicationError, TypeError, ValueError) as exc:
+            raise TravelApplicationError(
+                "TRAVEL_DRAFT_INVALID",
+                "旅行草稿格式无效。",
+                status_code=422,
+            ) from exc
+        normalized = parsed.to_dict()
+        missing = _travel_missing_fields(normalized)
+        if missing:
+            raise TravelApplicationError(
+                "TRAVEL_REQUIREMENTS_INCOMPLETE",
+                f"开始规划前还需确认：{'、'.join(missing)}。",
+                status_code=422,
+            )
+        metadata: dict[str, Any] = {
+            "travel_phase": TRAVEL_PLANNING_PHASE,
+            "travel_draft": normalized,
+            "travel_draft_version": 1,
+            "travel_planning_confirmed_at": datetime.now(UTC).isoformat(),
+            "travel_handoff_question": "",
+            "travel_handoff_topic": "",
+        }
+        title = _travel_draft_title(normalized, resolved.store.load(session_id).messages)
+        if title:
+            metadata["title"] = title
+        resolved.store.update_metadata(session_id, metadata)
+        if self.session_access is not None:
+            self.session_access.refresh_index(actor, session_id)
+        return {
+            "session_id": session_id,
+            "phase": TRAVEL_PLANNING_PHASE,
+            "status": "confirmed",
+        }
+
+    def list_travel_work_items(
+        self, actor: ActorContext, *, limit: int = 50
+    ) -> list[dict[str, str]]:
+        """Merge travel Sessions, Turns, reviews, and plans for the sidebar."""
+
+        if self.session_access is None or actor.user_id is None:
+            return []
+        store = getattr(self.auth, "store", None)
+        list_index = getattr(store, "session_index_list", None)
+        if not callable(list_index):
+            return []
+        bounded = max(1, min(int(limit), 100))
+        rows = [
+            row
+            for row in list_index(str(actor.user_id))
+            if str(row.get("channel") or "") == "travel"
+        ][:bounded]
+        plans = self.travel_service.list_plans(actor, limit=bounded) if self.travel_service else []
+        plan_by_session = {str(item.source_session_id): item for item in plans}
+        list_turns = getattr(store, "list_turn_runs", None)
+        all_turns = (
+            list_turns(actor_user_id=str(actor.user_id), limit=500)
+            if callable(list_turns)
+            else []
+        )
+        turn_by_session: dict[str, dict[str, Any]] = {}
+        for turn in all_turns:
+            candidate = str(turn.get("session_id") or "")
+            if candidate and candidate not in turn_by_session:
+                turn_by_session[candidate] = turn
+        actor_key = _active_turn_key(actor, "")[0]
+        with self._turns_lock:
+            active_sessions = {
+                candidate_session_id
+                for (candidate_actor, candidate_session_id), _active in self._active_turns.items()
+                if candidate_actor == actor_key
+            }
+        items: list[dict[str, str]] = []
+        for row in rows:
+            candidate = str(row.get("session_id") or "")
+            plan = plan_by_session.get(candidate)
+            state = self.session_access.resolve_session(actor, candidate).store.load(candidate)
+            phase = self._travel_phase(actor, candidate)
+            draft = state.metadata.get("travel_draft")
+            title = str(row.get("title") or state.metadata.get("title") or "").strip()
+            if not title:
+                title = _travel_draft_title(
+                    dict(draft) if isinstance(draft, dict) else {},
+                    [
+                        message
+                        for message in state.messages
+                        if message.metadata.get("travel_phase") == "requirements"
+                    ],
+                ) or "旅行需求草稿"
+            status, error_code = "collecting", ""
+            plan_id = ""
+            if plan is not None:
+                status, plan_id = "completed", str(plan.plan_id)
+                title = str(plan.title or title)
+            elif phase == TRAVEL_INTAKE_PHASE:
+                status = "collecting"
+            elif candidate in active_sessions:
+                status = "running"
+            elif self._travel_review_pending(actor, candidate):
+                status = "awaiting_candidate"
+            elif candidate in turn_by_session:
+                status = "failed"
+                error_code = str(
+                    turn_by_session[candidate].get("error_code")
+                    or "TRAVEL_PLAN_NOT_FINALIZED"
+                )
+            items.append(
+                {
+                    "session_id": candidate,
+                    "plan_id": plan_id,
+                    "status": status,
+                    "title": title[:120],
+                    "preview": str(row.get("preview") or "旅行需求")[:160],
+                    "updated_at": str(row.get("updated_at") or ""),
+                    "error_code": error_code,
+                }
+            )
+        return items
+
+    def delete_travel_work_item(self, actor: ActorContext, session_id: str) -> None:
+        """Delete one unfinished travel Session and transient application state."""
+
+        self._resolve_travel_session(actor, session_id)
+        if self._travel_plan_for_session(actor, session_id):
+            raise TravelApplicationError(
+                "TRAVEL_WORK_ITEM_COMPLETED",
+                "已完成计划请通过计划删除入口删除。",
+                status_code=409,
+            )
+        if self.travel_service is not None:
+            self.travel_service.clear_candidate_review(actor, session_id)
+            self.travel_service.source_ledger.clear(session_id)
+        self.delete_session(actor, session_id)
+
+    def _resolve_travel_session(self, actor: ActorContext, session_id: str):
+        if self.session_access is None or actor.user_id is None:
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND", "旅行规划任务不存在。", status_code=404
+            )
+        try:
+            resolved = self.session_access.resolve_session(actor, session_id, write=True)
+        except SessionAccessError as exc:
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND", "旅行规划任务不存在。", status_code=404
+            ) from exc
+        if resolved.channel != "travel":
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND", "旅行规划任务不存在。", status_code=404
+            )
+        if str(resolved.owner_user_id) != str(actor.user_id):
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND", "旅行规划任务不存在。", status_code=404
+            )
+        return resolved
+
+    def _travel_phase(self, actor: ActorContext, session_id: str, *, resolved=None) -> str:
+        """Return and backfill the bounded application phase for a travel Session."""
+
+        current = resolved or self._resolve_travel_session(actor, session_id)
+        state = current.store.load(session_id)
+        phase = str(state.metadata.get("travel_phase") or "")
+        if phase in {TRAVEL_INTAKE_PHASE, TRAVEL_PLANNING_PHASE}:
+            return phase
+        auth_store = getattr(self.auth, "store", None)
+        list_turns = getattr(auth_store, "list_turn_runs", None)
+        existing_turns = (
+            list_turns(
+                actor_user_id=str(actor.user_id),
+                session_id=session_id,
+                limit=1,
+            )
+            if callable(list_turns)
+            else []
+        )
+        phase = (
+            TRAVEL_PLANNING_PHASE
+            if self._travel_plan_for_session(actor, session_id)
+            or self._travel_review_pending(actor, session_id)
+            or existing_turns
+            else TRAVEL_INTAKE_PHASE
+        )
+        current.store.update_metadata(session_id, {"travel_phase": phase})
+        if self.session_access is not None:
+            self.session_access.refresh_index(actor, session_id)
+        return phase
+
+    def _travel_session_is_running(self, actor: ActorContext, session_id: str) -> bool:
+        actor_key = _active_turn_key(actor, "")[0]
+        with self._turns_lock:
+            return (actor_key, session_id) in self._active_turns
+
+    def _travel_plan_for_session(self, actor: ActorContext, session_id: str):
+        if self.travel_service is None:
+            return None
+        return next(
+            (
+                item
+                for item in self.travel_service.list_plans(actor, limit=100)
+                if str(item.source_session_id) == session_id
+            ),
+            None,
+        )
+
+    def _travel_review_pending(self, actor: ActorContext, session_id: str) -> bool:
+        if self.travel_service is None:
+            return False
+        review = self.travel_service.get_candidate_review(actor, session_id)
+        return review is not None and review.status == "pending"
+
+    def delete_travel_plan(self, actor: ActorContext, plan_id: str) -> None:
+        """Delete one actor-owned travel plan and its associated travel Session."""
+
+        if self.travel_service is None:
+            raise TravelApplicationError(
+                "TRAVEL_DISABLED", "Travel planning is not enabled.", status_code=503
+            )
+        source_session_id = self.travel_service.delete_plan(actor, plan_id)
+        if not source_session_id or self.session_access is None or actor.user_id is None:
+            return
+        try:
+            resolved = self.session_access.resolve_session(actor, source_session_id, delete=True)
+        except SessionAccessError:
+            return
+        if resolved.channel != "travel":
+            return
+        self.session_access.delete_session(actor, source_session_id)
+
+    def travel_generation_status(
+        self,
+        actor: ActorContext,
+        *,
+        session_id: str = "",
+    ) -> dict[str, str]:
+        """Return one actor-owned travel Turn state without exposing messages."""
+
+        if self.session_access is None or actor.user_id is None:
+            return {"status": "idle", "session_id": "", "turn_id": "", "plan_id": "", "error_code": ""}
+        store = getattr(self.auth, "store", None)
+        list_index = getattr(store, "session_index_list", None)
+        if not callable(list_index):
+            return {"status": "idle", "session_id": "", "turn_id": "", "plan_id": "", "error_code": ""}
+        rows = [
+            row
+            for row in list_index(str(actor.user_id))
+            if str(row.get("channel") or "") == "travel"
+        ]
+        owned_rows = {str(row.get("session_id") or ""): row for row in rows}
+        owned_session_ids = set(owned_rows)
+        requested = str(session_id or "").strip()
+        if requested and requested not in owned_session_ids:
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND",
+                "旅行规划任务不存在。",
+                status_code=404,
+            )
+
+        actor_key = _active_turn_key(actor, "")[0]
+        with self._turns_lock:
+            active_items = [
+                (candidate_session_id, active)
+                for (candidate_actor, candidate_session_id), active in self._active_turns.items()
+                if candidate_actor == actor_key
+                and candidate_session_id in owned_session_ids
+                and (not requested or candidate_session_id == requested)
+            ]
+        if active_items:
+            candidate_session_id, active = active_items[0]
+            return {
+                "status": "running",
+                "session_id": candidate_session_id,
+                "turn_id": active.turn_id,
+                "plan_id": "",
+                "error_code": "",
+            }
+        if not requested:
+            return {"status": "idle", "session_id": "", "turn_id": "", "plan_id": "", "error_code": ""}
+
+        if self.travel_service is not None:
+            for plan in self.travel_service.list_plans(actor, limit=50):
+                if str(plan.source_session_id) == requested:
+                    return {
+                        "status": "completed",
+                        "session_id": requested,
+                        "turn_id": str(plan.source_turn_id),
+                        "plan_id": str(plan.plan_id),
+                        "error_code": "",
+                    }
+            review_reader = getattr(self.travel_service, "get_candidate_review", None)
+            review = review_reader(actor, requested) if callable(review_reader) else None
+            if review is not None and review.status == "pending":
+                return {
+                    "status": "awaiting_candidate",
+                    "session_id": requested,
+                    "turn_id": str(review.turn_id),
+                    "plan_id": "",
+                    "error_code": "",
+                }
+
+        list_turns = getattr(store, "list_turn_runs", None)
+        turns = (
+            list_turns(actor_user_id=str(actor.user_id), session_id=requested, limit=1)
+            if callable(list_turns)
+            else []
+        )
+        if not turns:
+            updated_at = str(owned_rows[requested].get("updated_at") or "")
+            status = "pending" if _is_recent_timestamp(updated_at, seconds=60) else "finished"
+            turn_id, error_code = "", ""
+        else:
+            turn = turns[0]
+            raw_status = str(turn.get("status") or "")
+            status = {"error": "failed", "stopped": "stopped"}.get(raw_status, "failed")
+            turn_id = str(turn.get("turn_id") or "")
+            error_code = (
+                str(turn.get("error_code") or "TRAVEL_PLAN_NOT_FINALIZED")
+                if status == "failed"
+                else ""
+            )
+        return {
+            "status": status,
+            "session_id": requested,
+            "turn_id": turn_id,
+            "plan_id": "",
+            "error_code": error_code,
+        }
+
+    def travel_continuation_message(self, actor: ActorContext, session_id: str) -> str:
+        """Return the runtime Prompt used for a bounded travel continuation Turn."""
+
+        if self.session_access is None or actor.user_id is None:
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND", "旅行规划任务不存在。", status_code=404
+            )
+        row = getattr(self.auth, "store", None)
+        row = row.session_index_get(session_id) if row is not None else None
+        if (
+            row is None
+            or str(row.get("owner_user_id") or "") != str(actor.user_id)
+            or str(row.get("channel") or "") != "travel"
+        ):
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND", "旅行规划任务不存在。", status_code=404
+            )
+        resolved = self._resolve_travel_session(actor, session_id)
+        if self._travel_phase(actor, session_id, resolved=resolved) != TRAVEL_PLANNING_PHASE:
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND", "旅行规划任务尚未开始。", status_code=404
+            )
+        if self.prompt_loader is None:
+            raise TravelApplicationError(
+                "TRAVEL_PLAN_NOT_FINALIZED",
+                "旅行规划未能完成，请稍后重试。",
+                status_code=502,
+            )
+        return self.prompt_loader.load("travel_planning_continuation")
+
+    def travel_candidate_review(self, actor: ActorContext, session_id: str) -> dict[str, Any]:
+        """Return an actor-owned pending or selected candidate review."""
+
+        self._assert_travel_session_owner(actor, session_id)
+        if self.travel_service is None:
+            raise TravelApplicationError("TRAVEL_DISABLED", "旅行规划暂不可用。", status_code=503)
+        review = self.travel_service.get_candidate_review(actor, session_id)
+        if review is None:
+            raise TravelApplicationError(
+                "TRAVEL_CANDIDATE_REVIEW_NOT_FOUND", "候选行程不存在。", status_code=404
+            )
+        return review.to_dict()
+
+    def select_travel_candidate(
+        self, actor: ActorContext, session_id: str, candidate_id: str
+    ) -> dict[str, Any]:
+        """Record one actor-owned candidate decision for the continuation Turn."""
+
+        self._assert_travel_session_owner(actor, session_id)
+        if self.travel_service is None:
+            raise TravelApplicationError("TRAVEL_DISABLED", "旅行规划暂不可用。", status_code=503)
+        return self.travel_service.select_candidate(actor, session_id, candidate_id).to_dict()
+
+    def travel_candidate_continuation_message(
+        self, actor: ActorContext, session_id: str
+    ) -> str:
+        """Build a controlled message from a server-validated candidate selection."""
+
+        review = self.travel_candidate_review(actor, session_id)
+        selected = str(review.get("selected_candidate_id") or "")
+        if review.get("status") != "selected" or not selected:
+            raise TravelApplicationError(
+                "TRAVEL_CANDIDATE_SELECTION_REQUIRED", "请先选择一个候选行程。", status_code=409
+            )
+        return (
+            f"用户已确认候选方案 {selected}。继续当前旅行规划，只能以该候选为最终 days、预算和路线的基础；"
+            f"完成 TravelPlanV1 后调用 finalize_travel_plan，并传 selected_candidate_id={selected}。"
+        )
+
+    def _assert_travel_session_owner(self, actor: ActorContext, session_id: str) -> None:
+        if actor.user_id is None:
+            raise TravelApplicationError("TRAVEL_GENERATION_NOT_FOUND", "旅行规划任务不存在。", status_code=404)
+        store = getattr(self.auth, "store", None)
+        row = store.session_index_get(session_id) if store is not None else None
+        if (
+            row is None
+            or str(row.get("owner_user_id") or "") != str(actor.user_id)
+            or str(row.get("channel") or "") != "travel"
+        ):
+            raise TravelApplicationError("TRAVEL_GENERATION_NOT_FOUND", "旅行规划任务不存在。", status_code=404)
 
     def fork_session_to_web(
         self,
@@ -335,14 +968,6 @@ class WebRuntime:
         token = CancellationToken()
         active_key = _active_turn_key(actor, session_id)
         self._cancel_memory_extraction(actor, session_id)
-        self._register_turn(
-            active_key,
-            ActiveTurn(
-                turn_id=turn_id,
-                token=token,
-                subagent_force_once=force_subagent_once,
-            ),
-        )
         sessions = self.sessions
         workspace = self.config.workspace
         tools = getattr(self.agent_loop, "tools", None)
@@ -354,6 +979,8 @@ class WebRuntime:
         memory_notice: tuple[str, ...] = ()
         memory_store = None
         memory_safety = None
+        travel_phase = ""
+        travel_intake = False
         if self.session_access is not None and actor.user_id is not None:
             resolved = self.session_access.ensure_session(
                 actor,
@@ -370,6 +997,7 @@ class WebRuntime:
                 ),
                 write=True,
             )
+            resolved_channel = resolved.channel or resolved_channel
             if resolved.created:
                 log_event(
                     session_logger,
@@ -381,6 +1009,9 @@ class WebRuntime:
                     request_id=request_id,
                 )
             sessions = resolved.store
+            if resolved_channel == "travel":
+                travel_phase = self._travel_phase(actor, session_id, resolved=resolved)
+                travel_intake = travel_phase == TRAVEL_INTAKE_PHASE
             owner_has_workspace_scope = "owner" in actor.role_keys
             workspace = self.config.workspace if owner_has_workspace_scope else resolved.context.files_dir
             visible_skills = (
@@ -401,23 +1032,20 @@ class WebRuntime:
                 selection = self.llm_resolver.resolve(preference)
                 turn_llm = self.llm_resolver.bind(selection)
                 turn_context_budget = selection.context_budget
-            tools = UserScopedToolProvider(
-                files_dir=workspace,
-                shared_readonly_dir=resolved.context.shared_readonly_dir,
-                actor=actor,
-                skills=visible_skills,
-                skill_sync=self.skill_sync,
-                diagnostics=self.diagnostics,
-                system_diagnostics=self.system_diagnostics,
-                diagnostic_context=DiagnosticContext(
-                    session_id=session_id,
-                    current_turn_id=turn_id,
-                    current_request_id=request_id,
-                    channel=actor.channel,
-                ),
-                memory_store=memory_store,
-                memory_safety=memory_safety,
-                extra_tools=(
+            if travel_intake:
+                intake_tools = (
+                    self.travel_service.intake_tools_for_actor(
+                        actor,
+                        sessions,
+                        confirm_planning=self.confirm_travel_planning,
+                    )
+                    if self.travel_service is not None
+                    else []
+                )
+                tools = ToolRegistry(intake_tools)
+                memory_notice = ()
+            else:
+                mcp_tools = (
                     self.mcp_runtime.tools_for_actor(
                         actor,
                         workspace,
@@ -426,13 +1054,50 @@ class WebRuntime:
                             on_event,
                             {"type": "mcp_elicitation_requested", **asdict(request)},
                         ),
+                        result_observer=(
+                            self.travel_service.source_ledger.observe
+                            if self.travel_service is not None
+                            and travel_phase == TRAVEL_PLANNING_PHASE
+                            else None
+                        ),
                     )
                     if self.mcp_runtime is not None
-                    else None
-                ),
-            )
+                    else []
+                )
+                if self.travel_service is not None and travel_phase == TRAVEL_PLANNING_PHASE:
+                    self.travel_service.source_ledger.register_expected(
+                        session_id,
+                        [tool.name for tool in mcp_tools],
+                    )
+                tools = UserScopedToolProvider(
+                    files_dir=workspace,
+                    shared_readonly_dir=resolved.context.shared_readonly_dir,
+                    actor=actor,
+                    skills=visible_skills,
+                    skill_sync=self.skill_sync,
+                    diagnostics=self.diagnostics,
+                    system_diagnostics=self.system_diagnostics,
+                    diagnostic_context=DiagnosticContext(
+                        session_id=session_id,
+                        current_turn_id=turn_id,
+                        current_request_id=request_id,
+                        channel=actor.channel,
+                    ),
+                    memory_store=memory_store,
+                    memory_safety=memory_safety,
+                    extra_tools=[
+                        *(
+                            self.travel_service.tools_for_actor(actor)
+                            if self.travel_service is not None
+                            and travel_phase == TRAVEL_PLANNING_PHASE
+                            else []
+                        ),
+                        *mcp_tools,
+                    ],
+                )
         if (
             tools is not None
+            and not travel_intake
             and self.subagent_config is not None
             and self.subagent_config.enabled
             and (subagent_preference.mode == "auto" or force_subagent_once)
@@ -484,6 +1149,12 @@ class WebRuntime:
                                     **asdict(request),
                                 },
                             ),
+                            result_observer=(
+                                self.travel_service.source_ledger.observe
+                                if self.travel_service is not None
+                                and resolved_channel == "travel"
+                                else None
+                            ),
                         )
                         if self.mcp_runtime is not None
                         else None
@@ -511,12 +1182,62 @@ class WebRuntime:
             )
         elif (
             tools is not None
+            and not travel_intake
             and self.subagent_status is not None
             and self.subagent_status.state == "unavailable"
             and subagent_preference.mode == "auto"
         ):
             tools = build_unavailable_subagent_provider(tools, self.subagent_status)
-        tools = with_tool_discovery(tools)
+        initial_tool_names: tuple[str, ...] = ()
+        if travel_phase == TRAVEL_PLANNING_PHASE and tools is not None:
+            available_names = [
+                str(item.get("function", {}).get("name") or "")
+                for item in tools.definitions()
+                if isinstance(item, dict)
+            ]
+            initial_tool_names = (
+                "load_skills",
+                "run_skill",
+                "request_travel_candidate_review",
+                "finalize_travel_plan",
+                *preferred_travel_tool_names(available_names),
+            )
+        if not travel_intake:
+            tools = with_tool_discovery(tools, initial_names=initial_tool_names)
+        turn_requirements: list[str] = []
+        if resolved_channel == "travel" and self.prompt_loader is not None:
+            prompt_name = (
+                "travel_intake"
+                if travel_phase == TRAVEL_INTAKE_PHASE
+                else "travel_planning"
+            )
+            turn_requirements.append(self.prompt_loader.load(prompt_name))
+            if travel_phase == TRAVEL_INTAKE_PHASE:
+                reference_date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+                turn_requirements.append(
+                    "# 日期理解基准\n"
+                    f"当前北京时间日期为 {reference_date}。理解“国庆、下周、月底”等相对日期时"
+                    "以此为基准；不确定年份或结束日期时应自然追问，不得臆造。"
+                )
+            if travel_phase == TRAVEL_PLANNING_PHASE:
+                confirmed_draft = sessions.load(session_id).metadata.get("travel_draft")
+                if isinstance(confirmed_draft, dict):
+                    turn_requirements.append(
+                        "# 服务端已确认的旅行草稿\n"
+                        "以下 JSON 是服务端校验后的用户条件，优先于历史中的旧值；"
+                        "不得把它原样展示给用户。\n"
+                        + json.dumps(confirmed_draft, ensure_ascii=False, separators=(",", ":"))
+                    )
+        if force_subagent_once and self.prompt_loader is not None and not travel_intake:
+            turn_requirements.append(self.prompt_loader.load("subagent_once"))
+        self._register_turn(
+            active_key,
+            ActiveTurn(
+                turn_id=turn_id,
+                token=token,
+                subagent_force_once=force_subagent_once,
+            ),
+        )
         try:
             notice_text = _format_memory_notice(memory_notice)
             if notice_text:
@@ -539,23 +1260,33 @@ class WebRuntime:
                 confirmation_broker=self.confirmation_broker,
                 activity_sink=self.activity_sink,
                 audit_sink=self.audit_sink,
-                channel=actor.channel,
+                channel=resolved_channel,
                 conversation_type=(
                     channel_context.conversation_type if channel_context is not None else ""
                 ),
                 request_id=request_id,
-                system_prompt_addendum=(
-                    self.prompt_loader.load("subagent_once")
-                    if force_subagent_once and self.prompt_loader is not None
-                    else ""
-                ),
+                system_prompt_addendum="\n\n".join(turn_requirements),
             )
+            if travel_intake:
+                state = sessions.load(session_id)
+                turn_ids = state.metadata.get("travel_intake_turn_ids")
+                normalized_turn_ids = (
+                    [str(item) for item in turn_ids if str(item).strip()]
+                    if isinstance(turn_ids, list)
+                    else []
+                )
+                if turn_id not in normalized_turn_ids:
+                    normalized_turn_ids.append(turn_id)
+                    sessions.update_metadata(
+                        session_id,
+                        {"travel_intake_turn_ids": normalized_turn_ids[-40:]},
+                    )
             if self.session_access is not None and actor.user_id is not None:
                 self.session_access.refresh_index(actor, session_id)
             stopped = token.is_cancelled()
             if stopped:
                 log_event(web_logger, logging.INFO, "chat.stopped", session_id=session_id, turn_id=turn_id)
-            else:
+            elif not travel_intake:
                 self._schedule_memory_extraction(actor, session_id)
             visible_content = f"{notice_text}\n\n{content}" if notice_text else content
             return ChatTurnResult(content=visible_content, stopped=stopped, turn_id=turn_id)
@@ -839,7 +1570,10 @@ class WebRuntime:
         if self.session_access is not None and actor.user_id is not None:
             self.session_access.resolve_session(actor, session_id, delete=True)
         self._cancel_memory_extraction(actor, session_id)
+        active = self._active_turn_for_session(actor, session_id)
         self.cancel_session(actor, session_id)
+        if active is not None and not active.completed.wait(timeout=30.0):
+            raise RuntimeError("active turn did not stop before session deletion")
         self._invalidate_session_context(actor, session_id)
         if self.session_access is not None and actor.user_id is not None:
             self.session_access.delete_session(actor, session_id)
@@ -907,6 +1641,23 @@ class WebRuntime:
         )
         return {"session_id": session_id, "turn_id": active.turn_id, "cancelled": 1}
 
+    def _active_turn_for_session(
+        self, actor: ActorContext, session_id: str
+    ) -> ActiveTurn | None:
+        key = _active_turn_key(actor, session_id)
+        with self._turns_lock:
+            active = self._active_turns.get(key)
+            if active is not None or not actor.has_permission("chat.stop.any"):
+                return active
+            return next(
+                (
+                    candidate
+                    for candidate_key, candidate in self._active_turns.items()
+                    if candidate_key[1] == session_id
+                ),
+                None,
+            )
+
     def current_model_label(self) -> str:
         """Return a compact endpoint/model label when the provider exposes it."""
 
@@ -930,6 +1681,16 @@ class WebRuntime:
 
         actor = actor or local_operator_actor(channel="web")
         if self.session_access is not None and actor.user_id is not None:
+            if not session_id:
+                selection = self.llm_resolver.resolve(None) if self.llm_resolver else None
+                if selection is None:
+                    raise ValueError("LLM resolver is not configured")
+                endpoint = _find_endpoint(self.llm_resolver.endpoints(), selection.endpoint_name)
+                return ModelState(
+                    endpoint=selection.endpoint_name,
+                    current_model=selection.model_name,
+                    models=_endpoint_model_names(endpoint),
+                )
             resolved = self.session_access.ensure_session(actor, session_id, channel="web")
             if resolved.created:
                 log_event(
@@ -1181,6 +1942,7 @@ class WebRuntime:
             active = self._active_turns.get(key)
             if active is not None and active.turn_id == turn_id:
                 self._active_turns.pop(key, None)
+                active.completed.set()
 
     def shutdown(self) -> None:
         """Cancel pending background work before the Gateway exits."""
@@ -1194,6 +1956,7 @@ class WebRuntime:
             self._shutdown_complete = True
         for active in active_turns:
             active.token.cancel()
+            active.completed.set()
         if self.mcp_runtime is not None:
             self.mcp_runtime.cancel_active_calls()
         if self.channel_manager is not None:
@@ -1202,6 +1965,8 @@ class WebRuntime:
             self.memory_scheduler.shutdown()
         if self.mcp_runtime is not None:
             self.mcp_runtime.close()
+        if self.xhs_sidecar is not None:
+            self.xhs_sidecar.stop()
 
     def submit_mcp_interaction(
         self,
@@ -1347,6 +2112,28 @@ def build_web_runtime(
     subagent_config = subagent_startup.config
     context_startup = check_context_engineering_startup(config.config_dir, prompt_loader)
     context_config = load_context_config(config.config_dir)
+    try:
+        travel_config = load_travel_config(config.config_dir)
+        travel_status = CapabilityStatus(
+            name="travel",
+            state="available" if travel_config.enabled else "disabled",
+            code="TRAVEL_AVAILABLE" if travel_config.enabled else "TRAVEL_DISABLED",
+            message=(
+                "Travel planning is available."
+                if travel_config.enabled
+                else "Travel planning is not configured."
+            ),
+        )
+    except TravelConfigurationError as exc:
+        travel_config = TravelConfig()
+        travel_status = CapabilityStatus(
+            name="travel",
+            state="unavailable",
+            code="TRAVEL_CONFIG_INVALID",
+            message="Travel planning configuration is invalid.",
+            hint="Fix the travel section in config/config.yml and restart.",
+            details={"error_type": type(exc).__name__},
+        )
     llm = create_configured_llm_provider(config.config_dir, endpoint_name)
     try:
         compaction_llm = create_optional_aliased_llm_provider(
@@ -1361,11 +2148,14 @@ def build_web_runtime(
             "context.compaction.endpoint_degraded",
             error_type=type(exc).__name__,
         )
+    extra_system_prompts = []
+    if subagent_config.enabled:
+        extra_system_prompts.append("subagent_orchestration")
     context_builder = ContextBuilder(
         prompt_loader,
         skills=skill_loader,
         max_history_messages=DEFAULT_WEB_HISTORY_MESSAGES,
-        extra_system_prompts=("subagent_orchestration",) if subagent_config.enabled else (),
+        extra_system_prompts=tuple(extra_system_prompts),
         context_config=context_config,
         embedding_provider=context_startup.embedding_provider,
         compaction_llm_provider=compaction_llm,
@@ -1389,24 +2179,39 @@ def build_web_runtime(
         workspace_dir=config.workspace,
     )
     session_access = SessionAccessService(auth_store, user_contexts)
+    travel_service = TravelApplicationService(travel_config, user_contexts)
+    travel_requirement_extractor = (
+        TravelRequirementExtractor(llm, prompt_loader) if travel_config.enabled else None
+    )
     model_preferences = JsonSessionModelPreferenceStore()
     confirmation_broker = SQLiteToolConfirmationBroker(auth_store)
     diagnostics = RecentActivityDiagnostics(auth_store, config.logs_dir)
     system_diagnostics = SystemDiagnosticsService(auth_store, config.logs_dir)
     tool_policy = RbacToolExecutionPolicy()
-    mcp_runtime = McpRuntime(
-        mcp_startup.specs,
-        workspace=config.workspace,
-        activity_sink=activity_sink,
-        audit_sink=audit_sink,
+    xhs_sidecar = LocalXhsSidecarSupervisor.from_specs(config.workspace, mcp_startup.specs)
+    xhs_sidecar.start()
+    try:
+        mcp_runtime = McpRuntime(
+            mcp_startup.specs,
+            workspace=config.workspace,
+            activity_sink=activity_sink,
+            audit_sink=audit_sink,
+        )
+    except Exception:
+        xhs_sidecar.stop()
+        raise
+    hook_runtime = TravelProgressHookRuntime(
+        create_hook_runtime(config.workspace, config.config_dir)
     )
-    hook_runtime = create_hook_runtime(config.workspace, config.config_dir)
     operator = local_operator_actor(channel="web")
     tool_registry = create_default_tool_registry(
         config.workspace,
         skills=skill_loader,
         skill_sync=skill_sync,
-        extra_tools=mcp_runtime.tools_for_actor(operator, config.workspace),
+        extra_tools=[
+            *travel_service.tools_for_actor(operator),
+            *mcp_runtime.tools_for_actor(operator, config.workspace),
+        ],
     )
     agent_loop = AgentLoop(
         llm=llm,
@@ -1435,6 +2240,7 @@ def build_web_runtime(
         mcp_status=mcp_startup.status,
         memory_extraction_status=memory_extraction_startup.status,
         context_engineering_status=context_startup.status,
+        travel_status=travel_status,
         llm_resolver=llm_resolver,
         tool_policy=tool_policy,
         confirmation_broker=confirmation_broker,
@@ -1446,6 +2252,9 @@ def build_web_runtime(
         skill_sync=skill_sync,
         skill_status=skill_sync.status_store,
         prompt_loader=prompt_loader,
+        travel_service=travel_service,
+        travel_requirement_extractor=travel_requirement_extractor,
+        xhs_sidecar=xhs_sidecar,
         memory_extraction_enabled=memory_extraction_startup.enabled,
         mcp_runtime=mcp_runtime,
     )
@@ -1561,6 +2370,19 @@ def _active_turn_key(actor: ActorContext, session_id: str) -> tuple[str, str]:
 
     actor_key = actor.user_id or f"{actor.actor_type}:{actor.username}"
     return actor_key, session_id
+
+
+def _is_recent_timestamp(value: str, *, seconds: int) -> bool:
+    """Return whether an ISO timestamp is inside a small startup race window."""
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        age = (datetime.now(UTC) - parsed.astimezone(UTC)).total_seconds()
+        return 0 <= age <= seconds
+    except ValueError:
+        return False
 
 
 def _memory_extraction_actor_key(actor: ActorContext) -> str:
@@ -1921,3 +2743,37 @@ def _format_session_history(messages) -> str:
             content = content[:117] + "..."
         lines.append(f"- **{message.role}**: {content}")
     return "\n".join(lines)
+
+
+def _travel_draft_title(draft: dict[str, Any], messages: list[Message]) -> str:
+    """Build a short user-facing travel work title from validated fields."""
+
+    origin = " ".join(str(draft.get("origin") or "").split())
+    destinations = draft.get("destinations")
+    destination = ""
+    if isinstance(destinations, list | tuple):
+        destination = " / ".join(
+            " ".join(str(item).split()) for item in destinations if str(item).strip()
+        )
+    if origin and destination:
+        return f"{origin} → {destination}"[:120]
+    if destination:
+        return f"{destination}旅行计划"[:120]
+    for message in messages:
+        if message.role != "user":
+            continue
+        content = " ".join(message.content.split())
+        if content:
+            return content[:120]
+    return ""
+
+
+def _travel_missing_fields(draft: dict[str, Any]) -> list[str]:
+    checks = (
+        ("origin", "出发地"),
+        ("destinations", "目的地"),
+        ("start_date", "开始日期"),
+        ("end_date", "结束日期"),
+        ("traveller_count", "人数"),
+    )
+    return [label for field, label in checks if not draft.get(field)]

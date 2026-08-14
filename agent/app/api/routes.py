@@ -37,6 +37,7 @@ from agent.app.api.schemas import (
     ChatResponse,
     ConfirmationMutationResponse,
     LoginRequest,
+    McpMonitorResponse,
     ModelPreferenceRequest,
     ModelsResponse,
     MonitorActivityResponse,
@@ -63,9 +64,11 @@ from agent.app.api.schemas import (
     ToolConfirmationsResponse,
     WeixinBindingAttemptResponse,
     WeixinChannelStatusResponse,
+    XhsReadonlyAdminStatusResponse,
 )
 from agent.app.auth import AuthHttpError, local_operator_actor
 from agent.app.runtime import ChatTurnResult, ModelState
+from agent.applications.travel.service import TravelApplicationError
 from agent.auth.schema import PERMISSIONS
 from agent.auth.session_access import SessionAccessError
 from agent.auth.store import AuthStoreError, ExternalIdentityConflictError
@@ -711,13 +714,6 @@ def read_models(request: Request, session_id: str = "") -> ModelsResponse:
 
     runtime = _runtime(request)
     actor = _actor(request, channel="rest")
-    if _auth_service(request) is not None and not session_id.strip():
-        raise ApiError(
-            ErrorCode.REQUEST_VALIDATION_FAILED,
-            "session_id is required",
-            status_code=400,
-            details={"field": "session_id"},
-        )
     try:
         state = _runtime_model_state(
             runtime,
@@ -1061,6 +1057,186 @@ def read_skill_sources(request: Request) -> SkillSourcesResponse:
 
     actor = _actor(request, "skill.sources.read", channel="rest")
     return _skill_sources_response(_runtime(request), actor)
+
+
+@router.get("/admin/mcp/status", response_model=McpMonitorResponse)
+def read_mcp_status(request: Request) -> McpMonitorResponse:
+    """Return credential-free MCP runtime health beside the Skill catalog."""
+
+    _actor(request, "skill.sources.read", channel="rest")
+    mcp = getattr(_runtime(request), "mcp_runtime", None)
+    if mcp is None:
+        return McpMonitorResponse(status="disabled")
+    catalog = mcp.snapshot()
+    stats = mcp.stats_snapshot()
+    tool_totals: dict[str, dict[str, object]] = {}
+    for tool in stats.tools:
+        totals = tool_totals.setdefault(
+            tool.server_id,
+            {"calls": 0, "success": 0, "failure": 0, "cancelled": 0, "last_error": ""},
+        )
+        totals["calls"] = int(totals["calls"]) + tool.call_count
+        totals["success"] = int(totals["success"]) + tool.success_count
+        totals["failure"] = int(totals["failure"]) + tool.error_count
+        totals["cancelled"] = int(totals["cancelled"]) + tool.cancelled_count
+        if tool.last_error_code:
+            totals["last_error"] = tool.last_error_code
+    latest_connections = {}
+    for event in stats.connection_history:
+        latest_connections[event.server_id] = event
+    oauth_states = {item.server_id: item.state for item in stats.oauth}
+    servers = []
+    for server in catalog.servers:
+        totals = tool_totals.get(server.server_id, {})
+        latest = latest_connections.get(server.server_id)
+        servers.append(
+            {
+                "server_id": server.server_id,
+                "state": server.state,
+                "tool_count": server.tool_count,
+                "error_code": server.error_code,
+                "call_count": int(totals.get("calls", 0)),
+                "success_count": int(totals.get("success", 0)),
+                "failure_count": int(totals.get("failure", 0)),
+                "cancelled_count": int(totals.get("cancelled", 0)),
+                "last_tool_error_code": str(totals.get("last_error", "")),
+                "last_connection_state": str(getattr(latest, "state", "")),
+                "last_connection_at": float(getattr(latest, "timestamp", 0.0)),
+                "last_connection_reason_code": str(getattr(latest, "reason_code", "")),
+                "oauth_state": str(oauth_states.get(server.server_id, "disabled")),
+            }
+        )
+    return McpMonitorResponse(
+        status="ok",
+        catalog_version=catalog.version,
+        generated_at=catalog.generated_at,
+        active_calls=stats.active_calls,
+        catalog_refresh_count=stats.catalog_refresh_count,
+        list_changed_count=stats.list_changed_count,
+        reconnect_count=stats.reconnect_count,
+        servers=servers,
+    )
+
+
+@router.get(
+    "/admin/mcp/xhs-readonly/status",
+    response_model=XhsReadonlyAdminStatusResponse,
+)
+def read_xhs_admin_status(request: Request) -> XhsReadonlyAdminStatusResponse:
+    """Return local login-management availability without touching credentials."""
+
+    _owner_xhs_actor(request)
+    supervisor = _xhs_supervisor(request)
+    snapshot = supervisor.admin_snapshot()
+    return _xhs_admin_response(
+        snapshot,
+        state=str(snapshot.get("state") or ("unknown" if snapshot["enabled"] else "unavailable")),
+        code=str(
+            snapshot.get("code")
+            or ("XHS_AUTH_NOT_CHECKED" if snapshot["enabled"] else "XHS_SIDECAR_UNAVAILABLE")
+        ),
+        message=str(
+            snapshot.get("message")
+            or (
+                "Login status has not been checked."
+                if snapshot["enabled"]
+                else "The local Xiaohongshu sidecar is unavailable."
+            )
+        ),
+    )
+
+
+@router.post(
+    "/admin/mcp/xhs-readonly/check-login",
+    response_model=XhsReadonlyAdminStatusResponse,
+)
+def check_xhs_admin_login(request: Request) -> XhsReadonlyAdminStatusResponse:
+    """Check the isolated account through the same MCP Runtime used by travel."""
+
+    actor = _owner_xhs_actor(request)
+    runtime = _runtime(request)
+    supervisor = _xhs_supervisor(request)
+    state, code, message = _check_xhs_login(runtime, actor)
+    record = getattr(supervisor, "record_login_status", None)
+    if callable(record):
+        record(state, code, message)
+    _audit_xhs_admin_action(
+        request,
+        actor,
+        action="mcp.xhs.login_checked",
+        decision="allow" if state == "authenticated" else "error",
+        code=code,
+    )
+    return _xhs_admin_response(
+        supervisor.admin_snapshot(),
+        state=state,
+        code=code,
+        message=message,
+    )
+
+
+@router.post(
+    "/admin/mcp/xhs-readonly/login",
+    response_model=XhsReadonlyAdminStatusResponse,
+)
+def start_xhs_admin_login(request: Request) -> XhsReadonlyAdminStatusResponse:
+    """Open the fixed local login helper for the Owner's desktop session."""
+
+    actor = _owner_xhs_actor(request)
+    supervisor = _xhs_supervisor(request)
+    code = supervisor.start_login()
+    successful = code in {"XHS_LOGIN_STARTED", "XHS_LOGIN_ALREADY_RUNNING"}
+    _audit_xhs_admin_action(
+        request,
+        actor,
+        action="mcp.xhs.login_started",
+        decision="allow" if successful else "error",
+        code=code,
+    )
+    messages = {
+        "XHS_LOGIN_STARTED": "The Xiaohongshu login window was opened.",
+        "XHS_LOGIN_ALREADY_RUNNING": "The Xiaohongshu login window is already open.",
+        "XHS_LOGIN_UNSUPPORTED": "This runtime cannot open a local login window.",
+        "XHS_LOGIN_START_FAILED": "The Xiaohongshu login window could not be opened.",
+    }
+    return _xhs_admin_response(
+        supervisor.admin_snapshot(),
+        state="login_pending" if successful else "unavailable",
+        code=code,
+        message=messages.get(code, "The Xiaohongshu login action failed."),
+    )
+
+
+@router.post(
+    "/admin/mcp/xhs-readonly/restart",
+    response_model=XhsReadonlyAdminStatusResponse,
+)
+def restart_xhs_admin_sidecar(request: Request) -> XhsReadonlyAdminStatusResponse:
+    """Restart only the local sidecar process owned by this Gateway."""
+
+    actor = _owner_xhs_actor(request)
+    supervisor = _xhs_supervisor(request)
+    code = supervisor.restart()
+    successful = code == "XHS_RESTARTED"
+    _audit_xhs_admin_action(
+        request,
+        actor,
+        action="mcp.xhs.restarted",
+        decision="allow" if successful else "error",
+        code=code,
+    )
+    messages = {
+        "XHS_RESTARTED": "The Xiaohongshu sidecar was restarted.",
+        "XHS_RESTART_NOT_OWNED": "The current Xiaohongshu process is externally managed.",
+        "XHS_RESTART_UNAVAILABLE": "The local Xiaohongshu sidecar is unavailable.",
+        "XHS_RESTART_FAILED": "The Xiaohongshu sidecar could not be restarted.",
+    }
+    return _xhs_admin_response(
+        supervisor.admin_snapshot(),
+        state="unknown" if successful else "unavailable",
+        code=code,
+        message=messages.get(code, "The Xiaohongshu restart action failed."),
+    )
 
 
 @router.post(
@@ -1754,6 +1930,176 @@ def _weixin_attempt_response(attempt) -> WeixinBindingAttemptResponse:
     )
 
 
+def _owner_xhs_actor(request: Request):
+    actor = _actor(request, "skill.sources.read", channel="rest")
+    if "owner" not in actor.role_keys:
+        raise ApiError(
+            ErrorCode.AUTH_PERMISSION_DENIED,
+            "Only Owner can manage the Xiaohongshu MCP login",
+            status_code=403,
+            details={"required_role": "owner"},
+        )
+    return actor
+
+
+def _xhs_supervisor(request: Request):
+    supervisor = getattr(_runtime(request), "xhs_sidecar", None)
+    if supervisor is None:
+        raise ApiError(
+            "XHS_SIDECAR_UNAVAILABLE",
+            "The local Xiaohongshu sidecar is unavailable",
+            status_code=503,
+        )
+    return supervisor
+
+
+def _xhs_admin_response(
+    snapshot: dict[str, object],
+    *,
+    state: str,
+    code: str,
+    message: str,
+) -> XhsReadonlyAdminStatusResponse:
+    return XhsReadonlyAdminStatusResponse(
+        state=state,
+        code=code,
+        message=message,
+        enabled=bool(snapshot.get("enabled")),
+        login_supported=bool(snapshot.get("login_supported")),
+        login_in_progress=bool(snapshot.get("login_in_progress")),
+        restart_supported=bool(snapshot.get("restart_supported")),
+        cookie_updated_at=str(snapshot.get("cookie_updated_at") or ""),
+    )
+
+
+def _check_xhs_login(runtime, actor) -> tuple[str, str, str]:
+    mcp = getattr(runtime, "mcp_runtime", None)
+    bind = getattr(mcp, "tools_for_actor", None)
+    if not callable(bind):
+        return "unavailable", "XHS_MCP_UNAVAILABLE", "The Xiaohongshu MCP is unavailable."
+    tools = bind(actor, runtime.config.workspace)
+    tool = next(
+        (
+            item
+            for item in tools
+            if "xhs-readonly" in str(getattr(item, "name", ""))
+            and str(getattr(item, "name", "")).endswith("check_login_status")
+        ),
+        None,
+    )
+    if tool is None:
+        return (
+            "unavailable",
+            "XHS_LOGIN_CHECK_UNAVAILABLE",
+            "The Xiaohongshu login check is unavailable.",
+        )
+    result = tool.execute({})
+
+    return _classify_xhs_login_result(result)
+
+
+def _classify_xhs_login_result(result) -> tuple[str, str, str]:
+    """Classify one normalized ToolResult without exposing its raw payload."""
+
+    objects = _xhs_result_objects(str(getattr(result, "output", "")))
+    codes = {
+        str(getattr(result, "metadata", {}).get("code") or "").upper(),
+        *(str(item.get("code") or "").upper() for item in objects),
+    }
+    if "TRAVEL_SOURCE_AUTH_REQUIRED" in codes:
+        return (
+            "auth_required",
+            "TRAVEL_SOURCE_AUTH_REQUIRED",
+            "The isolated Xiaohongshu account needs login.",
+        )
+    if bool(getattr(result, "is_error", False)):
+        code = next((item for item in codes if item), "XHS_LOGIN_CHECK_FAILED")
+        return "unavailable", code, "The Xiaohongshu login check failed."
+    if any(
+        str(item.get("status") or "").casefold() == "success"
+        and str(item.get("code") or "OK").upper() in {"OK", "MCP_OK"}
+        for item in objects
+    ):
+        return "authenticated", "OK", "The isolated Xiaohongshu account is logged in."
+    code = next((item for item in codes if item not in {"", "OK", "MCP_OK"}), "XHS_LOGIN_CHECK_FAILED")
+    return "unavailable", code, "The Xiaohongshu login state could not be confirmed."
+
+
+def _xhs_result_objects(value: str) -> list[dict[str, Any]]:
+    if not value.strip() or len(value) > 20_000:
+        return []
+    queue: list[Any] = list(_xhs_json_documents(value))
+    result: list[dict[str, Any]] = []
+    while queue and len(result) < 12:
+        current = queue.pop(0)
+        if isinstance(current, list):
+            queue.extend(current[:12])
+            continue
+        if not isinstance(current, dict):
+            continue
+        result.append(current)
+        for key in (
+            "data",
+            "output",
+            "result",
+            "text",
+            "structuredContent",
+            "structured_content",
+            "content",
+        ):
+            nested = current.get(key)
+            if isinstance(nested, dict | list):
+                queue.append(nested)
+            elif isinstance(nested, str) and len(nested) <= 16_000:
+                queue.extend(_xhs_json_documents(nested))
+    return result
+
+
+def _xhs_json_documents(value: str) -> list[Any]:
+    """Decode bounded adjacent JSON documents emitted by MCP structured + text content."""
+
+    decoder = json.JSONDecoder()
+    documents: list[Any] = []
+    index = 0
+    while index < len(value) and len(documents) < 12:
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index >= len(value):
+            break
+        try:
+            document, end = decoder.raw_decode(value, index)
+        except (TypeError, ValueError):
+            break
+        documents.append(document)
+        index = end
+    return documents
+
+
+def _audit_xhs_admin_action(
+    request: Request,
+    actor,
+    *,
+    action: str,
+    decision: str,
+    code: str,
+) -> None:
+    auth = _auth_service(request)
+    if auth is None or auth.audit_sink is None:
+        return
+    auth.audit_sink.record(
+        AuditEvent(
+            action=action,
+            resource_type="mcp_server",
+            actor=actor,
+            resource_id="xhs-readonly",
+            channel="rest",
+            decision=decision,
+            reason_code=code,
+            metadata={},
+        )
+    )
+
+
 def _qq_account_key(runtime) -> str:
     config = getattr(runtime, "channel_config", None)
     accounts = tuple(getattr(getattr(config, "qq", None), "accounts", ()) or ())
@@ -2037,6 +2383,9 @@ def _api_error_from_exception(exc: Exception) -> ApiError:
             status_code=exc.status_code,
             details=exc.details,
         )
+    if isinstance(exc, TravelApplicationError):
+        details = {"field": exc.field} if exc.field else {}
+        return ApiError(exc.code, exc.message, status_code=exc.status_code, details=details)
     if isinstance(exc, AuthStoreError):
         return ApiError(ErrorCode.REQUEST_VALIDATION_FAILED, str(exc), status_code=400)
     if isinstance(exc, PermissionError):

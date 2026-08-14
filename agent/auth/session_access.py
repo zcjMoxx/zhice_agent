@@ -39,6 +39,7 @@ class ResolvedSession:
     owner_user_id: str
     context: UserContext
     store: JsonlSessionStore
+    channel: str = ""
     created: bool = False
 
     def model_context(self) -> SessionContext:
@@ -93,7 +94,12 @@ class SessionAccessService:
             created = True
         if row is None or not self._can_access(actor, str(row["owner_user_id"])):
             raise self._not_found()
-        return self._resolved(str(row["owner_user_id"]), session_id, created=created)
+        return self._resolved(
+            str(row["owner_user_id"]),
+            session_id,
+            channel=str(row.get("channel") or channel),
+            created=created,
+        )
 
     def resolve_session(
         self,
@@ -111,7 +117,7 @@ class SessionAccessService:
         if row is None or not self._can_access(actor, str(row["owner_user_id"])):
             raise self._not_found()
         owner = str(row["owner_user_id"])
-        return self._resolved(owner, session_id)
+        return self._resolved(owner, session_id, channel=str(row.get("channel") or ""))
 
     def list_sessions(self, actor: ActorContext) -> list[SessionSummary]:
         """List the actor's own sessions for the normal chat surface."""
@@ -121,6 +127,8 @@ class SessionAccessService:
         rows = self.store.session_index_list(str(actor.user_id))
         summaries: list[SessionSummary] = []
         for row in rows:
+            if str(row["channel"]) == "travel":
+                continue
             owner = str(row["owner_user_id"])
             session_id = str(row["session_id"])
             summary = _find_summary(self._resolved(owner, session_id).store.list_sessions(), session_id)
@@ -276,6 +284,7 @@ class SessionAccessService:
         owner_user_id: str,
         session_id: str,
         *,
+        channel: str = "",
         created: bool = False,
     ) -> ResolvedSession:
         owner = self.store.get_user(owner_user_id)
@@ -289,6 +298,7 @@ class SessionAccessService:
             owner_user_id=owner_user_id,
             context=context,
             store=JsonlSessionStore(context.sessions_dir),
+            channel=channel,
             created=created,
         )
 

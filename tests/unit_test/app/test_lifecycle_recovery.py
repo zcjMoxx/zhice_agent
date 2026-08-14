@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
@@ -63,6 +64,37 @@ def test_cancel_session_propagates_actor_and_session_to_mcp(tmp_path):
     assert runtime.mcp_runtime.cancel_calls == [(actor.user_id, "session-a")]
 
 
+def test_delete_waits_for_active_turn_before_removing_session(tmp_path):
+    runtime = _runtime(tmp_path)
+    actor = _actor()
+    active = ActiveTurn("turn-a", CancellationToken())
+    runtime._register_turn((actor.user_id or "", "session-a"), active)
+    access = _SessionAccess()
+    runtime.session_access = access
+    cancel_seen = Event()
+    cancel = runtime.cancel_session
+
+    def cancel_and_signal(*args, **kwargs):
+        result = cancel(*args, **kwargs)
+        cancel_seen.set()
+        return result
+
+    runtime.cancel_session = cancel_and_signal
+    worker = Thread(target=runtime.delete_session, args=(actor, "session-a"))
+    worker.start()
+
+    assert cancel_seen.wait(1)
+    assert active.token.is_cancelled() is True
+    assert access.deleted is False
+    assert worker.is_alive() is True
+
+    runtime._unregister_turn((actor.user_id or "", "session-a"), "turn-a")
+    worker.join(1)
+
+    assert worker.is_alive() is False
+    assert access.deleted is True
+
+
 def _runtime(tmp_path) -> WebRuntime:
     return WebRuntime(
         config=AppConfig(
@@ -113,3 +145,15 @@ class _McpRuntime:
 
     def close(self):
         self.closed = True
+
+
+class _SessionAccess:
+    def __init__(self):
+        self.deleted = False
+        self.resolved = SimpleNamespace(store=SimpleNamespace())
+
+    def resolve_session(self, _actor, _session_id, **_kwargs):
+        return self.resolved
+
+    def delete_session(self, _actor, _session_id):
+        self.deleted = True

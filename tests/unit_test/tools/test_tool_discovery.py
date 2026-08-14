@@ -33,6 +33,16 @@ def test_initial_schema_only_exposes_discover_tools():
     assert provider.available_tool_names == ("read_file", "exec", "delegate_tasks")
 
 
+def test_explicit_initial_names_are_exposed_without_activating_unrelated_tools():
+    provider = DiscoverableToolProvider(_Provider(), initial_names=("read_file", "missing"))
+
+    assert provider.activated_tool_names == ("read_file",)
+    assert _names(provider.definitions()) == ["discover_tools", "read_file"]
+    result = provider.execute("exec", {"command": "echo no"})
+    assert result.is_error is True
+    assert result.metadata["code"] == "TOOL_NOT_ACTIVATED"
+
+
 def test_discovery_activates_only_matching_schemas_for_next_step():
     provider = DiscoverableToolProvider(_Provider())
     result = provider.execute("discover_tools", {"query": "read file", "max_results": 2})

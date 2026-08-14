@@ -2,6 +2,9 @@
 
 ## 测试目标
 
+- `LLMProvider` 的调用级严格 JSON Schema 能被 OpenAI-compatible、LiteLLM 和 failover 链完整透传；未指定 response format 的普通 AgentLoop 调用保持兼容。
+- 调用级 `LLMGenerationOptions.temperature` 能覆盖 OpenAI/LiteLLM endpoint 默认值并穿过 failover，未指定时继续使用 endpoint 配置且不改变普通 AgentLoop 行为。
+
 验证 LLMProvider 边界稳定：AgentLoop 只依赖协议，OpenAIProvider 与 LiteLLMProvider 负责各自 OpenAI-compatible HTTP 请求、响应归一化和错误脱敏。
 
 ## 用例覆盖
@@ -60,3 +63,9 @@
 - 输入：多个 endpoint，包含 preferred endpoint、不同 priority、disabled endpoint。
 - 预期：优先尝试 preferred endpoint；失败后按 priority 尝试其它 enabled endpoint。
 - 检查点：成功响应 metadata 记录 endpoint 和 attempted_endpoints；`endpoint/model` 覆盖只允许默认模型或命中 `supported_models` 的模型，且只作用于首选 endpoint；全部失败时错误信息包含 endpoint 摘要且不泄露 secret。
+
+### Case 10: Endpoint request timeout
+
+- 输入：endpoint 配置长响应超时，并分别不传、显式传入 Provider timeout 上限。
+- 预期：默认采用 endpoint 的 `request_timeout_seconds`；显式上限取两者较小值。
+- 检查点：OpenAI 与 LiteLLM Provider 均不会被隐藏的 60 秒默认值截断。

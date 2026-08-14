@@ -12,6 +12,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from agent.app.api.routes import _api_error_from_exception, _runtime_call, _set_model_preference
 from agent.app.auth import AuthHttpError, local_operator_actor
 from agent.app.runtime import EXTERNAL_COMMAND_PROFILE, WEB_COMMAND_PROFILE, ChatTurnResult
+from agent.applications.travel.service import TravelApplicationError
 from agent.core.turns import new_turn_id
 from agent.protocols.auth import AuditEvent
 from agent.protocols.errors import ErrorCode
@@ -134,9 +135,14 @@ async def websocket_chat(websocket: WebSocket) -> None:
                 continue
             if frame_type == "new_session":
                 new_session_id = _new_session_id()
+                try:
+                    session_channel = _resolve_session_channel(frame, command_profile)
+                except ValueError as exc:
+                    await send_event("channel_status", _request_error(str(exc), connection_id))
+                    continue
                 create_session = getattr(runtime, "create_session", None)
                 if callable(create_session):
-                    _runtime_call(runtime, "create_session", actor, new_session_id, command_profile)
+                    _runtime_call(runtime, "create_session", actor, new_session_id, session_channel)
                 await send_event("session_created", {"session_id": new_session_id}, session_id=new_session_id)
                 continue
             if frame_type == "heartbeat":
@@ -235,8 +241,16 @@ async def _run_message_frame(
     )
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
     loop = asyncio.get_running_loop()
+    terminal = {"plan_ready": False, "clarification": False, "candidate_review": False}
 
     def on_event(event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type == "travel.plan_ready":
+            terminal["plan_ready"] = True
+        elif event_type == "travel.clarification_required":
+            terminal["clarification"] = True
+        elif event_type == "travel.candidate_review_required":
+            terminal["candidate_review"] = True
         loop.call_soon_threadsafe(queue.put_nowait, ("event", event))
 
     def worker() -> None:
@@ -249,17 +263,51 @@ async def _run_message_frame(
                     model,
                     request_id="",
                 )
-            result = _runtime_call(
-                runtime,
-                "run_chat_events",
-                actor,
-                session_id,
-                content,
-                turn_id=turn_id,
-                on_event=on_event,
-                command_profile=command_profile,
-                request_id="",
-            )
+            current_message = content
+            current_turn_id = turn_id
+            result = None
+            for attempt in range(3):
+                result = _runtime_call(
+                    runtime,
+                    "run_chat_events",
+                    actor,
+                    session_id,
+                    current_message,
+                    turn_id=current_turn_id,
+                    on_event=on_event,
+                    command_profile=command_profile,
+                    request_id="",
+                )
+                if (
+                    result.stopped
+                    or terminal["plan_ready"]
+                    or terminal["clarification"]
+                    or terminal["candidate_review"]
+                ):
+                    break
+                continuation = getattr(runtime, "travel_continuation_message", None)
+                if not callable(continuation):
+                    break
+                try:
+                    current_message = _runtime_call(
+                        runtime,
+                        "travel_continuation_message",
+                        actor,
+                        session_id,
+                    )
+                except TravelApplicationError as exc:
+                    if exc.code == "TRAVEL_GENERATION_NOT_FOUND":
+                        break
+                    raise
+                if attempt >= 2:
+                    raise TravelApplicationError(
+                        "TRAVEL_PLAN_NOT_FINALIZED",
+                        "旅行规划没有生成完整结果，请稍后重试。",
+                        status_code=502,
+                    )
+                current_turn_id = new_turn_id()
+            if result is None:
+                raise RuntimeError("travel turn did not start")
         except Exception as exc:  # noqa: BLE001 - errors must be sent over the channel.
             loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
             return
@@ -354,6 +402,20 @@ def _new_session_id() -> str:
     """Return a fresh Web session id."""
 
     return "session-" + uuid.uuid4().hex[:16]
+
+
+def _resolve_session_channel(frame: dict[str, Any], default_channel: str) -> str:
+    """Map a browser application label to a bounded persisted Session channel."""
+
+    raw_application = frame.get("application")
+    if raw_application is None or not str(raw_application).strip():
+        return default_channel
+    application = str(raw_application).strip().lower()
+    if application == "chat":
+        return "web"
+    if application == "travel":
+        return "travel"
+    raise ValueError("unknown session application; supported applications: chat, travel")
 
 
 def _should_apply_model_preference(content: str, model: str) -> bool:

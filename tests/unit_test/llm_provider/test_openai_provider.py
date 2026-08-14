@@ -109,6 +109,51 @@ def test_openai_provider_omits_tools_when_empty():
     assert "tools" not in request_body
 
 
+def test_openai_provider_sends_strict_json_schema_response_format():
+    """Structured application calls should constrain model output at generation time."""
+
+    from agent.llm.openai_provider import OpenAIProvider
+    from agent.protocols.llm import LLMResponseFormat
+
+    recorder = UrlopenRecorder({"choices": [{"message": {"content": '{"intent":"unrelated"}'}}]})
+    response_format = LLMResponseFormat(
+        name="travel_requirement_draft",
+        schema={
+            "type": "object",
+            "properties": {"intent": {"type": "string"}},
+            "required": ["intent"],
+            "additionalProperties": False,
+        },
+    )
+
+    OpenAIProvider(_endpoint(api_key="json-secret"), urlopen=recorder).chat(
+        messages=[{"role": "user", "content": "你是谁"}],
+        response_format=response_format,
+    )
+
+    request_body = json.loads(recorder.bodies[0])
+    assert request_body["response_format"] == response_format.to_openai()
+
+
+def test_openai_provider_uses_call_scoped_temperature_without_changing_default():
+    """Classification can be deterministic while ordinary calls keep endpoint settings."""
+
+    from agent.llm.openai_provider import OpenAIProvider
+    from agent.protocols.llm import LLMGenerationOptions
+
+    recorder = UrlopenRecorder({"choices": [{"message": {"content": "ok"}}]})
+    provider = OpenAIProvider(_endpoint(api_key="json-secret"), urlopen=recorder)
+
+    provider.chat(
+        messages=[{"role": "user", "content": "classify"}],
+        generation_options=LLMGenerationOptions(temperature=0.0),
+    )
+    provider.chat(messages=[{"role": "user", "content": "chat"}])
+
+    assert json.loads(recorder.bodies[0])["temperature"] == 0.0
+    assert json.loads(recorder.bodies[1])["temperature"] == _endpoint().temperature
+
+
 def test_openai_provider_preserves_multiple_tool_calls_order():
     """Provider parsing should keep tool call order stable."""
 
@@ -194,6 +239,26 @@ def test_openai_provider_classifies_network_and_invalid_response_errors():
     assert network_error.value.retryable is True
     assert invalid_error.value.code == "INVALID_RESPONSE"
     assert invalid_error.value.retryable is True
+
+
+def test_openai_provider_uses_endpoint_timeout_unless_explicitly_capped():
+    """Long structured responses must not be capped by a hidden 60 second default."""
+
+    from agent.llm.openai_provider import OpenAIProvider
+
+    endpoint = _endpoint(api_key="key", request_timeout_seconds=240)
+    endpoint_timeout = UrlopenRecorder({"choices": [{"message": {"content": "ok"}}]})
+    explicit_cap = UrlopenRecorder({"choices": [{"message": {"content": "ok"}}]})
+
+    OpenAIProvider(endpoint, urlopen=endpoint_timeout).chat(
+        messages=[{"role": "user", "content": "hello"}]
+    )
+    OpenAIProvider(endpoint, urlopen=explicit_cap, timeout=90).chat(
+        messages=[{"role": "user", "content": "hello"}]
+    )
+
+    assert endpoint_timeout.timeouts == [240]
+    assert explicit_cap.timeouts == [90]
 
 
 def test_litellm_provider_classifies_sdk_status_and_redacts_secret():
@@ -316,10 +381,83 @@ def test_litellm_provider_passes_custom_api_base_when_configured():
     assert recorder.calls[0]["api_base"] == "https://gateway.test/v1"
 
 
-def _endpoint(api_key=""):
+def test_litellm_provider_passes_strict_json_schema_response_format():
+    """LiteLLM endpoints should receive the same provider-neutral schema contract."""
+
+    from agent.llm.litellm_provider import LiteLLMProvider
+    from agent.protocols.llm import LLMEndpoint, LLMResponseFormat
+
+    recorder = CompletionRecorder({"choices": [{"message": {"content": '{"intent":"unrelated"}'}}]})
+    endpoint = LLMEndpoint(
+        name="custom",
+        protocol="litellm",
+        base_url="",
+        api_key="gateway-secret",
+        provider="openai",
+        model="custom-model",
+    )
+    response_format = LLMResponseFormat(
+        name="travel_requirement_draft",
+        schema={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+
+    LiteLLMProvider(endpoint, completion=recorder).chat(
+        messages=[{"role": "user", "content": "hello"}],
+        response_format=response_format,
+    )
+
+    assert recorder.calls[0]["response_format"] == response_format.to_openai()
+
+
+def test_litellm_provider_uses_call_scoped_temperature():
+    """LiteLLM should honor deterministic application calls without global mutation."""
+
+    from agent.llm.litellm_provider import LiteLLMProvider
+    from agent.protocols.llm import LLMEndpoint, LLMGenerationOptions
+
+    recorder = CompletionRecorder({"choices": [{"message": {"content": "ok"}}]})
+    endpoint = LLMEndpoint(
+        name="custom",
+        protocol="litellm",
+        base_url="",
+        api_key="gateway-secret",
+        provider="openai",
+        model="custom-model",
+        temperature=0.8,
+    )
+
+    LiteLLMProvider(endpoint, completion=recorder).chat(
+        messages=[{"role": "user", "content": "classify"}],
+        generation_options=LLMGenerationOptions(temperature=0.0),
+    )
+
+    assert recorder.calls[0]["temperature"] == 0.0
+
+
+def test_litellm_provider_uses_endpoint_timeout_unless_explicitly_capped():
+    """LiteLLM requests should honor configured long-response timeouts too."""
+
+    from agent.llm.litellm_provider import LiteLLMProvider
+
+    endpoint = _endpoint_for_litellm(request_timeout_seconds=240)
+    endpoint_timeout = CompletionRecorder({"choices": [{"message": {"content": "ok"}}]})
+    explicit_cap = CompletionRecorder({"choices": [{"message": {"content": "ok"}}]})
+
+    LiteLLMProvider(endpoint, completion=endpoint_timeout).chat(
+        messages=[{"role": "user", "content": "hello"}]
+    )
+    LiteLLMProvider(endpoint, completion=explicit_cap, timeout=90).chat(
+        messages=[{"role": "user", "content": "hello"}]
+    )
+
+    assert endpoint_timeout.calls[0]["timeout"] == 240
+    assert explicit_cap.calls[0]["timeout"] == 90
+
+
+def _endpoint(api_key="", **overrides):
     from agent.protocols.llm import LLMEndpoint
 
-    return LLMEndpoint(
+    values = dict(
         name="default",
         protocol="openai",
         base_url="https://example.test/v1",
@@ -329,6 +467,8 @@ def _endpoint(api_key=""):
         max_tokens=128,
         temperature=0.2,
     )
+    values.update(overrides)
+    return LLMEndpoint(**values)
 
 
 def _headers_lower(headers: dict[str, str]) -> dict[str, str]:
@@ -341,11 +481,13 @@ class UrlopenRecorder:
         self.urls: list[str] = []
         self.headers: list[dict[str, str]] = []
         self.bodies: list[str] = []
+        self.timeouts: list[float | None] = []
 
     def __call__(self, request, timeout=None):
         self.urls.append(request.full_url)
         self.headers.append(dict(request.header_items()))
         self.bodies.append(request.data.decode("utf-8"))
+        self.timeouts.append(timeout)
         return FakeResponse(self.payload)
 
 
@@ -400,10 +542,10 @@ class FakeSdkError(Exception):
         self.retry_after = retry_after
 
 
-def _endpoint_for_litellm():
+def _endpoint_for_litellm(**overrides):
     from agent.protocols.llm import LLMEndpoint
 
-    return LLMEndpoint(
+    values = dict(
         name="litellm",
         protocol="litellm",
         base_url="",
@@ -411,6 +553,8 @@ def _endpoint_for_litellm():
         provider="openai",
         model="gpt-test",
     )
+    values.update(overrides)
+    return LLMEndpoint(**values)
 
 
 class FakeResponse:

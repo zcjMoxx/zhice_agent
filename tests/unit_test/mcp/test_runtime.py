@@ -3,13 +3,15 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 
-from agent.mcp.runtime import McpRuntime
+import agent.mcp.runtime as mcp_runtime_module
+from agent.mcp.runtime import McpRuntime, _leaf_exception_type
 from agent.protocols.auth import ActorContext
-from agent.protocols.mcp import McpInteractionResponse, McpServerSpec
+from agent.protocols.mcp import McpInteractionResponse, McpServerSpec, McpToolDescriptor
 
 
 def _actor() -> ActorContext:
@@ -183,6 +185,53 @@ def test_empty_runtime_is_disabled_without_thread(tmp_path):
     assert runtime.snapshot().tools == ()
     assert runtime.format_capabilities() == "当前没有可用的 MCP Server。"
     runtime.close()
+
+
+def test_runtime_automatically_recovers_after_transient_initialization_failure(
+    tmp_path, monkeypatch
+):
+    attempts = 0
+
+    @asynccontextmanager
+    async def flaky_open_session(_runtime, _connection):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ExceptionGroup("transient", [TimeoutError("hidden detail")])
+        yield object()
+
+    async def discover(_runtime, _spec, _session):
+        return (
+            McpToolDescriptor(
+                server_id="flaky",
+                remote_name="search",
+                local_name="mcp__flaky__search",
+                description="Search",
+                input_schema={"type": "object"},
+            ),
+        ), ()
+
+    monkeypatch.setattr(McpRuntime, "_open_session", flaky_open_session)
+    monkeypatch.setattr(McpRuntime, "_discover_tools", discover)
+    monkeypatch.setattr(mcp_runtime_module, "MCP_RECONNECT_BACKOFF_SECONDS", (0.01,))
+    runtime = McpRuntime(
+        [McpServerSpec(server_id="flaky", transport="streamable_http", url="https://unused")],
+        workspace=tmp_path,
+    )
+    try:
+        assert _wait_until(lambda: runtime.snapshot().servers[0].state == "ready")
+        assert attempts >= 2
+        assert [tool.local_name for tool in runtime.snapshot().tools] == [
+            "mcp__flaky__search"
+        ]
+    finally:
+        runtime.close()
+
+
+def test_exception_group_logging_uses_safe_leaf_type():
+    error = ExceptionGroup("outer secret", [ExceptionGroup("inner", [TimeoutError("url")])])
+
+    assert _leaf_exception_type(error) == "TimeoutError"
 
 
 def _wait_until(predicate, *, timeout: float = 5.0) -> bool:

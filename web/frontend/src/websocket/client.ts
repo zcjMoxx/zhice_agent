@@ -39,11 +39,11 @@ export class ZhiCeWebSocket {
     return this.connecting;
   }
 
-  async createSession(): Promise<string> {
+  async createSession(application: "chat" | "travel" = "chat"): Promise<string> {
     const socket = await this.connect();
     return new Promise((resolve) => {
       this.sessionWaiters.push(resolve);
-      socket.send(JSON.stringify({ type: "new_session" }));
+      socket.send(JSON.stringify({ type: "new_session", application }));
     });
   }
 

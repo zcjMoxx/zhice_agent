@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import agent.mcp.runtime as mcp_runtime_module
 from agent.mcp.runtime import McpRuntime
 from agent.protocols.auth import ActorContext
 from agent.protocols.mcp import McpServerSpec
@@ -59,7 +60,11 @@ def test_remote_transports_discover_and_call(
     server_transport,
     runtime_transport,
     path,
+    monkeypatch,
 ):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
     port = _free_port()
     script = Path(__file__).with_name("fake_http_server.py").resolve()
     process = subprocess.Popen(  # noqa: S603 - fixed interpreter and local test script.
@@ -93,3 +98,19 @@ def test_remote_transports_discover_and_call(
             runtime.close()
         process.terminate()
         process.wait(timeout=10)
+
+
+def test_http_client_policy_only_trusts_environment_when_explicit(monkeypatch):
+    captured = []
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+    monkeypatch.setattr(mcp_runtime_module.httpx, "AsyncClient", _Client)
+
+    mcp_runtime_module._sse_http_client_factory("direct")()
+    mcp_runtime_module._sse_http_client_factory("environment")()
+
+    assert captured[0]["trust_env"] is False
+    assert captured[1]["trust_env"] is True

@@ -14,6 +14,7 @@ from datetime import datetime
 
 from agent.app.auth import local_operator_actor
 from agent.app.gateway import format_gateway_check, run_gateway
+from agent.app.instance_lock import WorkspaceGatewayLockError
 from agent.app.logging import GatewayLogOptions
 from agent.auth.activity import SqliteRuntimeActivitySink
 from agent.auth.audit import SqliteAuditSink
@@ -278,6 +279,9 @@ def _run_chat(argv: Sequence[str]) -> int:
         llm = _build_llm_provider(config.config_dir, args.endpoint)
     except LLMConfigurationError as exc:
         _print_llm_configuration_error(exc, config)
+        return 1
+    except WorkspaceGatewayLockError as exc:
+        print(console.error(str(exc)))
         return 1
     try:
         compaction_llm = create_optional_aliased_llm_provider(

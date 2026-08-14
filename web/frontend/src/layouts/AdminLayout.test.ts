@@ -38,9 +38,14 @@ describe("AdminLayout", () => {
       if (url.startsWith("/api/admin/skills/sources/official/sync") && init?.method === "POST") return Promise.resolve(response({ status: "synchronized" }));
       if (url.startsWith("/api/admin/skills/sources/official/refresh-index") && init?.method === "POST") return Promise.resolve(response({ status: "refreshed" }));
       if (url.startsWith("/api/admin/skills/sources")) return Promise.resolve(response({ status: "ok", sources: [{ source: "official", enabled: true, sync_enabled: true, configured_target: "master", current_commit: "abc123", last_sync_started_at: "2026-08-09T00:00:00Z", last_sync_finished_at: "2026-08-09T00:00:01Z", last_success_at: "2026-08-09T00:00:01Z", last_status: "up_to_date", health: "healthy", skill_count: 1, load_error_count: 0, last_error_code: "", last_error_message_safe: "" }], skills: [{ qualified_name: "official/weather", source: "official", name: "weather", description: "天气报告", executable: true }] }));
+      if (url.startsWith("/api/admin/mcp/xhs-readonly/check-login")) return Promise.resolve(response({ server_id: "xhs-readonly", state: "authenticated", code: "OK", message: "logged in", enabled: true, login_supported: true, login_in_progress: false, restart_supported: true, cookie_updated_at: "2026-08-14T04:42:18Z" }));
+      if (url.startsWith("/api/admin/mcp/xhs-readonly/login")) return Promise.resolve(response({ server_id: "xhs-readonly", state: "login_pending", code: "XHS_LOGIN_STARTED", message: "started", enabled: true, login_supported: true, login_in_progress: true, restart_supported: true, cookie_updated_at: "2026-08-14T04:42:18Z" }));
+      if (url.startsWith("/api/admin/mcp/xhs-readonly/restart")) return Promise.resolve(response({ server_id: "xhs-readonly", state: "unknown", code: "XHS_RESTARTED", message: "restarted", enabled: true, login_supported: true, login_in_progress: false, restart_supported: true, cookie_updated_at: "2026-08-14T04:42:18Z" }));
+      if (url.startsWith("/api/admin/mcp/xhs-readonly/status")) return Promise.resolve(response({ server_id: "xhs-readonly", state: "unknown", code: "XHS_AUTH_NOT_CHECKED", message: "not checked", enabled: true, login_supported: true, login_in_progress: false, restart_supported: true, cookie_updated_at: "2026-08-14T04:42:18Z" }));
+      if (url.startsWith("/api/admin/mcp/status")) return Promise.resolve(response({ status: "ok", catalog_version: 4, generated_at: 1, active_calls: 1, catalog_refresh_count: 2, list_changed_count: 1, reconnect_count: 3, servers: [{ server_id: "tavily", state: "degraded", tool_count: 2, error_code: "MCP_TRANSPORT_ERROR", call_count: 5, success_count: 3, failure_count: 1, cancelled_count: 1, last_tool_error_code: "MCP_TOOL_TIMEOUT", last_connection_state: "degraded", last_connection_at: 1, last_connection_reason_code: "MCP_TRANSPORT_ERROR", oauth_state: "disabled" }, { server_id: "xhs-readonly", state: "ready", tool_count: 3, error_code: "", call_count: 2, success_count: 2, failure_count: 0, cancelled_count: 0, last_tool_error_code: "", last_connection_state: "ready", last_connection_at: 1, last_connection_reason_code: "", oauth_state: "disabled" }] }));
       if (url.startsWith("/api/admin/operations/terminal")) return Promise.resolve(response({ enabled: true, configured: true, url: "https://ops.example.test", presentation: "both", mode: "server_docker", target_type: "container", target_name: "zhice-agent" }));
       if (url.startsWith("/api/admin/diagnostics")) return Promise.resolve(response({ status: "ok", window_minutes: 1440, filters: {}, summary: { incidents: 1 }, incidents: [{ incident_id: "inc-1", component: "agent", code: "WEIXIN_TOKEN_STALE", subject: "", count: 1, first_seen_at: "2026-07-29T00:00:00Z", last_seen_at: "2026-07-29T00:00:00Z", rule: "same_component_code_subject_within_query_window", evidence: [{ evidence_id: "evt-1", ts: "2026-07-29T00:00:00Z", component: "agent", event: "channel.weixin.reconnect_required", code: "WEIXIN_TOKEN_STALE", error_message: "The Weixin token is stale", request_id: "req-1" }] }], timeline: [{ evidence_id: "evt-1", ts: "2026-07-29T00:00:00Z", component: "agent", event: "channel.weixin.reconnect_required", code: "WEIXIN_TOKEN_STALE", is_error: true, error_message: "The Weixin token is stale", request_id: "req-1" }, { evidence_id: "evt-2", ts: "2026-07-29T00:00:01Z", component: "gateway", event: "channel.ready", code: "", is_error: false }], limitations: [] }));
-      if (url.startsWith("/api/admin/monitor")) return Promise.resolve(response({ gateway: { status: "ok", current_model: "default/model" }, capabilities: {}, activity: { summary: {}, recent_turns: [
+      if (url.startsWith("/api/admin/monitor")) return Promise.resolve(response({ gateway: { status: "ok", current_model: "default/model" }, capabilities: { mcp: { name: "MCP", state: "available", message: "MCP ready", code: "MCP_READY" }, travel: { name: "Travel", state: "available", message: "Travel ready", code: "TRAVEL_READY" } }, activity: { summary: {}, recent_turns: [
         { turn_id: "turn-sec", request_id: "req-turn-sec", session_id: "session-error", session_title: "排查模型错误", actor_user_id: "actor", actor_username: "actor", actor_display_name: "Actor", status: "error", error_code: "GATEWAY_RESTART_INTERRUPTED", channel: "web", started_at: "2026-08-08T14:00:00Z", duration_ms: null },
         { turn_id: "turn-min", session_id: "session-minute", session_title: "一分钟任务", actor_user_id: "actor", actor_username: "actor", actor_display_name: "Actor", status: "completed", channel: "web", started_at: "2026-08-08T14:00:00Z", duration_ms: 60_000 },
         { turn_id: "turn-hour", session_id: "session-hour", session_title: "一小时任务", actor_user_id: "actor", actor_username: "actor", actor_display_name: "Actor", status: "completed", channel: "web", started_at: "2026-08-08T14:00:00Z", duration_ms: 3_600_000 },
@@ -73,6 +78,47 @@ describe("AdminLayout", () => {
     await mounted.get('.permission-group input[type="checkbox"]').setValue(true);
     await flushPromises();
     expect(fetch).toHaveBeenCalledWith("/api/admin/roles/role-dev", expect.objectContaining({ method: "PATCH" }));
+  });
+
+  it("shows MCP server health and reconnect statistics beside Skills without treating unused OAuth as disabled", async () => {
+    const mounted = await wrapper();
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "MCP 与 Skills")!.trigger("click");
+    await flushPromises();
+
+    expect(mounted.get(".mcp-monitor-section").text()).toContain("MCP 服务监控");
+    expect(mounted.get(".mcp-server-card").text()).toContain("tavily");
+    expect(mounted.get(".mcp-server-card").text()).toContain("MCP_TRANSPORT_ERROR");
+    expect(mounted.get(".mcp-server-card").text()).toContain("无需 OAuth");
+    expect(mounted.get(".mcp-server-card").text()).not.toContain("disabled");
+    expect(mounted.get(".mcp-monitor-section").text()).toContain("3");
+    expect(fetch).toHaveBeenCalledWith("/api/admin/mcp/status", expect.anything());
+  });
+
+  it("shows Xiaohongshu login management only to Owner inside the MCP card", async () => {
+    const mounted = await wrapper();
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "MCP 与 Skills")!.trigger("click");
+    await flushPromises();
+
+    const xhsCard = mounted.findAll(".mcp-server-card").find((card) => card.text().includes("xhs-readonly"))!;
+    expect(xhsCard.get(".xhs-mcp-admin").text()).toContain("小红书登录管理");
+    expect(xhsCard.get(".xhs-mcp-admin").text()).toContain("已登录");
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/admin/mcp/xhs-readonly/check-login",
+      expect.objectContaining({ method: "POST" }),
+    );
+    await xhsCard.findAll(".xhs-mcp-actions button")[1].trigger("click");
+    await flushPromises();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/admin/mcp/xhs-readonly/login",
+      expect.objectContaining({ method: "POST" }),
+    );
+    mounted.unmount();
+
+    const adminMounted = await wrapper(["admin"]);
+    await adminMounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "MCP 与 Skills")!.trigger("click");
+    await flushPromises();
+    expect(adminMounted.find(".xhs-mcp-admin").exists()).toBe(false);
+    adminMounted.unmount();
   });
 
   it("lets only Owner control public registration from account management", async () => {
@@ -243,7 +289,7 @@ describe("AdminLayout", () => {
 
   it("shows safe Skill source status and executes fixed source actions", async () => {
     const mounted = await wrapper();
-    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "Skills")!.trigger("click");
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "MCP 与 Skills")!.trigger("click");
     await flushPromises();
 
     expect(mounted.text()).toContain("official");
@@ -282,7 +328,16 @@ describe("AdminLayout", () => {
 
     const adminMounted = await wrapper(["admin"]);
     expect(adminMounted.findAll(".admin-sidebar nav button").some((button) => button.text() === "服务器运维")).toBe(false);
-    expect(adminMounted.findAll(".admin-sidebar nav button").some((button) => button.text() === "Skills")).toBe(true);
+    expect(adminMounted.findAll(".admin-sidebar nav button").some((button) => button.text() === "MCP 与 Skills")).toBe(true);
+  });
+
+  it("keeps MCP out of runtime capability diagnostics while retaining other capabilities", async () => {
+    const mounted = await wrapper();
+    await mounted.findAll(".admin-sidebar nav button").find((button) => button.text() === "运行诊断")!.trigger("click");
+    await flushPromises();
+
+    expect(mounted.get(".capability-grid").text()).toContain("Travel");
+    expect(mounted.get(".capability-grid").text()).not.toContain("MCP");
   });
 
   it("drills overview failures and incidents into their diagnostic sections", async () => {

@@ -29,6 +29,9 @@ RUNTIME_EVENT_STATUS_BY_TYPE = {
     "skill.progress": "started",
     "skill.completed": "completed",
     "skill.failed": "failed",
+    "travel.plan_ready": "completed",
+    "travel.clarification_required": "waiting",
+    "travel.candidate_review_required": "waiting",
 }
 RUNTIME_EVENT_TYPES = frozenset(RUNTIME_EVENT_STATUS_BY_TYPE)
 RUNTIME_EVENT_STATUSES = frozenset(RUNTIME_EVENT_STATUS_BY_TYPE.values())
@@ -36,7 +39,9 @@ RUNTIME_EVENT_STATUSES = frozenset(RUNTIME_EVENT_STATUS_BY_TYPE.values())
 _DISPLAY_KEYS = frozenset({"title", "detail", "icon", "visibility"})
 _DISPLAY_LIMITS = {"title": 120, "detail": 500, "icon": 40, "visibility": 20}
 _UI_METADATA_KEYS = frozenset({"detail_type", "detail_data"})
-RUNTIME_UI_DETAIL_TYPES = frozenset({"summary", "search_results", "code_preview", "table", "map"})
+RUNTIME_UI_DETAIL_TYPES = frozenset(
+    {"summary", "search_results", "travel_candidates", "code_preview", "table", "map"}
+)
 _SENSITIVE_KEY_PARTS = (
     "api_key",
     "argument",
@@ -242,7 +247,7 @@ def _validate_ui_metadata(metadata: dict[str, Any]) -> None:
             raise ValueError("runtime event ui_metadata.detail_type is invalid")
         if "detail_data" not in metadata:
             raise ValueError("runtime event ui_metadata.detail_data is required")
-    _validate_json_value(metadata, field_name="ui_metadata", max_bytes=8192)
+    _validate_json_value(metadata, field_name="ui_metadata", max_bytes=32 * 1024)
     _reject_unsafe_ui_values(metadata)
 
 

@@ -24,7 +24,7 @@ _CJK_CHUNK_RE = re.compile(r"[\u4e00-\u9fff]+")
 class DiscoverableToolProvider:
     """Expose one bootstrap Tool, then only schemas activated during this Turn."""
 
-    def __init__(self, base: ToolProvider):
+    def __init__(self, base: ToolProvider, *, initial_names: tuple[str, ...] = ()):
         self._base = base
         self._definitions = tuple(copy.deepcopy(base.definitions()))
         self._by_name = {
@@ -34,7 +34,9 @@ class DiscoverableToolProvider:
         }
         if DISCOVER_TOOLS_NAME in self._by_name:
             raise ValueError(f"base ToolProvider cannot define reserved tool: {DISCOVER_TOOLS_NAME}")
-        self._activated: set[str] = set()
+        self._activated: set[str] = {
+            name for name in initial_names if name in self._by_name
+        }
         self._lock = Lock()
 
     @property
@@ -171,12 +173,16 @@ class DiscoverableToolProvider:
         )
 
 
-def with_tool_discovery(provider: ToolProvider | None) -> ToolProvider | None:
+def with_tool_discovery(
+    provider: ToolProvider | None,
+    *,
+    initial_names: tuple[str, ...] = (),
+) -> ToolProvider | None:
     """Wrap one final effective Provider once; preserve None for no-tool runtimes."""
 
     if provider is None or isinstance(provider, DiscoverableToolProvider):
         return provider
-    return DiscoverableToolProvider(provider)
+    return DiscoverableToolProvider(provider, initial_names=initial_names)
 
 
 def _discovery_definition() -> dict[str, Any]:

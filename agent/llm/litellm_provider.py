@@ -6,7 +6,14 @@ from collections.abc import Callable
 from typing import Any
 
 from agent.llm.openai_provider import _clean_message, _read_api_key
-from agent.protocols.llm import LLMConfigurationError, LLMEndpoint, LLMProviderError, LLMResponse
+from agent.protocols.llm import (
+    LLMConfigurationError,
+    LLMEndpoint,
+    LLMGenerationOptions,
+    LLMProviderError,
+    LLMResponse,
+    LLMResponseFormat,
+)
 
 CompletionCallable = Callable[..., Any]
 
@@ -18,18 +25,24 @@ class LiteLLMProvider:
         self,
         endpoint: LLMEndpoint,
         completion: CompletionCallable | None = None,
-        timeout: float = 60.0,
+        timeout: float | None = None,
     ):
         """Store endpoint config and optional test double for litellm.completion."""
 
         self.endpoint = endpoint
         self._completion = completion
-        self._timeout = min(timeout, endpoint.request_timeout_seconds)
+        self._timeout = (
+            endpoint.request_timeout_seconds
+            if timeout is None
+            else min(timeout, endpoint.request_timeout_seconds)
+        )
 
     def chat(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: LLMResponseFormat | None = None,
+        generation_options: LLMGenerationOptions | None = None,
     ) -> LLMResponse:
         """Call LiteLLM SDK with OpenAI-compatible messages and tools."""
 
@@ -40,7 +53,12 @@ class LiteLLMProvider:
             "model": request_model,
             "messages": [_clean_message(message) for message in messages],
             "max_tokens": self.endpoint.max_tokens,
-            "temperature": self.endpoint.temperature,
+            "temperature": (
+                generation_options.temperature
+                if generation_options is not None
+                and generation_options.temperature is not None
+                else self.endpoint.temperature
+            ),
             "timeout": self._timeout,
             "num_retries": 0,
             "api_key": api_key,
@@ -50,6 +68,8 @@ class LiteLLMProvider:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+        if response_format is not None:
+            kwargs["response_format"] = response_format.to_openai()
 
         try:
             raw = completion(**kwargs)

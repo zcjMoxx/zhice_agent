@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from agent.app.api.routes import ApiError, router
+from agent.app.api.travel_routes import router as travel_router
 from agent.app.api.ws import router as ws_router
 from agent.app.auth import AuthHttpError
 from agent.app.instance_lock import WorkspaceGatewayLock
@@ -53,51 +54,79 @@ def run_gateway(
 
     resolved_log_options = log_options or GatewayLogOptions()
     logging_result = configure_gateway_logging(resolved_log_options, logs_dir=config.logs_dir)
-    runtime = build_web_runtime(config)
-    static_dir = _default_static_dir()
-    app = create_app(config=config, runtime=runtime, static_dir=static_dir)
-    print(
-        f"{console.bold('ZhiCe-Agent gateway')} listening on "
-        f"{console.command(f'http://{host}:{port}')}"
-    )
-    if host in {"0.0.0.0", "::"}:
-        print(console.warning("gateway auth is enabled, but this remains a local development service."))
-    print(f"workspace: {console.path(config.workspace)}")
-    print(f"static: {console.path(static_dir)}")
-    print("routes: /, /_setup, /health, /api/*, /ws")
-    print(
-        "agent-log: "
-        f"{'on' if resolved_log_options.agent_log else 'off'} "
-        f"level={resolved_log_options.agent_log_level}"
-    )
-    print(
-        "http-access-log: "
-        f"{'on' if resolved_log_options.http_access_log else 'off'}, "
-        "http-server-log: "
-        f"{'on' if resolved_log_options.http_server_log else 'off'} "
-        f"level={resolved_log_options.http_server_log_level}"
-    )
-    trace_path = logging_result.trace_path or daily_trace_path(
-        config.logs_dir,
-        datetime.now(BEIJING_TIMEZONE).date(),
-    )
-    print(f"trace-log: {'on' if resolved_log_options.trace_log else 'off'} path={console.path(trace_path)}")
-    server_config = uvicorn.Config(
-        app=app,
-        host=host,
-        port=port,
-        log_level=_uvicorn_log_level(resolved_log_options),
-        access_log=resolved_log_options.http_access_log,
-        use_colors=terminal_color_override(),
-    )
-    begin_console_log_deferral()
+    instance_lock = WorkspaceGatewayLock(config.workspace)
+    instance_lock.acquire()
+    runtime = None
     try:
-        _OrderedGatewayServer(server_config).run()
-    except KeyboardInterrupt:
-        # A second Ctrl+C may escape Uvicorn while graceful shutdown is in progress.
-        # The terminal should still exit quietly instead of printing asyncio internals.
-        return
+        runtime = build_web_runtime(config)
+        static_dir = _default_static_dir()
+        app = create_app(
+            config=config,
+            runtime=runtime,
+            static_dir=static_dir,
+            instance_lock=instance_lock,
+        )
+        print(
+            f"{console.bold('ZhiCe-Agent gateway')} listening on "
+            f"{console.command(f'http://{host}:{port}')}"
+        )
+        if host in {"0.0.0.0", "::"}:
+            print(
+                console.warning(
+                    "gateway auth is enabled, but this remains a local development service."
+                )
+            )
+        print(f"workspace: {console.path(config.workspace)}")
+        print(f"static: {console.path(static_dir)}")
+        print("routes: /, /_setup, /health, /api/*, /ws")
+        print(
+            "agent-log: "
+            f"{'on' if resolved_log_options.agent_log else 'off'} "
+            f"level={resolved_log_options.agent_log_level}"
+        )
+        print(
+            "http-access-log: "
+            f"{'on' if resolved_log_options.http_access_log else 'off'}, "
+            "http-server-log: "
+            f"{'on' if resolved_log_options.http_server_log else 'off'} "
+            f"level={resolved_log_options.http_server_log_level}"
+        )
+        trace_path = logging_result.trace_path or daily_trace_path(
+            config.logs_dir,
+            datetime.now(BEIJING_TIMEZONE).date(),
+        )
+        print(
+            f"trace-log: {'on' if resolved_log_options.trace_log else 'off'} "
+            f"path={console.path(trace_path)}"
+        )
+        server_config = uvicorn.Config(
+            app=app,
+            host=host,
+            port=port,
+            log_level=_uvicorn_log_level(resolved_log_options),
+            access_log=resolved_log_options.http_access_log,
+            use_colors=terminal_color_override(),
+        )
+        begin_console_log_deferral()
+        try:
+            _OrderedGatewayServer(server_config).run()
+        except KeyboardInterrupt:
+            # A second Ctrl+C may escape Uvicorn while graceful shutdown is in progress.
+            # The terminal should still exit quietly instead of printing asyncio internals.
+            return
     finally:
+        shutdown = getattr(runtime, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown()
+            except Exception as exc:  # noqa: BLE001 - cleanup must not strand the process.
+                log_event(
+                    gateway_logger,
+                    logging.ERROR,
+                    "gateway.runtime_shutdown_failed",
+                    error_type=type(exc).__name__,
+                )
+        instance_lock.release()
         flush_deferred_console_logs()
 
 
@@ -161,13 +190,16 @@ def create_app(
     config: AppConfig,
     runtime: WebRuntime | Any | None = None,
     static_dir: Path | str | None = None,
+    instance_lock: WorkspaceGatewayLock | None = None,
 ) -> FastAPI:
     """Create the FastAPI app used by tests and the gateway command."""
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        instance_lock = WorkspaceGatewayLock(config.workspace)
-        instance_lock.acquire()
+        active_lock = instance_lock or WorkspaceGatewayLock(config.workspace)
+        owns_lock = instance_lock is None
+        if owns_lock:
+            active_lock.acquire()
         try:
             startup = getattr(runtime, "startup", None)
             if callable(startup):
@@ -184,7 +216,8 @@ def create_app(
                     shutdown()
                 _log_channel_shutdown(runtime)
         finally:
-            instance_lock.release()
+            if owns_lock:
+                active_lock.release()
 
     app = FastAPI(
         title="ZhiCe-Agent Gateway",
@@ -240,6 +273,7 @@ def create_app(
         return response
 
     app.include_router(router)
+    app.include_router(travel_router)
     app.include_router(ws_router)
     _register_error_handlers(app)
 
@@ -256,6 +290,13 @@ def create_app(
 
     @app.get("/admin", include_in_schema=False)
     def administration():
+        index_path = resolved_static_dir / "index.html"
+        if index_path.is_file():
+            return FileResponse(index_path)
+        return Response(status_code=404)
+
+    @app.get("/travel", include_in_schema=False)
+    def travel_planner():
         index_path = resolved_static_dir / "index.html"
         if index_path.is_file():
             return FileResponse(index_path)

@@ -39,14 +39,31 @@ skills:
       local_dir: "${ZHICE_AGENT_SKILL_REPO}"
 
 subagents:
-  enabled: false
+  enabled: true
   max_parallel: 3
   max_tasks_per_call: 4
   max_depth: 1
   max_subagents_per_parent_turn: 6
   max_batches_per_parent_turn: 1
   max_batch_result_chars: 32000
-  profiles: {}
+  profiles:
+    travel-research:
+      description: Research one bounded travel evidence branch using read-only MCP sources.
+      tools:
+        - mcp__amap-maps__*
+        - mcp__tavily__*
+        - mcp__12306__*
+        - mcp__open-meteo__*
+        - mcp__xhs-readonly__*
+      denied_tools: [delegate_tasks]
+      allowed_skills: []
+      preload_skills: []
+      workspace_mode: shared_readonly
+      max_tool_iterations: 12
+      timeout_seconds: 180
+      max_result_chars: 12000
+      allow_model_invocation: true
+      model_role: fast
 
 channels:
   qq:
@@ -71,7 +88,57 @@ hooks:
   entries: []
 
 mcp:
-  servers: {}
+  servers:
+    open-meteo:
+      command: python
+      args: [-m, integrations.open_meteo_mcp.server]
+      startup_timeout_seconds: 15
+      connect_timeout_seconds: 15
+      call_timeout_seconds: 30
+    # Enable after setting AMAP_MAPS_API_KEY in config/.env, then verify the
+    # current upstream Tool Catalog before production use.
+    # amap-maps:
+    #   command: mcp-amap
+    #   args: []
+    #   env:
+    #     AMAP_MAPS_API_KEY: "${AMAP_MAPS_API_KEY}"
+    # Enable Tavily only after confirming its current authentication contract.
+    # tavily:
+    #   url: https://mcp.tavily.com/mcp
+    #   transport: streamable_http
+    #   proxy_mode: direct
+    #   headers:
+    #     Authorization: "Bearer ${TAVILY_API_KEY}"
+    # Configure a reviewed query-only 12306 MCP command in the runtime file.
+    # Never describe this community source as an official booking service.
+    # 12306:
+    #   command: 12306-mcp
+    #   args: []
+    #   startup_timeout_seconds: 60
+    #   connect_timeout_seconds: 30
+    #   call_timeout_seconds: 30
+    # Enable the bundled catalog-level XHS adapter only with an isolated
+    # upstream service account, Cookie volume, and explicit environment values.
+    # xhs-readonly:
+    #   command: python
+    #   args: [-m, integrations.xhs_readonly_mcp.server]
+    #   env:
+    #     XHS_READONLY_UPSTREAM_URL: "${XHS_READONLY_UPSTREAM_URL}"
+    #     XHS_READONLY_COOKIE_DIR: "${XHS_READONLY_COOKIE_DIR}"
+    #     XHS_READONLY_COOKIE_FILE: "${XHS_READONLY_COOKIE_FILE}"
+    #     XHS_READONLY_HTTP_HOST_ALLOWLIST: "${XHS_READONLY_HTTP_HOST_ALLOWLIST}"
+    # For local process mode, a loopback XHS_READONLY_UPSTREAM_URL makes the
+    # Gateway supervise the fixed binary under integrations/xhs/bin. Docker
+    # and remote HTTPS upstreams remain independently managed sidecars.
+
+travel:
+  enabled: true
+  default_mode: quick
+  max_search_results: 8
+  max_evidence_items: 40
+  deep_subagent_count: 3
+  xhs_readonly_enabled: true
+  max_plan_bytes: 524288
 
 logging: {}
 

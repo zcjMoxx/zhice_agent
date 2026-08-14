@@ -47,6 +47,8 @@ try {
     }
     docker exec $name zcagent --env-file /home/zhice/.zhice/config/.env gateway --host 127.0.0.1 --port 10086 --check
     if ($LASTEXITCODE -ne 0) { throw "Gateway configuration check failed" }
+    docker exec $name sh -c "command -v mcp-amap >/dev/null && command -v 12306-mcp >/dev/null && test -x /opt/zhice/bin/xiaohongshu-mcp-rednote && test -x /opt/zhice/bin/xiaohongshu-login-rednote"
+    if ($LASTEXITCODE -ne 0) { throw "Travel runtime dependency smoke failed" }
     Write-Output "Image smoke test passed: $Image"
 } finally {
     Remove-SmokeContainer

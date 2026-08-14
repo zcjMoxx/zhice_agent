@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 
 import { api } from "@/api/client";
-import type { MonitorSnapshot, OperationsTerminal, PublicUser, RegistrationPolicy, Role, SkillSourcesSnapshot, SystemDiagnosticsSnapshot } from "@/api/types";
+import type { McpMonitorSnapshot, MonitorSnapshot, OperationsTerminal, PublicUser, RegistrationPolicy, Role, SkillSourcesSnapshot, SystemDiagnosticsSnapshot, XhsReadonlyAdminStatus } from "@/api/types";
 
 export const useAdminStore = defineStore("admin", {
   state: () => ({
@@ -9,6 +9,9 @@ export const useAdminStore = defineStore("admin", {
     roles: [] as Role[],
     permissions: [] as string[],
     skillSources: null as SkillSourcesSnapshot | null,
+    mcpStatus: null as McpMonitorSnapshot | null,
+    xhsStatus: null as XhsReadonlyAdminStatus | null,
+    xhsAction: "" as "" | "check" | "login" | "restart",
     operationsTerminal: null as OperationsTerminal | null,
     registrationPolicy: null as RegistrationPolicy | null,
     registrationPolicyBusy: false,
@@ -37,6 +40,23 @@ export const useAdminStore = defineStore("admin", {
       this.roles = this.roles.map((role) => role.id === id ? updated : role);
     },
     async loadSkillSources() { this.skillSources = await api.skillSources(); },
+    async loadMcpStatus() { this.mcpStatus = await api.mcpStatus(); },
+    async loadXhsStatus() { this.xhsStatus = await api.xhsAdminStatus(); },
+    async checkXhsLogin() {
+      this.xhsAction = "check";
+      try { this.xhsStatus = await api.checkXhsAdminLogin(); }
+      finally { this.xhsAction = ""; }
+    },
+    async startXhsLogin() {
+      this.xhsAction = "login";
+      try { this.xhsStatus = await api.startXhsAdminLogin(); }
+      finally { this.xhsAction = ""; }
+    },
+    async restartXhsSidecar() {
+      this.xhsAction = "restart";
+      try { this.xhsStatus = await api.restartXhsAdminSidecar(); }
+      finally { this.xhsAction = ""; }
+    },
     async syncSkillSource(source: string) {
       this.skillActionSource = source;
       try { await api.syncSkillSource(source); await this.loadSkillSources(); }

@@ -157,6 +157,9 @@ def _default_display(event_type: str, metadata: dict[str, Any]) -> dict[str, str
         "skill.progress": f"{skill_name} 运行中",
         "skill.completed": f"{skill_name} 已完成",
         "skill.failed": f"{skill_name} 运行失败",
+        "travel.plan_ready": "旅行计划已生成",
+        "travel.clarification_required": "需要补充旅行信息",
+        "travel.candidate_review_required": "请选择行程方案",
     }
     icons = {
         "turn": "turn",
@@ -164,6 +167,7 @@ def _default_display(event_type: str, metadata: dict[str, Any]) -> dict[str, str
         "llm": "model",
         "tool": "tool",
         "skill": "skill",
+        "travel": "map",
     }
     prefix = event_type.partition(".")[0]
     return {

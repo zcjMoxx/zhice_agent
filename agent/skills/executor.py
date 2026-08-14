@@ -456,6 +456,7 @@ def _minimal_environment(extra: dict[str, str]) -> dict[str, str]:
     environment.update(extra)
     environment["PYTHONUNBUFFERED"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
     return environment
 
 

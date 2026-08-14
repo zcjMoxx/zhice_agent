@@ -95,6 +95,9 @@ small { color: var(--text-soft); }
 .sidebar-brand { display: flex; min-width: var(--sidebar-width); align-items: center; justify-content: space-between; padding: 16px 14px 12px; }
 .sidebar-tools { display: grid; min-width: var(--sidebar-width); gap: 8px; padding: 8px 12px; }
 .new-chat { display: flex; align-items: center; gap: 9px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); }
+.travel-entry { position: relative; }
+.travel-entry > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.travel-unread-badge { display: grid; width: 18px; height: 18px; margin-left: auto; place-items: center; color: #fff; border: 2px solid var(--surface); border-radius: 999px; background: var(--danger); font-size: 10px; font-weight: 800; line-height: 1; }
 .session-search { display: flex; align-items: center; gap: 7px; padding: 0 10px; color: var(--muted); border: 1px solid transparent; border-radius: 10px; }
 .session-search:focus-within { border-color: var(--line); background: var(--surface); }
 .session-search input { width: 100%; min-width: 0; height: 34px; border: 0; background: transparent; box-shadow: none; }
@@ -373,6 +376,34 @@ small { color: var(--text-soft); }
 }
 
 .skill-sources-section, .operations-section { gap: 18px; }
+.mcp-monitor-section { display: grid; gap: 14px; padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface-raised); box-shadow: var(--shadow-soft); }
+.mcp-monitor-section > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.mcp-monitor-section > header h2, .mcp-monitor-section > header p { margin: 4px 0 0; }
+.mcp-monitor-section > header p { color: var(--text-soft); }
+.mcp-monitor-section > header button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 11px; border-radius: 9px; background: var(--accent-soft); }
+.mcp-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+.mcp-summary-grid article { display: grid; gap: 4px; padding: 12px; border-radius: 11px; background: var(--bg-soft); }
+.mcp-summary-grid span { color: var(--text-soft); font-size: 11px; }
+.mcp-summary-grid strong { font-size: 21px; }
+.mcp-server-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.mcp-server-card { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); }
+.mcp-server-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.mcp-server-card > header span { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.mcp-server-card > header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-server-card > header b { color: var(--text-soft); font-size: 11px; text-transform: uppercase; }
+.mcp-server-card dl { display: grid; grid-template-columns: repeat(3, auto minmax(0, 1fr)); gap: 6px 8px; margin: 0; }
+.mcp-server-card dt { color: var(--text-soft); font-size: 11px; }
+.mcp-server-card dd { margin: 0; font-weight: 700; }
+.mcp-server-card .source-safe-error { margin-top: 0; }
+.mcp-server-card > small { color: var(--muted); }
+.xhs-mcp-admin { display: grid; gap: 9px; padding: 12px; border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line)); border-radius: 11px; background: color-mix(in srgb, var(--accent-soft) 52%, transparent); }
+.xhs-mcp-admin > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.xhs-mcp-admin > header span { display: inline-flex; align-items: center; gap: 7px; }
+.xhs-mcp-admin > header b { color: var(--text-soft); font-size: 12px; }
+.xhs-mcp-admin p { margin: 0; color: var(--text-soft); font-size: 13px; line-height: 1.55; }
+.xhs-mcp-admin > small { color: var(--muted); }
+.xhs-mcp-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.xhs-mcp-actions button { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-solid); }
 .skill-source-list { display: grid; gap: 16px; }
 .skill-source-card, .operations-card { padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface-raised); box-shadow: var(--shadow-soft); }
 .skill-source-card > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
@@ -408,6 +439,8 @@ button:not(:disabled):active { transform: translateY(1px) scale(.985); filter: b
 .operations-frame-wrap iframe { display: block; width: 100%; min-height: 680px; border: 0; background: #0b1220; color-scheme: dark; }
 
 @media (max-width: 760px) {
+  .mcp-summary-grid, .mcp-server-grid { grid-template-columns: 1fr; }
+  .mcp-monitor-section > header { flex-direction: column; }
   .skill-source-facts { grid-template-columns: 105px minmax(0, 1fr); }
   .operations-card > dl { grid-template-columns: 120px minmax(0, 1fr); }
   .source-safe-error { flex-direction: column; }

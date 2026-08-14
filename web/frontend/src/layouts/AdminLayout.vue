@@ -39,6 +39,7 @@ const expandedSkillSources = ref<Record<string, boolean>>({});
 const opsEmbedded = ref(false);
 const opsFrameFallback = ref(false);
 let opsFrameTimer: ReturnType<typeof setTimeout> | undefined;
+let xhsLoginTimer: ReturnType<typeof setInterval> | undefined;
 
 function tr(chinese: string, english: string): string { return uiText(ui.language, chinese, english); }
 
@@ -46,7 +47,7 @@ const tabs = computed(() => [
   { key: "overview", label: tr("概览", "Overview"), icon: Gauge, visible: true },
   { key: "users", label: tr("账号管理", "Accounts"), icon: Users, visible: auth.can("auth.users.read") },
   { key: "roles", label: tr("角色与权限", "Roles & permissions"), icon: Shield, visible: auth.can("auth.roles.read") },
-  { key: "skills", label: "Skills", icon: BookOpen, visible: auth.can("skill.sources.read") },
+  { key: "skills", label: tr("MCP 与 Skills", "MCP & Skills"), icon: BookOpen, visible: auth.can("skill.sources.read") },
   { key: "monitor", label: tr("运行诊断", "Runtime diagnostics"), icon: Activity, visible: auth.can("turn.read.any") || auth.can("diagnostics.system.use") },
   { key: "operations", label: tr("服务器运维", "Server operations"), icon: Server, visible: auth.isOwner },
   { key: "advanced", label: tr("高级设置", "Advanced"), icon: Settings2, visible: auth.can("audit.read") },
@@ -118,6 +119,9 @@ const permissionGroups = computed(() => groupedPermissions(admin.permissions, ui
 const visibleBaseCapabilities = computed(() => baseCapabilities(ui.language));
 const auditExportUrl = computed(() => `/api/audit/events/export?${new URLSearchParams(Object.entries(auditFilters).filter(([, value]) => value)).toString()}`);
 const availableCapabilityCount = computed(() => Object.values(admin.monitor?.capabilities || {}).filter((item) => item.state === "available").length);
+const diagnosticCapabilities = computed(() => Object.fromEntries(
+  Object.entries(admin.monitor?.capabilities || {}).filter(([key]) => key !== "mcp"),
+));
 const currentDeployment = computed(() => window.location.origin);
 const opsModeLabel = computed(() => {
   const labels: Record<string, string> = {
@@ -141,7 +145,10 @@ watch(() => auditFilters.from_ts, (value) => {
 });
 
 onMounted(async () => { await loadTab("overview"); });
-onBeforeUnmount(() => { if (opsFrameTimer) clearTimeout(opsFrameTimer); });
+onBeforeUnmount(() => {
+  if (opsFrameTimer) clearTimeout(opsFrameTimer);
+  if (xhsLoginTimer) clearInterval(xhsLoginTimer);
+});
 
 async function loadTab(next: string) {
   tab.value = next;
@@ -160,7 +167,12 @@ async function loadTab(next: string) {
       await Promise.all(loads);
     }
     if (next === "roles") { await admin.loadRoles(); selectedRole.value ||= orderedRoles.value[0]?.id || ""; }
-    if (next === "skills") await admin.loadSkillSources();
+    if (next === "skills") {
+      const loads: Promise<unknown>[] = [admin.loadSkillSources(), admin.loadMcpStatus()];
+      if (auth.isOwner) loads.push(admin.loadXhsStatus());
+      await Promise.all(loads);
+      convergeXhsAdminStatus();
+    }
     if (next === "monitor") {
       const loads: Promise<unknown>[] = [];
       if (auth.can("turn.read.any")) loads.push(admin.loadMonitor(recentRunStatus.value));
@@ -319,6 +331,97 @@ function statusLabel(value: unknown): string {
 function channelLabel(value: unknown): string {
   return ({ web: tr("网页", "Web"), cli: tr("命令行", "CLI"), qq: "QQ", weixin: tr("微信", "WeChat") } as Record<string, string>)[String(value)] || String(value || "—");
 }
+async function refreshMcpAdmin() {
+  failure.value = "";
+  try {
+    const loads: Promise<unknown>[] = [admin.loadMcpStatus()];
+    if (auth.isOwner) loads.push(admin.loadXhsStatus());
+    await Promise.all(loads);
+    convergeXhsAdminStatus();
+  } catch (error) { failure.value = errorMessage(error); }
+}
+function convergeXhsAdminStatus() {
+  if (!auth.isOwner || !admin.xhsStatus?.enabled) return;
+  if (admin.xhsStatus.login_in_progress) {
+    watchXhsLogin();
+    return;
+  }
+  if (admin.xhsStatus.state === "unknown" && !admin.xhsAction) void checkXhsLogin();
+}
+async function checkXhsLogin() {
+  failure.value = "";
+  actionStatus.value = "";
+  try {
+    await admin.checkXhsLogin();
+    actionStatus.value = admin.xhsStatus?.state === "authenticated"
+      ? tr("小红书只读账号已登录", "Xiaohongshu read-only account is logged in")
+      : tr("小红书只读账号需要重新登录", "Xiaohongshu read-only account needs login");
+  } catch (error) { failure.value = errorMessage(error); }
+}
+async function startXhsLogin() {
+  failure.value = "";
+  actionStatus.value = "";
+  try {
+    await admin.startXhsLogin();
+    if (!admin.xhsStatus?.login_in_progress) {
+      failure.value = xhsActionMessage(admin.xhsStatus?.code || "XHS_LOGIN_START_FAILED");
+      return;
+    }
+    actionStatus.value = tr("扫码窗口已打开，完成后会自动检查登录状态", "The QR login window is open. Login will be checked automatically when it closes.");
+    watchXhsLogin();
+  } catch (error) { failure.value = errorMessage(error); }
+}
+async function restartXhsSidecar() {
+  failure.value = "";
+  actionStatus.value = "";
+  try {
+    await admin.restartXhsSidecar();
+    if (admin.xhsStatus?.code !== "XHS_RESTARTED") {
+      failure.value = xhsActionMessage(admin.xhsStatus?.code || "XHS_RESTART_FAILED");
+      return;
+    }
+    actionStatus.value = tr("小红书只读服务已重启", "Xiaohongshu read-only service restarted");
+  } catch (error) { failure.value = errorMessage(error); }
+}
+function watchXhsLogin() {
+  if (xhsLoginTimer) clearInterval(xhsLoginTimer);
+  xhsLoginTimer = setInterval(async () => {
+    if (admin.xhsAction) return;
+    try {
+      await admin.loadXhsStatus();
+      if (admin.xhsStatus?.login_in_progress) return;
+      if (xhsLoginTimer) clearInterval(xhsLoginTimer);
+      xhsLoginTimer = undefined;
+      await checkXhsLogin();
+    } catch {
+      // The normal page error surface remains authoritative for explicit actions.
+    }
+  }, 2500);
+}
+function xhsStateLabel(value: string | undefined) {
+  return ({ authenticated: tr("已登录", "Logged in"), auth_required: tr("需要登录", "Login required"), login_pending: tr("等待扫码", "Waiting for QR scan"), unavailable: tr("不可用", "Unavailable"), unknown: tr("未检查", "Not checked") } as Record<string, string>)[value || "unknown"];
+}
+function xhsActionMessage(code: string) {
+  return ({
+    XHS_LOGIN_UNSUPPORTED: tr("当前运行环境不能弹出本机扫码窗口", "This runtime cannot open a local QR login window"),
+    XHS_LOGIN_START_FAILED: tr("小红书扫码窗口打开失败", "The Xiaohongshu QR login window could not be opened"),
+    XHS_RESTART_NOT_OWNED: tr("当前小红书服务由外部进程管理，不能从这里重启", "The Xiaohongshu service is externally managed and cannot be restarted here"),
+    XHS_RESTART_UNAVAILABLE: tr("小红书本地服务当前不可用", "The local Xiaohongshu service is unavailable"),
+    XHS_RESTART_FAILED: tr("小红书只读服务重启失败", "The Xiaohongshu read-only service could not be restarted"),
+  } as Record<string, string>)[code] || tr("小红书管理操作未完成", "The Xiaohongshu management action did not complete");
+}
+function mcpAuthLabel(value: unknown): string {
+  const state = String(value || "").toLowerCase();
+  return ({
+    disabled: tr("无需 OAuth", "OAuth not used"),
+    ready: tr("OAuth 已连接", "OAuth connected"),
+    authenticated: tr("OAuth 已连接", "OAuth connected"),
+    connected: tr("OAuth 已连接", "OAuth connected"),
+    required: tr("需要 OAuth", "OAuth required"),
+    pending: tr("等待 OAuth 授权", "OAuth pending"),
+    error: tr("OAuth 异常", "OAuth error"),
+  } as Record<string, string>)[state] || String(value || "—");
+}
 function componentLabel(value: string): string {
   return ({ agent: tr("Agent 运行时", "Agent runtime"), gateway: "Gateway", turn: tr("对话运行", "Turn runtime"), llm: tr("模型服务", "Model service"), tool: tr("工具调用", "Tool calls"), channel: tr("外部渠道", "Channels"), mcp: "MCP", session: tr("会话", "Sessions"), context: tr("上下文", "Context"), memory: "Memory", subagent: tr("子智能体", "Subagents") } as Record<string, string>)[value] || value;
 }
@@ -417,7 +520,7 @@ function toggleTimelineEvent(evidenceId: unknown) {
           <button type="button" data-overview-target="failures" :disabled="!canOpenMonitor" :class="{ attention: Number(admin.monitor?.activity.summary.failed || 0) > 0 }" :aria-label="tr('查看近期失败运行', 'View recent failed runs')" @click="openMonitorSection('failures')"><span>{{ tr('近期失败', 'Recent failures') }}</span><strong>{{ admin.monitor?.activity.summary.failed ?? '—' }}</strong><small>{{ tr('结构化运行记录', 'Structured run records') }}</small></button>
           <button type="button" data-overview-target="incidents" :disabled="!canOpenMonitor" :class="{ attention: Number(admin.diagnostics?.summary.incidents || 0) > 0 }" :aria-label="tr('查看当前事故证据', 'View current incident evidence')" @click="openMonitorSection('incidents')"><span>{{ tr('当前事故', 'Current incidents') }}</span><strong>{{ admin.diagnostics?.summary.incidents ?? '—' }}</strong><small>{{ tr('近 60 分钟确定性聚合', 'Deterministic, last 60 minutes') }}</small></button>
         </div>
-        <div class="overview-grid"><button v-for="item in tabs.filter((item) => item.key !== 'overview')" :key="item.key" @click="loadTab(item.key)"><component :is="item.icon" :size="22" /><strong>{{ item.label }}</strong><span>{{ { users: tr('账号状态与角色分配', 'Account status and role assignment'), roles: tr('能力域与技术 key', 'Capability domains and technical keys'), skills: tr('Skill source 状态、健康与同步', 'Skill source status, health, and sync'), monitor: tr('事故、失败运行与诊断时间线', 'Incidents, failed runs, and diagnostic timeline'), operations: tr('独立受保护的服务器运维入口', 'Independent protected server operations entry'), advanced: tr('低频安全审计与导出', 'Low-frequency security audit and export') }[item.key] }}</span></button></div>
+        <div class="overview-grid"><button v-for="item in tabs.filter((item) => item.key !== 'overview')" :key="item.key" @click="loadTab(item.key)"><component :is="item.icon" :size="22" /><strong>{{ item.label }}</strong><span>{{ { users: tr('账号状态与角色分配', 'Account status and role assignment'), roles: tr('能力域与技术 key', 'Capability domains and technical keys'), skills: tr('MCP 服务与 Skill source 状态、健康及同步', 'MCP services and Skill source status, health, and sync'), monitor: tr('事故、失败运行与诊断时间线', 'Incidents, failed runs, and diagnostic timeline'), operations: tr('独立受保护的服务器运维入口', 'Independent protected server operations entry'), advanced: tr('低频安全审计与导出', 'Low-frequency security audit and export') }[item.key] }}</span></button></div>
       </section>
 
       <section v-else-if="tab === 'users'" class="admin-section">
@@ -436,6 +539,25 @@ function toggleTimelineEvent(evidenceId: unknown) {
 
       <section v-else-if="tab === 'skills'" class="admin-section skill-sources-section">
         <div class="truth-banner"><BookOpen :size="22" /><span><strong>{{ tr('Skill source 运行真值', 'Skill source runtime truth') }}</strong><small>{{ tr('状态来自持久同步记录和派生索引；页面不显示凭据、仓库 URL、宿主机路径或原始 stderr。', 'Status comes from persistent sync records and the derived index. Credentials, repository URLs, host paths, and raw stderr are never shown.') }}</small></span></div>
+        <section class="mcp-monitor-section">
+          <header><div><span class="eyebrow">MCP Runtime</span><h2>{{ tr('MCP 服务监控', 'MCP server monitoring') }}</h2><p>{{ tr('连接、Catalog 和调用统计来自当前 Gateway 运行时；自动重连由 Runtime 按退避策略持续处理。', 'Connection, catalog, and call facts come from the current Gateway runtime. Runtime continues automatic reconnect with backoff.') }}</p></div><button type="button" @click="refreshMcpAdmin"><RefreshCw :size="15" />{{ tr('刷新', 'Refresh') }}</button></header>
+          <div class="mcp-summary-grid"><article><span>Servers</span><strong>{{ admin.mcpStatus?.servers.length || 0 }}</strong></article><article><span>{{ tr('活动调用', 'Active calls') }}</span><strong>{{ admin.mcpStatus?.active_calls || 0 }}</strong></article><article><span>{{ tr('自动重连', 'Reconnects') }}</span><strong>{{ admin.mcpStatus?.reconnect_count || 0 }}</strong></article><article><span>Catalog</span><strong>v{{ admin.mcpStatus?.catalog_version || 0 }}</strong></article></div>
+          <div class="mcp-server-grid">
+            <article v-for="server in admin.mcpStatus?.servers" :key="server.server_id" class="mcp-server-card" :data-state="server.state">
+              <header><span><i :class="`status-dot ${server.state === 'ready' ? 'available' : server.state}`"></i><strong>{{ server.server_id }}</strong></span><b>{{ server.state }}</b></header>
+              <dl><dt>Tools</dt><dd>{{ server.tool_count }}</dd><dt>{{ tr('调用', 'Calls') }}</dt><dd>{{ server.call_count }}</dd><dt>{{ tr('成功', 'Success') }}</dt><dd>{{ server.success_count }}</dd><dt>{{ tr('失败', 'Failures') }}</dt><dd>{{ server.failure_count }}</dd><dt>{{ tr('取消', 'Cancelled') }}</dt><dd>{{ server.cancelled_count }}</dd><dt>{{ tr('认证方式', 'Authentication') }}</dt><dd>{{ mcpAuthLabel(server.oauth_state) }}</dd></dl>
+              <section v-if="auth.isOwner && server.server_id === 'xhs-readonly' && admin.xhsStatus" class="xhs-mcp-admin">
+                <header><span><i :class="`status-dot ${admin.xhsStatus.state === 'authenticated' ? 'available' : admin.xhsStatus.state === 'auth_required' ? 'degraded' : admin.xhsStatus.state}`"></i><strong>{{ tr('小红书登录管理', 'Xiaohongshu login management') }}</strong></span><b>{{ xhsStateLabel(admin.xhsStatus.state) }}</b></header>
+                <p>{{ admin.xhsStatus.state === 'authenticated' ? tr('旅行规划可读取社区公开笔记。', 'Travel planning can read public community notes.') : admin.xhsStatus.state === 'login_pending' ? tr('请在本机扫码窗口完成登录。', 'Complete login in the local QR window.') : tr('登录凭据由系统所有者维护，不向普通用户开放。', 'Login credentials are maintained by the system Owner and are not exposed to ordinary users.') }}</p>
+                <small>{{ tr('Cookie 最近更新', 'Cookie last updated') }}：{{ fmt(admin.xhsStatus.cookie_updated_at) }}</small>
+                <div class="xhs-mcp-actions"><button type="button" :disabled="Boolean(admin.xhsAction) || admin.xhsStatus.login_in_progress" @click="checkXhsLogin">{{ admin.xhsAction === 'check' ? tr('检查中…', 'Checking…') : tr('检查登录', 'Check login') }}</button><button type="button" :disabled="Boolean(admin.xhsAction) || !admin.xhsStatus.login_supported" @click="startXhsLogin">{{ admin.xhsStatus.login_in_progress ? tr('等待扫码…', 'Waiting for QR…') : admin.xhsAction === 'login' ? tr('打开中…', 'Opening…') : tr('重新登录', 'Log in again') }}</button><button type="button" :disabled="Boolean(admin.xhsAction) || !admin.xhsStatus.restart_supported" @click="restartXhsSidecar">{{ admin.xhsAction === 'restart' ? tr('重启中…', 'Restarting…') : tr('重启服务', 'Restart service') }}</button></div>
+              </section>
+              <div v-if="server.error_code || server.last_tool_error_code || server.last_connection_reason_code" class="source-safe-error"><code>{{ server.error_code || server.last_tool_error_code || server.last_connection_reason_code }}</code><span>{{ tr('最近连接或调用存在结构化错误；Runtime 会继续自动恢复连接，未知结果的调用不会自动重放。', 'A recent connection or call has a structured error. Runtime continues reconnecting automatically; calls with unknown outcomes are not replayed.') }}</span></div>
+              <small v-if="server.last_connection_state">{{ tr('最近连接', 'Last connection') }}：{{ server.last_connection_state }} · {{ fmt(server.last_connection_at * 1000) }}</small>
+            </article>
+            <p v-if="!admin.mcpStatus?.servers.length" class="empty-note">{{ tr('当前没有已配置的 MCP Server。', 'No MCP Servers are currently configured.') }}</p>
+          </div>
+        </section>
         <div class="skill-source-list">
           <article v-for="source in admin.skillSources?.sources" :key="source.source" class="skill-source-card">
             <header><div><span class="eyebrow">Skill source</span><h2>{{ source.source }}</h2></div><span class="source-health"><i :class="`status-dot ${source.health === 'healthy' ? 'available' : source.health}`"></i>{{ source.health }}</span></header>
@@ -475,7 +597,7 @@ function toggleTimelineEvent(evidenceId: unknown) {
             <div class="data-table activity-table"><div class="table-head"><span>{{ tr('Session 会话标题 / 账号', 'Session title / account') }}</span><span>{{ tr('状态 / 错误', 'Status / error') }}</span><span>{{ tr('渠道', 'Channel') }}</span><span>{{ tr('开始时间', 'Started') }}</span><span>{{ tr('耗时', 'Duration') }}</span><span></span></div><div v-for="turn in admin.monitor?.activity.recent_turns" :key="String(turn.turn_id)" class="run-record" :class="{ open: openRunRecords[String(turn.turn_id)] }"><div class="table-row"><span><small class="record-kind">{{ tr('Session 会话标题', 'Session title') }}</small><strong>{{ turn.session_title || tr('未命名会话', 'Untitled session') }}</strong><small>{{ tr('账号', 'Account') }}：{{ turn.actor_display_name || turn.actor_username || turn.actor_user_id }}<template v-if="turn.actor_username"> · @{{ turn.actor_username }}</template></small></span><span><strong><i :class="`status-dot ${turn.status}`"></i>{{ statusLabel(turn.status) }}</strong><code v-if="turn.error_code">{{ turn.error_code }}</code></span><span :data-label="tr('渠道', 'Channel')">{{ channelLabel(turn.channel) }}</span><span :data-label="tr('开始', 'Started')">{{ fmt(turn.started_at) }}</span><span :data-label="tr('耗时', 'Duration')">{{ fmtDuration(turn.duration_ms) }}</span><button class="record-toggle" type="button" @click="toggleRunRecord(turn.turn_id)"><span>{{ openRunRecords[String(turn.turn_id)] ? tr('收起', 'Collapse') : tr('查看诊断', 'View diagnosis') }}</span><ChevronDown :size="17" /></button></div><div v-if="openRunRecords[String(turn.turn_id)]" class="run-detail"><div v-if="turn.error_code" class="diagnosis-copy"><article><strong>{{ tr('发生了什么', 'What happened') }}</strong><p>{{ diagnosticGuide(turn.error_code).explanation }}</p></article><article><strong>{{ tr('影响', 'Impact') }}</strong><p>{{ diagnosticGuide(turn.error_code).impact }}</p></article><article><strong>{{ tr('建议处理', 'Recommended action') }}</strong><p>{{ diagnosticGuide(turn.error_code).action }}</p></article></div><dl><dt>Session ID</dt><dd><code>{{ turn.session_id || '—' }}</code></dd><dt>Turn ID</dt><dd><code>{{ turn.turn_id || '—' }}</code></dd><dt>Request / Trace ID</dt><dd><code>{{ turn.request_id || '—' }}</code></dd><dt>{{ tr('账号 ID', 'Account ID') }}</dt><dd><code>{{ turn.actor_user_id || '—' }}</code></dd><dt>{{ tr('结束时间', 'Finished') }}</dt><dd>{{ fmt(turn.finished_at) }}</dd><dt>{{ tr('错误码', 'Error code') }}</dt><dd><code>{{ turn.error_code || '—' }}</code></dd></dl></div></div></div>
             <p v-if="!admin.monitor?.activity.recent_turns.length" class="empty-note">{{ tr('当前状态下没有运行记录。', 'No runs match this status.') }}</p>
           </section>
-          <section class="runtime-health-section"><h2>{{ tr('服务与能力状态', 'Services and capabilities') }}</h2><div class="monitor-grid"><article><span>Gateway</span><strong>{{ admin.monitor?.gateway.status || 'unknown' }}</strong><small>{{ admin.monitor?.gateway.current_model }}</small></article><article v-for="(value, key) in admin.monitor?.activity.summary" :key="key"><span>{{ { turns: tr('总运行数', 'Total runs'), running: tr('运行中', 'Running'), failed: tr('失败', 'Failed'), stopped: tr('已停止', 'Stopped'), tool_errors: tr('工具错误', 'Tool errors') }[String(key)] || key }}</span><strong>{{ value }}</strong><small>{{ tr('结构化运行记录', 'Structured activity') }}</small></article></div><div class="capability-grid"><article v-for="(capability, key) in admin.monitor?.capabilities" :key="key"><i :class="`status-dot ${capability.state}`"></i><div><strong>{{ capability.name }}</strong><small>{{ capability.message }}</small><code>{{ capability.code }}</code></div></article></div></section>
+          <section class="runtime-health-section"><h2>{{ tr('服务与能力状态', 'Services and capabilities') }}</h2><div class="monitor-grid"><article><span>Gateway</span><strong>{{ admin.monitor?.gateway.status || 'unknown' }}</strong><small>{{ admin.monitor?.gateway.current_model }}</small></article><article v-for="(value, key) in admin.monitor?.activity.summary" :key="key"><span>{{ { turns: tr('总运行数', 'Total runs'), running: tr('运行中', 'Running'), failed: tr('失败', 'Failed'), stopped: tr('已停止', 'Stopped'), tool_errors: tr('工具错误', 'Tool errors') }[String(key)] || key }}</span><strong>{{ value }}</strong><small>{{ tr('结构化运行记录', 'Structured activity') }}</small></article></div><div class="capability-grid"><article v-for="(capability, key) in diagnosticCapabilities" :key="key"><i :class="`status-dot ${capability.state}`"></i><div><strong>{{ capability.name }}</strong><small>{{ capability.message }}</small><code>{{ capability.code }}</code></div></article></div></section>
         </template>
       </section>
 

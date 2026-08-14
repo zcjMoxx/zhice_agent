@@ -24,6 +24,7 @@ foreach ($name in $privateFiles) {
 
 $modelsPath = Join-Path $privateRoot "models.json"
 $null = Get-Content -Raw -LiteralPath $modelsPath | ConvertFrom-Json
+$privateEnvPath = Join-Path $privateRoot ".env"
 foreach ($name in $privateFiles) {
     $text = Get-Content -Raw -LiteralPath (Join-Path $privateRoot $name)
     if ($text -match '(?i)(replace[-_ ]?me|change[-_ ]?me|your[-_ ][a-z0-9_]+|<[^>]+>)') {
@@ -33,6 +34,33 @@ foreach ($name in $privateFiles) {
 if ((Get-Content -Raw -LiteralPath (Join-Path $privateRoot ".env")) -match '(?m)^\s*ZHICE_AGENT_WORKSPACE\s*=') {
     throw "deploy/private/.env must not set ZHICE_AGENT_WORKSPACE; the container uses /home/zhice/.zhice by default"
 }
+
+function Read-DotEnvValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $foundValues = @(Get-Content -LiteralPath $Path | ForEach-Object {
+        $line = $_.Trim()
+        if ($line.StartsWith("export ")) { $line = $line.Substring(7).TrimStart() }
+        $match = [regex]::Match($line, "^$([regex]::Escape($Name))=(.*)$")
+        if ($match.Success) { $match.Groups[1].Value }
+    })
+    if ($foundValues.Count -gt 1) {
+        throw "Duplicate private environment key: $Name"
+    }
+    if ($foundValues.Count -eq 0 -or [string]::IsNullOrWhiteSpace($foundValues[0])) {
+        throw "Missing private environment key: $Name"
+    }
+    if ($foundValues[0].IndexOfAny([char[]]@("`r", "`n", [char]0)) -ge 0) {
+        throw "Invalid multiline private environment value: $Name"
+    }
+    return $foundValues[0]
+}
+
+$amapJsApiKey = Read-DotEnvValue -Path $privateEnvPath -Name "VITE_AMAP_JS_API_KEY"
+$amapJsSecurityCode = Read-DotEnvValue -Path $privateEnvPath -Name "VITE_AMAP_JS_SECURITY_CODE"
 
 $forbidden = @("contexts", "logs", ".tmp", ".git")
 foreach ($name in $forbidden) {
@@ -55,7 +83,9 @@ $dockerArgs = @(
     "--file", (Join-Path $deployRoot "Dockerfile"),
     "--build-arg", "ZHICE_VERSION=$version",
     "--build-arg", "ZHICE_REVISION=$revision",
-    "--build-arg", "ZHICE_BUILD_DATE=$buildDate"
+    "--build-arg", "ZHICE_BUILD_DATE=$buildDate",
+    "--build-arg", "VITE_AMAP_JS_API_KEY=$amapJsApiKey",
+    "--build-arg", "VITE_AMAP_JS_SECURITY_CODE=$amapJsSecurityCode"
 )
 if ($AptMirror) {
     $dockerArgs += @("--build-arg", "APT_MIRROR=$AptMirror")
@@ -67,7 +97,7 @@ if ($LASTEXITCODE -ne 0) { throw "Docker image build failed" }
 
 $unexpected = docker run --rm --entrypoint sh $imageRef -c "find /home/zhice/.zhice -mindepth 1 -maxdepth 1 -type d | sort"
 if ($LASTEXITCODE -ne 0) { throw "Built-image state scan failed" }
-$allowed = @("/home/zhice/.zhice/config", "/home/zhice/.zhice/contexts", "/home/zhice/.zhice/extends", "/home/zhice/.zhice/logs", "/home/zhice/.zhice/prompts", "/home/zhice/.zhice/state")
+$allowed = @("/home/zhice/.zhice/config", "/home/zhice/.zhice/contexts", "/home/zhice/.zhice/extends", "/home/zhice/.zhice/integrations", "/home/zhice/.zhice/logs", "/home/zhice/.zhice/prompts", "/home/zhice/.zhice/state", "/home/zhice/.zhice/travel")
 foreach ($path in $unexpected) {
     if ($path -and $path -notin $allowed) { throw "Unexpected workspace path in image: $path" }
 }

@@ -6,6 +6,8 @@
 - 本地 sidecar 的 Docker API 请求只能包含固定 `zhice-agent`，浏览器不能提交容器名、Docker 参数或路径。
 - 私有云目标同时要求 `PublicUrl` 与 `OpsUrl`；公开 example 只有占位值，部署把 `server_docker` endpoint 投影给主 Web。
 - `config apply` 调用内部 `apply.sh`，从 root-owned 固定 deployment spec 使用当前 Digest/mounts 重建容器；不再以单纯 restart 代替 bind-mount 配置生效。
+- 高德 JS API Key/安全密钥只从 Git 忽略的 `deploy/private/.env` 读取并注入前端构建；缺失、空值或重复项前置失败，公开模板和构建摘要不含真实值。
+- 固定拓扑 restart 先重启并等待小红书 sidecar 端口就绪，再重启主容器；发布主容器失败时同时回滚 sidecar，Cookie seed 临时容器在正常与中断路径均清理。
 - Docker Ops 日志页默认每秒刷新固定容器的有界日志并自动滚动；用户向上查看历史时暂停，Continue follow 恢复，不使用无限输出缓冲。
 - 本地 Docker 与本地进程复用同一双视图静态页面和通用 restricted 命令集；页面不能提交容器名、Docker 参数、路径或服务器配置命令。
 - 服务器 Ops 使用 loopback Caddy 的长期签名 Cookie 统一认证，在同一 origin 提供共享监控页、固定 dashboard API 和 `/terminal/` ttyd；Caddy 只在 loopback 代理到仍保留 Basic Auth 的 ttyd 时注入固定认证，dashboard/terminal adapter 分离为受 systemd 保护的非 root 服务。
@@ -22,11 +24,11 @@
 - `config/.env.example` 是唯一公开 runtime env 模板，`deploy/` 不维护第二份 `.env.example`。
 - `private/.env`、`private/config.yml`、`private/models.json` 三个镜像私有文件以及本机云目标 `private/cloud-target.json` 被目录级 Git ignore 覆盖；公开 `private/cloud-target.example.json` 的 registry、SSH 主机、SSH 用户、SSH 密码、运维脚本目录和公网地址全部使用中文占位，未替换时流水线明确拒绝。
 - Deploy README 优先从当前 `${workspace}/config/` 复制三个私有文件到 `deploy/private/`，给出默认 Windows `.zhice` 路径，将项目 `config/.env` 标为 legacy migration，并要求任一来源的 `deploy/private/.env` 删除 `ZHICE_AGENT_WORKSPACE`；`ZHICE_AGENT_SKILL_REPO` 缺失时自动使用 `/app/skill_repo`，默认 source 不携带虚假远端地址。
-- Dockerfile 从仓库构建 Python、Vue、Prompt、Skill 和微信 sidecar，只从 `deploy/` 复制三个私有文件。
+- Dockerfile 从仓库构建 Python、Vue、Prompt、Skill、微信 sidecar和固定版本旅行 MCP，只从 `deploy/` 复制三个私有文件；RedNote 兼容小红书二进制锁定上游提交并应用可审计 patch。
 - 微信 Sidecar 使用 Node `pathToFileURL` 判断 Linux/Windows 直接入口；Docker 通过 `.[gateway,qq]` 显式安装 Gateway `websockets` runtime 和 QQ 渠道依赖，不依赖传递依赖碰巧可用。
 - 容器以专用非 root `zhice` 用户运行，使用与本地一致的 `Path.home()/.zhice` 默认目录，并通过显式 `--env-file` 加载镜像内私有环境变量。
 - Dockerfile 不预设 `ZHICE_AGENT_SKILL_REPO`；私有 `.env` 显式配置时使用配置值，未配置或为空时由运行时代码自动定位镜像内 `/app/skill_repo`。
-- Compose 持久化 `contexts`、`state`、`logs`、`extends`，并用独立命名卷持久化微信运行时账号凭据子目录；完整 `config/` 仍由镜像提供。
+- Compose 持久化 `contexts`、`state`、`travel`、`logs`、`extends`，其中 `zhice-travel-data` 跨重启和 Digest 更新保留 TravelPlanV1；并用独立命名卷持久化微信运行时账号凭据、小红书 Cookie和浏览器 cache。完整 `config/` 仍由镜像提供。小红书 sidecar 无 host port，主容器只读挂载 Cookie volume，容器 DNS 明文 HTTP 必须显式 allowlist。
 - Dockerfile 预创建微信账号凭据目录并交给非 root `zhice` 用户；云端部署幂等创建和挂载 `zhice-weixin-credentials`，并用镜像内身份初始化目录所有权和 `0700` 权限，回滚与重启不删除该卷。
 - 云端部署要求不可变 digest，且只启动单个容器；Gateway 端口只发布到宿主机 `127.0.0.1`，公网必须经过反向代理。
 - `push-image.ps1` 先用 `ConvertFrom-Json -InputObject` 解析 RepoDigests，再从变量管道展开数组并精确选择目标 repository 的唯一 Digest，不使用可能命中其他 registry 的索引 0；回归测试通过真实 Windows PowerShell 验证双元素 JSON 数组不会嵌套成单个 `System.Object[]`。

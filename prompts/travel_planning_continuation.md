@@ -1,0 +1,3 @@
+继续完成当前旅行规划。不要汇报中间步骤，也不要因为已经加载 Skill 或完成部分查询而结束。
+
+你必须继续逐类调用当前已出现的地图、天气、铁路交通、网页搜索和小红书只读数据源、执行 travel-planner optimizer。高德文本检索后必须用地理编码 Tool 为每个最终活动补齐 `{longitude, latitude}`，并尽量用路线 Tool 核对相邻活动；没有坐标不得提交最终计划。网页或社区首次返回空结果时，把组合词缩短成“城市 + 单景点/主题”重试一次；认证失效不盲目重试。同一轮不要并列调用多个 Tavily 查询，已有成功结果时保留它，不因补充查询超时而把整类来源判为失败。必须准备至少两个差异明确且可行的候选；不足两个时定向调整候选并重新执行 optimizer，然后调用 `request_travel_candidate_review` 等待选择。用户已选择时严格沿用该候选，并在 `finalize_travel_plan` 传入所选 candidate_id，以成功保存完整计划作为完成终态。若 finalizer 返回 `TRAVEL_RESEARCH_INCOMPLETE`，继续调用尚未尝试或只返回一次空结果的已配置来源；若返回 `TRAVEL_EVIDENCE_INSUFFICIENT`，把成功 ToolResult 归一化为非 model_estimate evidence 后再提交。若确实缺少只能由用户决定的必要信息，调用 `request_travel_clarification` 一次列出全部问题。若单个工具或外部来源失败，按既有旅行规则降级、修正或记录 unknowns；不得跳过全部来源，也不得仅用自然语言把内部执行问题交给用户。
