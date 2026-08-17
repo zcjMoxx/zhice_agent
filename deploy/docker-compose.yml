@@ -22,6 +22,7 @@ services:
       XHS_READONLY_HTTP_HOST_ALLOWLIST: zhice-xhs-readonly
       XHS_READONLY_COOKIE_DIR: /home/zhice/.zhice/integrations/xhs/data
       XHS_READONLY_COOKIE_FILE: /home/zhice/.zhice/integrations/xhs/data/cookies.json
+      HOTEL_BROWSER_CHANNEL: ""
     depends_on:
       zhice-xhs-readonly:
         condition: service_healthy

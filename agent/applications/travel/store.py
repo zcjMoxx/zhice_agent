@@ -220,6 +220,10 @@ class TravelPlanStore:
                     "DELETE FROM travel_plans WHERE id = ? AND owner_user_id = ?",
                     (plan_id, owner_user_id),
                 )
+                connection.execute(
+                    "DELETE FROM travel_candidate_reviews WHERE session_id=? AND owner_user_id=?",
+                    (str(row["source_session_id"]), owner_user_id),
+                )
                 connection.commit()
         except sqlite3.Error as exc:
             raise TravelPlanStoreError(
@@ -242,11 +246,11 @@ class TravelPlanStore:
         if not owner_user_id or not session_id or not turn_id:
             raise TravelPlanStoreError("TRAVEL_CANDIDATE_REVIEW_INVALID", "Candidate review identity is incomplete.")
         candidate_ids = {str(item.get("candidate_id") or "") for item in candidates}
-        if not 2 <= len(candidates) <= 5 or recommended_candidate_id not in candidate_ids:
+        if not 1 <= len(candidates) <= 3 or recommended_candidate_id not in candidate_ids:
             raise TravelPlanStoreError("TRAVEL_CANDIDATE_REVIEW_INVALID", "Candidate review is invalid.")
         now = _utc_now()
         encoded = json.dumps(candidates, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        if len(encoded.encode("utf-8")) > 32 * 1024:
+        if len(encoded.encode("utf-8")) > 256 * 1024:
             raise TravelPlanStoreError("TRAVEL_CANDIDATE_REVIEW_INVALID", "Candidate review is too large.")
         try:
             with self._connect() as connection:

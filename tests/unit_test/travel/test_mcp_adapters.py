@@ -149,6 +149,35 @@ def test_xhs_search_omits_upstream_filter_ui_for_defaults(monkeypatch):
     assert captured == {"keyword": "大理", "limit": 3}
 
 
+def test_xhs_search_retries_same_keyword_once_after_page_connection_closed(monkeypatch):
+    calls = []
+
+    async def fake_call(_candidates, args):
+        calls.append(dict(args))
+        if len(calls) == 1:
+            return {
+                "status": "error",
+                "code": "TRAVEL_SOURCE_PAGE_CONNECTION_CLOSED",
+                "message": "Xiaohongshu read-only query failed.",
+            }
+        return {"status": "success", "code": "OK", "data": {"items": [{"id": "note-1"}]}}
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.delenv("XHS_READONLY_COOKIE_FILE", raising=False)
+    monkeypatch.setattr(xhs, "_call_upstream", fake_call)
+    monkeypatch.setattr(xhs.asyncio, "sleep", no_sleep)
+
+    result = asyncio.run(xhs.search_notes("洛阳旅游攻略", max_results=3))
+
+    assert result["status"] == "success"
+    assert calls == [
+        {"keyword": "洛阳旅游攻略", "limit": 3},
+        {"keyword": "洛阳旅游攻略", "limit": 3},
+    ]
+
+
 def test_xhs_search_enforces_max_results_on_upstream_text_payload(monkeypatch):
     async def fake_call(_candidates, _args):
         return {
@@ -169,9 +198,58 @@ def test_xhs_search_enforces_max_results_on_upstream_text_payload(monkeypatch):
 
     assert payload == {
         "count": 2,
-        "feeds": [{"id": "0"}, {"id": "1"}],
+        "feeds": [
+            {
+                "id": "0",
+                "noteCard": {"displayTitle": "", "user": {"nickname": ""}},
+                "source_url": "https://www.xiaohongshu.com/explore/0",
+            },
+            {
+                "id": "1",
+                "noteCard": {"displayTitle": "", "user": {"nickname": ""}},
+                "source_url": "https://www.xiaohongshu.com/explore/1",
+            },
+        ],
         "total_count": 4,
     }
+
+
+def test_xhs_search_compacts_large_rednote_cards_before_result_limit(monkeypatch):
+    async def fake_call(_candidates, _args):
+        feeds = []
+        for index in range(6):
+            feeds.append(
+                {
+                    "id": f"note-{index}",
+                    "xsecToken": f"token-{index}",
+                    "noteCard": {
+                        "displayTitle": f"河南攻略 {index}",
+                        "description": "路线建议" * 300,
+                        "user": {
+                            "nickname": f"作者 {index}",
+                            "avatar": "https://example.invalid/" + "a" * 4000,
+                        },
+                        "cover": {"url": "https://example.invalid/" + "b" * 4000},
+                    },
+                }
+            )
+        return {
+            "status": "success",
+            "code": "OK",
+            "data": {"text": json.dumps({"feeds": feeds}, ensure_ascii=False)},
+        }
+
+    monkeypatch.delenv("XHS_READONLY_COOKIE_FILE", raising=False)
+    monkeypatch.setattr(xhs, "_call_upstream", fake_call)
+
+    result = asyncio.run(xhs.search_notes("河南旅游攻略", max_results=6))
+    payload = json.loads(result["data"]["text"])
+
+    assert len(payload["feeds"]) == 6
+    assert payload["feeds"][0]["noteCard"]["displayTitle"] == "河南攻略 0"
+    assert payload["feeds"][0]["noteCard"]["user"]["nickname"] == "作者 0"
+    assert "cover" not in payload["feeds"][0]["noteCard"]
+    assert len(json.dumps(result, ensure_ascii=False)) < xhs._MAX_RESULT_CHARS
 
 
 def test_xhs_search_keeps_non_json_upstream_text_unchanged(monkeypatch):
@@ -251,6 +329,21 @@ def test_xhs_exception_group_maps_offline_and_timeout_without_leaking_details():
     }
     assert timed_out["code"] == "TRAVEL_SOURCE_TIMEOUT"
     assert "secret host" not in json.dumps(offline)
+
+
+def test_xhs_upstream_tool_error_preserves_timeout_cause():
+    assert xhs._upstream_tool_error_code("context deadline exceeded") == (
+        "TRAVEL_SOURCE_TIMEOUT"
+    )
+    assert xhs._upstream_tool_error_code("please login again") == (
+        "TRAVEL_SOURCE_AUTH_REQUIRED"
+    )
+    assert xhs._upstream_tool_error_code("unexpected browser error") == (
+        "TRAVEL_SOURCE_UNAVAILABLE"
+    )
+    assert xhs._upstream_tool_error_code("navigation failed: net::ERR_CONNECTION_CLOSED") == (
+        "TRAVEL_SOURCE_PAGE_CONNECTION_CLOSED"
+    )
 
 
 def test_fake_travel_catalog_keeps_valid_servers_when_one_schema_is_invalid():

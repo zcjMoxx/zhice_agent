@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 
 import { api } from "@/api/client";
-import type { McpMonitorSnapshot, MonitorSnapshot, OperationsTerminal, PublicUser, RegistrationPolicy, Role, SkillSourcesSnapshot, SystemDiagnosticsSnapshot, XhsReadonlyAdminStatus } from "@/api/types";
+import type { HotelBrowserAdminStatus, McpMonitorSnapshot, MonitorSnapshot, OperationsTerminal, PublicUser, RegistrationPolicy, Role, SkillSourcesSnapshot, SystemDiagnosticsSnapshot, XhsReadonlyAdminStatus } from "@/api/types";
 
 export const useAdminStore = defineStore("admin", {
   state: () => ({
@@ -12,6 +12,8 @@ export const useAdminStore = defineStore("admin", {
     mcpStatus: null as McpMonitorSnapshot | null,
     xhsStatus: null as XhsReadonlyAdminStatus | null,
     xhsAction: "" as "" | "check" | "login" | "restart",
+    hotelBrowserStatus: null as HotelBrowserAdminStatus | null,
+    hotelBrowserAction: "" as "" | "save" | "login" | "delete",
     operationsTerminal: null as OperationsTerminal | null,
     registrationPolicy: null as RegistrationPolicy | null,
     registrationPolicyBusy: false,
@@ -42,6 +44,7 @@ export const useAdminStore = defineStore("admin", {
     async loadSkillSources() { this.skillSources = await api.skillSources(); },
     async loadMcpStatus() { this.mcpStatus = await api.mcpStatus(); },
     async loadXhsStatus() { this.xhsStatus = await api.xhsAdminStatus(); },
+    async loadHotelBrowserStatus() { this.hotelBrowserStatus = await api.hotelBrowserAdminStatus(); },
     async checkXhsLogin() {
       this.xhsAction = "check";
       try { this.xhsStatus = await api.checkXhsAdminLogin(); }
@@ -56,6 +59,21 @@ export const useAdminStore = defineStore("admin", {
       this.xhsAction = "restart";
       try { this.xhsStatus = await api.restartXhsAdminSidecar(); }
       finally { this.xhsAction = ""; }
+    },
+    async saveHotelBrowserCredentials(username: string, password: string) {
+      this.hotelBrowserAction = "save";
+      try { this.hotelBrowserStatus = await api.saveHotelBrowserCredentials(username, password); }
+      finally { this.hotelBrowserAction = ""; }
+    },
+    async startHotelBrowserLogin() {
+      this.hotelBrowserAction = "login";
+      try { this.hotelBrowserStatus = await api.startHotelBrowserLogin(); }
+      finally { this.hotelBrowserAction = ""; }
+    },
+    async deleteHotelBrowserCredentials() {
+      this.hotelBrowserAction = "delete";
+      try { this.hotelBrowserStatus = await api.deleteHotelBrowserCredentials(); }
+      finally { this.hotelBrowserAction = ""; }
     },
     async syncSkillSource(source: string) {
       this.skillActionSource = source;

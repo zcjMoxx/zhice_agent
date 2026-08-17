@@ -134,10 +134,11 @@ Linux:   ~/.zhice
 - `${ZHICE_AGENT_WORKSPACE}/config/models.json`
 - `${ZHICE_AGENT_WORKSPACE}/config/config.yml`
 - `${ZHICE_AGENT_WORKSPACE}/prompts/*.md`
+- 通用目录骨架：`contexts/sessions`、`contexts/memory`、`contexts/users`、`contexts/shared/readonly`、`state/mcp_runtime`、`extends` 和 `logs`
 
 运行态环境变量默认从 `${workspace}/config/.env` 加载。该文件不能反向定义 `ZHICE_AGENT_WORKSPACE`，避免 workspace 解析形成循环；如需由 dotenv 兼容提供 workspace，必须显式传入 `--env-file`。源码项目的 `config/.env` 只保留为旧版本迁移 fallback，不再是正常启动主路径。
 
-`zcagent init` 默认生成 `config/.env`、`config.yml`、`models.json` 和 Prompt，可以重复执行：已有文件默认保留，缺失文件会自动补齐；确实要刷新覆盖已有模板时再加 `--force`。`--write-env` 仅作为旧命令兼容参数保留，与普通 init 结果相同，不再是生成 env 的前提。
+`zcagent init` 默认把仓库的 `config/.env.example`、`config/config.example.yml`、`config/models.example.json` 和全部 Prompt 字节级复制到运行 workspace，并创建通用目录骨架。命令可以重复执行：已有文件默认保留，缺失文件自动补齐；只有明确要用最新 Example 覆盖本地模板时才加 `--force`。非 Secret 的待替换值统一使用“请填写……”中文占位；Secret 保持空值并用相邻中文注释提示，避免占位文字被误识别为真实凭据。`--write-env` 仅作为旧命令兼容参数保留。
 
 如果启动`zcagent`时缺少`models.json`，CLI会阻断聊天并引导运行`zcagent init`；文件已经存在但内容非法时，CLI会优先引导编辑现有文件。聊天至少需要一个enabled Chat endpoint，并配置与真实服务一致的protocol、base URL/provider、model和api_key。没有可用LLM时聊天无法继续。
 
@@ -145,9 +146,11 @@ Skill source、MCP 和 Subagent 都是可选扩展：未配置时作为 disabled
 
 ## 智能旅行规划
 
-登录 Web 后访问 `/travel`，填写出发地、目的地、日期、人数、预算/预算档位、偏好和 quick/deep 模式。表单会把这些字段转换为一条用户可见的正常聊天消息；Agent 通过现有 MCP、`travel-planner` Skill 和 `finalize_travel_plan` 保存计划，页面随后通过 `/api/travel/plans/{plan_id}` 读取结构化结果。计划数据库位于当前 actor context root 的 `travel/plans.sqlite3`，不同用户不能互相读取或删除。
+登录 Web 后访问 `/travel`，可以在专用对话中自然描述出发地、目的地、日期、人数、预算和偏好。旅行助手先核对需求，再并发查询交通天气、住宿景点和攻略来源，展示候选方案；用户选择后并行补齐具体住宿和市内路线，再由 `travel-planner` Skill 与 `finalize_travel_plan` 保存结构化计划。计划数据库位于当前 actor context root 的 `travel/plans.sqlite3`，不同用户不能互相读取或删除。
 
-模板默认启用无 Secret 的 Open-Meteo stdio 适配器和 `travel-research` shared-readonly Subagent Profile。高德、Tavily、12306 和小红书只读 upstream 需要在运行态 `${ZHICE_AGENT_WORKSPACE}/config/config.yml`/`.env` 中配置；真实 key、Cookie 和 Authorization 不进入仓库。小红书适配器 Catalog 只有登录状态、搜索和详情，写操作不存在。高德 JS 地图构建变量为 `VITE_AMAP_JS_API_KEY` 和 `VITE_AMAP_JS_SECURITY_CODE`；未配置或加载失败时页面继续显示文字路线、距离和时长。
+模板默认启用无 Secret 的 Open-Meteo stdio 适配器。五个旅行专用 shared-readonly Profile 由旅行应用只在旅行 Turn 内注入，不需要复制到全局 `subagents.profiles`；quick/deep 都使用同一组三路候选研究和两路选择后最终化。高德、Tavily、12306 和小红书只读 upstream 需要在运行态 `${ZHICE_AGENT_WORKSPACE}/config/config.yml`/`.env` 中配置；真实 key、Cookie 和 Authorization 不进入仓库。小红书不是 OAuth：管理员通过扫码或手机验证建立登录态，系统后续复用 Cookie；适配器 Catalog 只有登录状态、搜索和详情，写操作不存在。高德 JS 地图构建变量为 `VITE_AMAP_JS_API_KEY` 和 `VITE_AMAP_JS_SECURITY_CODE`；未配置或加载失败时页面继续显示文字路线、距离和时长。
+
+管理后台把协议状态和账号状态分开：MCP 服务监控只统计真实 Server；小红书技术状态保留在 `xhs-readonly` MCP 卡，扫码/Cookie 登录与携程账号登录位于独立“外部平台账号”区域。携程仍是旅行应用内置只读 Tool，不进入 MCP Server 数或 Catalog。
 
 服务器私有镜像固定预装 `mcp-amap`、`12306-mcp@0.3.1` 和 RedNote 兼容的小红书 Linux 二进制。云端小红书运行在独立 `zhice-xhs-readonly` sidecar 中，与主容器共享只读/读写分离的 Cookie volume，只通过 `zhice-travel` Docker 网络访问，不发布宿主机或公网端口。完整操作见 `deploy/README.md` 的“旅行外部服务”章节。
 
@@ -213,18 +216,18 @@ ${ZHICE_AGENT_WORKSPACE}/config/models.json
 {
   "schema_version": 1,
   "routing": {
-    "chat": "openai/gpt-5.5",
-    "compaction": "openai/gpt-5.5",
-    "embedding": "openai_embedding/text-embedding-3-small"
+    "chat": "请填写端点名称/请填写模型名称",
+    "compaction": "请填写端点名称/请填写模型名称",
+    "embedding": "请填写向量端点名称/请填写向量模型名称"
   },
   "chat": {
-    "openai": {
+    "请填写端点名称": {
       "protocol": "openai",
       "provider": "",
-      "base_url": "https://api.openai.com/v1",
+      "base_url": "请填写模型服务地址",
       "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
-      "model": "gpt-5.5",
-      "supported_models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+      "model": "请填写模型名称",
+      "supported_models": ["请填写模型名称"],
       "context_window": 131072,
       "max_tokens": 16384,
       "temperature": 0.7,
@@ -242,12 +245,12 @@ ${ZHICE_AGENT_WORKSPACE}/config/models.json
     }
   },
   "embedding": {
-    "openai_embedding": {
+    "请填写向量端点名称": {
       "protocol": "openai",
-      "base_url": "https://api.openai.com/v1",
+      "base_url": "请填写向量模型服务地址",
       "api_key": "${ZHICE_EMBEDDING_API_KEY}",
-      "model": "text-embedding-3-small",
-      "supported_models": ["text-embedding-3-small"],
+      "model": "请填写向量模型名称",
+      "supported_models": ["请填写向量模型名称"],
       "dimensions": 1536,
       "batch_size": 16,
       "enabled": false
@@ -261,12 +264,14 @@ ${ZHICE_AGENT_WORKSPACE}/config/models.json
 - `protocol` 表示本地 Provider：`openai` 或 `litellm`。
 - `provider` 对 OpenAI-compatible endpoint 保持空字符串；对 LiteLLM endpoint 写模型商前缀，例如 `anthropic`。
 - `model` 和 `supported_models` 都写不带 provider 前缀的模型名。
+- 非空 `supported_models` 必须包含该 endpoint 的默认 `model`，避免默认路由与模型选择列表矛盾。
 - `api_key` 可以直接写本地 key，也可以写 `${ENV_VAR}` 占位符。
 - `context_window` 是 endpoint/model 的总上下文窗口；未填写时默认 `131072`，并且必须大于 `max_tokens`。
 - `max_tokens` 是单次响应允许生成的最大输出 token，不是输入上限或总窗口；它同时用于本地预留输出空间和实际 Provider 请求。
 - 本地输入预算固定按 `context_window - max_tokens` 计算，不再提供第三个输入上限配置字段。
 - `request_timeout_seconds` 限制单次 Provider 请求；`max_attempts`、退避字段和 `total_deadline_seconds` 共同限制同一 endpoint 的重试总量与总时长。
 - `cooldown_seconds` 是进程内 endpoint 冷却窗口；失败切换和冷却不会修改 Session 保存的首选 endpoint/model。
+- `role` 是可选的 Child 模型用途标签：普通端点使用 `default`；只有显式配置 `fast` 或 `reasoning` 端点时对应 Child 才会选用。没有 `fast` 时旅行 Child 继承当前主模型；同一角色有多个 enabled endpoint 时按较小 `priority` 优先。
 - `routing.chat/compaction/embedding`分别指定回答、压缩和向量模型；只写endpoint使用默认模型，写`endpoint/model`时模型必须命中`supported_models`。
 
 Session上下文策略位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`context`分区；Embedding端点与路由位于`models.json`。未配置有效Embedding endpoint时不会阻断聊天，`/api/health`中`context_engineering`标记为`degraded`。Owner/CLI的派生状态位于`contexts/context/`，普通用户位于`contexts/users/{user_id}/context/`；compaction与`context_index.sqlite3`均可由Session JSONL重建，`/clear`和Session delete会同步失效。

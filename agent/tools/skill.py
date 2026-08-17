@@ -68,6 +68,11 @@ class LoadSkillsTool(BaseTool):
         name = require_string(args, "name", required=True).strip()
         source = require_string(args, "source", default="").strip() or None
         max_chars = require_int(args, "max_chars", default=20000, minimum=1000, maximum=50000)
+        if source and "/" in name and name.partition("/")[0] == source:
+            # Models occasionally provide both equivalent forms even though the schema
+            # documents them as alternatives. Treat the redundant source as harmless;
+            # a conflicting source still reaches the loader's structured validation.
+            source = None
         try:
             info = self.skills.get_skill(name, source=source)
             body = self.skills.get_skill_body(name, source=source)

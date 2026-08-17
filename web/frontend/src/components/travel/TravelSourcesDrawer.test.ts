@@ -12,7 +12,9 @@ describe("TravelSourcesDrawer", () => {
     });
     await wrapper.find("button").trigger("click");
 
-    expect(document.body.textContent).toContain("snapshot");
+    expect(document.body.textContent).toContain("查询快照");
+    expect(document.body.textContent).toContain("小红书只读");
+    expect(document.body.textContent).not.toContain("xhs-readonly");
     expect(document.body.querySelector('.travel-source-list a')).toBeNull();
     wrapper.unmount();
   });
@@ -35,4 +37,3 @@ function evidence(url: string): TravelEvidence {
     content_hash: "a".repeat(64),
   };
 }
-

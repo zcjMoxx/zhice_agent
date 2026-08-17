@@ -24,6 +24,7 @@ const startDateDefault = ref(false);
 const endDateDefault = ref(false);
 const conversation = ref<RequirementMessage[]>([]);
 const hasDraft = ref(false);
+const tonePickerRevealed = ref(false);
 const form = reactive({
   naturalInput: "",
   origin: "",
@@ -41,6 +42,11 @@ const form = reactive({
   mode: "",
   constraints: "",
 });
+const toneOptions = [
+  { value: "经济实惠", title: "经济实惠", price: "住宿约 ¥100–250/晚", detail: "公共交通优先，把预算留给更多体验" },
+  { value: "舒适均衡", title: "舒适均衡", price: "住宿约 ¥250–450/晚", detail: "控制折返，必要时短途打车" },
+  { value: "轻松品质", title: "轻松品质", price: "住宿约 ¥450–700/晚", detail: "减少换乘和长距离步行，节奏更松" },
+] as const;
 
 const durationDays = computed(() => {
   const start = Date.parse(`${form.startDate}T00:00:00Z`);
@@ -54,10 +60,33 @@ const missingFields = computed(() => [
   !form.startDate && "开始日期",
   !form.endDate && "结束日期",
   (!form.travellerCount || form.travellerCount < 1) && "人数",
+  !form.budgetLevel && "旅行基调",
   form.startDate && form.endDate && !durationDays.value && "有效日期范围",
 ].filter(Boolean) as string[]);
 const readyToGenerate = computed(() => missingFields.value.length === 0);
 const conversationReady = computed(() => hasDraft.value && readyToGenerate.value);
+const tonePrerequisitesReady = computed(() => [
+  form.origin.trim(),
+  form.destinations.trim(),
+  form.startDate,
+  form.endDate,
+  form.travellerCount && form.travellerCount > 0 ? "人数" : "",
+  durationDays.value > 0 ? "日期" : "",
+].every(Boolean));
+const tonePrompted = computed(() => (
+  !props.historyMode
+  && !form.budgetLevel
+  && tonePrerequisitesReady.value
+  && conversation.value.some((message) => message.role === "assistant")
+));
+const showTonePicker = computed(() => (
+  !props.historyMode
+  && !props.busy
+  && !props.intakeBusy
+  && !form.budgetLevel
+  && tonePrerequisitesReady.value
+  && (tonePickerRevealed.value || tonePrompted.value)
+));
 watch(detailsOpen, (open) => emit("detailsChange", open));
 watch(
   () => props.restoredConversation,
@@ -65,13 +94,17 @@ watch(
     conversation.value = messages.map((message) => ({ ...message }));
     hasDraft.value = Boolean(props.restoredDraft);
     form.naturalInput = "";
+    if (!messages.length) tonePickerRevealed.value = false;
   },
   { deep: true, immediate: true },
 );
 watch(
   () => props.restoredDraft,
   (draft) => {
-    if (!draft) return;
+    if (!draft) {
+      if (!conversation.value.length) resetForm();
+      return;
+    }
     applyDraft(draft);
     hasDraft.value = true;
   },
@@ -89,12 +122,14 @@ watch(
 );
 
 function openManualDetails() {
+  if (props.busy || props.intakeBusy) return;
   detailsSource.value = hasDraft.value ? "model" : "manual";
   if (!hasDraft.value) applyBeijingDateDefaults();
   detailsOpen.value = true;
 }
 
 function openReviewDetails() {
+  if (props.busy || props.intakeBusy) return;
   detailsSource.value = "model";
   detailsOpen.value = true;
 }
@@ -103,7 +138,8 @@ function sendNaturalMessage() {
   const text = form.naturalInput.trim();
   if (!text || props.busy || props.intakeBusy || props.historyMode) return;
   form.naturalInput = "";
-  emit("intakeMessage", text);
+  const toneContext = form.budgetLevel ? `（旅行基调：${form.budgetLevel}）` : "";
+  emit("intakeMessage", `${text}${toneContext}`);
 }
 
 function friendlyQuestions(questions: string[]) {
@@ -127,13 +163,48 @@ function applyDraft(draft: TravelRequirementDraft) {
   form.travellerType = draft.traveller_type;
   form.travellerCount = draft.traveller_count;
   form.budget = draft.budget_total_cny;
-  form.budgetLevel = ({ economy: "经济", balanced: "均衡", comfortable: "舒适" } as Record<string, string>)[draft.budget_level] || "";
+  form.budgetLevel = ({ economy: "经济实惠", balanced: "舒适均衡", comfortable: "轻松品质" } as Record<string, string>)[draft.budget_level] || "";
   form.transport = draft.transport_preferences.join(", ");
   form.stay = draft.stay_preferences.join(", ");
   form.interests = draft.interest_tags.join(", ");
   form.pace = draft.pace;
   form.mode = draft.planning_mode;
   form.constraints = draft.hard_constraints.join(", ");
+}
+
+function resetForm() {
+  form.naturalInput = "";
+  form.origin = "";
+  form.destinations = "";
+  form.startDate = "";
+  form.endDate = "";
+  form.travellerType = "";
+  form.travellerCount = null;
+  form.budget = null;
+  form.budgetLevel = "";
+  form.transport = "";
+  form.stay = "";
+  form.interests = "";
+  form.pace = "";
+  form.mode = "";
+  form.constraints = "";
+  startDateDefault.value = false;
+  endDateDefault.value = false;
+}
+
+function selectTone(value: string) {
+  if (props.busy || props.intakeBusy || !tonePrerequisitesReady.value) return;
+  form.budgetLevel = value;
+  tonePickerRevealed.value = false;
+  conversation.value = [
+    ...conversation.value.filter((message, index, items) => !(
+      message.role === "assistant"
+      && index === items.length - 1
+      && /旅行基调|经济实惠|舒适均衡|轻松品质/.test(message.content)
+    )),
+    { role: "user", content: `已选择旅行基调：${value}` },
+  ];
+  confirmAndSubmit();
 }
 
 function applyBeijingDateDefaults() {
@@ -180,6 +251,7 @@ function chineseDate(value: string) {
 }
 
 function confirmAndSubmit() {
+  if (props.busy || props.intakeBusy) return;
   if (!readyToGenerate.value || !form.travellerCount) { detailsOpen.value = true; return; }
   detailsOpen.value = false;
   const reviewedConversation = conversation.value.length
@@ -190,9 +262,9 @@ function confirmAndSubmit() {
 
 function draftFromForm(): TravelRequirementDraft {
   const budgetLevels: Record<string, TravelRequirementDraft["budget_level"]> = {
-    经济: "economy",
-    均衡: "balanced",
-    舒适: "comfortable",
+    经济实惠: "economy",
+    舒适均衡: "balanced",
+    轻松品质: "comfortable",
   };
   return {
     intent: "travel_requirement",
@@ -215,7 +287,7 @@ function draftFromForm(): TravelRequirementDraft {
 }
 
 function manualRequirementSummary() {
-  return `我已确认旅行条件：${form.origin.trim()}出发，前往${form.destinations.trim()}，${form.startDate} 至 ${form.endDate}，共 ${durationDays.value} 天，${form.travellerCount} 人。`;
+  return `我已确认旅行条件：${form.origin.trim()}出发，前往${form.destinations.trim()}，${form.startDate} 至 ${form.endDate}，共 ${durationDays.value} 天，${form.travellerCount} 人；旅行基调为${form.budgetLevel}。`;
 }
 </script>
 
@@ -223,7 +295,7 @@ function manualRequirementSummary() {
   <form class="travel-form travel-composer" @submit.prevent="sendNaturalMessage">
     <header class="travel-composer-header">
       <div><span class="eyebrow"><Sparkles :size="14" /> {{ historyMode ? '旅行需求' : '新建计划' }}</span><h2>{{ historyMode ? '生成这份计划时的需求问答' : '用一句话描述你的旅行' }}</h2><p>{{ historyMode ? '这段记录与当前计划一起保存。' : '信息不清楚时我会继续询问，确认后才开始规划。' }}</p></div>
-      <button v-if="!historyMode" class="travel-supplement-button" type="button" :aria-expanded="detailsOpen" @click="openManualDetails"><ListPlus :size="15" />补充数据</button>
+      <button v-if="!historyMode" class="travel-supplement-button" type="button" :disabled="busy || intakeBusy" :aria-expanded="detailsOpen" @click="openManualDetails"><ListPlus :size="15" />补充数据</button>
     </header>
 
     <div v-if="conversation.length" class="travel-requirement-dialog" aria-live="polite">
@@ -232,11 +304,20 @@ function manualRequirementSummary() {
         <p v-if="message.role === 'user'" class="travel-requirement-bubble">{{ message.content }}</p>
         <MarkdownMessage v-else class="travel-requirement-bubble" :content="message.content" />
       </div>
-      <div v-if="conversationReady && !historyMode && !busy" class="travel-requirement-ready">
+      <section v-if="showTonePicker" class="travel-tone-picker" aria-label="旅行基调">
+        <header><div><strong>最后选择这次旅行的基调</strong><small>其他必要条件已经齐全；选择后会立即开始规划。</small></div></header>
+        <div>
+          <button v-for="tone in toneOptions" :key="tone.value" type="button" :class="{ selected: form.budgetLevel === tone.value }" :aria-pressed="form.budgetLevel === tone.value" :disabled="busy || intakeBusy" @click="selectTone(tone.value)">
+            <strong>{{ tone.title }}</strong><span>{{ tone.price }}</span><small>{{ tone.detail }}</small>
+          </button>
+        </div>
+        <p class="travel-tone-optional">还有精确预算、交通、住宿、兴趣、节奏或硬约束？请先点“补充信息”；不填会按所选基调采用合理默认。</p>
+      </section>
+      <div v-if="conversationReady && !historyMode && !busy && !intakeBusy" class="travel-requirement-ready">
         <CheckCircle2 :size="18" />
         <span>关键信息已经齐全</span>
         <button type="button" @click="openReviewDetails">补充信息</button>
-        <button class="primary-button" type="button" :disabled="busy" @click="confirmAndSubmit">确认并开始规划</button>
+        <button class="primary-button" type="button" :disabled="busy || intakeBusy" @click="confirmAndSubmit">确认并开始规划</button>
       </div>
       <div v-if="handoffQuestion" class="travel-chat-handoff">
         <strong>这个问题更适合在智策 Agent 主聊天中交流</strong>
@@ -271,7 +352,7 @@ function manualRequirementSummary() {
         <label class="travel-field"><span>人群（可空）</span><input v-model="form.travellerType" placeholder="未说明时按旅行者处理" /></label>
         <label class="travel-field"><span>人数</span><input v-model.number="form.travellerCount" type="number" min="1" max="50" required /></label>
         <label class="travel-field"><span>精确总预算（可空）</span><input v-model.number="form.budget" type="number" min="100" step="100" placeholder="人民币" /></label>
-        <label class="travel-field"><span>预算档位（可空）</span><select v-model="form.budgetLevel"><option value="">未提供</option><option>经济</option><option>均衡</option><option>舒适</option></select></label>
+        <label class="travel-field"><span>旅行基调</span><select v-model="form.budgetLevel" required><option value="">请选择</option><option>经济实惠</option><option>舒适均衡</option><option>轻松品质</option></select></label>
         <label class="travel-field"><span>交通偏好</span><input v-model="form.transport" /></label>
         <label class="travel-field"><span>住宿偏好</span><input v-model="form.stay" /></label>
         <label class="travel-field"><span>旅行节奏（可选）</span><select v-model="form.pace"><option value="">系统采用均衡</option><option value="relaxed">轻松</option><option value="balanced">均衡</option><option value="intensive">充实</option></select></label>
@@ -280,7 +361,7 @@ function manualRequirementSummary() {
         <label class="travel-field travel-field-wide"><span>硬约束</span><input v-model="form.constraints" /></label>
       </div>
       <div v-if="missingFields.length" class="travel-review-missing">开始前只需确认：{{ missingFields.join('、') }}</div>
-      <div class="travel-inspector-actions"><button type="button" @click="detailsOpen = false">暂不规划</button><button class="primary-button" type="button" :disabled="busy || !readyToGenerate" @click="confirmAndSubmit">{{ busy ? "正在启动…" : "确认并开始规划" }}</button></div>
+      <div class="travel-inspector-actions"><button type="button" @click="detailsOpen = false">暂不规划</button><button class="primary-button" type="button" :disabled="busy || intakeBusy || !readyToGenerate" @click="confirmAndSubmit">{{ busy ? "正在启动…" : intakeBusy ? "正在更新条件…" : "确认并开始规划" }}</button></div>
     </aside>
     <footer v-if="!historyMode">
       <span></span>

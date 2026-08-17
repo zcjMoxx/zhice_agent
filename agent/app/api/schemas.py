@@ -346,9 +346,9 @@ class McpMonitorResponse(BaseModel):
 
 
 class XhsReadonlyAdminStatusResponse(BaseModel):
-    """Credential-free Owner projection for the local Xiaohongshu MCP."""
+    """Credential-free Owner projection for the Xiaohongshu platform account."""
 
-    server_id: str = "xhs-readonly"
+    platform_id: str = "xhs"
     state: str = "unknown"
     code: str = ""
     message: str = ""
@@ -357,6 +357,32 @@ class XhsReadonlyAdminStatusResponse(BaseModel):
     login_in_progress: bool = False
     restart_supported: bool = False
     cookie_updated_at: str = ""
+
+
+class HotelBrowserCredentialRequest(BaseModel):
+    """Owner-supplied Ctrip credential accepted only by the runtime credential store."""
+
+    username: str = Field(min_length=1, max_length=320)
+    password: str = Field(min_length=1, max_length=4096)
+
+
+class HotelBrowserAdminStatusResponse(BaseModel):
+    """Credential-free Owner projection for the local hotel browser account."""
+
+    platform_id: str = "ctrip"
+    state: str = "unknown"
+    code: str = ""
+    message: str = ""
+    credential_store_supported: bool = False
+    credential_configured: bool = False
+    account_hint: str = ""
+    credential_source: str = ""
+    credentials_updated_at: str = ""
+    browser_supported: bool = False
+    login_supported: bool = False
+    login_in_progress: bool = False
+    login_mode: str = "password_with_manual_verification_fallback"
+    last_checked_at: str = ""
 
 
 class OperationsTerminalResponse(BaseModel):
@@ -564,6 +590,13 @@ class TravelGenerationStatusResponse(BaseModel):
     turn_id: str = ""
     plan_id: str = ""
     error_code: str = ""
+
+
+class TravelProgressHistoryResponse(BaseModel):
+    """Bounded user-facing progress rebuilt from one actor-owned travel Session."""
+
+    session_id: str
+    items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TravelCandidateSelectionRequest(BaseModel):

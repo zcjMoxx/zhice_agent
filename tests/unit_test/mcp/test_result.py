@@ -71,3 +71,27 @@ def test_compacts_oversized_structured_search_without_failing(tmp_path):
     assert len(payload["results"]) == 5
     assert "raw_content" not in payload["results"][0]
     assert len(payload["results"][0]["content"]) <= 1001
+
+
+def test_long_text_preserves_head_and_tail_with_fixed_output_budget(tmp_path):
+    result = SimpleNamespace(
+        isError=False,
+        structuredContent=None,
+        content=[SimpleNamespace(type="text", text="HEAD" + "a" * 9000 + "b" * 9000 + "TAIL")],
+    )
+
+    normalized = normalize_mcp_result(
+        result,
+        server_id="long-list",
+        files_dir=tmp_path / "files",
+        temp_root=tmp_path / "runtime",
+        artifact_gateway=McpArtifactGateway(),
+    )
+
+    assert normalized.output.startswith("HEAD")
+    assert normalized.output.endswith("TAIL")
+    assert "[truncated middle]" in normalized.output
+    assert len(normalized.output) == 12000
+    assert normalized.metadata["truncated"] is True
+    assert normalized.metadata["original_chars"] == 18008
+    assert normalized.metadata["returned_chars"] == 12000

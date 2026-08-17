@@ -25,10 +25,11 @@
 - `private/.env`、`private/config.yml`、`private/models.json` 三个镜像私有文件以及本机云目标 `private/cloud-target.json` 被目录级 Git ignore 覆盖；公开 `private/cloud-target.example.json` 的 registry、SSH 主机、SSH 用户、SSH 密码、运维脚本目录和公网地址全部使用中文占位，未替换时流水线明确拒绝。
 - Deploy README 优先从当前 `${workspace}/config/` 复制三个私有文件到 `deploy/private/`，给出默认 Windows `.zhice` 路径，将项目 `config/.env` 标为 legacy migration，并要求任一来源的 `deploy/private/.env` 删除 `ZHICE_AGENT_WORKSPACE`；`ZHICE_AGENT_SKILL_REPO` 缺失时自动使用 `/app/skill_repo`，默认 source 不携带虚假远端地址。
 - Dockerfile 从仓库构建 Python、Vue、Prompt、Skill、微信 sidecar和固定版本旅行 MCP，只从 `deploy/` 复制三个私有文件；RedNote 兼容小红书二进制锁定上游提交并应用可审计 patch。
-- 微信 Sidecar 使用 Node `pathToFileURL` 判断 Linux/Windows 直接入口；Docker 通过 `.[gateway,qq]` 显式安装 Gateway `websockets` runtime 和 QQ 渠道依赖，不依赖传递依赖碰巧可用。
+- 微信 Sidecar 使用 Node `pathToFileURL` 判断 Linux/Windows 直接入口；Docker 通过 `.[gateway,qq,hotel-browser]` 显式安装 Gateway、QQ 与携程只读浏览器依赖，并安装 bundled Chromium，不依赖宿主机 Chrome 或传递依赖碰巧可用。
 - 容器以专用非 root `zhice` 用户运行，使用与本地一致的 `Path.home()/.zhice` 默认目录，并通过显式 `--env-file` 加载镜像内私有环境变量。
 - Dockerfile 不预设 `ZHICE_AGENT_SKILL_REPO`；私有 `.env` 显式配置时使用配置值，未配置或为空时由运行时代码自动定位镜像内 `/app/skill_repo`。
 - Compose 持久化 `contexts`、`state`、`travel`、`logs`、`extends`，其中 `zhice-travel-data` 跨重启和 Digest 更新保留 TravelPlanV1；并用独立命名卷持久化微信运行时账号凭据、小红书 Cookie和浏览器 cache。完整 `config/` 仍由镜像提供。小红书 sidecar 无 host port，主容器只读挂载 Cookie volume，容器 DNS 明文 HTTP 必须显式 allowlist。
+- 携程 Playwright profile 位于 `state/browser_profiles/ctrip` 并随 `zhice-state` 保留；Linux 容器显式清空 `HOTEL_BROWSER_CHANNEL`，使用镜像内 bundled Chromium。
 - Dockerfile 预创建微信账号凭据目录并交给非 root `zhice` 用户；云端部署幂等创建和挂载 `zhice-weixin-credentials`，并用镜像内身份初始化目录所有权和 `0700` 权限，回滚与重启不删除该卷。
 - 云端部署要求不可变 digest，且只启动单个容器；Gateway 端口只发布到宿主机 `127.0.0.1`，公网必须经过反向代理。
 - `push-image.ps1` 先用 `ConvertFrom-Json -InputObject` 解析 RepoDigests，再从变量管道展开数组并精确选择目标 repository 的唯一 Digest，不使用可能命中其他 registry 的索引 0；回归测试通过真实 Windows PowerShell 验证双元素 JSON 数组不会嵌套成单个 `System.Object[]`。

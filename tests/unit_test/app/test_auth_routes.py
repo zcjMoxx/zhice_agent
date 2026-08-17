@@ -1109,7 +1109,7 @@ def test_mcp_admin_status_aggregates_safe_runtime_monitoring(tmp_path):
     assert "secret" not in response.text.lower()
 
 
-def test_xhs_mcp_login_management_is_owner_only_and_credential_free(tmp_path):
+def test_xhs_platform_login_is_owner_only_and_mcp_restart_stays_separate(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     store.initialize_owner("owner", "Owner", "password-123")
     store.create_user("ops-admin", "Ops Admin", "password-456", role_keys=("admin",))
@@ -1125,13 +1125,15 @@ def test_xhs_mcp_login_management_is_owner_only_and_credential_free(tmp_path):
     client = _client(tmp_path, runtime)
     client.post("/api/auth/login", json={"username": "owner", "password": "password-123"})
 
-    status = client.get("/api/admin/mcp/xhs-readonly/status")
-    checked = client.post("/api/admin/mcp/xhs-readonly/check-login")
-    persisted = client.get("/api/admin/mcp/xhs-readonly/status")
-    started = client.post("/api/admin/mcp/xhs-readonly/login")
+    status = client.get("/api/admin/external-platforms/xhs/status")
+    checked = client.post("/api/admin/external-platforms/xhs/check-login")
+    persisted = client.get("/api/admin/external-platforms/xhs/status")
+    started = client.post("/api/admin/external-platforms/xhs/login")
     restarted = client.post("/api/admin/mcp/xhs-readonly/restart")
 
     assert status.status_code == 200
+    assert status.json()["platform_id"] == "xhs"
+    assert "server_id" not in status.json()
     assert checked.json()["state"] == "authenticated"
     assert checked.json()["code"] == "OK"
     assert persisted.json()["state"] == "authenticated"
@@ -1148,15 +1150,70 @@ def test_xhs_mcp_login_management_is_owner_only_and_credential_free(tmp_path):
         "/api/auth/login",
         json={"username": "ops-admin", "password": "password-456"},
     )
-    denied = client.post("/api/admin/mcp/xhs-readonly/login")
+    denied = client.post("/api/admin/external-platforms/xhs/login")
 
     assert denied.status_code == 403
     assert denied.json()["error"]["details"] == {"required_role": "owner"}
     actions = {item["action"] for item in store.list_audit_events(limit=50)}
     assert {
-        "mcp.xhs.login_checked",
-        "mcp.xhs.login_started",
+        "external_platform.xhs.login_checked",
+        "external_platform.xhs.login_started",
         "mcp.xhs.restarted",
+    }.issubset(actions)
+
+
+def test_hotel_browser_credentials_are_owner_only_and_never_returned(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_owner("owner", "Owner", "password-123")
+    store.create_user("ops-admin", "Ops Admin", "password-456", role_keys=("admin",))
+    admin_role = next(role for role in store.list_roles() if role["key"] == "admin")
+    store.update_role_permissions(
+        admin_role["id"],
+        [*admin_role["permission_keys"], "skill.sources.read"],
+    )
+    runtime = _AuthRuntime(AuthService(store, audit_sink=SqliteAuditSink(store)), tmp_path)
+    runtime.config = _config(tmp_path)
+    runtime.hotel_accounts = _FakeHotelAccountSupervisor()
+    client = _client(tmp_path, runtime)
+    client.post("/api/auth/login", json={"username": "owner", "password": "password-123"})
+
+    initial = client.get("/api/admin/external-platforms/ctrip/status")
+    saved = client.put(
+        "/api/admin/external-platforms/ctrip/credentials",
+        json={"username": "traveller@example.com", "password": "secret-password"},
+    )
+    started = client.post("/api/admin/external-platforms/ctrip/login")
+    deleted = client.delete("/api/admin/external-platforms/ctrip/credentials")
+
+    assert initial.status_code == 200
+    assert initial.json()["platform_id"] == "ctrip"
+    assert "server_id" not in initial.json()
+    assert saved.json()["credential_configured"] is True
+    assert saved.json()["account_hint"] == "tr***@example.com"
+    assert started.json()["login_in_progress"] is True
+    assert deleted.json()["credential_configured"] is False
+    serialized = initial.text + saved.text + started.text + deleted.text
+    assert "traveller@example.com" not in serialized
+    assert "secret-password" not in serialized
+    assert str(tmp_path) not in serialized
+
+    client.post("/api/auth/logout")
+    client.post(
+        "/api/auth/login",
+        json={"username": "ops-admin", "password": "password-456"},
+    )
+    denied = client.put(
+        "/api/admin/external-platforms/ctrip/credentials",
+        json={"username": "other", "password": "another-secret"},
+    )
+
+    assert denied.status_code == 403
+    assert denied.json()["error"]["details"] == {"required_role": "owner"}
+    actions = {item["action"] for item in store.list_audit_events(limit=50)}
+    assert {
+        "external_platform.ctrip.credentials_saved",
+        "external_platform.ctrip.login_started",
+        "external_platform.ctrip.credentials_deleted",
     }.issubset(actions)
 
 
@@ -1232,6 +1289,61 @@ class _FakeXhsSupervisor:
         self.state = "unknown"
         self.code = "XHS_AUTH_RECHECK_PENDING"
         return "XHS_RESTARTED"
+
+
+class _FakeHotelAccountSupervisor:
+    def __init__(self):
+        self.configured = False
+        self.hint = ""
+        self.login_in_progress = False
+
+    def admin_snapshot(self):
+        return {
+            "provider": "ctrip",
+            "state": (
+                "login_pending"
+                if self.login_in_progress
+                else "unknown"
+                if self.configured
+                else "not_configured"
+            ),
+            "code": (
+                "HOTEL_LOGIN_STARTED"
+                if self.login_in_progress
+                else "HOTEL_AUTH_NOT_CHECKED"
+                if self.configured
+                else "HOTEL_CREDENTIALS_NOT_CONFIGURED"
+            ),
+            "message": "safe status",
+            "credential_store_supported": True,
+            "credential_configured": self.configured,
+            "account_hint": self.hint,
+            "credentials_updated_at": "2026-08-14T05:00:00+00:00" if self.configured else "",
+            "browser_supported": True,
+            "login_supported": True,
+            "login_in_progress": self.login_in_progress,
+            "login_mode": "password_with_manual_verification_fallback",
+            "last_checked_at": "",
+        }
+
+    def save_credentials(self, username, password):
+        assert username == "traveller@example.com"
+        assert password == "secret-password"
+        self.configured = True
+        self.hint = "tr***@example.com"
+        return "HOTEL_CREDENTIALS_SAVED"
+
+    def start_login(self):
+        if not self.configured:
+            return "HOTEL_CREDENTIALS_NOT_CONFIGURED"
+        self.login_in_progress = True
+        return "HOTEL_LOGIN_STARTED"
+
+    def delete_credentials(self):
+        self.configured = False
+        self.hint = ""
+        self.login_in_progress = False
+        return "HOTEL_CREDENTIALS_DELETED"
 
 
 def test_skill_source_permissions_and_owner_only_operations_projection(tmp_path):

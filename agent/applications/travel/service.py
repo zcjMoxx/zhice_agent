@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,7 @@ class TravelApplicationService:
 
         if not self.config.enabled or not actor.user_id:
             return []
+        from agent.applications.travel.hotel_tool import SearchTravelHotelsTool
         from agent.applications.travel.tools import (
             FinalizeTravelPlanTool,
             RequestTravelCandidateReviewTool,
@@ -59,6 +61,18 @@ class TravelApplicationService:
             FinalizeTravelPlanTool(workspace, self),
             RequestTravelClarificationTool(workspace),
             RequestTravelCandidateReviewTool(workspace, self),
+            SearchTravelHotelsTool(workspace, self.source_ledger),
+        ]
+
+    def research_tools_for_actor(self, actor: ActorContext):
+        """Return only read-only travel research Tools safe for a child Agent."""
+
+        if not self.config.enabled or not actor.user_id:
+            return []
+        from agent.applications.travel.hotel_tool import SearchTravelHotelsTool
+
+        return [
+            SearchTravelHotelsTool(self.user_contexts.workspace_dir, self.source_ledger)
         ]
 
     def intake_tools_for_actor(self, actor: ActorContext, sessions, *, confirm_planning=None):
@@ -101,13 +115,20 @@ class TravelApplicationService:
 
         self._require_enabled()
         owner_user_id = self._owner_user_id(actor)
-        self._require_candidate_selection(
+        selected_candidate = self._require_candidate_selection(
             actor,
             source_session_id,
-            raw_plan=raw_plan,
             selected_candidate_id=selected_candidate_id,
             required=require_candidate_review,
         )
+        if selected_candidate is not None:
+            raw_plan = _merge_candidate_identity(raw_plan, selected_candidate)
+            if not _plan_matches_candidate(raw_plan, selected_candidate):
+                raise TravelApplicationError(
+                    "TRAVEL_CANDIDATE_SELECTION_MISMATCH",
+                    "Final plan does not preserve the selected candidate itinerary.",
+                    status_code=409,
+                )
         try:
             plan = TravelPlanV1.from_dict(
                 raw_plan,
@@ -129,7 +150,6 @@ class TravelApplicationService:
                 source_turn_id=source_turn_id,
                 title=travel_plan_title(owned.request),
             )
-            store.clear_candidate_review(owner_user_id, source_session_id)
             return saved
         except TravelPlanStoreError as exc:
             raise _application_error_from_store(exc) from exc
@@ -206,11 +226,13 @@ class TravelApplicationService:
     ) -> TravelCandidateReview:
         owner_user_id = self._owner_user_id(actor)
         try:
-            return self.store_for_actor(actor).select_candidate(
+            selected = self.store_for_actor(actor).select_candidate(
                 owner_user_id, session_id, candidate_id
             )
         except TravelPlanStoreError as exc:
             raise _application_error_from_store(exc) from exc
+        self.source_ledger.begin_finalization_budget(session_id)
+        return selected
 
     def clear_candidate_review(self, actor: ActorContext, session_id: str) -> None:
         """Remove transient candidate state for an actor-owned Session."""
@@ -226,10 +248,9 @@ class TravelApplicationService:
         actor: ActorContext,
         session_id: str,
         *,
-        raw_plan: object,
         selected_candidate_id: str,
         required: bool = False,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         review = self.get_candidate_review(actor, session_id)
         if review is None:
             if required:
@@ -238,7 +259,7 @@ class TravelApplicationService:
                     "Prepare candidate options and ask the user to choose before finalizing.",
                     status_code=409,
                 )
-            return
+            return None
         if review.status != "selected" or not review.selected_candidate_id:
             raise TravelApplicationError(
                 "TRAVEL_CANDIDATE_SELECTION_REQUIRED",
@@ -259,21 +280,20 @@ class TravelApplicationService:
             ),
             None,
         )
-        if not isinstance(selected, dict) or not _plan_matches_candidate(raw_plan, selected):
+        if not isinstance(selected, dict):
             raise TravelApplicationError(
                 "TRAVEL_CANDIDATE_SELECTION_MISMATCH",
                 "Final plan does not preserve the selected candidate itinerary.",
                 status_code=409,
             )
+        return selected
 
     def capability_details(self) -> dict[str, Any]:
         """Return non-secret travel limits for health diagnostics."""
 
         return {
-            "default_mode": self.config.default_mode,
             "max_evidence_items": self.config.max_evidence_items,
-            "deep_subagent_count": self.config.deep_subagent_count,
-            "xhs_readonly_enabled": self.config.xhs_readonly_enabled,
+            "max_plan_bytes": self.config.max_plan_bytes,
         }
 
     def _require_enabled(self) -> None:
@@ -327,35 +347,51 @@ def _plan_matches_candidate(raw_plan: object, candidate: dict[str, Any]) -> bool
         if str(planned.get("city_or_area") or "").strip() != str(expected.get("city_or_area") or "").strip():
             return False
         activities = planned.get("activities")
-        planned_places = {
+        planned_places = [
             str(item.get("place") or "").strip()
             for item in activities
             if isinstance(item, dict)
-        } if isinstance(activities, list) else set()
-        expected_places = {str(item).strip() for item in expected.get("places", [])}
-        if not expected_places.issubset(planned_places):
+        ] if isinstance(activities, list) else []
+        expected_places = [str(item).strip() for item in expected.get("places", [])]
+        if planned_places != expected_places:
             return False
-    raw_budget = raw_plan.get("budget")
-    expected_budget = candidate.get("budget")
-    if not isinstance(raw_budget, dict) or not isinstance(expected_budget, dict):
-        return False
-    budget_matches = all(
-        abs(float(raw_budget.get(key, -1)) - float(expected_budget.get(key, -2))) < 0.01
-        for key in ("lower", "expected", "upper")
-    )
-    route_minutes = 0.0
-    route_distance = 0.0
-    for day in plan_days:
-        segments = day.get("route_segments") if isinstance(day, dict) else None
-        if not isinstance(segments, list):
-            continue
-        for segment in segments:
-            if not isinstance(segment, dict):
-                continue
-            route_minutes += float(segment.get("duration") or 0)
-            route_distance += float(segment.get("distance") or 0)
-    return (
-        budget_matches
-        and abs(route_minutes - float(candidate.get("route_minutes") or 0)) < 0.01
-        and abs(route_distance - float(candidate.get("route_distance_km") or 0)) < 0.01
-    )
+    return True
+
+
+def _merge_candidate_identity(raw_plan: object, candidate: dict[str, Any]) -> object:
+    if not isinstance(raw_plan, dict):
+        return raw_plan
+    itinerary = candidate.get("itinerary")
+    skeleton_days = itinerary.get("days") if isinstance(itinerary, dict) else None
+    planned_days = raw_plan.get("days")
+    if not isinstance(skeleton_days, list) or not isinstance(planned_days, list):
+        return raw_plan
+    if len(skeleton_days) != len(planned_days):
+        return raw_plan
+    merged = deepcopy(raw_plan)
+    merged_days = merged.get("days")
+    if not isinstance(merged_days, list):
+        return raw_plan
+    for planned, skeleton in zip(merged_days, skeleton_days, strict=True):
+        if not isinstance(planned, dict) or not isinstance(skeleton, dict):
+            return raw_plan
+        planned["date"] = skeleton.get("date")
+        planned["city_or_area"] = skeleton.get("city_or_area")
+        planned_activities = planned.get("activities")
+        skeleton_activities = skeleton.get("activities")
+        if (
+            not isinstance(planned_activities, list)
+            or not isinstance(skeleton_activities, list)
+            or len(planned_activities) != len(skeleton_activities)
+        ):
+            return raw_plan
+        for activity, skeleton_activity in zip(
+            planned_activities, skeleton_activities, strict=True
+        ):
+            if not isinstance(activity, dict) or not isinstance(skeleton_activity, dict):
+                return raw_plan
+            for key in ("start", "end", "place"):
+                activity[key] = skeleton_activity.get(key)
+        if "daily_budget" in skeleton:
+            planned["daily_budget"] = skeleton["daily_budget"]
+    return merged

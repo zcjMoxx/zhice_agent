@@ -36,6 +36,8 @@ from agent.app.api.schemas import (
     ChatRequest,
     ChatResponse,
     ConfirmationMutationResponse,
+    HotelBrowserAdminStatusResponse,
+    HotelBrowserCredentialRequest,
     LoginRequest,
     McpMonitorResponse,
     ModelPreferenceRequest,
@@ -68,6 +70,7 @@ from agent.app.api.schemas import (
 )
 from agent.app.auth import AuthHttpError, local_operator_actor
 from agent.app.runtime import ChatTurnResult, ModelState
+from agent.applications.travel.account_credentials import CredentialStoreError
 from agent.applications.travel.service import TravelApplicationError
 from agent.auth.schema import PERMISSIONS
 from agent.auth.session_access import SessionAccessError
@@ -1119,7 +1122,7 @@ def read_mcp_status(request: Request) -> McpMonitorResponse:
 
 
 @router.get(
-    "/admin/mcp/xhs-readonly/status",
+    "/admin/external-platforms/xhs/status",
     response_model=XhsReadonlyAdminStatusResponse,
 )
 def read_xhs_admin_status(request: Request) -> XhsReadonlyAdminStatusResponse:
@@ -1147,7 +1150,7 @@ def read_xhs_admin_status(request: Request) -> XhsReadonlyAdminStatusResponse:
 
 
 @router.post(
-    "/admin/mcp/xhs-readonly/check-login",
+    "/admin/external-platforms/xhs/check-login",
     response_model=XhsReadonlyAdminStatusResponse,
 )
 def check_xhs_admin_login(request: Request) -> XhsReadonlyAdminStatusResponse:
@@ -1163,7 +1166,7 @@ def check_xhs_admin_login(request: Request) -> XhsReadonlyAdminStatusResponse:
     _audit_xhs_admin_action(
         request,
         actor,
-        action="mcp.xhs.login_checked",
+        action="external_platform.xhs.login_checked",
         decision="allow" if state == "authenticated" else "error",
         code=code,
     )
@@ -1176,7 +1179,7 @@ def check_xhs_admin_login(request: Request) -> XhsReadonlyAdminStatusResponse:
 
 
 @router.post(
-    "/admin/mcp/xhs-readonly/login",
+    "/admin/external-platforms/xhs/login",
     response_model=XhsReadonlyAdminStatusResponse,
 )
 def start_xhs_admin_login(request: Request) -> XhsReadonlyAdminStatusResponse:
@@ -1189,7 +1192,7 @@ def start_xhs_admin_login(request: Request) -> XhsReadonlyAdminStatusResponse:
     _audit_xhs_admin_action(
         request,
         actor,
-        action="mcp.xhs.login_started",
+        action="external_platform.xhs.login_started",
         decision="allow" if successful else "error",
         code=code,
     )
@@ -1237,6 +1240,97 @@ def restart_xhs_admin_sidecar(request: Request) -> XhsReadonlyAdminStatusRespons
         code=code,
         message=messages.get(code, "The Xiaohongshu restart action failed."),
     )
+
+
+@router.get(
+    "/admin/external-platforms/ctrip/status",
+    response_model=HotelBrowserAdminStatusResponse,
+)
+def read_hotel_browser_admin_status(request: Request) -> HotelBrowserAdminStatusResponse:
+    """Return the safe Ctrip credential and login capability projection."""
+
+    _owner_platform_actor(request)
+    return _hotel_admin_response(_hotel_account_supervisor(request).admin_snapshot())
+
+
+@router.put(
+    "/admin/external-platforms/ctrip/credentials",
+    response_model=HotelBrowserAdminStatusResponse,
+)
+def save_hotel_browser_credentials(
+    request_body: HotelBrowserCredentialRequest,
+    request: Request,
+) -> HotelBrowserAdminStatusResponse:
+    """Persist one Ctrip password in runtime .env, then start the login helper."""
+
+    actor = _owner_platform_actor(request)
+    supervisor = _hotel_account_supervisor(request)
+    try:
+        supervisor.save_credentials(request_body.username, request_body.password)
+    except CredentialStoreError as exc:
+        _audit_hotel_admin_action(
+            request,
+            actor,
+            action="external_platform.ctrip.credentials_saved",
+            decision="error",
+            code="HOTEL_CREDENTIAL_STORE_UNAVAILABLE",
+        )
+        raise ApiError(
+            "HOTEL_CREDENTIAL_STORE_UNAVAILABLE",
+            "Runtime environment credential storage is unavailable",
+            status_code=503,
+        ) from exc
+    code = supervisor.start_login()
+    successful = code in {"HOTEL_LOGIN_STARTED", "HOTEL_LOGIN_ALREADY_RUNNING"}
+    _audit_hotel_admin_action(
+        request,
+        actor,
+        action="external_platform.ctrip.credentials_saved",
+        decision="allow" if successful else "error",
+        code=code,
+    )
+    return _hotel_admin_response(supervisor.admin_snapshot())
+
+
+@router.delete(
+    "/admin/external-platforms/ctrip/credentials",
+    response_model=HotelBrowserAdminStatusResponse,
+)
+def delete_hotel_browser_credentials(request: Request) -> HotelBrowserAdminStatusResponse:
+    """Delete stored Ctrip credentials without exposing or returning them."""
+
+    actor = _owner_platform_actor(request)
+    supervisor = _hotel_account_supervisor(request)
+    code = supervisor.delete_credentials()
+    _audit_hotel_admin_action(
+        request,
+        actor,
+        action="external_platform.ctrip.credentials_deleted",
+        decision="allow",
+        code=code,
+    )
+    return _hotel_admin_response(supervisor.admin_snapshot())
+
+
+@router.post(
+    "/admin/external-platforms/ctrip/login",
+    response_model=HotelBrowserAdminStatusResponse,
+)
+def start_hotel_browser_login(request: Request) -> HotelBrowserAdminStatusResponse:
+    """Start automatic Ctrip password login with visible verification fallback."""
+
+    actor = _owner_platform_actor(request)
+    supervisor = _hotel_account_supervisor(request)
+    code = supervisor.start_login()
+    successful = code in {"HOTEL_LOGIN_STARTED", "HOTEL_LOGIN_ALREADY_RUNNING"}
+    _audit_hotel_admin_action(
+        request,
+        actor,
+        action="external_platform.ctrip.login_started",
+        decision="allow" if successful else "error",
+        code=code,
+    )
+    return _hotel_admin_response(supervisor.admin_snapshot())
 
 
 @router.post(
@@ -1942,6 +2036,74 @@ def _owner_xhs_actor(request: Request):
     return actor
 
 
+def _owner_platform_actor(request: Request):
+    actor = _actor(request, "skill.sources.read", channel="rest")
+    if "owner" not in actor.role_keys:
+        raise ApiError(
+            ErrorCode.AUTH_PERMISSION_DENIED,
+            "Only Owner can manage platform account credentials",
+            status_code=403,
+            details={"required_role": "owner"},
+        )
+    return actor
+
+
+def _hotel_account_supervisor(request: Request):
+    supervisor = getattr(_runtime(request), "hotel_accounts", None)
+    if supervisor is None:
+        raise ApiError(
+            "HOTEL_ACCOUNT_MANAGER_UNAVAILABLE",
+            "The local hotel account manager is unavailable",
+            status_code=503,
+        )
+    return supervisor
+
+
+def _hotel_admin_response(snapshot: dict[str, object]) -> HotelBrowserAdminStatusResponse:
+    return HotelBrowserAdminStatusResponse(
+        state=str(snapshot.get("state") or "unknown"),
+        code=str(snapshot.get("code") or "HOTEL_AUTH_NOT_CHECKED"),
+        message=str(snapshot.get("message") or "Hotel login has not been checked."),
+        credential_store_supported=bool(snapshot.get("credential_store_supported")),
+        credential_configured=bool(snapshot.get("credential_configured")),
+        account_hint=str(snapshot.get("account_hint") or ""),
+        credential_source=str(snapshot.get("credential_source") or ""),
+        credentials_updated_at=str(snapshot.get("credentials_updated_at") or ""),
+        browser_supported=bool(snapshot.get("browser_supported")),
+        login_supported=bool(snapshot.get("login_supported")),
+        login_in_progress=bool(snapshot.get("login_in_progress")),
+        login_mode=str(
+            snapshot.get("login_mode") or "password_with_manual_verification_fallback"
+        ),
+        last_checked_at=str(snapshot.get("last_checked_at") or ""),
+    )
+
+
+def _audit_hotel_admin_action(
+    request: Request,
+    actor,
+    *,
+    action: str,
+    decision: str,
+    code: str,
+) -> None:
+    auth = _auth_service(request)
+    if auth is None or auth.audit_sink is None:
+        return
+    auth.audit_sink.record(
+        AuditEvent(
+            action=action,
+            resource_type="external_platform_account",
+            actor=actor,
+            resource_id="ctrip",
+            channel="rest",
+            decision=decision,
+            reason_code=code,
+            metadata={},
+        )
+    )
+
+
 def _xhs_supervisor(request: Request):
     supervisor = getattr(_runtime(request), "xhs_sidecar", None)
     if supervisor is None:
@@ -2089,9 +2251,13 @@ def _audit_xhs_admin_action(
     auth.audit_sink.record(
         AuditEvent(
             action=action,
-            resource_type="mcp_server",
+            resource_type=(
+                "external_platform_account"
+                if action.startswith("external_platform.")
+                else "mcp_server"
+            ),
             actor=actor,
-            resource_id="xhs-readonly",
+            resource_id=("xhs" if action.startswith("external_platform.") else "xhs-readonly"),
             channel="rest",
             decision=decision,
             reason_code=code,

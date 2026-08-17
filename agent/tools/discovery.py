@@ -57,7 +57,8 @@ class DiscoverableToolProvider:
 
         with self._lock:
             active = set(self._activated)
-        definitions = [_discovery_definition()]
+        all_activated = bool(self._by_name) and active.issuperset(self._by_name)
+        definitions = [] if all_activated else [_discovery_definition()]
         definitions.extend(
             copy.deepcopy(definition)
             for name, definition in self._by_name.items()

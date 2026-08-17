@@ -11,9 +11,11 @@ from agent.config import (
     bootstrap_dotenv,
     init_runtime_files,
     load_config,
+    load_dotenv_file,
     load_llm_endpoint,
     load_llm_endpoints,
     resolve_model_route,
+    sync_managed_application_prompts,
 )
 from agent.llm.runtime import (
     create_configured_llm_provider,
@@ -79,6 +81,29 @@ def test_load_config_uses_explicit_workspace(tmp_path, monkeypatch):
     assert config.sessions_dir == tmp_path / "contexts" / "sessions"
     assert config.auth_db_path == tmp_path / "state" / "auth.sqlite3"
     assert config.channels_config_path == tmp_path / "config" / "config.yml"
+
+
+def test_managed_code_prompts_refresh_without_overwriting_user_prompts(tmp_path, monkeypatch):
+    _clear_zhice_env(monkeypatch)
+    config = load_config(tmp_path)
+    config.ensure_dirs()
+    (config.prompts_dir / "travel_intake.md").write_text("stale", encoding="utf-8")
+    (config.prompts_dir / "identity.md").write_text("custom identity", encoding="utf-8")
+
+    updated = sync_managed_application_prompts(config)
+
+    repository_prompts = Path(__file__).resolve().parents[3] / "prompts"
+    assert config.prompts_dir / "travel_intake.md" in updated
+    assert (config.prompts_dir / "travel_intake.md").read_text(encoding="utf-8") == (
+        repository_prompts / "travel_intake.md"
+    ).read_text(encoding="utf-8")
+    assert (config.prompts_dir / "travel_planning.md").is_file()
+    assert (config.prompts_dir / "travel_planning_continuation.md").is_file()
+    assert (config.prompts_dir / "travel_requirement_extraction.md").is_file()
+    assert (config.prompts_dir / "tool_use_policy.md").is_file()
+    assert (config.prompts_dir / "skills_intro.md").is_file()
+    assert (config.prompts_dir / "memory_policy.md").is_file()
+    assert (config.prompts_dir / "identity.md").read_text(encoding="utf-8") == "custom identity"
 
 
 def test_load_config_allows_environment_overrides(tmp_path, monkeypatch):
@@ -226,6 +251,19 @@ def test_bootstrap_dotenv_supports_utf16_and_preserves_shell_value(tmp_path, mon
     assert os.environ["LOCAL_ONLY"] == "value"
 
 
+def test_load_dotenv_decodes_json_escaped_double_quoted_values(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text(
+        'QUOTED_SECRET="pa\\\\ss\\\"word"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("QUOTED_SECRET", raising=False)
+
+    load_dotenv_file(path)
+
+    assert os.environ["QUOTED_SECRET"] == 'pa\\ss"word'
+
+
 def test_ensure_dirs_creates_runtime_directories(tmp_path, monkeypatch):
     _clear_zhice_env(monkeypatch)
     config = load_config(tmp_path)
@@ -236,6 +274,11 @@ def test_ensure_dirs_creates_runtime_directories(tmp_path, monkeypatch):
             config.config_dir,
             config.prompts_dir,
             config.sessions_dir,
+            config.local_memory_dir,
+            config.users_contexts_dir,
+            config.shared_readonly_dir,
+            config.state_dir,
+            config.mcp_runtime_dir,
             config.extends_dir,
             config.logs_dir,
         )
@@ -278,6 +321,22 @@ def test_route_supports_endpoint_and_endpoint_model_forms(tmp_path):
     assert provider.current_endpoint().model == "gpt-alt"
 
 
+def test_route_alias_does_not_overwrite_legacy_default_named_endpoint(tmp_path):
+    config_dir = tmp_path / "config"
+    _write_models(
+        config_dir,
+        _models(
+            {"default": _endpoint()},
+            routing={"chat": "default/gpt-test"},
+        ),
+    )
+
+    endpoints = load_llm_endpoints(config_dir)
+
+    assert [endpoint.name for endpoint in endpoints] == ["default"]
+    assert load_llm_endpoint(config_dir).model == "gpt-test"
+
+
 def test_route_rejects_model_outside_endpoint_allowlist(tmp_path):
     config_dir = tmp_path / "config"
     _write_models(
@@ -286,6 +345,24 @@ def test_route_rejects_model_outside_endpoint_allowlist(tmp_path):
     )
     with pytest.raises(LLMConfigurationError, match="does not support"):
         create_configured_llm_provider(config_dir)
+
+
+def test_models_json_requires_default_model_in_supported_models(tmp_path):
+    config_dir = tmp_path / "config"
+    _write_models(
+        config_dir,
+        _models(
+            {
+                "primary": _endpoint(
+                    model="gpt-default",
+                    supported_models=["gpt-alternate"],
+                )
+            }
+        ),
+    )
+
+    with pytest.raises(LLMConfigurationError, match="default model must be listed"):
+        load_llm_endpoint(config_dir)
 
 
 def test_optional_compaction_route_can_be_absent_or_present(tmp_path):
@@ -386,28 +463,45 @@ def test_runtime_requires_models_json_and_ignores_old_filename(tmp_path):
 def test_init_generates_standard_config_files_and_prompts(tmp_path, monkeypatch):
     _clear_zhice_env(monkeypatch)
     config = load_config(tmp_path)
-    written = init_runtime_files(
-        config,
-        endpoint_name="primary",
-        model="gpt-test",
-        context_window=8192,
-        max_tokens=128,
-    )
+    written = init_runtime_files(config)
     assert config.config_dir / "models.json" in written
     assert config.config_dir / "config.yml" in written
     env_path = config.config_dir / ".env"
     assert env_path in written
-    assert env_path.read_text(encoding="utf-8") == (
+    assert env_path.read_bytes() == (
         Path(__file__).resolve().parents[3] / "config" / ".env.example"
-    ).read_text(encoding="utf-8")
+    ).read_bytes()
+    assert "# 请填写：聊天模型与向量模型凭据" in env_path.read_text(encoding="utf-8")
     assert "ZHICE_AGENT_WORKSPACE=" not in env_path.read_text(encoding="utf-8")
     assert not (config.config_dir / "llm_endpoints.json").exists()
     assert not (config.config_dir / "context.yml").exists()
-    payload = json.loads((config.config_dir / "models.json").read_text(encoding="utf-8"))
-    assert payload["routing"]["chat"] == "primary/gpt-test"
-    assert payload["routing"]["compaction"] == "primary/gpt-test"
-    assert payload["chat"]["primary"]["supported_models"] == ["gpt-test"]
-    assert (config.prompts_dir / "context_compaction.md").is_file()
+    assert (config.config_dir / "config.yml").read_bytes() == (
+        Path(__file__).resolve().parents[3] / "config" / "config.example.yml"
+    ).read_bytes()
+    models_path = config.config_dir / "models.json"
+    models_example = Path(__file__).resolve().parents[3] / "config" / "models.example.json"
+    assert models_path.read_bytes() == models_example.read_bytes()
+    payload = json.loads(models_path.read_text(encoding="utf-8"))
+    assert payload["routing"]["chat"] == "请填写端点名称/请填写模型名称"
+    assert list(payload["chat"]) == ["请填写端点名称"]
+    assert payload["chat"]["请填写端点名称"]["provider"] == ""
+    source_prompts = Path(__file__).resolve().parents[3] / "prompts"
+    assert {
+        path.name: path.read_bytes() for path in config.prompts_dir.glob("*.md")
+    } == {path.name: path.read_bytes() for path in source_prompts.glob("*.md")}
+    assert all(
+        path.is_dir()
+        for path in (
+            config.sessions_dir,
+            config.local_memory_dir,
+            config.users_contexts_dir,
+            config.shared_readonly_dir,
+            config.state_dir,
+            config.mcp_runtime_dir,
+            config.extends_dir,
+            config.logs_dir,
+        )
+    )
 
 
 def test_init_preserves_existing_two_main_files_without_force(tmp_path, monkeypatch):
@@ -431,7 +525,9 @@ def test_init_force_replaces_two_main_files(tmp_path, monkeypatch):
     (config.config_dir / "config.yml").write_text("bad", encoding="utf-8")
     (config.config_dir / ".env").write_text("EXISTING=1\n", encoding="utf-8")
     init_runtime_files(config, force=True)
-    assert json.loads((config.config_dir / "models.json").read_text(encoding="utf-8"))["schema_version"] == 1
+    assert (config.config_dir / "models.json").read_bytes() == (
+        Path(__file__).resolve().parents[3] / "config" / "models.example.json"
+    ).read_bytes()
     assert (config.config_dir / "config.yml").read_text(encoding="utf-8").startswith("schema_version: 1")
     assert "EXISTING=1" not in (config.config_dir / ".env").read_text(encoding="utf-8")
 
@@ -470,15 +566,18 @@ def test_init_reports_missing_public_env_template(tmp_path, monkeypatch):
         )
 
 
-@pytest.mark.parametrize(
-    "context_window,max_tokens",
-    [(0, 1), (100, 0), (100, 100)],
-)
-def test_init_rejects_invalid_token_budgets(tmp_path, context_window, max_tokens):
-    config = load_config(tmp_path)
-    with pytest.raises(InitConfigurationError):
+def test_init_reports_missing_public_models_template(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.joinpath("config").mkdir(parents=True)
+    project.joinpath("config", ".env.example").write_text("KEY=\n", encoding="utf-8")
+    monkeypatch.setattr("agent.config._project_root", lambda: project)
+    config = load_config(tmp_path / "workspace")
+
+    with pytest.raises(InitConfigurationError, match="Model config template is missing"):
         init_runtime_files(
             config,
-            context_window=context_window,
-            max_tokens=max_tokens,
+            create_skill_sources_config=False,
+            create_channels_config=False,
+            create_context_config=False,
+            create_prompts=False,
         )

@@ -145,7 +145,7 @@ def test_dockerfile_builds_repository_assets_and_only_private_config() -> None:
     assert 'CMD ["gateway", "--host", "0.0.0.0", "--port", "10086"]' in dockerfile
 
 
-def test_docker_installs_explicit_gateway_websocket_runtime() -> None:
+def test_docker_installs_gateway_channel_and_hotel_browser_runtime() -> None:
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     gateway = metadata["project"]["optional-dependencies"]["gateway"]
     deploy_extra = metadata["project"]["optional-dependencies"]["deploy"]
@@ -156,7 +156,10 @@ def test_docker_installs_explicit_gateway_websocket_runtime() -> None:
 
     assert any(requirement.startswith("websockets") for requirement in gateway)
     assert any(requirement.startswith("paramiko") for requirement in deploy_extra)
-    assert 'pip install --no-cache-dir ".[gateway,qq]"' in dockerfile
+    assert 'pip install --no-cache-dir ".[gateway,qq,hotel-browser]"' in dockerfile
+    assert "python -m playwright install chromium" in dockerfile
+    assert "PLAYWRIGHT_BROWSERS_PATH=/opt/zhice/playwright" in dockerfile
+    assert 'HOTEL_BROWSER_CHANNEL=""' in dockerfile
     assert ".[deploy]" not in dockerfile
     assert 'from "node:url"' in sidecar_main
     assert "pathToFileURL(process.argv[1]).href" in sidecar_main
@@ -221,6 +224,14 @@ def test_compose_persists_runtime_channel_and_xhs_state_only() -> None:
     assert "zhice-xhs-data:/home/zhice/.zhice/integrations/xhs/data:ro" in compose
     assert "zhice-config:/home/zhice/.zhice/config" not in compose
     assert "/home/zhice/.zhice/prompts" not in compose
+    assert 'HOTEL_BROWSER_CHANNEL: ""' in compose
+
+
+def test_cloud_deploy_uses_bundled_chromium_and_persistent_hotel_profile() -> None:
+    script = (DEPLOY / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    assert "-e HOTEL_BROWSER_CHANNEL=" in script
+    assert "-v zhice-state:/home/zhice/.zhice/state" in script
 
 
 def test_private_image_state_scan_allows_travel_store_directory() -> None:

@@ -13,7 +13,7 @@ from agent.config import AppConfig
 from tests.unit_test.travel.fixtures import plan_payload
 
 
-def test_travel_config_missing_disables_and_explicit_values_are_bounded(tmp_path):
+def test_travel_config_accepts_legacy_fields_without_exposing_fake_controls(tmp_path, caplog):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     assert load_travel_config(config_dir).enabled is False
@@ -35,11 +35,13 @@ travel:
     config = load_travel_config(config_dir)
 
     assert config.enabled is True
-    assert config.default_mode == "deep"
-    assert config.deep_subagent_count == 3
+    assert config.max_evidence_items == 35
+    assert config.max_plan_bytes == 524288
+    assert not hasattr(config, "default_mode")
+    assert "Ignoring deprecated travel configuration fields" in caplog.text
 
 
-def test_travel_config_rejects_unknown_and_more_than_three_children(tmp_path):
+def test_travel_config_rejects_invalid_legacy_and_unknown_fields(tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     config_dir.joinpath("config.yml").write_text(
@@ -47,6 +49,13 @@ def test_travel_config_rejects_unknown_and_more_than_three_children(tmp_path):
         encoding="utf-8",
     )
     with pytest.raises(TravelConfigurationError):
+        load_travel_config(config_dir)
+
+    config_dir.joinpath("config.yml").write_text(
+        "schema_version: 1\ntravel:\n  enabled: true\n  imaginary_switch: true\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(TravelConfigurationError, match="unknown fields"):
         load_travel_config(config_dir)
 
 
@@ -83,7 +92,7 @@ def test_travel_requirement_extraction_api_returns_review_draft_without_starting
     assert response.status_code == 200
     assert response.json()["draft"]["origin"] == "重庆"
     assert response.json()["draft"]["intent"] == "travel_requirement"
-    assert response.json()["missing_fields"] == ["开始日期", "结束日期"]
+    assert response.json()["missing_fields"] == ["开始日期", "结束日期", "旅行基调"]
     assert extractor.calls == ["两个大学生从重庆去大理"]
 
 
@@ -107,6 +116,29 @@ def test_travel_generation_api_returns_actor_scoped_recovery_projection(tmp_path
         "plan_id": "",
         "error_code": "",
     }
+
+
+def test_travel_progress_api_returns_bounded_safe_history(tmp_path):
+    client = _client(
+        tmp_path,
+        FakeTravelService(),
+        progress_reader=lambda actor, session_id: {
+            "session_id": session_id,
+            "items": [{
+                "id": "history-complete",
+                "stage": "complete",
+                "title": "旅行计划已完成",
+                "detail": "完整行程已保存",
+                "status": "done",
+            }],
+        },
+    )
+
+    response = client.get("/api/travel/sessions/session-travel/progress")
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == "session-travel"
+    assert response.json()["items"][0]["id"] == "history-complete"
 
 
 def test_travel_conversation_api_persists_bounded_messages_in_the_travel_session(tmp_path):
@@ -257,6 +289,7 @@ def _client(
     generation=None,
     conversation_writer=None,
     planning_confirmer=None,
+    progress_reader=None,
 ):
     static = tmp_path / "static"
     static.mkdir()
@@ -269,6 +302,7 @@ def _client(
         or {"status": "idle", "session_id": "", "turn_id": "", "plan_id": "", "error_code": ""},
         persist_travel_conversation=conversation_writer,
         confirm_travel_planning=planning_confirmer,
+        travel_progress_history=progress_reader,
         startup=lambda: None,
         shutdown=lambda: None,
         capability_statuses=lambda: {},

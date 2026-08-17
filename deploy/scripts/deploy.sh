@@ -252,6 +252,7 @@ if ! /usr/bin/docker run -d --name "$CONTAINER_NAME" --init --restart unless-sto
   -e XHS_READONLY_HTTP_HOST_ALLOWLIST=zhice-xhs-readonly \
   -e XHS_READONLY_COOKIE_DIR=/home/zhice/.zhice/integrations/xhs/data \
   -e XHS_READONLY_COOKIE_FILE=/home/zhice/.zhice/integrations/xhs/data/cookies.json \
+  -e HOTEL_BROWSER_CHANNEL= \
   -p "127.0.0.1:${HOST_PORT}:10086" \
   -v zhice-contexts:/home/zhice/.zhice/contexts \
   -v zhice-state:/home/zhice/.zhice/state \

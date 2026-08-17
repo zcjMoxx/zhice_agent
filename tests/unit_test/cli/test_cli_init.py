@@ -40,29 +40,14 @@ def test_cli_init_generates_runtime_files(tmp_path, capsys, monkeypatch):
     _clear_zhice_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
 
-    result = main(
-        [
-            "init",
-            "--workspace",
-            str(tmp_path),
-            "--endpoint",
-            "local",
-            "--base-url",
-            "https://gateway.test/v1",
-            "--api-key",
-            "local-json-secret",
-            "--model",
-            "test-model",
-            "--max-tokens",
-            "8192",
-        ]
-    )
+    result = main(["init", "--workspace", str(tmp_path)])
 
     output = capsys.readouterr().out
     assert result == 0
     assert "created:" in output
     assert "Runtime files created" in output
-    assert "Configure an enabled LLM endpoint before chatting" in output
+    assert "Runtime files created from repository examples" in output
+    assert "Edit config/models.json and config/.env before chatting" in output
     assert "Extension capabilities are optional" in output
     assert "context_window" not in output
     assert "api_key" not in output
@@ -70,12 +55,12 @@ def test_cli_init_generates_runtime_files(tmp_path, capsys, monkeypatch):
     assert (tmp_path / "config" / ".env").read_text(encoding="utf-8") == (
         Path(__file__).resolve().parents[3] / "config" / ".env.example"
     ).read_text(encoding="utf-8")
-    assert (tmp_path / "config" / "models.json").is_file()
-    endpoint = json.loads(
-        (tmp_path / "config" / "models.json").read_text(encoding="utf-8")
-    )["chat"]["local"]
-    assert endpoint["max_tokens"] == 8192
-    assert "max_input_tokens" not in endpoint
+    models_path = tmp_path / "config" / "models.json"
+    models_example = Path(__file__).resolve().parents[3] / "config" / "models.example.json"
+    assert models_path.read_bytes() == models_example.read_bytes()
+    payload = json.loads(models_path.read_text(encoding="utf-8"))
+    assert "请填写端点名称" in payload["chat"]
+    assert payload["chat"]["请填写端点名称"]["provider"] == ""
     assert (tmp_path / "config" / "config.yml").is_file()
     assert (tmp_path / "prompts" / "identity.md").is_file()
     assert (tmp_path / "prompts" / "diagnostics.md").is_file()

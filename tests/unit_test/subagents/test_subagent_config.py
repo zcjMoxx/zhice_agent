@@ -47,6 +47,7 @@ profiles:
   explorer:
     description: Read the repository.
     tools: [list_dir, read_file, "mcp__github__*"]
+    initial_tools: [read_file]
     allowed_skills: [official/review]
     preload_skills: [official/review]
     workspace_mode: shared_readonly
@@ -68,6 +69,7 @@ profiles:
     explorer = config.get_profile("explorer")
     assert explorer is not None
     assert explorer.tools == ("list_dir", "read_file", "mcp__github__*")
+    assert explorer.initial_tools == ("read_file",)
     assert explorer.denied_tools == ("delegate_tasks",)
     assert explorer.preload_skills == ("official/review",)
     assert explorer.model_role == "fast"
@@ -105,6 +107,11 @@ profiles:
             "    tools: [read_file]\n    allowed_skills: [official/review]\n"
             "    preload_skills: [team/review]\n",
             "preload_skills",
+        ),
+        (
+            "enabled: true\nprofiles:\n  explorer:\n    description: x\n"
+            "    tools: [read_file]\n    initial_tools: [exec]\n",
+            "initial_tools",
         ),
         (
             "enabled: true\nprofiles: {}\n",

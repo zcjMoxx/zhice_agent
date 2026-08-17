@@ -12,6 +12,7 @@
 - `discover_tools` 只从已做 actor/Profile 过滤的 Provider catalog 中匹配并激活有界候选。
 - 下一次 definitions 只增加已激活 schema；未激活 Tool dispatch 返回 `TOOL_NOT_ACTIVATED`。
 - 多次发现可累积激活，contextual dispatch 仍保留可信 actor/session/turn 上下文。
+- 初始化或动态发现后若已激活当前全部有效 Tool，则隐藏无意义的 `discover_tools`，只保留可直接调用的业务或错误 facade。
 
 ### Case 1: ToolRegistry 定义生成
 
@@ -78,3 +79,9 @@
 - 输入：无上下文直接调用、可信 actor/turn 上下文调用、额外参数、指令型/不可执行 Skill、未授权 source、Subagent Profile 禁止、取消、timeout 和 Executor 异常。
 - 预期：只有 contextual dispatch 可执行；通过 `SkillExecutor` 返回结构化结果，并产生关联外层 Tool Event 的 `skill.*`；所有已开始的异常路径都以 `skill.failed` 收敛。
 - 检查点：参数只含 `skill` 与 `params`，上下文、取消令牌和 RuntimeEvent publisher 经 Registry/Scoped/Discovery/Filtered/Augmented 链保持；运行活动的参数与结果预览不记录 `params` 值或 Skill `data`。
+
+### Case 12: `load_skills` 冗余来源归一化
+
+- 输入：同时传 `name=official/review` 与相同 `source=official`，以及正常的完整名称、单独 source 和歧义别名。
+- 预期：相同来源是等价冗余并正常加载；冲突来源仍返回结构化名称错误，歧义别名继续返回候选列表。
+- 检查点：只兼容完全相同的 qualifier，不放宽 Skill 名称或 source 权限校验。

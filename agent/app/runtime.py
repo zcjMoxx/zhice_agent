@@ -7,7 +7,8 @@ import json
 import logging
 import os
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from threading import Event, Lock
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -19,10 +20,30 @@ from agent.applications.travel import (
     load_travel_config,
 )
 from agent.applications.travel.config import TravelConfig, TravelConfigurationError
+from agent.applications.travel.history import project_travel_progress
+from agent.applications.travel.hotel_accounts import HotelAccountSupervisor
 from agent.applications.travel.progress import TravelProgressHookRuntime
 from agent.applications.travel.requirements import TravelRequirementDraft
 from agent.applications.travel.service import TravelApplicationError
-from agent.applications.travel.source_ledger import preferred_travel_tool_names
+from agent.applications.travel.source_ledger import (
+    guard_travel_tools,
+    preferred_travel_tool_names,
+    require_travel_finalization_before_saving,
+    require_travel_research_before_solving,
+    source_category,
+)
+from agent.applications.travel.subagents import (
+    TRAVEL_FINAL_ROUTE_PROFILE,
+    TRAVEL_FINAL_STAY_PROFILE,
+    TRAVEL_FINAL_WEATHER_PROFILE,
+    compact_travel_final_route_results,
+    require_exact_travel_delegation,
+    travel_subagent_config_for_stage,
+)
+from agent.applications.travel.tools import (
+    TRAVEL_INTAKE_DRAFT_VERSION,
+    recover_intake_draft,
+)
 from agent.applications.travel.xhs_sidecar import LocalXhsSidecarSupervisor
 from agent.auth.activity import SqliteRuntimeActivitySink
 from agent.auth.audit import SqliteAuditSink
@@ -32,7 +53,7 @@ from agent.auth.session_access import SessionAccessError, SessionAccessService
 from agent.auth.store import SQLiteAuthStore
 from agent.auth.tool_policy import RbacToolExecutionPolicy
 from agent.auth.user_context import FilesystemUserContextResolver
-from agent.config import AppConfig
+from agent.config import AppConfig, sync_managed_application_prompts
 from agent.context.config import load_context_config
 from agent.context.startup import check_context_engineering_startup
 from agent.core.context import DEFAULT_CONTEXT_PROMPTS, ContextBuilder
@@ -61,7 +82,12 @@ from agent.protocols.capability import CapabilityStatus
 from agent.protocols.channel import ChannelExecutionContext
 from agent.protocols.diagnostics import DiagnosticContext
 from agent.protocols.errors import ErrorCode
-from agent.protocols.llm import LLMConfigurationError, LLMEndpoint, LLMProvider
+from agent.protocols.llm import (
+    LLMConfigurationError,
+    LLMEndpoint,
+    LLMProvider,
+    ModelSelection,
+)
 from agent.protocols.mcp import McpInteractionResponse
 from agent.protocols.session import (
     SessionContext,
@@ -71,6 +97,7 @@ from agent.protocols.session import (
     SessionSummary,
 )
 from agent.protocols.subagent import SubagentProfile
+from agent.protocols.tool import ToolProvider, ToolResult
 from agent.session import (
     JsonlSessionStore,
     JsonSessionModelPreferenceStore,
@@ -87,13 +114,368 @@ from agent.subagents.runtime import (
     build_unavailable_subagent_provider,
 )
 from agent.subagents.startup import check_subagent_startup
-from agent.tools import UserScopedToolProvider, create_default_tool_registry, with_tool_discovery
+from agent.tools import (
+    FilteredToolProvider,
+    UserScopedToolProvider,
+    create_default_tool_registry,
+    with_tool_discovery,
+)
 from agent.tools.registry import ToolRegistry
 
 DEFAULT_WEB_HISTORY_MESSAGES = 60
 TRAVEL_INTAKE_PHASE = "intake"
 TRAVEL_PLANNING_PHASE = "planning"
 RuntimeEventCallback = Callable[[dict[str, Any]], None]
+_TRAVEL_CANDIDATE_RESEARCH_PROFILES = frozenset(
+    {"travel-transport-weather", "travel-stay-poi", "travel-guides"}
+)
+_TRAVEL_FINAL_PROFILE_CATEGORIES = {
+    TRAVEL_FINAL_STAY_PROFILE: "lodging",
+    TRAVEL_FINAL_ROUTE_PROFILE: "maps",
+    TRAVEL_FINAL_WEATHER_PROFILE: "weather",
+}
+
+
+def _travel_message_timestamp(message: Message) -> float:
+    try:
+        return float(message.metadata.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _persisted_travel_child_messages(
+    sessions_dir: object,
+    session_id: str,
+    parent_messages: list[Message] | None = None,
+) -> tuple[list[Message], list[Message]]:
+    """Return persisted candidate and finalization Child messages separately.
+
+    A selected Session may be resumed after process restart.  The source ledger must
+    replay candidate research before opening the finalization budget, and replay only
+    ``travel-final-*`` children afterwards.  Mixing both phases makes old candidate
+    hotel/POI calls look like the required selected-itinerary detail batch.
+    """
+
+    if sessions_dir is None:
+        return [], []
+    child_dir = Path(str(sessions_dir)) / "_subagents" / session_id
+    if not child_dir.is_dir():
+        return [], []
+    final_child_ids = _persisted_finalization_child_ids(parent_messages or [])
+    child_store = JsonlSessionStore(child_dir)
+    candidate_messages: list[Message] = []
+    finalization_messages: list[Message] = []
+    for path in sorted(child_dir.glob("*.jsonl"))[:24]:
+        target = (
+            finalization_messages
+            if path.stem in final_child_ids
+            else candidate_messages
+        )
+        target.extend(child_store.load(path.stem).messages)
+    return candidate_messages, finalization_messages
+
+
+def _persisted_finalization_child_ids(messages: list[Message]) -> set[str]:
+    calls: dict[str, set[str]] = {}
+    for message in messages:
+        if message.role != "assistant":
+            continue
+        for raw in message.tool_calls:
+            if not isinstance(raw, dict):
+                continue
+            call_id = str(raw.get("id") or "").strip()
+            function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+            if str(function.get("name") or "").casefold() != "delegate_tasks":
+                continue
+            try:
+                arguments = function.get("arguments")
+                parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            tasks = parsed.get("tasks") if isinstance(parsed, dict) else None
+            if not isinstance(tasks, list):
+                continue
+            final_task_ids = {
+                str(task.get("id") or "").strip()
+                for task in tasks
+                if isinstance(task, dict)
+                and str(task.get("profile") or "").strip()
+                in {"travel-final-stay", "travel-final-route", "travel-final-weather"}
+                and str(task.get("id") or "").strip()
+            }
+            if final_task_ids:
+                calls[call_id] = final_task_ids
+
+    child_ids: set[str] = set()
+    for message in messages:
+        if message.role != "tool" or str(message.tool_call_id or "") not in calls:
+            continue
+        payload = _stored_tool_payload(message.content)
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            continue
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            if str(result.get("id") or "").strip() not in calls[str(message.tool_call_id)]:
+                continue
+            child_id = str(result.get("child_session_id") or "").strip()
+            if child_id:
+                child_ids.add(child_id)
+    return child_ids
+
+
+def _persisted_finalization_completed_categories(
+    messages: list[Message],
+) -> frozenset[str]:
+    """Recover successful finalization lanes from the durable parent fan-in."""
+
+    calls: dict[str, dict[str, str]] = {}
+    for message in messages:
+        if message.role != "assistant":
+            continue
+        for raw in message.tool_calls:
+            if not isinstance(raw, dict):
+                continue
+            call_id = str(raw.get("id") or "").strip()
+            function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+            if not call_id or str(function.get("name") or "").casefold() != "delegate_tasks":
+                continue
+            try:
+                raw_arguments = function.get("arguments")
+                arguments = (
+                    json.loads(raw_arguments)
+                    if isinstance(raw_arguments, str)
+                    else raw_arguments
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            tasks = arguments.get("tasks") if isinstance(arguments, dict) else None
+            if not isinstance(tasks, list):
+                continue
+            task_profiles = {
+                str(task.get("id") or "").strip(): str(task.get("profile") or "").strip()
+                for task in tasks
+                if isinstance(task, dict)
+                and str(task.get("id") or "").strip()
+                and str(task.get("profile") or "").strip() in _TRAVEL_FINAL_PROFILE_CATEGORIES
+            }
+            if task_profiles:
+                calls[call_id] = task_profiles
+
+    completed: set[str] = set()
+    for message in messages:
+        call_id = str(message.tool_call_id or "").strip()
+        task_profiles = calls.get(call_id)
+        if message.role != "tool" or task_profiles is None:
+            continue
+        payload = _stored_tool_payload(message.content)
+        rows = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            task_id = str(row.get("id") or "").strip()
+            profile = task_profiles.get(task_id)
+            if (
+                profile
+                and str(row.get("status") or "").casefold() == "completed"
+                and str(row.get("code") or "").upper() == "OK"
+            ):
+                completed.add(_TRAVEL_FINAL_PROFILE_CATEGORIES[profile])
+    return frozenset(completed)
+
+
+def _travel_finalization_categories_for_profiles(
+    profiles: frozenset[str],
+) -> set[str]:
+    return {
+        category
+        for profile in profiles
+        if (category := _TRAVEL_FINAL_PROFILE_CATEGORIES.get(profile))
+    }
+
+
+def _persisted_candidate_research_complete(messages: list[Message]) -> bool:
+    """Recognize one fully successful candidate fan-in from parent Session history."""
+
+    candidate_calls: dict[str, dict[str, str]] = {}
+    for message in messages:
+        if message.role != "assistant":
+            continue
+        for raw in message.tool_calls:
+            if not isinstance(raw, dict):
+                continue
+            call_id = str(raw.get("id") or "").strip()
+            function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+            if not call_id or str(function.get("name") or "").casefold() != "delegate_tasks":
+                continue
+            try:
+                raw_arguments = function.get("arguments")
+                arguments = (
+                    json.loads(raw_arguments)
+                    if isinstance(raw_arguments, str)
+                    else raw_arguments
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            tasks = arguments.get("tasks") if isinstance(arguments, dict) else None
+            if not isinstance(tasks, list):
+                continue
+            task_profiles = {
+                str(task.get("id") or "").strip(): str(task.get("profile") or "").strip()
+                for task in tasks
+                if isinstance(task, dict)
+                and str(task.get("id") or "").strip()
+                and str(task.get("profile") or "").strip()
+            }
+            if (
+                len(task_profiles) == len(_TRAVEL_CANDIDATE_RESEARCH_PROFILES)
+                and frozenset(task_profiles.values()) == _TRAVEL_CANDIDATE_RESEARCH_PROFILES
+            ):
+                candidate_calls[call_id] = task_profiles
+
+    for message in messages:
+        call_id = str(message.tool_call_id or "").strip()
+        expected = candidate_calls.get(call_id)
+        if message.role != "tool" or expected is None:
+            continue
+        payload = _stored_tool_payload(message.content)
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if str(payload.get("status") or "").casefold() != "completed" or not isinstance(
+            results, list
+        ):
+            continue
+        completed = {
+            str(result.get("id") or "").strip()
+            for result in results
+            if isinstance(result, dict)
+            and str(result.get("id") or "").strip() in expected
+            and str(result.get("status") or "").casefold() == "completed"
+            and str(result.get("code") or "").upper() == "OK"
+        }
+        if completed == set(expected):
+            return True
+    return False
+
+
+def _latest_travel_finalizer_error_code(messages: list[Message]) -> str:
+    """Return only the newest persisted finalizer error code for recovery routing."""
+
+    for message in reversed(messages):
+        if message.role != "tool" or str(message.name or "").casefold() != "finalize_travel_plan":
+            continue
+        metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        code = str(metadata.get("code") or "").strip().upper()
+        return code if metadata.get("is_error") is True or code not in {"", "OK"} else ""
+    return ""
+
+
+def _travel_finalization_repair_profiles(
+    messages: list[Message],
+    snapshot: Any,
+) -> frozenset[str]:
+    """Map a persisted, source-repairable finalizer error to one bounded Profile."""
+
+    code = _latest_travel_finalizer_error_code(messages)
+    if code == "TRAVEL_WEATHER_FORECAST_REQUIRED" and not bool(
+        getattr(snapshot, "forecast_successful", False)
+    ):
+        return frozenset({TRAVEL_FINAL_WEATHER_PROFILE})
+    if code == "TRAVEL_ROUTE_EVIDENCE_MISSING" and not bool(
+        getattr(snapshot, "route_repair_attempted", False)
+    ):
+        return frozenset({TRAVEL_FINAL_ROUTE_PROFILE})
+    return frozenset()
+
+
+def _travel_forecast_window_context(draft: object) -> str:
+    """Build deterministic date-window facts so the model never estimates them itself."""
+
+    payload = draft if isinstance(draft, dict) else {}
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    window_end = today + timedelta(days=15)
+    start_text = str(payload.get("start_date") or "")
+    end_text = str(payload.get("end_date") or "")
+    within = False
+    try:
+        start = date.fromisoformat(start_text)
+        end = date.fromisoformat(end_text)
+        within = today <= start <= end <= window_end
+    except ValueError:
+        pass
+    return json.dumps(
+        {
+            "destination": next(iter(payload.get("destinations") or []), ""),
+            "start_date": start_text,
+            "end_date": end_text,
+            "beijing_today": today.isoformat(),
+            "forecast_window_end": window_end.isoformat(),
+            "inside_forecast_window": within,
+            "required_weather_tool": "get_forecast" if within else "get_historical_weather",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _stored_tool_payload(content: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if isinstance(payload, dict) and isinstance(payload.get("output"), str):
+        try:
+            nested = json.loads(payload["output"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return payload
+        return nested if isinstance(nested, dict) else payload
+    return payload if isinstance(payload, dict) else {}
+
+
+def _rehydrate_travel_search_evidence(
+    ledger: object,
+    session_id: str,
+    messages: list[Message],
+    *,
+    finalization: bool,
+    only_categories: frozenset[str] | None = None,
+) -> None:
+    observe = getattr(ledger, "observe", None)
+    if not callable(observe):
+        return
+    for message in messages:
+        category = source_category(str(message.name or ""))
+        if (
+            message.role != "tool"
+            or not category
+            or (only_categories is not None and category not in only_categories)
+        ):
+            continue
+        output = message.content
+        metadata = dict(message.metadata)
+        is_error = bool(metadata.get("is_error"))
+        try:
+            stored = json.loads(message.content)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            stored = None
+        if isinstance(stored, dict) and isinstance(stored.get("output"), str):
+            output = stored["output"]
+            stored_metadata = stored.get("metadata")
+            if isinstance(stored_metadata, dict):
+                metadata = {**stored_metadata, **metadata}
+            is_error = bool(stored.get("status") == "error" or metadata.get("is_error"))
+        observe(
+            session_id,
+            str(message.name or ""),
+            ToolResult(
+                output=output,
+                is_error=is_error,
+                metadata=metadata,
+            ),
+            record_finalization=finalization,
+        )
 web_logger = logging.getLogger("zcagent.agent.web")
 session_logger = logging.getLogger("zcagent.agent.session")
 memory_logger = logging.getLogger("zcagent.agent.memory")
@@ -180,6 +562,7 @@ class WebRuntime:
     travel_service: TravelApplicationService | None = None
     travel_requirement_extractor: TravelRequirementExtractor | None = None
     xhs_sidecar: LocalXhsSidecarSupervisor | None = None
+    hotel_accounts: HotelAccountSupervisor | None = None
 
     def __post_init__(self) -> None:
         self._active_turns: dict[tuple[str, str], ActiveTurn] = {}
@@ -297,7 +680,10 @@ class WebRuntime:
                 }:
                     resolved.store.update_metadata(
                         session_id,
-                        {"travel_phase": TRAVEL_INTAKE_PHASE, "travel_draft_version": 1},
+                        {
+                            "travel_phase": TRAVEL_INTAKE_PHASE,
+                            "travel_draft_version": TRAVEL_INTAKE_DRAFT_VERSION,
+                        },
                     )
                     self.session_access.refresh_index(actor, session_id)
 
@@ -434,7 +820,9 @@ class WebRuntime:
         else:
             resolved.store.replace(session_id, normalized)
             status = "saved" if not existing else "updated"
-        metadata: dict[str, Any] = {"travel_draft_version": 1}
+        metadata: dict[str, Any] = {
+            "travel_draft_version": TRAVEL_INTAKE_DRAFT_VERSION
+        }
         if normalized_draft:
             metadata["travel_draft"] = normalized_draft
         title = _travel_draft_title(normalized_draft, normalized)
@@ -472,13 +860,43 @@ class WebRuntime:
                 or (message.turn_id is not None and message.turn_id in intake_turn_ids)
             )
         ]
-        draft = state.metadata.get("travel_draft")
+        draft = recover_intake_draft(state.metadata, state.messages)
+        if state.metadata.get("travel_draft_version") != TRAVEL_INTAKE_DRAFT_VERSION:
+            resolved.store.update_metadata(
+                session_id,
+                {
+                    "travel_draft": draft,
+                    "travel_draft_version": TRAVEL_INTAKE_DRAFT_VERSION,
+                },
+            )
         return {
             "session_id": session_id,
             "messages": messages[-20:],
             "draft": dict(draft) if isinstance(draft, dict) else {},
             "phase": self._travel_phase(actor, session_id, resolved=resolved),
             "handoff_question": str(state.metadata.get("travel_handoff_question") or ""),
+        }
+
+    def travel_progress_history(
+        self, actor: ActorContext, session_id: str
+    ) -> dict[str, object]:
+        """Rebuild bounded user-facing progress from one actor-owned travel Session."""
+
+        resolved = self._resolve_travel_session(actor, session_id)
+        state = resolved.store.load(session_id)
+        messages = list(state.messages)
+        sessions_dir = getattr(resolved.store, "sessions_dir", None)
+        candidate_messages, finalization_messages = _persisted_travel_child_messages(
+            sessions_dir,
+            session_id,
+            messages,
+        )
+        messages.extend(candidate_messages)
+        messages.extend(finalization_messages)
+        messages.sort(key=_travel_message_timestamp)
+        return {
+            "session_id": session_id,
+            "items": project_travel_progress(messages),
         }
 
     def confirm_travel_planning(
@@ -506,10 +924,11 @@ class WebRuntime:
                 f"开始规划前还需确认：{'、'.join(missing)}。",
                 status_code=422,
             )
+        normalized = _apply_travel_tone_defaults(normalized)
         metadata: dict[str, Any] = {
             "travel_phase": TRAVEL_PLANNING_PHASE,
             "travel_draft": normalized,
-            "travel_draft_version": 1,
+            "travel_draft_version": TRAVEL_INTAKE_DRAFT_VERSION,
             "travel_planning_confirmed_at": datetime.now(UTC).isoformat(),
             "travel_handoff_question": "",
             "travel_handoff_topic": "",
@@ -582,6 +1001,7 @@ class WebRuntime:
                 ) or "旅行需求草稿"
             status, error_code = "collecting", ""
             plan_id = ""
+            persisted_finalizer_error = _latest_travel_finalizer_error_code(state.messages)
             if plan is not None:
                 status, plan_id = "completed", str(plan.plan_id)
                 title = str(plan.title or title)
@@ -591,6 +1011,9 @@ class WebRuntime:
                 status = "running"
             elif self._travel_review_pending(actor, candidate):
                 status = "awaiting_candidate"
+            elif persisted_finalizer_error:
+                status = "failed"
+                error_code = persisted_finalizer_error
             elif candidate in turn_by_session:
                 status = "failed"
                 error_code = str(
@@ -758,12 +1181,21 @@ class WebRuntime:
             ]
         if active_items:
             candidate_session_id, active = active_items[0]
+            persisted_error = ""
+            if self.travel_service is not None:
+                try:
+                    resolved = self._resolve_travel_session(actor, candidate_session_id)
+                    persisted_error = _latest_travel_finalizer_error_code(
+                        resolved.store.load(candidate_session_id).messages
+                    )
+                except (TravelApplicationError, OSError):
+                    persisted_error = ""
             return {
                 "status": "running",
                 "session_id": candidate_session_id,
                 "turn_id": active.turn_id,
                 "plan_id": "",
-                "error_code": "",
+                "error_code": persisted_error,
             }
         if not requested:
             return {"status": "idle", "session_id": "", "turn_id": "", "plan_id": "", "error_code": ""}
@@ -788,6 +1220,19 @@ class WebRuntime:
                     "plan_id": "",
                     "error_code": "",
                 }
+            if review is not None and review.status == "selected":
+                resolved = self._resolve_travel_session(actor, requested)
+                persisted_error = _latest_travel_finalizer_error_code(
+                    resolved.store.load(requested).messages
+                )
+                if persisted_error:
+                    return {
+                        "status": "failed",
+                        "session_id": requested,
+                        "turn_id": str(review.turn_id),
+                        "plan_id": "",
+                        "error_code": persisted_error,
+                    }
 
         list_turns = getattr(store, "list_turn_runs", None)
         turns = (
@@ -845,6 +1290,75 @@ class WebRuntime:
                 "旅行规划未能完成，请稍后重试。",
                 status_code=502,
             )
+        review = (
+            self.travel_service.get_candidate_review(actor, session_id)
+            if self.travel_service is not None
+            else None
+        )
+        if review is None:
+            parent_messages = resolved.store.load(session_id).messages
+            persisted_research_complete = _persisted_candidate_research_complete(
+                parent_messages
+            )
+            ledger = getattr(self.travel_service, "source_ledger", None)
+            snapshot = getattr(ledger, "snapshot", None)
+            research = snapshot(session_id) if callable(snapshot) else None
+            if persisted_research_complete or (
+                research is not None and not research.candidate_missing_attempts
+            ):
+                return (
+                    "三路旅行研究已经完成，不要重新查询外部来源，也不要再次调用 delegate_tasks。"
+                    "当前只需复用本 Session 已有的交通天气、住宿景点和攻略结果，加载 travel-planner Skill，"
+                    "构造恰好两个差异明确且都满足预算、每日总分钟和强度硬门槛的候选，并立即运行 optimizer。"
+                    "如果上一轮只有一个可行候选，只调整被拒候选对应的活动时长与安排一次；"
+                    "不要用普通文字提前结束。"
+                )
+            return (
+                "候选行程尚未生成。本轮必须立即调用当前唯一的 delegate_tasks 入口，"
+                "并在同一批次中并行创建恰好三个任务："
+                "travel-transport-weather 查询去返程 12306 与天气；"
+                "travel-stay-poi 查询指定日期住宿价格与目的地景点；"
+                "travel-guides 查询 Tavily 与小红书攻略。"
+                "等待三项结果 fan-in 后加载并运行 travel-planner optimizer；"
+                "禁止用普通文字声称工具不可用，也不得跳过委派。"
+            )
+        if review.status == "selected":
+            ledger = getattr(self.travel_service, "source_ledger", None)
+            snapshot = getattr(ledger, "snapshot", None)
+            research = snapshot(session_id) if callable(snapshot) else None
+            parent_messages = resolved.store.load(session_id).messages
+            repair_profiles = _travel_finalization_repair_profiles(
+                parent_messages,
+                research,
+            )
+            if TRAVEL_FINAL_WEATHER_PROFILE in repair_profiles:
+                return (
+                    "上一轮最终校验明确缺少当前日期范围的实时天气预报。"
+                    "本轮只调用一次 delegate_tasks，并且只创建一个 "
+                    "travel-final-weather 任务；按服务端日期窗口查询 get_forecast，"
+                    "禁止查询历史天气、铁路、住宿、路线、网页或社区来源。"
+                    "天气结果返回后复用已有完整计划草稿，更新 weather_summary 与 evidence，"
+                    "并在同一轮立即再次调用 finalize_travel_plan；不得只返回文字说明。"
+                )
+            if TRAVEL_FINAL_ROUTE_PROFILE in repair_profiles:
+                return (
+                    "上一轮最终校验明确指出仍有不少于 2 公里的本地交通段缺少真实高德公交/地铁证据。"
+                    "本轮只调用一次 delegate_tasks，并且只创建一个 travel-final-route 任务；"
+                    "从上一轮 Finalizer 错误和已选候选骨架中列出所有缺口。公交首查为空时，"
+                    "对远郊景点只改查同一景点的游客中心、主入口、售票处或景区接驳点，"
+                    "再查一次公交；仍为空则查询一次高德驾车，作为出租车/网约车兜底，"
+                    "保留真实距离和时长，禁止伪造公交线路或站点。公交有结果时逐条保留线路号、"
+                    "上下车站、时长和距离；禁止查询天气、铁路、住宿、网页或社区来源。"
+                    "路线结果返回后复用已有完整计划草稿，替换对应 planning estimate，"
+                    "并在同一轮立即再次调用 finalize_travel_plan；不得只返回文字说明。"
+                )
+            if research is not None and not research.missing_attempts:
+                return (
+                    "所选方案的住宿与路线子任务已经完成，不要再次调用 delegate_tasks，"
+                    "也不要重新查询外部来源。复用本 Session 历史中的 Child 结果和已有计划草稿，"
+                    "修正上一轮 Finalizer 返回的具体字段或证据问题，然后立即再次调用 "
+                    "finalize_travel_plan；禁止用普通文字提前结束。"
+                )
         return self.prompt_loader.load("travel_planning_continuation")
 
     def travel_candidate_review(self, actor: ActorContext, session_id: str) -> dict[str, Any]:
@@ -881,9 +1395,22 @@ class WebRuntime:
             raise TravelApplicationError(
                 "TRAVEL_CANDIDATE_SELECTION_REQUIRED", "请先选择一个候选行程。", status_code=409
             )
+        if self.travel_service is not None:
+            resolved = self._resolve_travel_session(actor, session_id)
+            snapshot = self.travel_service.source_ledger.snapshot(session_id)
+            if _travel_finalization_repair_profiles(
+                resolved.store.load(session_id).messages,
+                snapshot,
+            ):
+                return self.travel_continuation_message(actor, session_id)
         return (
-            f"用户已确认候选方案 {selected}。继续当前旅行规划，只能以该候选为最终 days、预算和路线的基础；"
-            f"完成 TravelPlanV1 后调用 finalize_travel_plan，并传 selected_candidate_id={selected}。"
+            "路线任务必须逐条覆盖所有不少于2公里的本地公交、地铁或未定交通段，包括首日车站到酒店、末日酒店到车站和远郊景点去返程；任务正文要附上候选研究中已有的地点坐标，只有缺坐标时才查询一次高德地点，并保留线路号、上下车站与途经站。远郊景点中心坐标公交为空时，改用同一景点的游客中心、主入口、售票处或景区接驳点再查一次；仍为空时用高德驾车距离和时长形成透明的出租车/网约车兜底，不得伪造公交线路。"
+            f"用户已确认候选方案 {selected}。继续当前旅行规划，只能以该候选为最终 days、预算和路线的基础。"
+            "本轮必须先且只调用一次 delegate_tasks，并在同一批次中并行创建恰好两个任务："
+            "travel-final-stay 查询一处具体住宿身份和指定日期价格状态；"
+            "travel-final-route 查询所选候选全部必要的高德公共交通路线，远郊景点同时覆盖去程和返程。"
+            "等待两项结果 fan-in 后再一次构造 TravelPlanV1，禁止直接跳过委派试探 finalizer；"
+            f"最后调用 finalize_travel_plan，并传 selected_candidate_id={selected}。"
         )
 
     def _assert_travel_session_owner(self, actor: ActorContext, session_id: str) -> None:
@@ -973,6 +1500,7 @@ class WebRuntime:
         tools = getattr(self.agent_loop, "tools", None)
         visible_skills = self.skill_loader
         turn_llm = self.llm
+        travel_child_parent_llm = turn_llm
         turn_context_budget = (
             self.llm_resolver.context_budget() if self.llm_resolver is not None else None
         )
@@ -981,6 +1509,11 @@ class WebRuntime:
         memory_safety = None
         travel_phase = ""
         travel_intake = False
+        travel_research_delegation_active = False
+        travel_candidate_review_state = None
+        travel_finalization_active = False
+        travel_candidate_research_complete = False
+        travel_finalization_repair_profiles: frozenset[str] = frozenset()
         if self.session_access is not None and actor.user_id is not None:
             resolved = self.session_access.ensure_session(
                 actor,
@@ -1012,6 +1545,126 @@ class WebRuntime:
             if resolved_channel == "travel":
                 travel_phase = self._travel_phase(actor, session_id, resolved=resolved)
                 travel_intake = travel_phase == TRAVEL_INTAKE_PHASE
+                if (
+                    travel_phase == TRAVEL_PLANNING_PHASE
+                    and self.travel_service is not None
+                ):
+                    travel_candidate_review_state = (
+                        self.travel_service.get_candidate_review(actor, session_id)
+                    )
+                    travel_finalization_active = (
+                        travel_candidate_review_state is not None
+                        and travel_candidate_review_state.status == "selected"
+                    )
+                    parent_messages = resolved.store.load(session_id).messages
+                    travel_candidate_research_complete = (
+                        travel_candidate_review_state is None
+                        and _persisted_candidate_research_complete(parent_messages)
+                    )
+                    if travel_candidate_research_complete:
+                        candidate_messages, _ = _persisted_travel_child_messages(
+                            getattr(resolved.store, "sessions_dir", None),
+                            session_id,
+                            parent_messages,
+                        )
+                        _rehydrate_travel_search_evidence(
+                            self.travel_service.source_ledger,
+                            session_id,
+                            candidate_messages,
+                            finalization=False,
+                        )
+                    if travel_candidate_review_state is None:
+                        try:
+                            candidate_llm = create_optional_aliased_llm_provider(
+                                self.config.config_dir,
+                                "compaction",
+                            )
+                        except LLMConfigurationError as exc:
+                            candidate_llm = None
+                            log_event(
+                                web_logger,
+                                logging.WARNING,
+                                "travel.candidate_model_degraded",
+                                error_type=type(exc).__name__,
+                            )
+                        if candidate_llm is not None:
+                            turn_llm = candidate_llm
+                            candidate_endpoint_name = "custom"
+                            candidate_model_name = "configured"
+                            try:
+                                candidate_endpoint = _current_endpoint(candidate_llm)
+                                candidate_endpoint_name = candidate_endpoint.name
+                                candidate_model_name = candidate_endpoint.model
+                                turn_context_budget = ConfiguredLLMProviderResolver(
+                                    list(candidate_llm.endpoints()),
+                                    default_endpoint=candidate_endpoint.name,
+                                ).context_budget()
+                            except (AttributeError, LLMConfigurationError, ValueError):
+                                # The turn keeps the already safe main-model budget if a
+                                # custom provider cannot expose endpoint metadata.
+                                pass
+                            log_event(
+                                web_logger,
+                                logging.INFO,
+                                "travel.candidate_model_selected",
+                                endpoint=candidate_endpoint_name,
+                                model=candidate_model_name,
+                            )
+                    if travel_finalization_active:
+                        # Candidate selection normally opens this phase in the API service.
+                        # Re-open it idempotently here as well so an already-selected plan
+                        # resumes correctly after a process restart and still has to run the
+                        # fresh stay + route detail batch before final saving.
+                        ledger = self.travel_service.source_ledger
+                        parent_messages = resolved.store.load(session_id).messages
+                        candidate_messages, finalization_messages = (
+                            _persisted_travel_child_messages(
+                                getattr(resolved.store, "sessions_dir", None),
+                                session_id,
+                                parent_messages,
+                            )
+                        )
+                        snapshot = ledger.snapshot(session_id)
+                        if not snapshot.attempted:
+                            _rehydrate_travel_search_evidence(
+                                ledger,
+                                session_id,
+                                candidate_messages,
+                                finalization=False,
+                            )
+                        ledger.begin_finalization_budget(session_id)
+                        finalization_attempted = ledger.snapshot(
+                            session_id
+                        ).finalization_attempted
+                        remaining_categories = frozenset(
+                            {"lodging", "maps"} - set(finalization_attempted)
+                        )
+                        if finalization_messages and remaining_categories:
+                            _rehydrate_travel_search_evidence(
+                                ledger,
+                                session_id,
+                                finalization_messages,
+                                finalization=True,
+                                only_categories=remaining_categories,
+                            )
+                        ledger.mark_finalization_attempted(
+                            session_id,
+                            set(
+                                _persisted_finalization_completed_categories(
+                                    parent_messages
+                                )
+                            ),
+                        )
+                        travel_finalization_repair_profiles = (
+                            _travel_finalization_repair_profiles(
+                                parent_messages,
+                                ledger.snapshot(session_id),
+                            )
+                        )
+                        if TRAVEL_FINAL_WEATHER_PROFILE in travel_finalization_repair_profiles:
+                            ledger.begin_forecast_repair(session_id)
+                        if TRAVEL_FINAL_ROUTE_PROFILE in travel_finalization_repair_profiles:
+                            ledger.begin_route_repair(session_id)
             owner_has_workspace_scope = "owner" in actor.role_keys
             workspace = self.config.workspace if owner_has_workspace_scope else resolved.context.files_dir
             visible_skills = (
@@ -1031,6 +1684,7 @@ class WebRuntime:
                 preference = self.model_preferences.get(resolved.model_context(), session_id)
                 selection = self.llm_resolver.resolve(preference)
                 turn_llm = self.llm_resolver.bind(selection)
+                travel_child_parent_llm = turn_llm
                 turn_context_budget = selection.context_budget
             if travel_intake:
                 intake_tools = (
@@ -1045,6 +1699,12 @@ class WebRuntime:
                 tools = ToolRegistry(intake_tools)
                 memory_notice = ()
             else:
+                travel_domain_tools = (
+                    self.travel_service.tools_for_actor(actor)
+                    if self.travel_service is not None
+                    and travel_phase == TRAVEL_PLANNING_PHASE
+                    else []
+                )
                 mcp_tools = (
                     self.mcp_runtime.tools_for_actor(
                         actor,
@@ -1054,20 +1714,52 @@ class WebRuntime:
                             on_event,
                             {"type": "mcp_elicitation_requested", **asdict(request)},
                         ),
-                        result_observer=(
-                            self.travel_service.source_ledger.observe
-                            if self.travel_service is not None
-                            and travel_phase == TRAVEL_PLANNING_PHASE
-                            else None
-                        ),
+                        # Travel source results are observed by guard_travel_tools after
+                        # city filtering and payload compaction, with the effective args.
+                        result_observer=None,
                     )
                     if self.mcp_runtime is not None
                     else []
                 )
                 if self.travel_service is not None and travel_phase == TRAVEL_PLANNING_PHASE:
+                    expected_source_tools = [
+                        tool.name for tool in [*travel_domain_tools, *mcp_tools]
+                    ]
+                    if travel_finalization_active:
+                        expected_source_tools = [
+                            name
+                            for name in expected_source_tools
+                            if source_category(name) in {"maps", "lodging", "weather"}
+                        ]
                     self.travel_service.source_ledger.register_expected(
                         session_id,
-                        [tool.name for tool in mcp_tools],
+                        expected_source_tools,
+                    )
+                    if (
+                        travel_finalization_active
+                        and (
+                            self.travel_service.source_ledger.snapshot(
+                                session_id
+                            ).missing_attempts
+                            or travel_finalization_repair_profiles
+                        )
+                    ):
+                        force_subagent_once = True
+                    if (
+                        not travel_finalization_active
+                        and not travel_candidate_research_complete
+                        and self.travel_service.source_ledger.snapshot(
+                            session_id
+                        ).candidate_missing_attempts
+                    ):
+                        # Candidate research is a fixed three-lane product stage, not an
+                        # optional model optimization. The force-once contract prevents a
+                        # text-only refusal when delegate_tasks is the sole safe entrypoint.
+                        force_subagent_once = True
+                    mcp_tools = guard_travel_tools(
+                        mcp_tools,
+                        self.travel_service.source_ledger,
+                        session_id,
                     )
                 tools = UserScopedToolProvider(
                     files_dir=workspace,
@@ -1086,20 +1778,36 @@ class WebRuntime:
                     memory_store=memory_store,
                     memory_safety=memory_safety,
                     extra_tools=[
-                        *(
-                            self.travel_service.tools_for_actor(actor)
-                            if self.travel_service is not None
-                            and travel_phase == TRAVEL_PLANNING_PHASE
-                            else []
-                        ),
+                        *travel_domain_tools,
                         *mcp_tools,
                     ],
                 )
+                if travel_phase == TRAVEL_PLANNING_PHASE:
+                    tools = FilteredToolProvider(
+                        tools,
+                        allowed_tools=[
+                            "load_skills",
+                            "run_skill",
+                            *[tool.name for tool in travel_domain_tools],
+                            *[tool.name for tool in mcp_tools],
+                        ],
+                    )
+        turn_subagent_config = self.subagent_config
+        if (
+            resolved_channel == "travel"
+            and travel_phase == TRAVEL_PLANNING_PHASE
+            and turn_subagent_config is not None
+        ):
+            turn_subagent_config = travel_subagent_config_for_stage(
+                turn_subagent_config,
+                finalization=travel_finalization_active,
+                repair_profiles=travel_finalization_repair_profiles,
+            )
         if (
             tools is not None
             and not travel_intake
-            and self.subagent_config is not None
-            and self.subagent_config.enabled
+            and turn_subagent_config is not None
+            and turn_subagent_config.enabled
             and (subagent_preference.mode == "auto" or force_subagent_once)
             and self.prompt_loader is not None
         ):
@@ -1113,8 +1821,44 @@ class WebRuntime:
                 child_identity,
                 child_skills,
             ):
-                del profile, parent_context
-                return UserScopedToolProvider(
+                del parent_context
+                child_mcp_tools = (
+                    self.mcp_runtime.tools_for_actor(
+                        actor,
+                        child_workspace,
+                        session_id=session_id,
+                        interaction_notifier=lambda request: _emit_runtime_event(
+                            child_on_event,
+                            {
+                                "type": "mcp_elicitation_requested",
+                                "subagent_id": child_identity.subagent_id,
+                                "task_id": child_identity.task_id,
+                                "batch_id": child_identity.batch_id,
+                                **asdict(request),
+                            },
+                        ),
+                        # The travel guard records the compact, city-scoped result once.
+                        result_observer=None,
+                    )
+                    if self.mcp_runtime is not None
+                    else []
+                )
+                if (
+                    self.travel_service is not None
+                    and resolved_channel == "travel"
+                ):
+                    child_mcp_tools = guard_travel_tools(
+                        child_mcp_tools,
+                        self.travel_service.source_ledger,
+                        session_id,
+                    )
+                child_research_tools = (
+                    self.travel_service.research_tools_for_actor(actor)
+                    if self.travel_service is not None
+                    and resolved_channel == "travel"
+                    else []
+                )
+                child_provider: ToolProvider = UserScopedToolProvider(
                     files_dir=child_workspace,
                     shared_readonly_dir=(
                         resolved.context.shared_readonly_dir
@@ -1134,36 +1878,15 @@ class WebRuntime:
                     ),
                     memory_store=memory_store,
                     memory_safety=memory_safety,
-                    extra_tools=(
-                        self.mcp_runtime.tools_for_actor(
-                            actor,
-                            child_workspace,
-                            session_id=session_id,
-                            interaction_notifier=lambda request: _emit_runtime_event(
-                                child_on_event,
-                                {
-                                    "type": "mcp_elicitation_requested",
-                                    "subagent_id": child_identity.subagent_id,
-                                    "task_id": child_identity.task_id,
-                                    "batch_id": child_identity.batch_id,
-                                    **asdict(request),
-                                },
-                            ),
-                            result_observer=(
-                                self.travel_service.source_ledger.observe
-                                if self.travel_service is not None
-                                and resolved_channel == "travel"
-                                else None
-                            ),
-                        )
-                        if self.mcp_runtime is not None
-                        else None
-                    ),
+                    extra_tools=[*child_mcp_tools, *child_research_tools],
                 )
+                if profile.name == TRAVEL_FINAL_ROUTE_PROFILE:
+                    child_provider = compact_travel_final_route_results(child_provider)
+                return child_provider
 
             tools = build_turn_subagent_provider(
                 base_tools=tools,
-                config=self.subagent_config,
+                config=turn_subagent_config,
                 prompt_loader=self.prompt_loader,
                 sessions_root=sessions_root,
                 workspace=workspace,
@@ -1179,7 +1902,98 @@ class WebRuntime:
                 activity_sink=self.activity_sink,
                 audit_sink=self.audit_sink,
                 hook_runtime=self.agent_loop.hook_runtime,
+                llm_factory=(
+                    _travel_child_llm_factory(travel_child_parent_llm)
+                    if resolved_channel == "travel"
+                    and travel_phase == TRAVEL_PLANNING_PHASE
+                    else None
+                ),
             )
+            if (
+                resolved_channel == "travel"
+                and travel_phase == TRAVEL_PLANNING_PHASE
+                and self.travel_service is not None
+            ):
+                final_stay_context = ""
+                final_weather_context = ""
+                if travel_finalization_active:
+                    structured = self.travel_service.source_ledger.structured_results(
+                        session_id
+                    )
+                    observations = structured.get("hotel_observations") or []
+                    if observations:
+                        final_stay_context = json.dumps(
+                            {"candidate_hotel_observations": observations[-2:]},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )[:4_000]
+                    if TRAVEL_FINAL_WEATHER_PROFILE in travel_finalization_repair_profiles:
+                        final_weather_context = _travel_forecast_window_context(
+                            sessions.load(session_id).metadata.get("travel_draft")
+                        )
+                tools = require_exact_travel_delegation(
+                    tools,
+                    finalization=travel_finalization_active,
+                    final_stay_context=final_stay_context,
+                    final_weather_context=final_weather_context,
+                    expected_profiles=(travel_finalization_repair_profiles or None),
+                    on_profiles_completed=(
+                        (
+                            lambda profiles: self.travel_service.source_ledger.mark_finalization_attempted(
+                                session_id,
+                                _travel_finalization_categories_for_profiles(profiles),
+                            )
+                        )
+                        if travel_finalization_active
+                        else None
+                    ),
+                )
+                # The travel parent orchestrates bounded child research. ChildAgentFactory
+                # already captured the full source surface above; hiding sources only from
+                # the returned parent provider prevents slow serial re-query after fan-in.
+                stage_tools = (
+                    ["finalize_travel_plan"]
+                    if travel_finalization_active
+                    else [
+                        "load_skills",
+                        "run_skill",
+                        "request_travel_clarification",
+                        "request_travel_candidate_review",
+                    ]
+                )
+                tools = FilteredToolProvider(
+                    tools,
+                    allowed_tools=[
+                        *stage_tools,
+                        "delegate_tasks",
+                    ],
+                    kernel_denied_tools=(),
+                )
+                if travel_finalization_active:
+                    tools = require_travel_finalization_before_saving(
+                        tools,
+                        self.travel_service.source_ledger,
+                        session_id,
+                        repair_categories=(
+                            frozenset(
+                                {
+                                    category
+                                    for profile, category in (
+                                        (TRAVEL_FINAL_WEATHER_PROFILE, "weather"),
+                                        (TRAVEL_FINAL_ROUTE_PROFILE, "maps"),
+                                    )
+                                    if profile in travel_finalization_repair_profiles
+                                }
+                            )
+                        ),
+                    )
+                else:
+                    tools = require_travel_research_before_solving(
+                        tools,
+                        self.travel_service.source_ledger,
+                        session_id,
+                    )
+                travel_research_delegation_active = True
         elif (
             tools is not None
             and not travel_intake
@@ -1198,11 +2012,12 @@ class WebRuntime:
             initial_tool_names = (
                 "load_skills",
                 "run_skill",
+                "delegate_tasks",
                 "request_travel_candidate_review",
                 "finalize_travel_plan",
                 *preferred_travel_tool_names(available_names),
             )
-        if not travel_intake:
+        if not travel_intake and not travel_research_delegation_active:
             tools = with_tool_discovery(tools, initial_names=initial_tool_names)
         turn_requirements: list[str] = []
         if resolved_channel == "travel" and self.prompt_loader is not None:
@@ -1219,7 +2034,38 @@ class WebRuntime:
                     f"当前北京时间日期为 {reference_date}。理解“国庆、下周、月底”等相对日期时"
                     "以此为基准；不确定年份或结束日期时应自然追问，不得臆造。"
                 )
+                intake_state = sessions.load(session_id)
+                current_draft = recover_intake_draft(
+                    intake_state.metadata,
+                    intake_state.messages,
+                )
+                if intake_state.metadata.get(
+                    "travel_draft_version"
+                ) != TRAVEL_INTAKE_DRAFT_VERSION:
+                    sessions.update_metadata(
+                        session_id,
+                        {
+                            "travel_draft": current_draft,
+                            "travel_draft_version": TRAVEL_INTAKE_DRAFT_VERSION,
+                        },
+                    )
+                if current_draft:
+                    turn_requirements.append(
+                        "# 服务端当前旅行草稿\n"
+                        "以下 JSON 是服务端已保存的累计条件，优先于历史对话中的旧值；"
+                        "本轮只向 update_travel_draft 传用户明确新增或修正的非空字段。"
+                        "空字符串、空数组和 null 只是占位，不得用来清除旧值；"
+                        "用户明确要求删除条件时才使用 clear_fields。不得把 JSON 原样展示给用户。\n"
+                        + json.dumps(current_draft, ensure_ascii=False, separators=(",", ":"))
+                    )
             if travel_phase == TRAVEL_PLANNING_PHASE:
+                reference_timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                turn_requirements.append(
+                    "# 本轮服务端时间基准\n"
+                    f"当前 RFC 3339 UTC 时间为 {reference_timestamp}。可直接把它用于 "
+                    "generated_at，以及未返回独立查询时间的 ToolResult 的 retrieved_at；"
+                    "禁止为取得当前时间调用 discover_tools、诊断 Tool 或外部来源。"
+                )
                 confirmed_draft = sessions.load(session_id).metadata.get("travel_draft")
                 if isinstance(confirmed_draft, dict):
                     turn_requirements.append(
@@ -1228,6 +2074,37 @@ class WebRuntime:
                         "不得把它原样展示给用户。\n"
                         + json.dumps(confirmed_draft, ensure_ascii=False, separators=(",", ":"))
                     )
+                    turn_requirements.append(
+                        "# 服务端天气日期窗口\n"
+                        "以下 JSON 已由服务端按北京时间计算。inside_forecast_window=true 时，"
+                        "天气任务必须调用 get_forecast，禁止由模型自行改判为历史天气；false 时"
+                        "才允许把历史同期天气作为气候参考。不得把 JSON 原样展示给用户。\n"
+                        + _travel_forecast_window_context(confirmed_draft)
+                    )
+                if (
+                    travel_candidate_review_state is not None
+                    and travel_candidate_review_state.status == "selected"
+                ):
+                    selected_candidate = next(
+                        (
+                            candidate
+                            for candidate in travel_candidate_review_state.candidates
+                            if str(candidate.get("candidate_id") or "")
+                            == travel_candidate_review_state.selected_candidate_id
+                        ),
+                        None,
+                    )
+                    if isinstance(selected_candidate, dict):
+                        turn_requirements.append(
+                            "# 服务端已确认的候选方案\n"
+                            "以下 JSON 是用户已经选择的候选骨架；只补充具体住宿、路线与证据，"
+                            "不得改换候选或重新运行 optimizer，也不得把 JSON 原样展示给用户。\n"
+                            + json.dumps(
+                                selected_candidate,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        )
         if force_subagent_once and self.prompt_loader is not None and not travel_intake:
             turn_requirements.append(self.prompt_loader.load("subagent_once"))
         self._register_turn(
@@ -1967,6 +2844,8 @@ class WebRuntime:
             self.mcp_runtime.close()
         if self.xhs_sidecar is not None:
             self.xhs_sidecar.stop()
+        if self.hotel_accounts is not None:
+            self.hotel_accounts.stop()
 
     def submit_mcp_interaction(
         self,
@@ -2101,6 +2980,7 @@ def build_web_runtime(
     )
     skill_sync_error = _sync_startup_skills(skill_sync)
 
+    sync_managed_application_prompts(config)
     prompt_loader = PromptLoader(config.prompts_dir)
     prompt_loader.load_many(DEFAULT_CONTEXT_PROMPTS)
     session_store = JsonlSessionStore(config.sessions_dir)
@@ -2190,6 +3070,7 @@ def build_web_runtime(
     tool_policy = RbacToolExecutionPolicy()
     xhs_sidecar = LocalXhsSidecarSupervisor.from_specs(config.workspace, mcp_startup.specs)
     xhs_sidecar.start()
+    hotel_accounts = HotelAccountSupervisor(config.workspace)
     try:
         mcp_runtime = McpRuntime(
             mcp_startup.specs,
@@ -2255,6 +3136,7 @@ def build_web_runtime(
         travel_service=travel_service,
         travel_requirement_extractor=travel_requirement_extractor,
         xhs_sidecar=xhs_sidecar,
+        hotel_accounts=hotel_accounts,
         memory_extraction_enabled=memory_extraction_startup.enabled,
         mcp_runtime=mcp_runtime,
     )
@@ -2775,5 +3657,71 @@ def _travel_missing_fields(draft: dict[str, Any]) -> list[str]:
         ("start_date", "开始日期"),
         ("end_date", "结束日期"),
         ("traveller_count", "人数"),
+        ("budget_level", "旅行基调"),
     )
     return [label for field, label in checks if not draft.get(field)]
+
+
+def _apply_travel_tone_defaults(draft: dict[str, Any]) -> dict[str, Any]:
+    """Project the reviewed tone into concrete and visible planning defaults."""
+
+    normalized = dict(draft)
+    defaults = {
+        "economy": (
+            "旅行基调：经济实惠；住宿每间每晚上限约250元",
+            "公共交通优先，减少非必要打车",
+            "balanced",
+        ),
+        "balanced": (
+            "旅行基调：舒适均衡；住宿每间每晚上限约450元",
+            "公共交通为主，必要时短途打车减少折返",
+            "balanced",
+        ),
+        "comfortable": (
+            "旅行基调：轻松品质；住宿每间每晚上限约700元",
+            "优先减少换乘和长距离步行，必要时打车",
+            "relaxed",
+        ),
+    }.get(str(normalized.get("budget_level") or ""))
+    if defaults is None:
+        return normalized
+    stay_default, transport_default, pace_default = defaults
+    stay = [str(item) for item in normalized.get("stay_preferences", [])]
+    transport = [str(item) for item in normalized.get("transport_preferences", [])]
+    if stay_default not in stay:
+        stay.append(stay_default)
+    if transport_default not in transport:
+        transport.append(transport_default)
+    normalized["stay_preferences"] = stay
+    normalized["transport_preferences"] = transport
+    if not normalized.get("pace"):
+        normalized["pace"] = pace_default
+    return normalized
+
+
+def _travel_child_llm_factory(
+    parent_llm: LLMProvider,
+) -> Callable[[SubagentProfile], LLMProvider]:
+    """Honor explicit Profile roles and otherwise inherit the current parent model."""
+
+    endpoints_method = getattr(parent_llm, "endpoints", None)
+    if not callable(endpoints_method):
+        raise ValueError("Travel Subagent runtime requires configured LLM endpoints")
+    endpoints = list(endpoints_method())
+    current_method = getattr(parent_llm, "current_endpoint", None)
+    inherited = current_method() if callable(current_method) else endpoints[0]
+    resolver = ConfiguredLLMProviderResolver(endpoints, default_endpoint=inherited.name)
+
+    def create(profile: SubagentProfile) -> LLMProvider:
+        selected = inherited
+        if profile.model_role != "inherit":
+            selected = min(
+                (endpoint for endpoint in endpoints if endpoint.role == profile.model_role),
+                key=lambda endpoint: endpoint.priority,
+                default=inherited,
+            )
+        return resolver.bind(
+            ModelSelection(selected.name, selected.model, source="subagent_profile")
+        )
+
+    return create

@@ -17,6 +17,7 @@ from agent.app.api.schemas import (
     TravelPlanningConfirmationResponse,
     TravelPlanResponse,
     TravelPlansResponse,
+    TravelProgressHistoryResponse,
     TravelRequirementExtractionRequest,
     TravelRequirementExtractionResponse,
     TravelWorkItemMutationResponse,
@@ -25,6 +26,27 @@ from agent.app.api.schemas import (
 from agent.applications.travel.service import TravelApplicationError
 
 router = APIRouter(prefix="/api/travel")
+
+
+@router.get(
+    "/sessions/{session_id}/progress",
+    response_model=TravelProgressHistoryResponse,
+)
+def read_travel_progress(
+    session_id: str, request: Request
+) -> TravelProgressHistoryResponse:
+    """Return safe progress reconstructed from one actor-owned travel Session."""
+
+    runtime = _runtime(request)
+    actor = _actor(request, channel="rest")
+    reader = getattr(runtime, "travel_progress_history", None)
+    if not callable(reader):
+        raise ApiError("TRAVEL_PROGRESS_UNAVAILABLE", "旅行规划过程暂时无法读取。", status_code=503)
+    try:
+        payload = reader(actor, session_id)
+    except TravelApplicationError as exc:
+        raise _api_error(exc) from exc
+    return TravelProgressHistoryResponse(**payload)
 
 
 @router.post(
@@ -296,5 +318,6 @@ def _missing_requirement_fields(draft: dict) -> list[str]:
         ("start_date", "开始日期"),
         ("end_date", "结束日期"),
         ("traveller_count", "人数"),
+        ("budget_level", "旅行基调"),
     )
     return [label for key, label in checks if not draft.get(key)]

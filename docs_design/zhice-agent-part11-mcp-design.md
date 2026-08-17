@@ -39,7 +39,7 @@ MCP Server 的外部业务行为由 Server 和外部系统负责。ZhiCe-Agent �
 
 ## 3. 实现范围
 
-- `config/mcp.example.json` 和运行态 `${ZHICE_AGENT_WORKSPACE}/config/mcp.json`。
+- `config/config.example.yml` 的 `mcp` 模板和运行态 `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `mcp` 分区。
 - 常见 `mcpServers` JSON 配置解析。
 - `stdio`、`streamable_http` 和旧 `sse` transport。
 - Header、Bearer、直接/env credential 和 OAuth token refresh。
@@ -78,7 +78,7 @@ UserScopedToolProvider(
 ## 5. 总体架构
 
 ```text
-config/mcp.json
+config/config.yml#mcp
   -> McpConfigLoader
   -> McpServerSpec[]
   -> process-wide McpRuntime
@@ -109,8 +109,8 @@ Runtime 管连接、发现、调用、Elicitation、重连和关闭；Catalog �
 ### 6.1 文件位置
 
 ```text
-仓库模板：config/mcp.example.json
-运行配置：${ZHICE_AGENT_WORKSPACE}/config/mcp.json
+仓库模板：config/config.example.yml 的 mcp 分区
+运行配置：${ZHICE_AGENT_WORKSPACE}/config/config.yml 的 mcp 分区
 ```
 
 - 仓库模板不保存真实 credential。
@@ -118,28 +118,21 @@ Runtime 管连接、发现、调用、Elicitation、重连和关闭；Catalog �
 - 缺少配置表示 MCP 未启用。
 - 配置在 CLI/Gateway 启动时加载，修改后重启生效。
 
-### 6.2 直接粘贴常见配置
+### 6.2 迁移常见 MCP 配置
 
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "."
-      ]
-    }
-  }
-}
+```yaml
+mcp:
+  servers:
+    filesystem:
+      command: npx
+      args: [-y, "@modelcontextprotocol/server-filesystem", "."]
 ```
 
-用户不需要提前填写 Tool 名。Runtime 连接成功后通过 `tools/list` 获取。
+从其它客户端复制配置时，将 `mcpServers` 下的 server 项迁入上述 `servers` mapping；用户不需要提前填写 Tool 名，Runtime 连接成功后通过 `tools/list` 获取。
 
 ### 6.3 固定解析规则
 
-`mcp.json` 不是任意 JSON。Loader 识别：
+`config.yml` 的 `mcp.servers` 不是任意 mapping。Loader 识别：
 
 | 字段 | 作用 |
 | --- | --- |
@@ -154,7 +147,7 @@ Runtime 管连接、发现、调用、Elicitation、重连和关闭；Catalog �
 
 存在 `command` 时识别为 stdio；存在 `url` 且未指定 transport 时识别为 Streamable HTTP；明确写 `sse` 时使用 SSE。远程 transport 默认 `proxy_mode: direct`，不会因启动终端残留代理变量而改变路由；确需读取 httpx 支持的代理、CA 或 netrc 环境时必须显式写 `proxy_mode: environment`。Server 专有参数放在 args、env、headers 或 oauth。未识别字段返回明确配置错误。
 
-其它 MCP Client 的 JSON 配置可以直接使用常见字段；TOML、YAML 或客户端专有占位符需要先转换为 JSON。
+其它 MCP Client 的 JSON 配置可以复用常见 server 字段，但需要放入统一 YAML 的 `mcp.servers` 分区；客户端专有占位符需要转换为 `${ENV_VAR}`。
 
 ### 6.4 Credential
 

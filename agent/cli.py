@@ -784,42 +784,12 @@ def _run_init(argv: Sequence[str]) -> int:
         action="store_true",
         help="Deprecated compatibility option; runtime config/.env is always initialized.",
     )
-    parser.add_argument("--endpoint", default="default", help="Endpoint name to generate.")
-    parser.add_argument("--protocol", default="openai", choices=["openai", "litellm"])
-    parser.add_argument("--base-url", default="https://api.openai.com/v1")
-    parser.add_argument(
-        "--api-key",
-        default="",
-        help="api_key value written to workspace config. Supports a direct key or ${ENV_VAR}.",
-    )
-    parser.add_argument("--model", default="gpt-5.5")
-    parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=16384,
-        help="Maximum output tokens requested for one model call.",
-    )
-    parser.add_argument(
-        "--context-window",
-        type=int,
-        default=131072,
-        help="Total model context window including input and generated output.",
-    )
-    parser.add_argument("--temperature", type=float, default=0.7)
     args = parser.parse_args(argv)
 
     config = load_config(args.workspace)
     try:
         written = init_runtime_files(
             config,
-            endpoint_name=args.endpoint,
-            protocol=args.protocol,
-            base_url=args.base_url,
-            api_key=args.api_key,
-            model=args.model,
-            max_tokens=args.max_tokens,
-            context_window=args.context_window,
-            temperature=args.temperature,
             force=args.force,
         )
     except InitConfigurationError as exc:
@@ -834,8 +804,8 @@ def _run_init(argv: Sequence[str]) -> int:
         print(f"{console.success('created:')} {console.path(path)}")
     print(
         console.warning(
-            "Runtime files created. Configure an enabled LLM endpoint before chatting. "
-            "Extension capabilities are optional."
+            "Runtime files created from repository examples. Edit config/models.json and "
+            "config/.env before chatting. Extension capabilities are optional."
         )
     )
     return 0

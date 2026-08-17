@@ -331,8 +331,8 @@ ContextBuilder(
 
 说明：
 
-- `context_config` 来自 `${ZHICE_AGENT_WORKSPACE}/config/context.yml`；缺失时使用安全默认值。
-- `embedding_provider` 来自可选 `embedding_endpoints.json`；缺失或失败时语义召回诚实降级，完整历史、历史查询、compaction 和 FTS 继续可用。
+- `context_config` 来自 `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `context` 分区；缺失时使用安全默认值。
+- `embedding_provider` 来自 `models.json` 的可选 embedding route/endpoint；缺失或失败时语义召回诚实降级，完整历史、历史查询、compaction 和 FTS 继续可用。
 - `max_history_turns`、`max_relevant_turns`、`always_include_recent_turns`、`max_history_messages` 仍保留在构造签名中兼容一个版本周期，但不再作为正常删历史策略。
 - 每次构建同时接收当前已授权 `SessionStore`、实际 `LLMProvider`、可见 Tool schemas 和 failover-safe `ContextBudget`。
 

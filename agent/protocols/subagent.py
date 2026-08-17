@@ -79,6 +79,7 @@ class SubagentProfile:
     name: str
     description: str
     tools: tuple[str, ...]
+    initial_tools: tuple[str, ...] = ()
     denied_tools: tuple[str, ...] = ("delegate_tasks",)
     allowed_skills: tuple[str, ...] = ()
     preload_skills: tuple[str, ...] = ()

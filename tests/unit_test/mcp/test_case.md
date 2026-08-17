@@ -19,6 +19,7 @@
 ## 关键检查点
 
 - credential 不出现在 Catalog 和 ToolResult。
+- 超长 MCP 文本保持 12000 字符上限，同时保留首尾内容和中间截断标记，使按时间排序的长列表在重启恢复后仍保留末尾候选。
 - stdio cwd 固定在 `state/mcp_runtime/{server_id}/tmp` 下。
 - 绝对 cwd、父目录 cwd、越界临时文件和超大 artifact 被拒绝。
 - 参数 schema 在远端调用前执行基础校验。

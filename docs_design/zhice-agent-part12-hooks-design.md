@@ -84,7 +84,7 @@ Hook 只能增加业务限制或展示信息，不能减少核心限制、跳过
 - 不让 Hook 直接调用 WebSocket、SSE response 或前端 API。
 - 不把瞬态进度 Event 写入 Session JSONL。
 - 不用 Hook 替代 RBAC、危险确认、workspace guard 或 Tool 自身安全检查。
-- 不实现递归脚本扫描、热加载、在线安装、远端 Hook 或 Hook 市集；只加载 `${ZHICE_AGENT_WORKSPACE}/config/hooks.yml` 显式注册的本地 Python 脚本。
+- 不实现递归脚本扫描、热加载、在线安装、远端 Hook 或 Hook 市集；只加载 `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `hooks` 分区显式注册的本地 Python 脚本。
 - 不通过解析 `exec.command` 猜测 Skill 名作为长期协议。
 - Part 12 本身不实现 SkillExecutor、`skill.*`、ProgressSink、Subagent 或跨进程事件总线；其中正式 Skill Runtime 已由 Part 18 独立实现。
 
@@ -122,7 +122,7 @@ mcp_elicitation_response
 - AgentLoop 已覆盖 context/LLM/tool/turn 的正常、失败、停止和确认等待路径。
 - WS/SSE/CLI 复用同一语义；旧交互事件保持独立兼容。
 - 前端按 `turn_id + sequence` 更新安全短状态，不显示思维链或虚假百分比。
-- `${ZHICE_AGENT_WORKSPACE}/config/hooks.yml` 显式注册真实 pre/post Hook；无配置时不创建 Hook 子进程。
+- `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `hooks` 分区显式注册真实 pre/post Hook；无配置时不创建 Hook 子进程。
 - Activity/Audit/trace 继续承担持久诊断，RuntimeEvent 不写入 Session。
 
 ## 6. RuntimeEvent 协议
@@ -408,7 +408,7 @@ class HookRuntime(Protocol):
     def run_post_tooluse(self, request: PostToolHookRequest) -> PostToolHookResult: ...
 ```
 
-运行时从 `${ZHICE_AGENT_WORKSPACE}/config/hooks.yml` 按配置顺序加载 Hook。配置只允许显式本地 Python 脚本，脚本路径解析后必须位于 `ZHICE_AGENT_WORKSPACE` 内；不扫描目录，不执行远端内容。
+运行时从 `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `hooks` 分区按配置顺序加载 Hook。配置只允许显式本地 Python 脚本，脚本路径解析后必须位于 `ZHICE_AGENT_WORKSPACE` 内；不扫描目录，不执行远端内容。
 
 ```yaml
 version: 1
@@ -502,7 +502,7 @@ post Hook timeout、异常或非法输出 fail open：保留真实 ToolResult �
 
 ### 12.5 无 Hook 与真实 fixture
 
-- 无 `hooks.yml` 或空 `hooks` 时不创建子进程，RuntimeEvent 与 Tool 主链保持完整。
+- 无 `hooks` 分区或空 `hooks.entries` 时不创建子进程，RuntimeEvent 与 Tool 主链保持完整。
 - 测试提供 workspace 内真实 Python Hook fixture，覆盖 continue、block、modify、enrich、timeout、派生子进程树回收、非法输出和脚本异常。
 - fixture 通过 stdin/stdout JSON 走真实 Runner，不直接 import Hook 脚本内部函数绕过边界。
 

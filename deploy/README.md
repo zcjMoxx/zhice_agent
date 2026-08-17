@@ -188,7 +188,7 @@ SSH 登录密码可用于该用户的 sudo；若两者不同，当前一键流�
 python -m pip install ".[deploy]"
 ```
 
-Dockerfile 仍只安装 `.[gateway,qq]`，不会把 Paramiko 打入运行镜像。
+Dockerfile 安装 `.[gateway,qq,hotel-browser]` 和 Playwright bundled Chromium，保证容器内携程只读酒店查询可用；它仍不会把只供发布端使用的 Paramiko 打入运行镜像。Linux 容器显式使用 bundled Chromium，不依赖系统 Chrome。携程浏览器 profile 位于 `state/browser_profiles/ctrip`，随 `zhice-state` 命名卷跨重启保留；账号密码继续通过 `deploy/private/.env` 或平台 Secret 注入，不能写入仓库。
 `deploy` extra 支持 Paramiko `2.8` 至 `3.x`；流水线通过 helper 的安全 preflight 检查依赖，helper 只精确抑制 Paramiko 导入阶段的 `CryptographyDeprecationWarning`，普通导入异常仍会明确提示安装 `.[deploy]`。远端 sudo/deploy 等待最多 300 秒，超时会关闭 SSH channel 并失败退出，避免一键发布永久挂起。
 
 ## 底层推送与云端部署

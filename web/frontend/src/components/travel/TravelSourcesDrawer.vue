@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { ExternalLink, X } from "@lucide/vue";
 import type { TravelEvidence } from "@/api/types";
 import { needsTravelRefresh } from "@/travel/freshness";
+import { travelFreshnessLabel, travelProviderLabel } from "@/travel/sourceLabels";
 
 const props = defineProps<{ evidence: TravelEvidence[] }>();
 const open = ref(false);
@@ -15,7 +16,7 @@ function safeUrl(value: string): string {
   try { const parsed = new URL(value); return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : ""; }
   catch { return ""; }
 }
-const label: Record<string, string> = { official_api: "官方 API", live_query: "实时查询", official_page: "官方页面", web_article: "网页攻略", social_post: "个体体验", model_estimate: "模型估算" };
+const label: Record<string, string> = { official_api: "官方接口", live_query: "实时查询", official_page: "官方页面", web_article: "网页攻略", social_post: "个体体验", model_estimate: "规划估算" };
 </script>
 
 <template>
@@ -27,7 +28,7 @@ const label: Record<string, string> = { official_api: "官方 API", live_query: 
         <p class="travel-source-note">社交内容只作为个体体验；页面不重新发布完整正文、图片或视频。</p>
         <div class="travel-source-list">
           <article v-for="item in safeEvidence" :key="item.evidence_id">
-            <div class="travel-source-meta"><span :data-freshness="item.freshness">{{ item.freshness }}</span><b>{{ label[item.source_type] || item.source_type }}</b><em v-if="item.needsRefresh">需要重新查询</em><small>{{ item.provider }}</small></div>
+            <div class="travel-source-meta"><span :data-freshness="item.freshness">{{ travelFreshnessLabel(item.freshness) }}</span><b>{{ label[item.source_type] || '其他来源' }}</b><em v-if="item.needsRefresh">需要重新查询</em><small>{{ travelProviderLabel(item.provider) }}</small></div>
             <h3>{{ item.title }}</h3><p>{{ item.excerpt }}</p>
             <dl><dt>发布</dt><dd>{{ item.published_at || '未提供' }}</dd><dt>查询</dt><dd>{{ item.retrieved_at }}</dd><dt>数据时点</dt><dd>{{ item.data_as_of || '未提供' }}</dd><dt>可信度</dt><dd>{{ Math.round(item.confidence * 100) }}%</dd></dl>
             <a v-if="item.safeUrl" :href="item.safeUrl" target="_blank" rel="noopener noreferrer"><ExternalLink :size="14" />打开原链接</a>

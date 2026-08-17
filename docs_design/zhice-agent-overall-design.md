@@ -1252,40 +1252,37 @@ contexts/sessions/
 
 ### 13.1 配置文件
 
-`${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`：
+`${ZHICE_AGENT_WORKSPACE}/config/models.json`：
 
 ```json
 {
-  "default": "openai_gpt5",
-  "openai_gpt5": {
-    "protocol": "openai",
-    "provider": "",
-    "base_url": "https://api.openai.com/v1",
-    "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
-    "model": "gpt-5.5",
-    "supported_models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
-    "context_window": 131072,
-    "max_tokens": 16384,
-    "temperature": 0.7,
-    "priority": 1,
-    "enabled": true,
-    "role": "default"
+  "_说明": "请将所有以‘请填写’开头的值替换为真实配置",
+  "schema_version": 1,
+  "routing": {
+    "chat": "请填写端点名称/请填写模型名称",
+    "compaction": "请填写端点名称/请填写模型名称"
   },
-  "litellm_claude": {
-    "protocol": "litellm",
-    "provider": "anthropic",
-    "api_key": "${ANTHROPIC_API_KEY}",
-    "model": "claude-opus-4.8",
-    "supported_models": ["claude-opus-4.8", "claude-opus-4.6"],
-    "context_window": 200000,
-    "max_tokens": 16384,
-    "temperature": 0.7,
-    "priority": 1,
-    "enabled": true,
-    "role": "default"
-  }
+  "chat": {
+    "请填写端点名称": {
+      "protocol": "openai",
+      "provider": "",
+      "base_url": "请填写模型服务地址",
+      "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
+      "model": "请填写模型名称",
+      "supported_models": ["请填写模型名称"],
+      "context_window": 131072,
+      "max_tokens": 16384,
+      "temperature": 0.7,
+      "priority": 1,
+      "enabled": true,
+      "role": "default"
+    }
+  },
+  "embedding": {}
 }
 ```
+
+仓库中的 `config/models.example.json` 是 `zcagent init` 的唯一模型模板；初始化只复制，不在 Python 中重新拼 endpoint。运行态文件已存在时默认保留，显式 `--force` 才覆盖。
 
 `protocol="openai"` 表示 `base_url` 直接指向 OpenAI-compatible 模型网关。`protocol="litellm"` 表示在 ZhiCe-Agent 进程内调用 LiteLLM SDK；`base_url` 对 litellm 是可选字段，只在需要自定义 `api_base` 时填写。预算配置只保留两个字段：`context_window` 是总窗口，缺失时默认 `131072`；`max_tokens` 是单次最大输出并直接传给当前 Provider。有效输入预算固定为 `context_window - max_tokens`。
 
@@ -1332,14 +1329,9 @@ CLI --workspace
 ```text
 ${ZHICE_AGENT_WORKSPACE}/
 +-- config/
-|   +-- llm_endpoints.json
-|   +-- config.yml       # skills/operations/channels/hooks/mcp 等统一运行配置
-|   +-- mcp.json
-|   +-- subagents.yml
-|   +-- hooks.yml
-|   +-- channels.yml
-|   +-- context.yml
-|   +-- embedding_endpoints.json
+|   +-- models.json      # chat/compaction/embedding endpoint 与路由
+|   +-- config.yml       # context/skills/subagents/channels/hooks/mcp/travel/operations
+|   +-- .env             # runtime env，不定义 workspace
 +-- prompts/
 +-- contexts/
 |   +-- sessions/
@@ -1360,14 +1352,14 @@ ${ZHICE_AGENT_WORKSPACE}/
 - 默认工作目录是 `Path.home() / ".zhice"`；部署和本地启动使用同一解析协议，不以源码目录充当运行工作区。
 - workspace 优先级是 `--workspace > ZHICE_AGENT_WORKSPACE > 默认目录`；`${workspace}/config/.env` 只能提供运行变量，不能反向定义 workspace。
 - 显式 `--env-file` 可兼容提供 workspace；项目 `config/.env` 只保留遗留迁移 fallback。
-- 仓库只提交 `config/llm_endpoints.example.json`，不提交真实 `llm_endpoints.json`。
-- 本地运行态 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 统一使用 `api_key` 字段，可写直接本地值，也可写 `${ENV_VAR}` 占位。
+- 仓库只提交 `config/models.example.json`，不提交真实 `models.json`。
+- 本地运行态 `${ZHICE_AGENT_WORKSPACE}/config/models.json` 统一使用 `api_key` 字段，可写直接本地值，也可写 `${ENV_VAR}` 占位。
 - endpoint 支持可选 `context_window`、输出侧 `max_tokens`、`priority`、`enabled`、`role`、`supported_models`，并支持 keyed object 与 `"endpoints": [...]` 两种配置形态；`context_window` 缺失时默认 `131072`。
 - 顶层 `"default": "endpoint_name"` 或 `"default": {"ref": "endpoint_name"}` 只作为别名，不是必须存在的真实 endpoint。
 - `zcagent init` 完成提示必须区分核心与可选配置：LLM endpoint 是聊天前置条件；预算字段已有默认值；Skill source、MCP、Subagent 和 Hook 只在显式启用时配置。已有非法 endpoint 文件应提示直接编辑，普通 `init` 不会覆盖现有文件。
 - 普通 `zcagent init` 默认从唯一公开模板 `config/.env.example` 补齐 `${workspace}/config/.env`；已有 env 保留，`--force` 覆盖，`--write-env` 仅作为兼容参数且不再改变生成结果。
-- `channels.yml`、`mcp.json`、`subagents.yml` 和 `hooks.yml` 位于 workspace `config/`，未配置表示对应可选能力未启用。
-- `context.yml` 缺失时使用安全默认值；`embedding_endpoints.json` 缺失时上下文 capability 标记为 degraded，但完整历史、确定性历史查询、compaction 和 FTS/BM25 继续工作。
+- Channels、MCP、Subagents、Hooks、Context 和 Travel 都位于 workspace `config/config.yml` 的独立分区；分区缺失时按对应模块的安全默认或 disabled 处理。
+- `models.json` 的 embedding route/endpoint 缺失时上下文 capability 标记为 degraded，但完整历史、确定性历史查询、compaction 和 FTS/BM25 继续工作。
 - QQ AppID/AppSecret、微信凭证和其它 Secret 从 `${workspace}/config/.env`、进程环境或部署平台 Secret 注入；配置文件只保存环境变量引用或非敏感字段。
 
 ---
@@ -1983,7 +1975,7 @@ Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费
 10. 工具调用有最大轮数限制。
 11. `zcagent init` 能生成本地运行态文件。
 12. `zcagent gateway --check` 能验证本地 gateway 配置并快速退出。
-13. `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 能配置多个 endpoint，并按 priority failover。
+13. `${ZHICE_AGENT_WORKSPACE}/config/models.json` 能配置多个 endpoint，并按 priority failover。
 14. `/model` 能按当前 session 查看、列出、切换和 reset endpoint/model 偏好。
 15. `zcagent gateway` 能启动本地 FastAPI/Web 服务，默认地址为 `http://127.0.0.1:10086/`。
 16. Web 前端能通过 `/ws` 发送消息、展示 pending/streaming 状态和 assistant Markdown。

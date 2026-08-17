@@ -38,8 +38,17 @@ class _AnswerLLM:
                     }
                 ],
             )
-        assert names == ["discover_tools", "read_file"]
+        assert names == ["read_file"]
         return LLMResponse(content="child result")
+
+
+class _PreactivatedAnswerLLM:
+    def chat(self, messages, tools=None):
+        assert messages[0]["role"] == "system"
+        assert [item["function"]["name"] for item in tools or []] == [
+            "read_file",
+        ]
+        return LLMResponse(content="preactivated child result")
 
 
 class _Tools:
@@ -141,3 +150,52 @@ def test_child_factory_uses_independent_loop_session_and_runtime_scope(tmp_path)
     assert all(event["agent_id"] == "subagent-1" for event in runtime_events)
     assert all(event["task_id"] == "task-1" for event in runtime_events)
     assert all(event["depth"] == 1 for event in runtime_events)
+
+
+def test_child_factory_preactivates_only_profile_initial_tools(tmp_path):
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "subagent.md").write_text("child identity", encoding="utf-8")
+    factory = ChildAgentFactory(
+        prompt_loader=PromptLoader(prompts),
+        sessions_root=tmp_path / "sessions",
+        parent_tools=_Tools(),
+        llm_factory=lambda profile: _PreactivatedAnswerLLM(),
+        tool_provider_factory=(
+            lambda workspace, profile, context, on_event, identity, skills: _Tools()
+        ),
+    )
+    context = ToolExecutionContext(
+        actor=_actor(),
+        session_id="parent-session",
+        turn_id="parent-turn",
+        turn_index=1,
+        channel="cli",
+        root_session_id="parent-session",
+        root_turn_id="parent-turn",
+    )
+    identity = ChildRunIdentity(
+        batch_id="batch-1",
+        task_id="task-1",
+        subagent_id="subagent-1",
+        child_session_id="child-1",
+        child_turn_id="child-turn-1",
+    )
+    profile = SubagentProfile(
+        name="explorer",
+        description="inspect",
+        tools=("read_file", "exec"),
+        initial_tools=("read_file",),
+        denied_tools=("exec", "delegate_tasks"),
+    )
+
+    output = factory.run_child(
+        SubagentTask("task-1", "child task", "explorer"),
+        profile,
+        context,
+        identity,
+        tmp_path,
+        cancellation_token=CancellationToken(),
+    )
+
+    assert output == "preactivated child result"

@@ -12,7 +12,7 @@
 - QQ 账号级 Adapter 状态在 Runtime 内聚合成唯一 `channel.qq`；公共 health 和管理监控不暴露 `qq.main` 等内部账号 key，混合多账号状态降级为渠道级状态。
 - 聊天 Web 不渲染或主动请求 capability 启动横幅；health 状态保留给诊断、系统监控和自动化检查。
 - Gateway/CLI缺少`config.yml.skills`时按未启用的可选扩展静默处理；分区存在但非法时只记录一次结构化`skills.runtime_unavailable` WARNING，包含稳定code且不泄露绝对路径。
-- `/` 从可替换 `static_dir` 返回 SPA 首页；`/_setup` 和 `/admin` 继续返回同一 Vue 入口并保留服务端安全条件。
+- `/` 从可替换 `static_dir` 返回 SPA 首页；`/_setup`、`/admin`、`/travel` 和 `/bind/qq` 继续返回同一 Vue 入口并保留服务端安全条件；所有 SPA 入口使用 `Cache-Control: no-store`，避免部署后旧入口继续引用过期资源。
 - 默认静态目录定位 `agent/web/static` 包内 production build；首页引用 `/static/assets/*`，Python wheel 运行不要求 Node.js。
 - `GET /api/sessions` 返回会话摘要并把更新时间格式化为 ISO 8601。
 - `GET /api/sessions/{session_id}` 返回指定会话消息。
@@ -30,6 +30,8 @@
 - Gateway lifespan对正常渠道输出`channel.enabled/channel.ready`，禁用/异常渠道记录`channel.skip/channel.start_failed`，关闭记录`channel.stop`；外部渠道及ready日志严格遵循`config.yml.channels`映射顺序；可选渠道失败不阻断Web，日志不包含credential或外部账号标识。
 - WebSocket `hello client=web` 返回 web command profile 能力，默认不支持 `/history` 和 `/exit`。
 - WebSocket `hello client=external` 打开 external command profile 能力，`/history` 进入 external profile，`/exit` 关闭当前 WS 连接。
+- 旅行接待的 `travel.planning_confirmed` 在 Turn 完成前通过 WebSocket 实时转发，前端无需刷新即可从 intake 切换到 planning；该事件不作为规划终态，后端继续同请求自动续跑。
+- 旅行规划最多跨 6 个持久阶段 Turn 自动继续；后续阶段的一次 LLM Provider 瞬时失败从当前旅行状态生成新 Turn 重试，第二次失败仍返回结构化错误。
 - `/sessions rename <id> <title>`、`/sessions delete <id>` 和 `/sessions delete` 在 runtime slash command 层有覆盖。
 - assistant Markdown 使用本地打包的 Marked、DOMPurify 与 KaTeX 支持常用行内/块级公式；`\\bm{}` 映射到 `\\boldsymbol{}`，不再依赖运行时 CDN。
 
@@ -48,6 +50,7 @@
 - WS 使用 `runtime_event` 信封转发 RuntimeEvent；SSE 使用 `event: runtime`，`skill.*` 的 `skill_run_id` 也必须原样保留，且均保持旧 text/status/interaction 兼容。
 - 浏览器 RuntimeEvent reducer 按 turn_id + sequence 忽略旧状态，并在 terminal turn Event 清理运行状态。
 - Subagent child RuntimeEvent 按 root session/turn 归并，并按 agent/task 维护独立 sequence 与并行任务状态，不能跨 child 用同一 sequence 覆盖。
+- WebSocket 转发 Child RuntimeEvent 时 payload 保留真实 Child 关联字段，外层信封使用 root session/turn，使旅行页能够接收所属并行任务进度。
 - Web `/help` 只新增顶层 `/subagent`；裸命令显示 mode、force-once、可用 Profile，并在 Tip 中提示 `auto/off/once`。`/clear` 与清空当前 Session 只清 one-shot、保留 mode；旧 `/reset` 不再支持。QQ群帮助展示 `/clear`。
 - Subagent unavailable 时，Owner 的 `/subagent` 与 force-once 返回真实 message/hint；普通用户只看到暂时不可用并联系管理员，不直接展示 JSON、Prompt 文件名、初始化命令、`code` 或 `cause_code`；one-shot 仍只消费一次。公共 health 同样只返回通用 capability 状态。
 - Subagent unavailable 且 Session 为 auto 时，普通 Web Turn 注入只返回通用不可用文案的 `delegate_tasks` facade，内部 cause 仅写日志与 trace；它不创建 child，防止模型用其它 Tool 冒充明确的子代理请求。
@@ -103,14 +106,15 @@
 - typed API client 保留稳定 HTTP error，typed WebSocket client 保留 hello/message/stop/confirmation/MCP elicitation frame；RuntimeEvent reducer 覆盖乱序、终态和 child 独立 sequence。
 - Session 窄侧栏不显示消息数；三点菜单支持 ESC 关闭、重命名和二次确认删除；外部群 Session 只读并可 fork 到 Web。
 - 设置中心包含常规、个性化、个人资料、账号与安全、渠道连接；主题按登录身份保存在 browser localStorage，支持系统/浅色/暗色曜石。
-- 管理后台按权限独立显示概览、账号、角色、运行诊断和高级设置；安全审计收在高级设置中，运行诊断默认展示带账号与 Session 标题的失败记录；所有内置 permission key 都有中文能力域映射，未知 key 回退技术名称，Owner 固定只读，Admin 角色权限仅允许 Owner 修改。
+- 管理后台按权限独立显示概览、账号、角色、运行诊断和安全审计；运行诊断默认展示带账号与 Session 标题的失败记录；所有内置 permission key 都有中文能力域映射，未知 key 回退技术名称，Owner 固定只读，Admin 角色权限仅允许 Owner 修改。
 - `GET /api/admin/monitor` 需要 `turn.read.any`，只聚合 Gateway、Capability 与结构化 Runtime Activity 真值，不返回根因诊断。
 - `GET /api/admin/diagnostics` 独立要求 `diagnostics.system.use`；Owner 默认可查，普通角色不能用 `turn.read.any` 替代该权限，并支持 component/error_code 等有界筛选。
 - `GET /api/audit/events` 保持旧 `limit/session_id/turn_id` 兼容，并增加事件、操作者、结果、时间和 cursor 筛选；`audit.export` 独立保护 CSV 导出。
 - Gateway lifespan 对同一 workspace 持有跨平台单实例锁；关闭时拒绝新 Turn、取消 active Turn 与 MCP 调用，并在释放锁前关闭渠道、Memory 和 MCP。
 - `run_gateway` 在构造 Runtime 前取得 workspace 单实例锁；Uvicorn 启动、绑定或 lifespan 进入失败时仍幂等关闭 Runtime 并释放锁，不遗留已初始化的后台组件。
 - 删除仍有活动 Turn 的 Session 时，Runtime 先发送取消并等待 Turn 注销完成，再删除 Session 文件和索引；超时则保留 Session 并返回失败，避免后台回写形成孤儿 CLI 会话。
-- “MCP 与 Skills”中的小红书登录管理仅 Owner 可用：安全状态、检查登录、启动固定扫码程序和重启自有 sidecar；非 Owner API 返回 403，响应和审计不包含 Cookie、路径、PID 或原始工具输出。
+- “MCP 与 Skills”将协议服务和外部账号分区：MCP 监控只统计真实 Server；小红书连接、Catalog、调用与服务重启留在 MCP 卡，扫码/Cookie 登录移入仅 Owner 可见的“外部平台账号”。非 Owner API 返回 403，响应和审计不包含 Cookie、路径、PID 或原始工具输出。
+- 携程只进入“外部平台账号”，不进入 MCP 网格、Server 数或 Catalog；与小红书账号卡双列等高。账号 API 使用 `/api/admin/external-platforms/ctrip/*` 并返回 `platform_id=ctrip`；保存接口将密码写入 Git 忽略的 runtime `config/.env` 并立即启动登录助手，Linux/Docker/云平台也可使用外部 Secret 注入；状态、删除与重登响应只返回脱敏账号提示和稳定码，非 Owner 403，审计使用 `external_platform_account` 且不记录账号或密码。
 - 小红书登录检查兼容 MCP structured content 与 text content 形成的连续 JSON 文档；真实 success/OK 结果缓存为 authenticated，页面刷新不再误判为 unavailable。
 
 ## Part 18B Skill 与 Ops Web 投影覆盖

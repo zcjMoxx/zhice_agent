@@ -42,7 +42,7 @@ Part 13 不是把子代理限制成只能读文件。Skill、`exec` 和 MCP 均�
 Part 13 当前已经实现：
 
 - `delegate_tasks` 批量 Tool 与有界 `ThreadPoolExecutor` fan-out/fan-in；
-- fail-closed `subagents.yml` Profile Loader、父 Tool/Skill/MCP 能力交集和 schema/dispatch 双重过滤；
+- fail-closed `config.yml` `subagents` Profile Loader、父 Tool/Skill/MCP 能力交集和 schema/dispatch 双重过滤；
 - context-aware Tool dispatch，普通旧 Tool 保持两参数兼容；
 - 每个 task 独立 AgentLoop、LLM provider facade、child Session、CancellationToken 和 RuntimeEvent scope；
 - shared-readonly、进程级 shared-exclusive lane 与 Git worktree lease；
@@ -242,7 +242,7 @@ max_batches_per_parent_turn = 1
 运行态：
 
 ```text
-${ZHICE_AGENT_WORKSPACE}/config/subagents.yml
+${ZHICE_AGENT_WORKSPACE}/config/config.yml#subagents
 ```
 
 仓库模板：
@@ -953,4 +953,4 @@ Part 13 关闭必须满足：
 
 第一阶段先完成并行 manager/worker 闭环及真实工具安全边界，再根据运行数据扩展。
 
-Part 19 已增加仓库模板 `travel-research` Profile：shared-readonly，只允许高德、Tavily、12306、Open-Meteo 和 xhs-readonly 五类 MCP server pattern，最多三个 child、depth 仍为 1。quick 模式明确不委派；deep 模式只做交通天气、住宿景点、攻略避坑三个独立分支，部分失败由父 Agent写入 unknowns 后继续 fan-in。当前应用口径见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。
+Part 19 的旅行 Profile 不再复制到仓库全局模板，而由旅行应用在对应 Turn 内按阶段注入：候选前固定为交通天气、住宿景点、攻略避坑三个互斥 shared-readonly Profile，选择后固定为住宿价格和市内路线两个 Profile，depth 仍为 1。quick/deep 都使用相同并发结构；部分失败由父 Agent写入 unknowns 后继续 fan-in。Profile 请求可选 `fast` 角色，没有该角色端点时继承当前主模型。当前应用口径见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。

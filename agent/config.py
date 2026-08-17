@@ -35,6 +35,15 @@ _ENDPOINT_ROUTE_KEYS = {
     "max_tokens",
     "pricing",
 }
+MANAGED_APPLICATION_PROMPTS = (
+    "memory_policy.md",
+    "skills_intro.md",
+    "tool_use_policy.md",
+    "travel_intake.md",
+    "travel_planning.md",
+    "travel_planning_continuation.md",
+    "travel_requirement_extraction.md",
+)
 
 
 @dataclass(frozen=True)
@@ -111,6 +120,10 @@ class AppConfig:
         self.contexts_dir.mkdir(parents=True, exist_ok=True)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.local_memory_dir.mkdir(parents=True, exist_ok=True)
+        self.users_contexts_dir.mkdir(parents=True, exist_ok=True)
+        self.shared_readonly_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.mcp_runtime_dir.mkdir(parents=True, exist_ok=True)
         self.extends_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -242,8 +255,9 @@ def _load_llm_endpoint_config(config_dir: Path) -> dict[str, object]:
     normalized: dict[str, object] = dict(chat)
     for alias in ("chat", "compaction"):
         value = routing.get(alias)
-        if isinstance(value, str) and value.strip():
-            normalized["default" if alias == "chat" else alias] = value.strip()
+        alias_name = "default" if alias == "chat" else alias
+        if isinstance(value, str) and value.strip() and alias_name not in normalized:
+            normalized[alias_name] = value.strip()
     return normalized
 
 
@@ -257,84 +271,25 @@ def init_runtime_files(
     create_context_config: bool = True,
     create_embedding_config: bool = True,
     create_prompts: bool = True,
-    endpoint_name: str = "default",
-    protocol: str = "openai",
-    base_url: str = "https://api.openai.com/v1",
-    api_key: str = "",
-    model: str = "gpt-5.5",
-    max_tokens: int = 16384,
-    context_window: int = 131072,
-    temperature: float = 0.7,
     force: bool = False,
 ) -> list[Path]:
-    """Create local runtime config templates for the second-stage runnable setup.
+    """Copy repository-owned templates into one local runtime workspace.
 
-    The generated files are local working copies, not committed secrets. Existing
-    files are skipped unless force=True so rerunning init can fill missing files
-    without replacing a user's real endpoint configuration. Endpoint values such
-    as protocol, base_url, and model are scaffold defaults only; runtime calls
-    always use the generated workspace config file.
+    Existing files are skipped unless force=True, so rerunning init fills missing
+    files without replacing user configuration. Model structure has one source of
+    truth: config/models.example.json. Users edit its copied runtime file manually.
     """
 
     written: list[Path] = []
     del create_env  # Retained only for source compatibility; env initialization is standard.
     config.ensure_dirs()
-    _validate_init_token_budget(
-        context_window=context_window,
-        max_tokens=max_tokens,
-    )
 
     env_path = config.config_dir / ".env"
-    if _write_text_once(env_path, _build_env_template(), force=force):
+    if _write_bytes_once(env_path, _build_env_template(), force=force):
         written.append(env_path)
     if create_llm_config or create_embedding_config:
         llm_path = config.config_dir / "models.json"
-        endpoint_payload = {
-            "protocol": protocol,
-            "provider": "",
-            "base_url": base_url,
-            "api_key": api_key,
-            "model": model,
-            "supported_models": [model],
-            "max_tokens": max_tokens,
-            "context_window": context_window,
-            "temperature": temperature,
-            "priority": 1,
-            "enabled": True,
-            "role": "default",
-            "pricing": {
-                "input_per_million": 0,
-                "output_per_million": 0,
-            },
-        }
-        route = f"{endpoint_name}/{model}"
-        payload = {
-            "schema_version": 1,
-            "routing": {
-                "chat": route,
-                "compaction": route,
-                "embedding": "default_embedding",
-            },
-            "chat": {endpoint_name: endpoint_payload},
-            "embedding": {
-                "default_embedding": {
-                    "protocol": "openai",
-                    "base_url": "https://api.openai.com/v1",
-                    "api_key": "${ZHICE_EMBEDDING_API_KEY}",
-                    "model": "text-embedding-3-small",
-                    "supported_models": ["text-embedding-3-small"],
-                    "dimensions": 1536,
-                    "timeout": 30,
-                    "batch_size": 16,
-                    "enabled": False,
-                }
-            },
-        }
-        if _write_text_once(
-            llm_path,
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            force=force,
-        ):
+        if _write_bytes_once(llm_path, _build_models_template(), force=force):
             written.append(llm_path)
     if any(
         (
@@ -347,7 +302,11 @@ def init_runtime_files(
         if not source.is_file():
             raise InitConfigurationError(f"Unified config template is missing: {source}")
         target = config.config_dir / "config.yml"
-        if _write_text_once(target, source.read_text(encoding="utf-8"), force=force):
+        if _write_bytes_once(
+            target,
+            _read_utf8_template(source, label="Unified config template"),
+            force=force,
+        ):
             written.append(target)
     if create_prompts:
         source_prompts = _project_root() / "prompts"
@@ -355,7 +314,11 @@ def init_runtime_files(
             raise InitConfigurationError(f"Source prompts directory is missing: {source_prompts}")
         for source in sorted(source_prompts.glob("*.md")):
             target = config.prompts_dir / source.name
-            if _write_text_once(target, source.read_text(encoding="utf-8"), force=force):
+            if _write_bytes_once(
+                target,
+                _read_utf8_template(source, label="Prompt template"),
+                force=force,
+            ):
                 written.append(target)
     return written
 
@@ -372,6 +335,30 @@ def load_dotenv_file(path: Path, *, excluded_keys: set[str] | None = None) -> No
         key = key.strip()
         if key and key not in excluded and key not in os.environ:
             os.environ[key] = _strip_dotenv_quotes(value.strip())
+
+
+def sync_managed_application_prompts(config: AppConfig) -> list[Path]:
+    """Refresh code-coupled application prompts without touching user prompts."""
+
+    source_dir = _project_root() / "prompts"
+    updated: list[Path] = []
+    config.prompts_dir.mkdir(parents=True, exist_ok=True)
+    for name in MANAGED_APPLICATION_PROMPTS:
+        source = source_dir / name
+        if not source.is_file():
+            raise InitConfigurationError(f"Managed application prompt is missing: {source}")
+        content = source.read_text(encoding="utf-8")
+        target = config.prompts_dir / name
+        if target.is_file() and target.read_text(encoding="utf-8") == content:
+            continue
+        temporary = target.with_name(f".{target.name}.tmp")
+        try:
+            temporary.write_text(content, encoding="utf-8")
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        updated.append(target)
+    return updated
 
 
 def bootstrap_dotenv(
@@ -423,50 +410,69 @@ def _read_dotenv_text(path: Path) -> str:
 
 
 def _strip_dotenv_quotes(value: str) -> str:
-    """Remove matching single or double quotes around one dotenv value."""
+    """Decode JSON-style double quotes or strip matching single quotes."""
 
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return value[1:-1]
+        return str(decoded)
+    if len(value) >= 2 and value[0] == value[-1] == "'":
         return value[1:-1]
     return value
 
 
-def _write_text_once(path: Path, content: str, *, force: bool) -> bool:
-    """Write a text file, returning False when an existing file is preserved."""
+def _write_bytes_once(path: Path, content: bytes, *, force: bool) -> bool:
+    """Write exact template bytes without platform newline conversion."""
 
     if path.exists() and not force:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    path.write_bytes(content)
     return True
 
 
-def _build_env_template() -> str:
+def _build_env_template() -> bytes:
     """Read the repository's single public runtime env template as UTF-8."""
 
     source = _project_root() / "config" / ".env.example"
     if not source.is_file():
         raise InitConfigurationError(f"Runtime env template is missing: {source}")
+    return _read_utf8_template(source, label="Runtime env template")
+
+
+def _read_utf8_template(source: Path, *, label: str) -> bytes:
+    """Read one bundled template exactly while rejecting invalid text encoding."""
+
+    content = source.read_bytes()
     try:
-        return source.read_text(encoding="utf-8")
+        content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InitConfigurationError(f"{label} is not valid UTF-8: {source}") from exc
+    return content
+
+
+def _build_models_template() -> bytes:
+    """Read and structurally validate the single public model template."""
+
+    source = _project_root() / "config" / "models.example.json"
+    if not source.is_file():
+        raise InitConfigurationError(f"Model config template is missing: {source}")
+    try:
+        content = source.read_bytes()
+        payload = json.loads(content.decode("utf-8"))
     except UnicodeDecodeError as exc:
         raise InitConfigurationError(
-            f"Runtime env template is not valid UTF-8: {source}"
+            f"Model config template is not valid UTF-8: {source}"
         ) from exc
-
-
-def _validate_init_token_budget(
-    *,
-    context_window: int,
-    max_tokens: int,
-) -> None:
-    """Reject init arguments that would generate an unusable endpoint config."""
-
-    if context_window < 1:
-        raise InitConfigurationError("context_window must be >= 1")
-    if max_tokens < 1:
-        raise InitConfigurationError("max_tokens must be >= 1")
-    if max_tokens >= context_window:
-        raise InitConfigurationError("max_tokens must be less than context_window")
+    except json.JSONDecodeError as exc:
+        raise InitConfigurationError(f"Model config template is not valid JSON: {source}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise InitConfigurationError("Model config template must be a schema_version 1 object")
+    if not isinstance(payload.get("routing"), dict) or not isinstance(payload.get("chat"), dict):
+        raise InitConfigurationError("Model config template must contain routing and chat objects")
+    return content
 
 
 def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
@@ -511,6 +517,10 @@ def _endpoint_from_mapping(name: str, data: dict[str, object]) -> LLMEndpoint:
     if "/" in model:
         raise LLMConfigurationError(
             f"LLM endpoint {name!r} model should be an unprefixed model name"
+        )
+    if supported_models and model not in supported_models:
+        raise LLMConfigurationError(
+            f"LLM endpoint {name!r} default model must be listed in supported_models"
         )
     priority = _coerce_int(data.get("priority"), 1, "priority")
     if priority < 1:

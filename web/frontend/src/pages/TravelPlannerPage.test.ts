@@ -4,6 +4,7 @@ import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "@/api/client";
+import type { TravelPlan } from "@/api/types";
 import { useAuthStore } from "@/stores/auth";
 import { useTravelStore } from "@/stores/travel";
 import TravelPlannerPage from "./TravelPlannerPage.vue";
@@ -59,9 +60,93 @@ describe("TravelPlannerPage generation continuity", () => {
     expect(wrapper.get(".travel-new-button").attributes("title")).toContain("原计划");
     wrapper.unmount();
   });
+
+  it("scrolls to finalization progress immediately after choosing a candidate", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    const { wrapper, travel } = await mountPage({ interactiveProgress: true });
+    let finishSelection: (() => void) | undefined;
+    vi.spyOn(travel, "chooseCandidate").mockImplementation(
+      () => new Promise<void>((resolve) => { finishSelection = resolve; }),
+    );
+
+    await wrapper.get(".test-choose-candidate").trigger("click");
+    await wrapper.vm.$nextTick();
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+    finishSelection?.();
+    await flushPromises();
+    wrapper.unmount();
+  });
+
+  it("shows the continue action for a failed session whose selected candidate was restored", async () => {
+    vi.spyOn(api, "travelDraft").mockResolvedValue({
+      session_id: "travel-failed",
+      phase: "planning",
+      draft: {},
+      handoff_question: "",
+      messages: [],
+    });
+    vi.spyOn(api, "travelProgress").mockResolvedValue({ session_id: "travel-failed", items: [] });
+    vi.spyOn(api, "travelCandidateReview").mockResolvedValue({
+      session_id: "travel-failed",
+      status: "selected",
+      recommended_candidate_id: "candidate-a",
+      selected_candidate_id: "candidate-a",
+      candidates: [],
+      created_at: "",
+      updated_at: "",
+    });
+    const { wrapper, travel } = await mountPage();
+
+    await travel.openWorkItem({
+      session_id: "travel-failed",
+      plan_id: "",
+      status: "failed",
+      title: "大理五日游",
+      preview: "重庆到大理",
+      updated_at: "2026-08-16T00:00:00Z",
+      error_code: "TRAVEL_PLAN_NOT_FINALIZED",
+    });
+    await flushPromises();
+
+    expect(wrapper.get(".travel-error-recovery button").text()).toBe("继续完成当前方案");
+    wrapper.unmount();
+  });
+
+  it("renders the real flat train and hotel fields instead of placeholder dashes", async () => {
+    const { wrapper, travel } = await mountPage();
+    travel.activePlan = evidenceRichPlan();
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.text()).toContain("G177 · 北京朝阳站 → 沈阳站");
+    expect(wrapper.text()).toContain("08:50 → 11:19");
+    expect(wrapper.text()).toContain("¥355/人");
+    expect(wrapper.text()).toContain("沈阳中街故宫玫瑰亚朵酒店");
+    expect(wrapper.text()).toContain("2026-08-20 入住");
+    expect(wrapper.text()).toContain("规划估算 ¥750/晚（非实时房价）");
+    expect(wrapper.text()).toContain("住宿信息来源：高德地图：酒店 POI");
+    expect(wrapper.text()).toContain("价格来源：规划估算，无外部实时报价");
+    wrapper.unmount();
+  });
+
+  it("distinguishes an available Xiaohongshu search snapshot from no community result", async () => {
+    const { wrapper, travel } = await mountPage();
+    const plan = evidenceRichPlan();
+    plan.unknowns = ["小红书仅完成搜索级快照，未逐篇抽取正文体验。"];
+    travel.activePlan = plan;
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.text()).toContain("社区经验已有搜索摘要，原文仍需复核");
+    expect(wrapper.text()).not.toContain("社区经验暂未补充");
+    wrapper.unmount();
+  });
 });
 
-async function mountPage() {
+async function mountPage(options: { interactiveProgress?: boolean } = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const router = createRouter({
@@ -80,22 +165,101 @@ async function mountPage() {
   travel.initializedUserId = "user-a";
   travel.restoreCompleted = true;
   vi.spyOn(api, "travelPlans").mockResolvedValue({ plans: [] });
-  const wrapper = mount(TravelPlannerPage, { global: pageGlobals(pinia, router) });
+  vi.spyOn(api, "travelWorkItems").mockResolvedValue({ items: [] });
+  const wrapper = mount(TravelPlannerPage, { global: pageGlobals(pinia, router, options) });
   await flushPromises();
   return { wrapper, router, pinia, travel };
 }
 
-function pageGlobals(pinia: ReturnType<typeof createPinia>, router: ReturnType<typeof createRouter>) {
+function pageGlobals(
+  pinia: ReturnType<typeof createPinia>,
+  router: ReturnType<typeof createRouter>,
+  options: { interactiveProgress?: boolean } = {},
+) {
   return {
     plugins: [pinia, router],
     stubs: {
       QuickPreferences: { template: "<div />" },
       TravelPlanForm: { template: "<div />" },
-      TravelProgress: { template: "<div />" },
+      TravelProgress: options.interactiveProgress
+        ? { emits: ["chooseCandidate"], template: '<button class="test-choose-candidate" @click="$emit(\'chooseCandidate\', \'candidate-a\')">选择</button>' }
+        : { template: "<div />" },
       TravelBudget: { template: "<div />" },
       TravelMap: { template: "<div />" },
       TravelSourcesDrawer: { template: "<div />" },
       TravelTimeline: { template: "<div />" },
     },
+  };
+}
+
+function evidenceRichPlan(): TravelPlan {
+  return {
+    schema_version: "1",
+    plan_id: "plan-real-shape",
+    owner_user_id: "user-a",
+    request: {
+      origin: "北京",
+      destinations: ["沈阳"],
+      start_date: "2026-08-20",
+      end_date: "2026-08-22",
+      duration_days: 3,
+      travellers: [{ type: "成人", count: 2 }],
+      budget_total_cny: 5000,
+      planning_mode: "quick",
+    },
+    assumptions: [],
+    freshness_summary: {},
+    transport_options: [{
+      name: "去程高铁",
+      mode: "高铁",
+      service_name: "G177",
+      from: "北京朝阳站",
+      to: "沈阳站",
+      departure: "2026-08-20T08:50:00+08:00",
+      arrival: "2026-08-20T11:19:00+08:00",
+      duration_minutes: 149,
+      seat: "二等座",
+      price_cny_per_person: 355,
+      price_cny_total: 710,
+      source: "12306",
+      evidence_ids: ["train"],
+    }],
+    stay_recommendations: [{
+      hotel_name: "沈阳中街故宫玫瑰亚朵酒店",
+      address: "中街路201号",
+      area: "中街/故宫片区",
+      location: { longitude: 123.46, latitude: 41.80 },
+      check_in: "2026-08-20",
+      check_out: "2026-08-22",
+      nights: 2,
+      observed_price_per_night_cny: null,
+      planning_estimate_per_night_cny: 750,
+      price_status: "planning_estimate",
+      evidence_ids: ["hotel"],
+      price_source_evidence_ids: [],
+      reason: "步行可达核心景点",
+    }],
+    days: [],
+    budget: { lower: 3500, expected: 4200, upper: 4900, items: [] },
+    weather_summary: [],
+    fallbacks: [],
+    avoidance_tips: [],
+    evidence: [{
+      evidence_id: "hotel",
+      source_type: "official_api",
+      provider: "高德地图",
+      title: "酒店 POI",
+      source_url: "https://ditu.amap.com/search?query=hotel",
+      published_at: "",
+      retrieved_at: "2026-08-15T00:00:00Z",
+      data_as_of: "",
+      excerpt: "",
+      facts: [],
+      confidence: 0.6,
+      freshness: "live",
+      content_hash: "",
+    }],
+    unknowns: [],
+    generated_at: "2026-08-15T00:00:00Z",
   };
 }

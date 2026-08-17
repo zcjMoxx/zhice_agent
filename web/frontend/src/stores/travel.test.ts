@@ -37,6 +37,38 @@ describe("travel store", () => {
     expect(window.location.search).toContain("travel-plan-one");
   });
 
+  it("keeps live progress when plan_ready arrives before the plan list refreshes", async () => {
+    vi.spyOn(api, "travelPlan").mockResolvedValue({ plan: samplePlan() });
+    vi.spyOn(api, "travelProgress").mockResolvedValue({ session_id: "travel-session", items: [] });
+    vi.spyOn(api, "travelDraft").mockResolvedValue({
+      session_id: "travel-session",
+      phase: "planning",
+      draft: sampleDraft(),
+      handoff_question: "",
+      messages: [],
+    });
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+    travel.sessionId = "travel-session";
+    travel.generating = true;
+    travel.progressItems = [
+      { id: "map", stage: "data", title: "高德地图查询完成", detail: "已找到地点", status: "done" },
+      { id: "skill", stage: "solve", title: "候选行程比较完成", detail: "已完成", status: "done" },
+    ];
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-session",
+      data: { type: "travel.plan_ready", metadata: { plan_id: "travel-plan-one" } },
+    });
+    await vi.waitFor(() => expect(travel.activeId).toBe("travel-plan-one"));
+
+    expect(travel.sessionId).toBe("travel-session");
+    expect(travel.progressItems.some((item) => item.id === "map")).toBe(true);
+    expect(travel.progressItems.some((item) => item.id === "skill")).toBe(true);
+    expect(travel.progressItems.at(-1)?.stage).toBe("complete");
+  });
+
   it("receives plan completion while chat is visible without changing the route", async () => {
     window.history.replaceState({}, "", "/");
     const travel = useTravelStore();
@@ -143,6 +175,26 @@ describe("travel store", () => {
     expect(travel.progressItems[0]?.title).not.toContain("mcp__");
   });
 
+  it("never exposes the internal delegation tool name in progress titles", () => {
+    const travel = useTravelStore();
+    travel.sessionId = "travel-session";
+    travel.generating = true;
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-session",
+      data: {
+        type: "tool.completed",
+        tool_call_id: "research-batch",
+        metadata: { tool_name: "delegate_tasks" },
+        display: { title: "delegate_tasks 执行完成", detail: "并行研究正在汇总" },
+      },
+    });
+
+    expect(travel.progressItems[0]?.title).toBe("并行旅行资料已汇总");
+    expect(travel.progressItems[0]?.title).not.toContain("delegate_tasks");
+  });
+
   it("returns structured clarification to the requirement conversation", () => {
     const travel = useTravelStore();
     travel.initializedUserId = "user-a";
@@ -164,17 +216,61 @@ describe("travel store", () => {
     expect(travel.statusText).toBe("还需要确认一些旅行信息");
   });
 
-  it("treats a done turn without plan_ready as an error instead of completion", () => {
+  it("resolves a done turn through the durable generation status", async () => {
+    vi.spyOn(api, "travelGeneration").mockResolvedValue({
+      session_id: "travel-session",
+      turn_id: "turn-failed",
+      status: "failed",
+      plan_id: "",
+      error_code: "TRAVEL_PLAN_NOT_FINALIZED",
+    });
+    vi.spyOn(api, "travelCandidateReview").mockRejectedValue(new Error("not selected"));
     const travel = useTravelStore();
     travel.sessionId = "travel-session";
     travel.generating = true;
 
     travel.handleEnvelope({ event: "channel_status", session_id: "travel-session", data: { type: "done" } });
 
+    await vi.waitFor(() => expect(travel.statusText).toBe("旅行规划失败"));
     expect(travel.generating).toBe(false);
-    expect(travel.statusText).toBe("旅行规划未完成");
+    expect(api.travelGeneration).toHaveBeenCalledWith("travel-session");
     expect(travel.error).toBe("旅行规划没有生成完整结果，请重试");
     expect(travel.progressItems.at(-1)?.status).toBe("error");
+  });
+
+  it("restores only the route lane while repairing missing route evidence", async () => {
+    vi.spyOn(api, "travelCandidateReview").mockResolvedValue({
+      session_id: "travel-route-repair",
+      status: "selected",
+      recommended_candidate_id: "candidate-a",
+      selected_candidate_id: "candidate-a",
+      candidates: [],
+      created_at: "",
+      updated_at: "",
+    });
+    const travel = useTravelStore();
+    travel.sessionId = "travel-route-repair";
+    travel.generating = true;
+    travel.progressItems = [
+      { id: "stay-done", stage: "validate", title: "住宿与房价资料已汇总", detail: "已完成", status: "done", lane: "lodging" },
+      { id: "route-done", stage: "validate", title: "公共交通路线已汇总", detail: "仍有缺口", status: "done", lane: "transport" },
+    ];
+
+    await travel.applyGenerationStatus({
+      session_id: "travel-route-repair",
+      turn_id: "turn-repair",
+      status: "running",
+      plan_id: "",
+      error_code: "TRAVEL_ROUTE_EVIDENCE_MISSING",
+    }, false);
+
+    expect(travel.statusText).toBe("正在补齐缺失的公共交通路线");
+    expect(travel.progressItems.filter((item) => item.lane === "lodging" && item.status === "running")).toEqual([]);
+    expect(travel.progressItems.at(-1)).toMatchObject({
+      id: "finalization-transport-repair-candidate-a",
+      lane: "transport",
+      status: "running",
+    });
   });
 
   it("keeps the complete truthful progress timeline", () => {
@@ -199,6 +295,72 @@ describe("travel store", () => {
     expect(travel.progressItems).toEqual([]);
     travel.loadProgress("session-a");
     expect(travel.progressItems[0]?.title).toBe("天气查询完成");
+  });
+
+  it("restores durable server history when the browser cache only has completion", async () => {
+    vi.spyOn(api, "travelProgress").mockResolvedValue({
+      session_id: "session-a",
+      items: [
+        { id: "history-requirements", stage: "requirements", title: "旅行条件已确认", detail: "开始规划", status: "done" },
+        { id: "map", stage: "data", title: "高德地图查询完成", detail: "找到景点", status: "done" },
+        { id: "history-complete", stage: "complete", title: "旅行计划已完成", detail: "完整行程已保存", status: "done" },
+      ],
+    });
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+    travel.sessionId = "session-a";
+    travel.recordProgress({ id: "saved-plan-complete", stage: "complete", title: "旅行计划已完成", detail: "完整行程已保存", status: "done" });
+
+    await travel.restoreProgress("session-a");
+
+    expect(travel.progressItems.map((item) => item.id)).toEqual([
+      "history-requirements",
+      "map",
+      "history-complete",
+    ]);
+  });
+
+  it("lets durable history replace stale cached details for the same tool event", async () => {
+    vi.spyOn(api, "travelProgress").mockResolvedValue({
+      session_id: "session-a",
+      items: [{
+        id: "amap-search",
+        stage: "data",
+        title: "高德地图查询完成",
+        detail: "返回 10 个结果，展示前 5 个候选",
+        status: "done",
+        result: {
+          provider: "高德地图",
+          query: "龙门石窟",
+          summary: "返回 10 个结果，展示前 5 个候选",
+          resultCount: 10,
+          items: [{ title: "龙门石窟", detail: "龙门中街13号" }],
+        },
+      }],
+    });
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+    travel.sessionId = "session-a";
+    travel.recordProgress({
+      id: "amap-search",
+      stage: "data",
+      title: "高德地图查询完成",
+      detail: "查询完成，未返回可展示的地点候选",
+      status: "done",
+      result: {
+        provider: "高德地图",
+        query: "龙门石窟",
+        summary: "查询完成，未返回可展示的地点候选",
+        resultCount: 0,
+        items: [],
+      },
+    });
+
+    await travel.restoreProgress("session-a");
+
+    expect(travel.progressItems).toHaveLength(1);
+    expect(travel.progressItems[0]?.detail).toBe("返回 10 个结果，展示前 5 个候选");
+    expect(travel.progressItems[0]?.result?.resultCount).toBe(10);
   });
 
   it("uses a readable candidate name instead of exposing the candidate id", async () => {
@@ -249,8 +411,285 @@ describe("travel store", () => {
 
     await travel.chooseCandidate("classic-riverside-loop");
 
-    expect(travel.progressItems.at(-1)?.detail).toBe("正在完善 重庆主城 · 三峡博物馆、洪崖洞");
-    expect(travel.progressItems.at(-1)?.detail).not.toContain("classic-riverside-loop");
+    const selected = travel.progressItems.find((item) => item.id === "candidate-classic-riverside-loop");
+    expect(selected?.detail).toBe("正在完善 重庆主城 · 三峡博物馆、洪崖洞");
+    expect(selected?.detail).not.toContain("classic-riverside-loop");
+    expect(travel.progressItems.at(-1)).toMatchObject({
+      id: "finalizing-classic-riverside-loop",
+      stage: "validate",
+      status: "running",
+    });
+    expect(travel.statusText).toContain("并行补齐住宿价格、交通路线");
+  });
+
+  it("shows immediate feedback while a candidate selection request is pending", async () => {
+    let resolveSelection!: (value: Awaited<ReturnType<typeof api.selectTravelCandidate>>) => void;
+    vi.spyOn(api, "selectTravelCandidate").mockReturnValue(new Promise((resolve) => { resolveSelection = resolve; }));
+    vi.spyOn(webSocket, "sendMessage").mockResolvedValue();
+    const travel = useTravelStore();
+    travel.sessionId = "travel-session";
+
+    const selecting = travel.chooseCandidate("candidate-a");
+
+    expect(travel.generating).toBe(true);
+    expect(travel.statusText).toBe("正在确认所选方案");
+    expect(travel.progressItems.at(-1)).toMatchObject({
+      id: "candidate-candidate-a",
+      status: "running",
+    });
+
+    resolveSelection({
+      session_id: "travel-session",
+      status: "selected",
+      recommended_candidate_id: "candidate-a",
+      selected_candidate_id: "candidate-a",
+      candidates: [],
+      created_at: "",
+      updated_at: "",
+    });
+    await selecting;
+  });
+
+  it("retries a failed selected candidate without selecting or delegating in the browser", async () => {
+    const send = vi.spyOn(webSocket, "sendMessage").mockResolvedValue();
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+    travel.sessionId = "travel-session";
+    travel.error = "旅行规划没有生成完整结果，请重试";
+    travel.candidateReview = {
+      session_id: "travel-session",
+      status: "selected",
+      recommended_candidate_id: "candidate-a",
+      selected_candidate_id: "candidate-a",
+      candidates: [],
+      created_at: "",
+      updated_at: "",
+    };
+
+    await travel.retrySelectedCandidate();
+
+    expect(send).toHaveBeenCalledWith(
+      "travel-session",
+      "继续完成我已确认的候选方案：candidate-a",
+      "auto",
+    );
+    expect(travel.generating).toBe(true);
+    expect(travel.error).toBe("");
+    expect(travel.progressItems.at(-1)).toMatchObject({
+      stage: "validate",
+      status: "running",
+      lane: "validation",
+    });
+  });
+
+  it("updates both finalization lanes from the selected-candidate delegation batch", () => {
+    const travel = useTravelStore();
+    travel.sessionId = "travel-session";
+    travel.generating = true;
+    travel.stage = "validate";
+    travel.candidateReview = {
+      session_id: "travel-session",
+      status: "selected",
+      recommended_candidate_id: "candidate-a",
+      selected_candidate_id: "candidate-a",
+      candidates: [],
+      created_at: "",
+      updated_at: "",
+    };
+    travel.progressItems = [
+      { id: "finalization-lodging-recovered-candidate-a", stage: "validate", title: "恢复住宿", detail: "恢复中", status: "running", lane: "lodging" },
+      { id: "finalization-transport-recovered-candidate-a", stage: "validate", title: "恢复路线", detail: "恢复中", status: "running", lane: "transport" },
+    ];
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-session",
+      data: {
+        type: "tool.started",
+        tool_call_id: "final-batch",
+        metadata: { tool_name: "delegate_tasks" },
+      },
+    });
+
+    expect(travel.progressItems.find((item) => item.lane === "lodging")?.status).toBe("running");
+    expect(travel.progressItems.find((item) => item.lane === "transport")?.status).toBe("running");
+    expect(travel.progressItems.filter((item) => item.lane === "lodging")).toHaveLength(1);
+    expect(travel.progressItems.filter((item) => item.lane === "transport")).toHaveLength(1);
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-session",
+      data: {
+        type: "tool.completed",
+        tool_call_id: "final-batch",
+        metadata: { tool_name: "delegate_tasks" },
+      },
+    });
+
+    expect(travel.progressItems.find((item) => item.lane === "lodging")?.status).toBe("done");
+    expect(travel.progressItems.find((item) => item.lane === "transport")?.status).toBe("done");
+    expect(travel.progressItems.find((item) => item.lane === "validation")).toMatchObject({
+      title: "正在生成并校验完整计划",
+      status: "running",
+    });
+    expect(travel.statusText).toContain("正在生成最终计划");
+  });
+
+  it("restores selected-candidate finalization lanes before new runtime events arrive", async () => {
+    vi.spyOn(api, "travelCandidateReview").mockResolvedValue({
+      session_id: "travel-session",
+      status: "selected",
+      recommended_candidate_id: "candidate-a",
+      selected_candidate_id: "candidate-a",
+      candidates: [],
+      created_at: "",
+      updated_at: "",
+    });
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+
+    await travel.applyGenerationStatus({
+      session_id: "travel-session",
+      turn_id: "turn-finalizing",
+      status: "running",
+      plan_id: "",
+      error_code: "",
+    }, false);
+
+    expect(travel.stage).toBe("validate");
+    expect(travel.candidateReview?.status).toBe("selected");
+    expect(travel.progressItems.find((item) => item.lane === "lodging")?.status).toBe("running");
+    expect(travel.progressItems.find((item) => item.lane === "transport")?.status).toBe("running");
+    expect(travel.statusText).toContain("并行补齐住宿价格与公共交通路线");
+    travel.stopRecoveryPolling();
+  });
+
+  it("restores a selected candidate when a failed work item is opened", async () => {
+    vi.spyOn(api, "travelDraft").mockResolvedValue({
+      session_id: "travel-failed",
+      phase: "planning",
+      draft: sampleDraft(),
+      handoff_question: "",
+      messages: [],
+    });
+    vi.spyOn(api, "travelProgress").mockResolvedValue({ session_id: "travel-failed", items: [] });
+    vi.spyOn(api, "travelCandidateReview").mockResolvedValue({
+      session_id: "travel-failed",
+      status: "selected",
+      recommended_candidate_id: "candidate-a",
+      selected_candidate_id: "candidate-a",
+      candidates: [],
+      created_at: "",
+      updated_at: "",
+    });
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+
+    await travel.openWorkItem({
+      session_id: "travel-failed",
+      plan_id: "",
+      status: "failed",
+      title: "大理五日游",
+      preview: "重庆到大理",
+      updated_at: "2026-08-16T00:00:00Z",
+      error_code: "TRAVEL_PLAN_NOT_FINALIZED",
+    });
+
+    expect(travel.candidateReview?.status).toBe("selected");
+    expect(travel.phase).toBe("planning");
+    expect(travel.stage).toBe("validate");
+    expect(travel.error).toContain("点击继续");
+  });
+
+  it("keeps the restart guidance when a failed work item has no candidate review", async () => {
+    vi.spyOn(api, "travelDraft").mockResolvedValue({
+      session_id: "travel-failed",
+      phase: "planning",
+      draft: sampleDraft(),
+      handoff_question: "",
+      messages: [],
+    });
+    vi.spyOn(api, "travelProgress").mockResolvedValue({ session_id: "travel-failed", items: [] });
+    vi.spyOn(api, "travelCandidateReview").mockRejectedValue(new Error("not found"));
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+
+    await travel.openWorkItem({
+      session_id: "travel-failed",
+      plan_id: "",
+      status: "failed",
+      title: "未完成计划",
+      preview: "",
+      updated_at: "2026-08-16T00:00:00Z",
+      error_code: "TRAVEL_PLAN_NOT_FINALIZED",
+    });
+
+    expect(travel.candidateReview).toBeNull();
+    expect(travel.stage).toBe("requirements");
+    expect(travel.error).toContain("重新开始");
+  });
+
+  it("restores a failed selected candidate from the persisted session", async () => {
+    vi.spyOn(api, "travelGeneration").mockResolvedValue({
+      session_id: "travel-failed",
+      turn_id: "turn-failed",
+      status: "failed",
+      plan_id: "",
+      error_code: "TRAVEL_PLAN_NOT_FINALIZED",
+    });
+    vi.spyOn(api, "travelProgress").mockResolvedValue({ session_id: "travel-failed", items: [] });
+    vi.spyOn(api, "travelCandidateReview").mockResolvedValue({
+      session_id: "travel-failed",
+      status: "selected",
+      recommended_candidate_id: "candidate-a",
+      selected_candidate_id: "candidate-a",
+      candidates: [],
+      created_at: "",
+      updated_at: "",
+    });
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+    sessionStorage.setItem("zhice.travel.active.user-a", "travel-failed");
+
+    await travel.restoreGeneration();
+
+    expect(travel.sessionId).toBe("travel-failed");
+    expect(travel.candidateReview?.selected_candidate_id).toBe("candidate-a");
+    expect(travel.stage).toBe("validate");
+    expect(travel.statusText).toContain("继续完善已选方案");
+  });
+
+  it("never moves the main stage backwards when a late map event arrives", () => {
+    const travel = useTravelStore();
+    travel.sessionId = "travel-session";
+    travel.generating = true;
+    travel.stage = "validate";
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-session",
+      data: {
+        type: "tool.started",
+        tool_call_id: "late-map",
+        metadata: { tool_name: "mcp__amap-maps__maps_direction_transit_integrated" },
+      },
+    });
+
+    expect(travel.stage).toBe("validate");
+    expect(travel.progressItems.at(-1)?.lane).toBe("transport");
+  });
+
+  it("restores the highest stage from out-of-order cached progress", () => {
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+    sessionStorage.setItem("zhice.travel.progress.user-a.travel-session", JSON.stringify([
+      { id: "validation", stage: "validate", title: "校验", detail: "进行中", status: "running" },
+      { id: "late-map", stage: "data", title: "路线", detail: "已完成", status: "done" },
+    ]));
+
+    travel.loadProgress("travel-session");
+
+    expect(travel.stage).toBe("validate");
   });
 
   it("starts a new blank workspace without opening the latest saved plan", () => {
@@ -267,6 +706,30 @@ describe("travel store", () => {
     expect(travel.progressItems).toEqual([]);
     expect(window.location.pathname).toBe("/travel");
     expect(window.location.search).toBe("");
+  });
+
+  it("ignores a late generation restore after starting a new workspace", async () => {
+    let resolveStatus!: (status: Awaited<ReturnType<typeof api.travelGeneration>>) => void;
+    vi.spyOn(api, "travelGeneration").mockReturnValue(new Promise((resolve) => { resolveStatus = resolve; }));
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+    sessionStorage.setItem("zhice.travel.active.user-a", "travel-old");
+
+    const restoring = travel.restoreGeneration();
+    travel.startNew();
+    resolveStatus({
+      session_id: "travel-old",
+      turn_id: "turn-old",
+      status: "failed",
+      plan_id: "",
+      error_code: "TRAVEL_PLAN_NOT_FINALIZED",
+    });
+    await restoring;
+
+    expect(travel.sessionId).toBe("");
+    expect(travel.statusText).toBe("");
+    expect(travel.progressItems).toEqual([]);
+    expect(travel.error).toBe("");
   });
 
   it("creates an isolated travel session and ignores events from other sessions", async () => {
@@ -443,6 +906,161 @@ describe("travel store", () => {
     expect(travel.statusText).toContain("正式规划");
     expect(travel.progressItems[0]?.title).toBe("旅行条件已确认");
     travel.stopRecoveryPolling();
+  });
+
+  it("keeps live tool and skill progress before candidate review", () => {
+    const travel = useTravelStore();
+    travel.sessionId = "travel-intake";
+    travel.intakeBusy = true;
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-intake",
+      data: { type: "travel.planning_confirmed" },
+    });
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-intake",
+      data: {
+        type: "tool.started",
+        tool_call_id: "amap-search",
+        metadata: { tool_name: "mcp__amap-maps__maps_text_search" },
+      },
+    });
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-intake",
+      data: {
+        type: "tool.completed",
+        tool_call_id: "amap-search",
+        metadata: { tool_name: "mcp__amap-maps__maps_text_search" },
+        display: { title: "高德地图查询完成", detail: "找到沈阳景点" },
+      },
+    });
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-intake",
+      data: {
+        type: "skill.started",
+        tool_call_id: "travel-solver",
+        display: { detail: "正在比较行程方案" },
+      },
+    });
+
+    expect(travel.generating).toBe(true);
+    expect(travel.stage).toBe("solve");
+    expect(travel.progressItems.some((item) => item.id === "amap-search" && item.status === "done")).toBe(true);
+    expect(travel.progressItems.some((item) => item.id === "travel-solver")).toBe(true);
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-intake",
+      data: {
+        type: "travel.candidate_review_required",
+        ui_metadata: {
+          detail_data: {
+            recommended_candidate_id: "candidate-a",
+            candidates: [{ candidate_id: "candidate-a", title: "沈河区中街" }],
+          },
+        },
+      },
+    });
+
+    expect(travel.generating).toBe(false);
+    expect(travel.stage).toBe("solve");
+    expect(travel.candidateReview?.candidates).toHaveLength(1);
+    expect(travel.progressItems.some((item) => item.id === "amap-search")).toBe(true);
+    expect(travel.progressItems.some((item) => item.id === "travel-solver")).toBe(true);
+    expect(travel.progressItems.at(-1)?.title).toBe("候选行程比较完成");
+  });
+
+  it("removes the matching started item when a guarded tool result is internal", () => {
+    const travel = useTravelStore();
+    travel.sessionId = "travel-intake";
+    travel.intakeBusy = true;
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-intake",
+      data: { type: "travel.planning_confirmed" },
+    });
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-intake",
+      data: {
+        type: "tool.started",
+        tool_call_id: "guarded-amap",
+        metadata: { tool_name: "mcp__amap-maps__maps_geo" },
+      },
+    });
+
+    expect(travel.progressItems.some((item) => item.id === "guarded-amap")).toBe(true);
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-intake",
+      data: {
+        type: "tool.failed",
+        tool_call_id: "guarded-amap",
+        metadata: { tool_name: "mcp__amap-maps__maps_geo" },
+        display: { visibility: "internal" },
+      },
+    });
+
+    expect(travel.progressItems.some((item) => item.id === "guarded-amap")).toBe(false);
+    expect(travel.progressItems.some((item) => item.id === "requirements")).toBe(true);
+  });
+
+  it("continues automatically after a single converged candidate turn finishes", async () => {
+    const send = vi.spyOn(webSocket, "sendMessage").mockResolvedValue();
+    const travel = useTravelStore();
+    travel.sessionId = "travel-auto";
+    travel.generating = true;
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-auto",
+      data: {
+        type: "travel.candidate_review_auto_selected",
+        ui_metadata: {
+          detail_data: {
+            status: "selected",
+            recommended_candidate_id: "complete-coverage",
+            selected_candidate_id: "complete-coverage",
+            candidates: [{
+              candidate_id: "complete-coverage",
+              recommended: true,
+              score: 100,
+              days: [],
+              budget: { lower: 1000, expected: 1500, upper: 2000 },
+              route_minutes: 60,
+              route_distance_km: 10,
+              daily_intensity_scores: [5],
+              evidence_coverage: 1,
+              warnings: [],
+            }],
+          },
+        },
+      },
+    });
+
+    expect(travel.candidateReview?.status).toBe("selected");
+    expect(travel.statusText).toContain("直接进入完整规划");
+
+    travel.handleEnvelope({
+      event: "channel_status",
+      session_id: "travel-auto",
+      data: { type: "done" },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(send).toHaveBeenCalledWith(
+      "travel-auto",
+      "继续完成我已确认的候选方案：complete-coverage",
+      "auto",
+    );
+    expect(travel.generating).toBe(true);
   });
 
   it("clears a stale handoff only when an intake event changes travel fields", () => {
@@ -709,6 +1327,53 @@ describe("travel store", () => {
     expect(travel.progressItems.at(-1)?.title).toBe("Tavily 补充检索未成功");
     expect(travel.progressItems.at(-1)?.detail).toContain("前面已取得的网页资料继续保留");
     expect(travel.progressItems[0]?.result?.resultCount).toBe(2);
+  });
+
+  it("does not describe a hotel authentication failure as a completed price query", () => {
+    const travel = useTravelStore();
+    travel.sessionId = "travel-a";
+    travel.generating = true;
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-a",
+      data: {
+        type: "tool.failed",
+        tool_call_id: "hotel-auth",
+        metadata: {
+          tool_name: "search_travel_hotels",
+          code: "HOTEL_MANUAL_VERIFICATION_REQUIRED",
+        },
+      },
+    });
+
+    expect(travel.progressItems.at(-1)).toMatchObject({
+      title: "携程酒店房价未取得",
+      status: "error",
+      lane: "lodging",
+    });
+    expect(travel.progressItems.at(-1)?.detail).toContain("需要重新验证");
+    expect(travel.progressItems.at(-1)?.detail).not.toContain("查询完成");
+  });
+
+  it("never exposes the internal hotel tool identifier after completion", () => {
+    const travel = useTravelStore();
+    travel.sessionId = "travel-a";
+    travel.generating = true;
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-a",
+      data: {
+        type: "tool.completed",
+        tool_call_id: "hotel-completed",
+        metadata: { tool_name: "search_travel_hotels" },
+        display: { title: "search_travel_hotels 执行完成" },
+      },
+    });
+
+    expect(travel.progressItems.at(-1)?.title).toBe("携程酒店房价查询完成");
+    expect(travel.progressItems.at(-1)?.title).not.toContain("search_travel_hotels");
   });
 
   it("restores a running session from safe per-user session storage", async () => {

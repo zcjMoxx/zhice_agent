@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import type { TravelDay } from "@/api/types";
+import { travelSegmentSourceLabel, travelTransportModeLabel } from "@/travel/sourceLabels";
 defineProps<{ days: TravelDay[] }>();
 const money = (value: number) => new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", maximumFractionDigits: 0 }).format(value);
+const walkingDistance = (meters: number) => meters < 1000
+  ? `${Math.round(meters)} 米`
+  : `${Number((meters / 1000).toFixed(1))} 公里`;
 </script>
 
 <template>
@@ -17,7 +21,15 @@ const money = (value: number) => new Intl.NumberFormat("zh-CN", { style: "curren
         </div>
       </div>
       <div v-if="day.route_segments.length" class="travel-route-list">
-        <div v-for="(segment, routeIndex) in day.route_segments" :key="routeIndex"><b>{{ segment.mode }}</b><span>{{ segment.from }} → {{ segment.to }}</span><small>{{ segment.duration }} 分钟 · {{ segment.distance }} 公里 · {{ segment.source }}</small></div>
+        <div v-for="(segment, routeIndex) in day.route_segments" :key="routeIndex">
+          <b>{{ travelTransportModeLabel(segment.mode) }}</b><span>{{ segment.from }} → {{ segment.to }}</span><small>{{ segment.duration }} 分钟 · {{ segment.distance }} 公里 · {{ travelSegmentSourceLabel(segment.source, segment.mode) }}</small>
+          <ul v-if="segment.transit_legs?.length" class="travel-transit-legs">
+            <li v-for="(leg, legIndex) in segment.transit_legs" :key="`${routeIndex}-${legIndex}`">
+              <strong>{{ leg.line_name }}</strong><span>{{ leg.departure_stop }} → {{ leg.arrival_stop }}</span><small v-if="leg.via_stops.length">途经 {{ leg.via_stops.join('、') }}</small>
+            </li>
+          </ul>
+          <small v-if="Number(segment.walking_distance) > 0">步行接驳 {{ walkingDistance(Number(segment.walking_distance)) }}</small>
+        </div>
       </div>
       <div class="travel-day-notes">
         <p v-if="day.meal_suggestions.length"><b>吃什么：</b>{{ day.meal_suggestions.join('、') }}</p>
@@ -27,4 +39,3 @@ const money = (value: number) => new Intl.NumberFormat("zh-CN", { style: "curren
     </article>
   </section>
 </template>
-

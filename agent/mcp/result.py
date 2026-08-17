@@ -15,7 +15,6 @@ from agent.mcp.artifacts import (
     McpArtifactGateway,
 )
 from agent.protocols.tool import ToolResult
-from agent.tools.base import truncate_text
 
 MAX_STRUCTURED_RESULT_CHARS = 16000
 MAX_STRUCTURED_LIST_ITEMS = 5
@@ -24,6 +23,7 @@ MAX_STRUCTURED_OUTPUT_CHARS = 10000
 _LARGE_CONTENT_KEYS = frozenset(
     {"raw_content", "rawcontent", "raw_html", "html", "images", "image_descriptions"}
 )
+_MAX_MCP_OUTPUT_CHARS = 12000
 
 
 def normalize_mcp_result(
@@ -112,7 +112,9 @@ def normalize_mcp_result(
         return _error(str(exc) or "MCP artifact import failed", getattr(exc, "code", "MCP_ARTIFACT_INVALID"))
     if artifacts:
         parts.append("Artifacts:\n" + "\n".join(f"- {path}" for path in artifacts))
-    output, truncation = truncate_text("\n\n".join(part for part in parts if part), 12000)
+    output, truncation = _truncate_mcp_output(
+        "\n\n".join(part for part in parts if part)
+    )
     is_error = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
     metadata = {
         "code": "MCP_REMOTE_ERROR" if is_error else "MCP_OK",
@@ -122,6 +124,23 @@ def normalize_mcp_result(
         **truncation,
     }
     return ToolResult(output=output, is_error=is_error, metadata=metadata)
+
+
+def _truncate_mcp_output(text: str) -> tuple[str, dict[str, Any]]:
+    """Preserve both ends of long ordered MCP text within the fixed budget."""
+
+    if len(text) <= _MAX_MCP_OUTPUT_CHARS:
+        return text, {"truncated": False}
+    marker = "\n[truncated middle]\n"
+    remaining = _MAX_MCP_OUTPUT_CHARS - len(marker)
+    head_chars = remaining // 2
+    tail_chars = remaining - head_chars
+    output = f"{text[:head_chars]}{marker}{text[-tail_chars:]}"
+    return output, {
+        "truncated": True,
+        "original_chars": len(text),
+        "returned_chars": len(output),
+    }
 
 
 def _error(message: str, code: str) -> ToolResult:

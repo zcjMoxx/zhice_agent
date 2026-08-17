@@ -64,7 +64,7 @@
 - `traveller_type`：如大学生、亲子家庭、老人、情侣；未表达则为空。
 - `traveller_count`：1 到 50 的整数；未表达则 null。
 - `budget_total_cny`：人民币总预算，100 到 10000000；未表达精确总额则 null。
-- `budget_level`：只能是空字符串、`economy`、`balanced`、`comfortable`。只有用户明确表达经济、省钱、均衡、舒适等档位时填写。
+- `budget_level`：这是整趟旅行基调，只能是空字符串、`economy`、`balanced`、`comfortable`。经济实惠、省钱优先填 `economy`；舒适均衡、性价比填 `balanced`；轻松品质、体验优先填 `comfortable`。只有用户明确表达时填写，未表达时保持空字符串并交给前端选择。
 - `transport_preferences`、`stay_preferences`、`interest_tags`、`hard_constraints`：字符串数组，只保留用户明确表达的内容，不扩写。
 - `pace`：只能是空字符串、`relaxed`、`balanced`、`intensive`。
 - `planning_mode`：只能是空字符串、`quick`、`deep`。不要因为普通请求而默认 quick。

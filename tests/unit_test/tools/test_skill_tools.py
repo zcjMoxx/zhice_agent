@@ -54,10 +54,14 @@ def test_load_skills_tool_supports_source_and_reports_ambiguous_names(tmp_path):
     tool = LoadSkillsTool(workspace, loader)
 
     qualified = tool.execute({"name": "official/review"})
+    redundant_source = tool.execute(
+        {"name": "official/review", "source": "official"}
+    )
     sourced = tool.execute({"name": "review", "source": "team"})
     ambiguous = tool.execute({"name": "review"})
 
     assert qualified.metadata["skill"] == "official/review"
+    assert redundant_source.metadata["skill"] == "official/review"
     assert sourced.metadata["skill"] == "team/review"
     assert ambiguous.is_error is True
     payload = json.loads(ambiguous.output)

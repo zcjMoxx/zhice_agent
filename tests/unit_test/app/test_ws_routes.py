@@ -8,6 +8,7 @@ from agent.app.gateway import create_app
 from agent.app.runtime import ChatTurnResult
 from agent.applications.travel.service import TravelApplicationError
 from agent.config import AppConfig
+from agent.protocols.llm import LLMProviderError
 
 
 def test_ws_message_streams_text_and_done(tmp_path):
@@ -70,6 +71,63 @@ def test_ws_forwards_runtime_event_envelope(tmp_path):
     assert done["data"]["type"] == "done"
 
 
+def test_ws_routes_child_runtime_event_to_root_session_envelope(tmp_path):
+    child = _runtime_event("tool.completed", 3)
+    child.update(
+        {
+            "session_id": "child-session",
+            "turn_id": "child-turn",
+            "root_session_id": "alpha",
+            "root_turn_id": "root-turn",
+            "agent_id": "subagent-one",
+        }
+    )
+    runtime = _WsRuntime(runtime_events=[child])
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "message", "session_id": "alpha", "content": "hello"})
+        websocket.receive_json()
+        runtime_frame = websocket.receive_json()
+
+    assert runtime_frame["session_id"] == "alpha"
+    assert runtime_frame["turn_id"] == "root-turn"
+    assert runtime_frame["data"]["session_id"] == "child-session"
+    assert runtime_frame["data"]["root_session_id"] == "alpha"
+    assert runtime_frame["data"]["agent_id"] == "subagent-one"
+
+
+def test_ws_forwards_travel_planning_confirmation_before_turn_completion(tmp_path):
+    event = _runtime_event("travel.planning_confirmed", 2)
+    event.update(
+        {
+            "status": "completed",
+            "display": {"title": "旅行条件已确认", "visibility": "internal"},
+            "ui_metadata": {
+                "detail_type": "travel_planning_confirmed",
+                "detail_data": {"phase": "planning"},
+            },
+            "metadata": {"phase": "planning"},
+        }
+    )
+    runtime = _WsRuntime(runtime_events=[event])
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json(
+            {"type": "message", "session_id": "travel-a", "content": "确认"}
+        )
+        accepted = websocket.receive_json()
+        confirmed = websocket.receive_json()
+
+    assert accepted["data"]["type"] == "accepted"
+    assert confirmed["event"] == "runtime_event"
+    assert confirmed["data"]["type"] == "travel.planning_confirmed"
+    assert confirmed["data"]["ui_metadata"]["detail_data"]["phase"] == "planning"
+
+
 def test_ws_creates_travel_application_session_with_isolated_channel(tmp_path):
     runtime = _WsRuntime()
     client = _client(tmp_path, runtime)
@@ -98,8 +156,27 @@ def test_ws_auto_continues_a_travel_turn_until_plan_ready(tmp_path):
     assert runtime.chat_calls[1][1] == "continue travel"
 
 
+def test_ws_uses_server_validated_candidate_continuation_for_first_turn(tmp_path):
+    runtime = _SelectedCandidateWsRuntime(outcomes=["plan"])
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json(
+            {
+                "type": "message",
+                "session_id": "travel-a",
+                "content": "untrusted candidate text",
+            }
+        )
+        frames = _receive_until_terminal(websocket)
+
+    assert frames[-1]["data"]["type"] == "done"
+    assert runtime.chat_calls[0][1] == "continue selected candidate-a"
+
+
 def test_ws_returns_structured_error_when_travel_continuations_are_exhausted(tmp_path):
-    runtime = _TravelWsRuntime(outcomes=["text", "text", "text"])
+    runtime = _TravelWsRuntime(outcomes=["text"] * 6)
     client = _client(tmp_path, runtime)
 
     with client.websocket_connect("/ws") as websocket:
@@ -109,7 +186,29 @@ def test_ws_returns_structured_error_when_travel_continuations_are_exhausted(tmp
 
     assert frames[-1]["data"]["type"] == "error"
     assert frames[-1]["data"]["error"]["code"] == "TRAVEL_PLAN_NOT_FINALIZED"
-    assert len(runtime.chat_calls) == 3
+    assert len(runtime.chat_calls) == 6
+
+
+def test_ws_retries_one_transient_llm_failure_from_persisted_travel_state(tmp_path):
+    runtime = _TravelWsRuntime(outcomes=["text", "provider_error", "plan"])
+    client = _client(tmp_path, runtime)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "message", "session_id": "travel-a", "content": "plan"})
+        frames = _receive_until_terminal(websocket)
+
+    assert frames[-1]["data"]["type"] == "done"
+    assert any(
+        frame.get("event") == "runtime_event"
+        and frame["data"]["type"] == "travel.plan_ready"
+        for frame in frames
+    )
+    assert [call[1] for call in runtime.chat_calls] == [
+        "plan",
+        "continue travel",
+        "continue travel",
+    ]
 
 
 def test_ws_clarification_event_pauses_travel_without_auto_continuation(tmp_path):
@@ -363,8 +462,8 @@ class _WsRuntime:
         self.request_ids.append(request_id)
         for runtime_event in self.runtime_events:
             event = dict(runtime_event)
-            event["session_id"] = session_id
-            event["turn_id"] = turn_id or "turn-ws"
+            event["session_id"] = event.get("session_id") or session_id
+            event["turn_id"] = event.get("turn_id") or turn_id or "turn-ws"
             if on_event is not None:
                 on_event(event)
         for chunk in self.chunks:
@@ -406,11 +505,22 @@ class _TravelWsRuntime(_WsRuntime):
         self.chat_calls.append((session_id, message, command_profile, turn_id or ""))
         self.request_ids.append(request_id)
         outcome = self.outcomes[len(self.chat_calls) - 1]
+        if outcome == "provider_error":
+            raise LLMProviderError("temporary provider failure", retryable=True)
         if outcome == "plan" and on_event is not None:
             on_event(_travel_runtime_event("travel.plan_ready", turn_id or "turn-ws"))
         elif outcome == "clarification" and on_event is not None:
             on_event(_travel_runtime_event("travel.clarification_required", turn_id or "turn-ws"))
         return ChatTurnResult(content=outcome, turn_id=turn_id or "turn-ws")
+
+
+class _SelectedCandidateWsRuntime(_TravelWsRuntime):
+    def travel_candidate_continuation_message(self, session_id: str) -> str:
+        if session_id != "travel-a":
+            raise TravelApplicationError(
+                "TRAVEL_GENERATION_NOT_FOUND", "not travel", status_code=404
+            )
+        return "continue selected candidate-a"
 
 
 def _receive_until_terminal(websocket):

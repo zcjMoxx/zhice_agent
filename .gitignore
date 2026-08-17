@@ -13,4 +13,5 @@ config/.env
 config/llm_endpoints.json
 contexts/
 logs/
+state/
 .zhice/subagents/

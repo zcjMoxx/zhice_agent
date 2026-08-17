@@ -262,6 +262,51 @@ def test_system_diagnostics_aggregates_cross_user_errors_and_redacts_trace(tmp_p
     assert actor.user_id not in serialized
 
 
+def test_system_diagnostics_does_not_treat_success_codes_as_errors(tmp_path):
+    store, actor = _store_and_actor(tmp_path)
+    _write_trace(
+        tmp_path,
+        [
+            {
+                "event": "tool.done",
+                "actor_user_id": actor.user_id,
+                "ok": True,
+                "code": "MCP_OK",
+            },
+            {
+                "event": "subagent.task_completed",
+                "actor_user_id": actor.user_id,
+                "code": "OK",
+            },
+            {
+                "event": "tool.done",
+                "actor_user_id": actor.user_id,
+                "ok": False,
+                "code": "MCP_TOOL_FAILED",
+            },
+            {
+                "event": "llm.error",
+                "actor_user_id": actor.user_id,
+                "error_code": "RATE_LIMITED",
+            },
+        ],
+    )
+
+    report = SystemDiagnosticsService(store, tmp_path / "logs").diagnose(
+        {"actor_user_id": actor.user_id, "minutes": 30}
+    )
+
+    by_code = {str(item.get("code") or ""): item for item in report["timeline"]}
+    assert by_code["MCP_OK"]["is_error"] is False
+    assert by_code["OK"]["is_error"] is False
+    assert by_code["MCP_TOOL_FAILED"]["is_error"] is True
+    assert by_code["RATE_LIMITED"]["is_error"] is True
+    incident_codes = {item["code"] for item in report["incidents"]}
+    assert "MCP_OK" not in incident_codes
+    assert "OK" not in incident_codes
+    assert {"MCP_TOOL_FAILED", "RATE_LIMITED"} <= incident_codes
+
+
 def test_system_diagnostics_tool_requires_explicit_permission(tmp_path):
     _, actor = _store_and_actor(tmp_path)
     denied = DiagnoseSystemActivityTool(

@@ -1,6 +1,6 @@
 # 小红书只读 MCP 的 Owner 管理入口设计
 
-> 说明：当前实现已由 `2026-08-14-xhs-login-state-convergence-design.md` 补强。登录完成不再只依赖扫码助手退出，而由 Cookie 内容稳定更新触发 sidecar 重载；登录检查兼容 MCP structured content 与 text content 的连续 JSON，并缓存最近安全状态。下文保留最初方案背景。
+> 说明：当前登录收敛仍采用 Cookie 稳定更新触发 sidecar 重载；账号扫码、Cookie 与登录检查现已移至 `/api/admin/external-platforms/xhs/*`，`xhs-readonly` 的技术监控和服务重启仍属于 MCP。当前管理边界见 `docs_design/2026-08-16-runtime-config-prompt-example-convergence-design.md`，下文保留最初方案背景。
 
 ## 背景
 

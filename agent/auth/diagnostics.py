@@ -835,12 +835,11 @@ def _system_timeline(
         timeline.append(item)
     for row in traces:
         code = str(row.get("error_code") or row.get("code") or row.get("reason_code") or "")
-        event = str(row.get("event") or "")
         item = {
             **row,
             "kind": "trace",
             "code": code,
-            "is_error": bool(code) or event.endswith((".error", "_failed", ".failed")),
+            "is_error": _trace_event_is_error(row),
         }
         timeline.append(item)
     timeline.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
@@ -851,6 +850,26 @@ def _system_timeline(
         )
         item["evidence_id"] = "evt-" + hashlib.sha256(material.encode()).hexdigest()[:16]
     return timeline[: max(1, min(limit * 3, 500))]
+
+
+def _trace_event_is_error(row: dict[str, Any]) -> bool:
+    """Classify failures without treating success and result codes as errors."""
+
+    ok = row.get("ok")
+    if ok is True:
+        return False
+    if ok is False:
+        return True
+    if row.get("is_error") is True:
+        return True
+    if str(row.get("level") or "").upper() in {"ERROR", "CRITICAL"}:
+        return True
+    if any(row.get(key) not in {None, ""} for key in ("error_code", "error_message", "error_type")):
+        return True
+    if str(row.get("status") or "").lower() in {"error", "failed", "failure"}:
+        return True
+    event = str(row.get("event") or "").lower()
+    return event.endswith((".error", "_failed", ".failed"))
 
 
 def _aggregate_incidents(timeline: list[dict[str, Any]]) -> list[dict[str, Any]]:

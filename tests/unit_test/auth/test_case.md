@@ -33,6 +33,7 @@
 - `ensure_session` 只在首次创建时返回 `created=True`，本人创建和写入由认证身份与 ownership 直接允许。
 - `diagnose_my_recent_activity` 自动使用当前 Session，排除当前诊断 Turn，并从上一条 Turn、最近失败或近期趋势生成结构化诊断；同时返回按时间排序、字段白名单过滤的 `trace_events` 供模型直接归因，Owner 普通聊天也不扩大到全系统。
 - `diagnose_system_activity` 仅对显式拥有 `diagnostics.system.use` 的 actor 可用；跨用户查询保持时间/数量有界，事故由稳定规则聚合，trace、Tool 与时间线只返回白名单脱敏字段，绝不回传参数、命令、输出或 Secret。
+- 系统诊断以 `ok`、错误字段、错误级别、失败状态和失败事件名判定异常；`ok=true` 的 `MCP_OK` 及普通 `OK` 结果码不得被误判为事故。
 - 普通用户诊断到 Subagent 内部失败时只返回暂时不可用并联系管理员，隐藏 cause/evidence/修复命令；Owner 和具备内部审计权限的管理员保留完整证据。
 - 父 `delegate_tasks` Turn 可沿同 actor 的 `root_session_id/root_turn_id` 下钻 child terminal trace，优先报告 child failure code/stage 和脱敏 `error_message`；安全证据只暴露白名单字段，不能跨 actor。缺少 child 终因的通用 `SUBAGENT_FAILED` 最多为中等置信度。
 - 诊断只读取权威 `logs/log-YYYY-MM-DD.jsonl`，不保留旧文件路径分支。

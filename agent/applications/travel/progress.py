@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
+from agent.applications.travel.source_ledger import source_operation
 from agent.protocols.hook import (
     HookRuntime,
     PostToolHookRequest,
@@ -16,6 +18,7 @@ from agent.protocols.runtime_event import validate_runtime_event_presentation
 
 _MAX_ITEMS = 5
 _MAX_TEXT = 100
+_MAX_RESULT_PARSE_CHARS = 128_000
 
 
 class TravelProgressHookRuntime:
@@ -71,10 +74,24 @@ def travel_tool_presentation(request: PostToolHookRequest) -> PostToolHookResult
     """Project one final Tool result into safe travel progress copy."""
 
     name = request.tool_name.casefold()
+    if request.result_metadata.get("travel_progress_visibility") == "internal":
+        return PostToolHookResult(display={"visibility": "internal"})
     if name in {"discover_tools", "load_skills", "request_travel_clarification"}:
+        return PostToolHookResult(display={"visibility": "internal"})
+    if source_operation(name) == "transport_lookup":
         return PostToolHookResult(display={"visibility": "internal"})
     if name == "run_skill":
         return _optimizer(request)
+    if name == "request_travel_candidate_review":
+        return (
+            _simple(
+                "候选方案准备未完成",
+                "正在修正候选结构后重新校验",
+                icon="route",
+            )
+            if request.is_error
+            else PostToolHookResult(display={"visibility": "internal"})
+        )
     if name == "finalize_travel_plan":
         return _simple(
             "完整计划校验未通过" if request.is_error else "完整计划已校验并保存",
@@ -99,21 +116,34 @@ def _amap(request: PostToolHookRequest) -> PostToolHookResult:
     if request.is_error:
         return _source_error("高德地图", query)
     try:
-        payload = _json_object(request.output)
+        payloads = _json_objects(request.output)
+        payload = _preferred_object(
+            payloads,
+            ("pois", "geocodes", "return", "route", "paths", "name", "distance"),
+        )
     except json.JSONDecodeError:
+        payloads = []
         payload = {}
-    pois = _first_list(payload, "pois", "results", "data")
+    geocodes = _first_list(payload, "geocodes", "return")
+    if geocodes:
+        items = _geocode_items(geocodes, query)
+        detail = f"解析到 {len(geocodes)} 个地址候选，展示前 {min(len(items), _MAX_ITEMS)} 个"
+        return _results("高德地图", query or "地址解析", detail, items, len(geocodes))
+    pois = _first_list_from(payloads, "pois", "results", "data")
     items = _named_items(pois, detail_keys=("address", "type", "distance"))
+    if "detail" in request.tool_name.casefold() and not items and _text(payload.get("name")):
+        items = _named_items([payload], detail_keys=("address", "type", "business_area"))
     if "detail" in request.tool_name.casefold() and items:
         detail = f"已核对 {items[0]['title']} 的地址与地点信息"
     elif items:
         detail = f"返回 {len(pois)} 个结果，展示前 {min(len(items), _MAX_ITEMS)} 个候选"
     elif any(part in request.tool_name.casefold() for part in ("direction", "route", "distance")):
-        items = _route_items(payload, request.arguments)
+        items = _route_items(payload, request.arguments, request.output)
         detail = "已核对路线距离、预计时长与出行方式"
     else:
         detail = "查询完成，未返回可展示的地点候选"
-    return _results("高德地图", query or "地点与路线", detail, items, len(pois) or len(items))
+    visible_query = query or (items[0]["title"] if items and "detail" in request.tool_name.casefold() else "地点与路线")
+    return _results("高德地图", visible_query, detail, items, len(pois) or len(items))
 
 
 def _weather(request: PostToolHookRequest) -> PostToolHookResult:
@@ -127,8 +157,8 @@ def _weather(request: PostToolHookRequest) -> PostToolHookResult:
         return _results(
             "Open-Meteo",
             query or "地点定位",
-            f"找到 {len(locations)} 个匹配地点，用于天气坐标核对",
-            locations,
+            f"已返回 {len(locations)} 个地点候选，行政区域核对通过后用于天气查询",
+            [],
             len(locations),
         )
     daily = payload.get("daily") if isinstance(payload.get("daily"), dict) else {}
@@ -140,8 +170,12 @@ def _weather(request: PostToolHookRequest) -> PostToolHookResult:
 
 
 def _rail(request: PostToolHookRequest) -> PostToolHookResult:
-    origin = _first_text(request.arguments, "from_station", "origin", "from")
-    destination = _first_text(request.arguments, "to_station", "destination", "to")
+    origin = _first_text(
+        request.arguments, "fromStation", "from_station", "origin", "from"
+    )
+    destination = _first_text(
+        request.arguments, "toStation", "to_station", "destination", "to"
+    )
     query = " → ".join(item for item in (origin, destination) if item)
     if request.is_error:
         return _source_error("铁路 12306", query)
@@ -153,11 +187,24 @@ def _rail(request: PostToolHookRequest) -> PostToolHookResult:
         title_keys=("train_no", "train_code", "code", "name"),
         detail_keys=("departure_time", "arrival_time", "duration", "status"),
     )
-    status = _text(payload.get("status"))
-    detail = "当前车次尚未开售，已作为出发前复核项" if status == "not_on_sale" else (
-        f"返回 {len(rows)} 个车次结果，展示前 {min(len(items), _MAX_ITEMS)} 个" if rows else "已完成铁路交通核对"
+    if not items:
+        items = _rail_text_items(request.output)
+    status = _text(payload.get("status")).casefold()
+    sale_open_date = _text(payload.get("sale_open_date"))
+    detail = (
+        f"当前车次尚未开售，预计 {sale_open_date} 开售，届时再复核"
+        if status == "not_on_sale" and sale_open_date
+        else "当前车次尚未开售，已作为出发前复核项"
+        if status == "not_on_sale"
+        else (
+        f"返回 {len(rows) or len(items)} 个车次结果，展示前 {min(len(items), _MAX_ITEMS)} 个"
+        if rows or items
+        else "已完成铁路交通核对"
+        )
     )
-    return _results("铁路 12306", query or "跨城交通", detail, items, len(rows))
+    return _results(
+        "铁路 12306", query or "跨城交通", detail, items, len(rows) or len(items)
+    )
 
 
 def _web_search(request: PostToolHookRequest) -> PostToolHookResult:
@@ -169,6 +216,7 @@ def _web_search(request: PostToolHookRequest) -> PostToolHookResult:
         payload = {}
     if request.is_error or _payload_failed(payload):
         return _source_error("Tavily 网页检索", query, request, payload)
+    query = _first_text(payload, "query") or query
     rows = _first_list_from(payloads, "results", "items", "data")
     items = _named_items(rows, title_keys=("title", "name"), detail_keys=("content", "excerpt", "snippet"))
     detail = _search_summary(
@@ -201,7 +249,7 @@ def _xhs(request: PostToolHookRequest) -> PostToolHookResult:
         rows,
         items,
         found=f"读取 {len(rows)} 条公开经验，展示前 {min(len(items), _MAX_ITEMS)} 条筛选摘要",
-        empty="没有找到匹配的公开笔记，建议减少组合关键词后重试",
+        empty="上游本轮返回空结果；如有具体景点，将仅收窄重试一次",
         unreadable="公开笔记已返回，但当前格式暂无法生成摘要",
         recognized=bool(payloads),
     )
@@ -267,12 +315,18 @@ def _source_error(
         "TRAVEL_SOURCE_UPSTREAM_OFFLINE": "本地只读服务未启动",
         "TRAVEL_SOURCE_AUTH_REQUIRED": "登录状态已失效",
         "TRAVEL_SOURCE_TIMEOUT": "本次查询超时",
+        "TRAVEL_SOURCE_PAGE_CONNECTION_CLOSED": "上游搜索页面连接被关闭，同关键词有界重试后仍未恢复",
         "MCP_TOOL_TIMEOUT": "本次查询超时",
         "MCP_OUTPUT_TOO_LARGE": "返回内容过大，已改用精简查询重试",
         "TRAVEL_SOURCE_RATE_LIMITED": "当前请求较多，已触发限流",
         "MCP_TRANSPORT_ERROR": "连接临时中断，服务会自动重连",
     }
-    reason = reasons.get(code, "本次查询未成功")
+    output_text = str(request.output or "") if request else ""
+    reason = (
+        "高德接口瞬时并发额度已满，本次有界重试后仍未恢复"
+        if "CUQPS_HAS_EXCEEDED_THE_LIMIT" in output_text.upper()
+        else reasons.get(code, "本次查询未成功")
+    )
     return _simple(
         f"{provider}暂未取得结果",
         f"{target}{reason}；已安全降级，规划会保留其它已核验信息",
@@ -294,7 +348,11 @@ def _json_objects(value: Any) -> list[dict[str, Any]]:
 
     if isinstance(value, dict):
         roots = [value]
-    elif not isinstance(value, str) or not value.strip() or len(value) > 20_000:
+    elif (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > _MAX_RESULT_PARSE_CHARS
+    ):
         return []
     else:
         roots = []
@@ -333,7 +391,7 @@ def _json_objects(value: Any) -> list[dict[str, Any]]:
         expanded.append(current)
         if depth >= 4:
             continue
-        for key in ("data", "result", "content", "text", "payload"):
+        for key in ("data", "result", "content", "text", "payload", "output"):
             nested = current.get(key)
             if isinstance(nested, dict):
                 queue.append((nested, depth + 1))
@@ -343,6 +401,9 @@ def _json_objects(value: Any) -> list[dict[str, Any]]:
 
 
 def _preferred_object(objects: list[dict[str, Any]], keys: tuple[str, ...]) -> dict[str, Any]:
+    failed = [item for item in objects if _payload_failed(item)]
+    if failed:
+        return max(failed, key=lambda item: sum(key in item for key in keys))
     return max(objects, key=lambda item: sum(key in item for key in keys), default={})
 
 
@@ -409,6 +470,58 @@ def _named_items(
     return items
 
 
+def _geocode_items(rows: list[Any], query: str) -> list[dict[str, str]]:
+    items = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        address_parts = [
+            _text(row.get(key))
+            for key in ("province", "city", "district", "street", "number")
+        ]
+        address = _text(row.get("formatted_address")) or "".join(
+            part for part in address_parts if part
+        )
+        title = address or query or "地址候选"
+        location = _text(row.get("location"))
+        detail = " · ".join(
+            part
+            for part in (
+                _text(row.get("district")),
+                f"坐标 {location}" if location else "",
+            )
+            if part
+        )
+        items.append({"title": title[:_MAX_TEXT], "detail": detail[:_MAX_TEXT]})
+        if len(items) >= _MAX_ITEMS:
+            break
+    return items
+
+
+def _rail_text_items(output: str) -> list[dict[str, str]]:
+    pattern = re.compile(
+        r"(?m)^(?P<train>[GDCZTKYSL]\d+)"
+        r"(?:\([^\r\n]*?\))?\s+"
+        r"(?P<origin>[\u4e00-\u9fff]+)(?:\([^\r\n]*?\))?\s*->\s*"
+        r"(?P<destination>[\u4e00-\u9fff]+)(?:\([^\r\n]*?\))?\s+"
+        r"(?P<departure>\d{2}:\d{2})\s*->\s*(?P<arrival>\d{2}:\d{2})"
+        r"(?:\s+(?P<duration>\d{2}:\d{2}))?"
+    )
+    items = []
+    for match in pattern.finditer(str(output or "")[:_MAX_RESULT_PARSE_CHARS]):
+        duration = match.group("duration") or ""
+        detail = (
+            f"{match.group('origin')} {match.group('departure')} → "
+            f"{match.group('destination')} {match.group('arrival')}"
+        )
+        if duration:
+            detail += f" · 历时 {duration}"
+        items.append({"title": match.group("train"), "detail": detail})
+        if len(items) >= _MAX_ITEMS:
+            break
+    return items
+
+
 def _nested_first_text(value: dict[str, Any], keys: tuple[str, ...], depth: int = 0) -> str:
     for key in keys:
         item = value.get(key)
@@ -441,14 +554,166 @@ def _nested_first_text(value: dict[str, Any], keys: tuple[str, ...], depth: int 
     return ""
 
 
-def _route_items(payload: dict[str, Any], arguments: dict[str, Any]) -> list[dict[str, str]]:
+def _route_items(
+    payload: dict[str, Any],
+    arguments: dict[str, Any],
+    raw_output: object = "",
+) -> list[dict[str, str]]:
     origin = _first_text(arguments, "origin", "from")
     destination = _first_text(arguments, "destination", "to")
     title = " → ".join(item for item in (origin, destination) if item) or "路线方案"
-    duration = _nested_find(payload, ("duration", "duration_minutes", "time"))
-    distance = _nested_find(payload, ("distance", "distance_km"))
-    detail = " · ".join(item for item in (_format_metric(distance, "距离"), _format_metric(duration, "时长")) if item)
+    transit_leg = _first_transit_leg(payload)
+    truncated_metrics = _truncated_route_metrics(raw_output)
+    if not transit_leg:
+        transit_leg = _truncated_route_transit_leg(raw_output)
+    if transit_leg and _has_route_metric_envelope(payload):
+        duration = _route_level_metric(payload, ("duration", "duration_minutes", "time"))
+        distance = _route_level_metric(payload, ("distance", "distance_km"))
+    elif truncated_metrics:
+        distance, duration = truncated_metrics
+    elif transit_leg:
+        duration = None
+        distance = None
+    else:
+        duration = _nested_find(payload, ("duration", "duration_minutes", "time"))
+        distance = _nested_find(payload, ("distance", "distance_km"))
+    detail = " · ".join(
+        item
+        for item in (
+            _amap_distance(distance),
+            _amap_duration(duration),
+            transit_leg,
+        )
+        if item
+    )
     return [{"title": title, "detail": detail}]
+
+
+def _truncated_route_metrics(value: object) -> tuple[str, str | None] | None:
+    """Recover only top-level AMap totals from a bounded head/tail response.
+
+    The MCP transport deliberately inserts ``[truncated middle]`` into oversized
+    route JSON.  Generic recursive parsing can then mistake a nested walking step
+    (for example 155 metres) for the whole route.  The route envelope lives in the
+    retained head, so use only its explicit total distance and first option duration.
+    """
+
+    text = _truncated_route_text(value)
+    if "[truncated middle]" not in text:
+        return None
+    route = re.search(
+        r'"route"\s*:\s*\{.{0,1200}?"distance"\s*:\s*"?(\d+(?:\.\d+)?)"?',
+        text,
+        flags=re.DOTALL,
+    )
+    if not route:
+        return None
+    tail = text[route.end() : route.end() + 1200]
+    duration = re.search(r'"duration"\s*:\s*"?(\d+(?:\.\d+)?)"?', tail)
+    return route.group(1), duration.group(1) if duration else None
+
+
+def _truncated_route_transit_leg(value: object) -> str:
+    text = _truncated_route_text(value)
+    if "[truncated middle]" not in text:
+        return ""
+    match = re.search(
+        r'"buslines"\s*:\s*\[\s*\{.{0,1000}?'
+        r'"name"\s*:\s*"([^"]+)".{0,500}?'
+        r'"departure_stop"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"\s*\}.{0,500}?'
+        r'"arrival_stop"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"',
+        text,
+        flags=re.DOTALL,
+    )
+    return f"{match.group(1)}：{match.group(2)} → {match.group(3)}" if match else ""
+
+
+def _truncated_route_text(value: object) -> str:
+    """Unwrap a persisted ToolResult once before parsing its bounded route text."""
+
+    text = str(value or "")
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return text
+    if isinstance(payload, dict) and isinstance(payload.get("output"), str):
+        return payload["output"]
+    return text
+
+
+def _has_route_metric_envelope(value: dict[str, Any]) -> bool:
+    """Only trust totals that remain attached to a complete route envelope."""
+
+    route = value.get("route")
+    if isinstance(route, dict):
+        return True
+    data = value.get("data")
+    if isinstance(data, dict) and isinstance(data.get("route"), dict):
+        return True
+    return bool(
+        _first_text(value, "origin", "from")
+        and _first_text(value, "destination", "to")
+        and any(isinstance(value.get(key), list) for key in ("transits", "paths"))
+    )
+
+
+def _route_level_metric(value: object, keys: tuple[str, ...], depth: int = 0) -> Any:
+    if depth > 4:
+        return None
+    if isinstance(value, dict):
+        for key in keys:
+            if key in value and isinstance(value[key], str | int | float):
+                return value[key]
+        for key in ("data", "route", "transits", "paths"):
+            if key not in value:
+                continue
+            found = _route_level_metric(value[key], keys, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value[:5]:
+            found = _route_level_metric(item, keys, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _amap_distance(value: object) -> str:
+    try:
+        meters = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"距离 {meters / 1000:.1f} 公里" if meters >= 1000 else f"距离 {meters:.0f} 米"
+
+
+def _amap_duration(value: object) -> str:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"约 {max(1, round(seconds / 60))} 分钟"
+
+
+def _first_transit_leg(value: object, depth: int = 0) -> str:
+    if depth > 8:
+        return ""
+    if isinstance(value, dict):
+        if all(key in value for key in ("name", "departure_stop", "arrival_stop")):
+            line = _text(value.get("name"))
+            departure = _nested_first_text(value, ("departure_stop",))
+            arrival = _nested_first_text(value, ("arrival_stop",))
+            if line and departure and arrival:
+                return f"{line}：{departure} → {arrival}"
+        for item in value.values():
+            found = _first_transit_leg(item, depth + 1)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value[:20]:
+            found = _first_transit_leg(item, depth + 1)
+            if found:
+                return found
+    return ""
 
 
 def _nested_find(value: Any, keys: tuple[str, ...], depth: int = 0) -> Any:

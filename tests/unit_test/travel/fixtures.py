@@ -34,18 +34,37 @@ def plan_payload(*, mode: str = "quick", budget: float | None = 5000) -> dict:
         "freshness_summary": {"weather": "live", "guides": "snapshot"},
         "transport_options": [
             {
-                "title": "重庆至大理铁路方案",
-                "duration": "以查询班次为准",
-                "price_note": "实时票价需复核",
-                "status": "not_on_sale",
-                "reason": "不把未开售误称为无票",
+                "name": "重庆至大理铁路方案",
+                "mode": "高铁",
+                "from": "重庆",
+                "to": "大理",
+                "service_name": "待开售",
+                "departure": "",
+                "arrival": "",
+                "duration_minutes": 0,
+                "seat": "二等座",
+                "price_cny_per_person": None,
+                "price_cny_total": None,
+                "source": "规划估算",
+                "summary": "未开售，不把查询失败误称为无票",
+                "evidence_ids": [],
             }
         ],
         "stay_recommendations": [
             {
+                "hotel_name": "大理古城南门客栈候选",
+                "address": "大理古城南门片区",
                 "area": "大理古城南门",
+                "location": {"longitude": 100.165, "latitude": 25.694},
+                "check_in": "2026-10-01",
+                "check_out": "2026-10-02",
+                "nights": 1,
+                "observed_price_per_night_cny": None,
+                "planning_estimate_per_night_cny": 500,
+                "price_status": "planning_estimate",
+                "evidence_ids": ["ev-hotel"],
+                "price_source_evidence_ids": [],
                 "reason": "公交与餐饮方便",
-                "price_note": "POI 不代表实时房价或房态",
             }
         ],
         "days": [
@@ -70,12 +89,23 @@ def plan_payload(*, mode: str = "quick", budget: float | None = 5000) -> dict:
                         "to": "大理古城",
                         "duration": 50,
                         "distance": 18,
-                        "source": "高德地图",
+                        "source": "amap_transit",
                         "evidence_ids": ["ev-map"],
                         "path": [
                             {"longitude": 100.25, "latitude": 25.59},
                             {"longitude": 100.165, "latitude": 25.694},
                         ],
+                        "transit_legs": [
+                            {
+                                "mode": "公交",
+                                "line_name": "大理古城景区直通车",
+                                "departure_stop": "大理站",
+                                "arrival_stop": "大理古城南门",
+                                "via_stops": [],
+                            }
+                        ],
+                        "walking_distance": 0.4,
+                        "fare_cny": 5,
                     }
                 ],
                 "meal_suggestions": ["古城周边本地小吃"],
@@ -114,9 +144,20 @@ def plan_payload(*, mode: str = "quick", budget: float | None = 5000) -> dict:
                         "to": "喜洲古镇",
                         "duration": 70,
                         "distance": 28,
-                        "source": "高德地图",
+                        "source": "amap_transit",
                         "evidence_ids": ["ev-map"],
                         "path": [],
+                        "transit_legs": [
+                            {
+                                "mode": "公交",
+                                "line_name": "大理至喜洲旅游专线",
+                                "departure_stop": "生态廊道站",
+                                "arrival_stop": "喜洲古镇站",
+                                "via_stops": [],
+                            }
+                        ],
+                        "walking_distance": 0.6,
+                        "fare_cny": 10,
                     }
                 ],
                 "meal_suggestions": ["喜洲粑粑"],
@@ -158,6 +199,21 @@ def plan_payload(*, mode: str = "quick", budget: float | None = 5000) -> dict:
                 "content_hash": "",
             },
             {
+                "evidence_id": "ev-hotel",
+                "source_type": "official_api",
+                "provider": "高德地图",
+                "title": "大理古城南门客栈候选 POI",
+                "source_url": "https://ditu.amap.com/search?query=大理古城南门客栈",
+                "published_at": "",
+                "retrieved_at": "2026-09-28T08:00:30Z",
+                "data_as_of": "2026-09-28T08:00:30Z",
+                "excerpt": "大理古城南门片区住宿地点",
+                "facts": ["大理古城南门客栈候选，地址位于大理古城南门片区"],
+                "confidence": 0.9,
+                "freshness": "live",
+                "content_hash": "",
+            },
+            {
                 "evidence_id": "ev-weather",
                 "source_type": "official_api",
                 "provider": "Open-Meteo",
@@ -195,4 +251,3 @@ def plan_payload(*, mode: str = "quick", budget: float | None = 5000) -> dict:
 
 def clone_plan() -> dict:
     return deepcopy(plan_payload())
-

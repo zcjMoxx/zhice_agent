@@ -130,7 +130,10 @@ class ChildAgentFactory:
             denied_tools=profile.denied_tools,
             audit_sink=self.audit_sink,
         )
-        effective_tools = with_tool_discovery(effective_tools)
+        effective_tools = with_tool_discovery(
+            effective_tools,
+            initial_names=profile.initial_tools,
+        )
         child_loop = AgentLoop(
             llm=self.llm_factory(profile),
             sessions=child_sessions,

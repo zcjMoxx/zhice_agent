@@ -13,10 +13,19 @@ export interface TravelProgressDetail {
   resultCount: number;
   items: Array<{ title: string; detail: string }>;
 }
-export interface TravelProgressItem { id: string; stage: TravelProgressStage; title: string; detail: string; status: "running" | "done" | "error"; result?: TravelProgressDetail; }
+export type TravelProgressLane = "lodging" | "transport" | "validation";
+export interface TravelProgressItem { id: string; stage: TravelProgressStage; title: string; detail: string; status: "running" | "done" | "error"; result?: TravelProgressDetail; lane?: TravelProgressLane; startedAt?: number; }
 
 const PROGRESS_CACHE_PREFIX = "zhice.travel.progress";
 const MAX_CACHED_PROGRESS_ITEMS = 100;
+const STAGE_RANK: Record<TravelProgressStage, number> = {
+  requirements: 0,
+  data: 1,
+  guides: 2,
+  solve: 3,
+  validate: 4,
+  complete: 5,
+};
 
 export const useTravelStore = defineStore("travel", {
   state: () => ({
@@ -42,6 +51,7 @@ export const useTravelStore = defineStore("travel", {
     clarificationQuestions: [] as string[],
     candidateReview: null as TravelCandidateReview | null,
     candidateSelecting: false,
+    autoCandidateContinuationPending: "",
     conversation: [] as TravelConversationMessage[],
     conversationLoading: false,
     conversationError: "",
@@ -49,6 +59,7 @@ export const useTravelStore = defineStore("travel", {
     handoffQuestion: "",
     draftSaving: false,
     draftSavePromise: null as Promise<void> | null,
+    workspaceVersion: 0,
   }),
   actions: {
     initialize(userId: string): Promise<void> {
@@ -67,6 +78,7 @@ export const useTravelStore = defineStore("travel", {
       return this.restorePromise;
     },
     resetForIdentity() {
+      this.workspaceVersion += 1;
       this.unsubscribe?.();
       this.unsubscribe = null;
       this.stopRecoveryPolling();
@@ -88,7 +100,9 @@ export const useTravelStore = defineStore("travel", {
       this.restorePromise = null;
       this.clarificationQuestions = [];
       this.candidateReview = null;
+      this.autoCandidateContinuationPending = "";
       this.candidateSelecting = false;
+      this.autoCandidateContinuationPending = "";
       this.conversation = [];
       this.conversationLoading = false;
       this.conversationError = "";
@@ -111,22 +125,29 @@ export const useTravelStore = defineStore("travel", {
         this.loading = false;
       }
     },
-    async open(id: string) {
+    async open(id: string, sourceSessionIdHint = "") {
       if (!id) return;
+      const workspaceVersion = ++this.workspaceVersion;
       this.loading = true;
       this.error = "";
       this.clarificationQuestions = [];
       this.candidateReview = null;
+      this.autoCandidateContinuationPending = "";
       this.conversation = [];
       this.conversationError = "";
       this.activeDraft = null;
       try {
-        this.activePlan = (await api.travelPlan(id)).plan;
-        const sourceSessionId = this.plans.find((item) => item.plan_id === id)?.source_session_id || "";
+        const plan = (await api.travelPlan(id)).plan;
+        if (this.workspaceVersion !== workspaceVersion) return;
+        this.activePlan = plan;
+        const sourceSessionId = sourceSessionIdHint
+          || this.plans.find((item) => item.plan_id === id)?.source_session_id
+          || "";
         this.activeId = id;
         this.sessionId = sourceSessionId;
         this.generating = false;
-        this.loadProgress(sourceSessionId);
+        await this.restoreProgress(sourceSessionId);
+        if (this.workspaceVersion !== workspaceVersion) return;
         this.stage = "complete";
         this.statusText = "旅行计划已完成";
         if (!this.progressItems.some((item) => item.stage === "complete" && item.status === "done")) {
@@ -139,6 +160,13 @@ export const useTravelStore = defineStore("travel", {
           });
         }
         if (sourceSessionId) await this.loadDraft(sourceSessionId);
+        if (sourceSessionId) {
+          try {
+            this.candidateReview = await api.travelCandidateReview(sourceSessionId);
+          } catch {
+            this.candidateReview = null;
+          }
+        }
         if (window.location.pathname === "/travel") window.history.replaceState({}, "", `/travel?plan=${encodeURIComponent(id)}`);
       } catch (error) {
         this.error = error instanceof Error ? error.message : "无法读取旅行计划";
@@ -147,6 +175,7 @@ export const useTravelStore = defineStore("travel", {
       }
     },
     startNew() {
+      this.workspaceVersion += 1;
       this.stopRecoveryPolling();
       this.clearPersistedSessionId();
       this.activePlan = null;
@@ -161,6 +190,7 @@ export const useTravelStore = defineStore("travel", {
       this.error = "";
       this.clarificationQuestions = [];
       this.candidateReview = null;
+      this.autoCandidateContinuationPending = "";
       this.conversation = [];
       this.conversationLoading = false;
       this.conversationError = "";
@@ -197,26 +227,41 @@ export const useTravelStore = defineStore("travel", {
     },
     async openWorkItem(item: TravelWorkItem) {
       if (item.status === "completed" && item.plan_id) {
-        await this.open(item.plan_id);
+        await this.open(item.plan_id, item.session_id);
         return;
       }
+      const workspaceVersion = ++this.workspaceVersion;
       this.activePlan = null;
       this.activeId = "";
       this.sessionId = item.session_id;
-      this.loadProgress(item.session_id);
+      this.advanceStage("requirements", true);
       this.phase = "intake";
       this.error = "";
       this.candidateReview = null;
       this.clarificationQuestions = [];
       await this.loadDraft(item.session_id);
+      if (this.workspaceVersion !== workspaceVersion) return;
       window.history.replaceState({}, "", `/travel?session=${encodeURIComponent(item.session_id)}`);
       if (item.status === "running" || item.status === "awaiting_candidate") {
-        await this.applyGenerationStatus(await api.travelGeneration(item.session_id), true);
+        const status = await api.travelGeneration(item.session_id);
+        if (this.workspaceVersion !== workspaceVersion) return;
+        await this.applyGenerationStatus(status, true, workspaceVersion);
       } else {
+        await this.restoreProgress(item.session_id);
+        if (this.workspaceVersion !== workspaceVersion) return;
         this.generating = false;
-        this.stage = "requirements";
-        this.statusText = item.status === "failed" ? "上次规划未完成，可以补充或修正需求后继续" : "旅行需求收集中";
-        if (item.status === "failed") this.error = "上次规划未生成完整计划，请检查需求后重新开始。";
+        if (item.status === "failed") {
+          const selectedCandidateRestored = await this.restoreFailedCandidateReview(item.session_id, workspaceVersion);
+          if (this.workspaceVersion !== workspaceVersion) return;
+          if (!selectedCandidateRestored) {
+            this.stage = "requirements";
+            this.statusText = "上次规划未完成，可以补充或修正需求后继续";
+            this.error = "上次规划未生成完整计划，请检查需求后重新开始。";
+          }
+        } else {
+          this.stage = "requirements";
+          this.statusText = "旅行需求收集中";
+        }
       }
     },
     async saveDraft(conversation: TravelConversationMessage[], draft?: TravelRequirementDraft) {
@@ -268,17 +313,19 @@ export const useTravelStore = defineStore("travel", {
       this.activeId = "";
       window.history.replaceState({}, "", "/travel");
       this.generating = true;
-      this.stage = "requirements";
+      this.advanceStage("requirements", true);
       this.statusText = "正在确认旅行需求";
       this.error = "";
       this.clarificationQuestions = [];
       this.candidateReview = null;
+      this.autoCandidateContinuationPending = "";
       this.conversation = conversation.map((item) => ({ ...item }));
       if (draft) this.activeDraft = { ...draft };
       this.conversationError = "";
       this.progressItems = [{ id: "requirements", stage: "requirements", title: "已收到旅行需求", detail: "正在提取日期、人数、预算与偏好", status: "running" }];
       try {
-        if (this.draftSavePromise) await this.draftSavePromise;
+        if (conversation.length && draft) await this.saveDraft(conversation, draft);
+        else if (this.draftSavePromise) await this.draftSavePromise;
         if (!this.sessionId) this.sessionId = await webSocket.createSession("travel");
         this.persistProgress();
         if (!this.activeDraft) throw new Error("请先确认旅行条件");
@@ -347,7 +394,7 @@ export const useTravelStore = defineStore("travel", {
           const backgroundEvent = (envelope.data ?? {}) as RuntimeEventData;
           const backgroundName = String(backgroundEvent.type ?? backgroundEvent.event ?? "");
           if (backgroundName === "travel.plan_ready") this.markCompletedUnread();
-          if (["travel.plan_ready", "travel.clarification_required", "travel.candidate_review_required"].includes(backgroundName)) void this.refresh();
+          if (["travel.plan_ready", "travel.clarification_required", "travel.candidate_review_required", "travel.candidate_review_auto_selected"].includes(backgroundName)) void this.refresh();
         } else if (envelope.event === "channel_status") {
           const backgroundStatus = String((envelope.data as { type?: string })?.type || "");
           if (["done", "error", "stopped"].includes(backgroundStatus)) void this.refresh();
@@ -374,7 +421,7 @@ export const useTravelStore = defineStore("travel", {
           this.phase = "planning";
           this.intakeBusy = false;
           this.generating = true;
-          this.stage = "requirements";
+          this.advanceStage("requirements", true);
           this.statusText = "旅行条件已确认，正在开始正式规划";
           this.error = "";
           this.conversationError = "";
@@ -394,6 +441,7 @@ export const useTravelStore = defineStore("travel", {
         if (eventName === "travel.plan_ready") {
           const planId = String(event.metadata?.plan_id ?? "");
           if (planId) {
+            const sourceSessionId = this.sessionId;
             this.stage = "complete";
             this.statusText = "旅行计划已完成";
             this.generating = false;
@@ -402,7 +450,7 @@ export const useTravelStore = defineStore("travel", {
             this.clearPersistedSessionId();
             this.stopRecoveryPolling();
             this.finishProgress("complete", "旅行计划已保存", "正在打开完整行程");
-            void this.open(planId).then(() => this.refresh());
+            void this.open(planId, sourceSessionId).then(() => this.refresh());
           }
           return;
         }
@@ -418,30 +466,100 @@ export const useTravelStore = defineStore("travel", {
           this.finishProgress("requirements", "等待补充旅行信息", "补充后会重新确认并开始规划");
           return;
         }
-        if (eventName === "travel.candidate_review_required") {
+        if (["travel.candidate_review_required", "travel.candidate_review_auto_selected"].includes(eventName)) {
           const data = event.ui_metadata?.detail_data;
           const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
+          const automatic = eventName === "travel.candidate_review_auto_selected";
           this.candidateReview = {
             session_id: this.sessionId,
-            status: "pending",
+            status: automatic ? "selected" : "pending",
             recommended_candidate_id: String(data?.recommended_candidate_id || ""),
-            selected_candidate_id: "",
+            selected_candidate_id: automatic
+              ? String(data?.selected_candidate_id || data?.recommended_candidate_id || "")
+              : "",
             candidates,
             created_at: "",
             updated_at: "",
           };
-          this.generating = false;
-          this.stopRecoveryPolling();
-          this.statusText = "请选择一个候选行程";
-          this.finishProgress("solve", "候选行程比较完成", "选择后会继续生成完整旅行计划");
+          if (automatic) {
+            this.autoCandidateContinuationPending = this.candidateReview.selected_candidate_id;
+            this.advanceStage("validate");
+            this.statusText = "时间充足，已直接进入完整规划";
+            this.recordProgress({
+              id: `candidate-auto-${this.candidateReview.selected_candidate_id}`,
+              stage: "solve",
+              title: "无需额外方案取舍",
+              detail: "主要兴趣点可以完整覆盖，已自动采用唯一有效方案",
+              status: "done",
+            });
+          } else {
+            this.generating = false;
+            this.stopRecoveryPolling();
+            this.advanceStage("solve");
+            this.statusText = "请选择一个候选行程";
+            this.finishProgress("solve", "候选行程比较完成", "选择后会继续生成完整旅行计划");
+          }
           return;
         }
         if (!this.generating) return;
-        if (event.display?.visibility === "internal" || isInternalTravelTool(toolName)) return;
-        if (eventName.startsWith("skill.")) this.stage = "solve";
-        else if (toolName === "finalize_travel_plan") this.stage = "validate";
-        else if (eventName.startsWith("tool.") && toolName.includes("xhs")) this.stage = "guides";
-        else if (eventName.startsWith("tool.")) this.stage = "data";
+        const selectedCandidateFinalization = this.candidateReview?.status === "selected"
+          && this.stage === "validate"
+          && toolName === "delegate_tasks";
+        if (selectedCandidateFinalization) {
+          const finished = /completed|done|finished/.test(eventName);
+          const failed = /error|failed/.test(eventName);
+          const status: TravelProgressItem["status"] = failed ? "error" : finished ? "done" : "running";
+          const callId = String(event.tool_call_id || "selected-candidate");
+          this.recordProgress({
+            id: `finalization-lodging-${callId}`,
+            stage: "validate",
+            title: status === "running" ? "正在核对住宿与房价" : status === "done" ? "住宿与房价资料已汇总" : "住宿资料未完整取得",
+            detail: status === "running" ? "正在查询具体酒店身份和指定日期价格" : status === "done" ? "已完成住宿来源补齐，准备最终校验" : "保留已取得结果并进入最终校验",
+            status,
+            lane: "lodging",
+            startedAt: status === "running" ? Date.now() : undefined,
+          });
+          this.recordProgress({
+            id: `finalization-transport-${callId}`,
+            stage: "validate",
+            title: status === "running" ? "正在核对公共交通路线" : status === "done" ? "公共交通路线已汇总" : "部分路线未完整取得",
+            detail: status === "running" ? "正在补齐线路号、上下车站和远郊往返" : status === "done" ? "已完成路线来源补齐，准备最终校验" : "保留已取得线路并进入最终校验",
+            status,
+            lane: "transport",
+            startedAt: status === "running" ? Date.now() : undefined,
+          });
+          if (status === "done") {
+            this.recordProgress({
+              id: `finalization-validation-${callId}`,
+              stage: "validate",
+              title: "正在生成并校验完整计划",
+              detail: "住宿与交通资料已汇总，正在组装最终行程并执行结构校验",
+              status: "running",
+              lane: "validation",
+              startedAt: Date.now(),
+            });
+          }
+          this.statusText = status === "running"
+            ? "正在并行补齐住宿与交通路线"
+            : "住宿与交通资料已汇总，正在生成最终计划";
+          return;
+        }
+        if (event.display?.visibility === "internal") {
+          const progressId = String(event.tool_call_id || event.skill_run_id || "");
+          if (progressId && /completed|failed|error|done|finished/.test(eventName)) {
+            const remaining = this.progressItems.filter((item) => item.id !== progressId);
+            if (remaining.length !== this.progressItems.length) {
+              this.progressItems = remaining;
+              this.persistProgress();
+            }
+          }
+          return;
+        }
+        if (isInternalTravelTool(toolName)) return;
+        if (eventName.startsWith("skill.")) this.advanceStage("solve");
+        else if (toolName === "finalize_travel_plan") this.advanceStage("validate");
+        else if (eventName.startsWith("tool.") && toolName.includes("xhs")) this.advanceStage("guides");
+        else if (eventName.startsWith("tool.")) this.advanceStage("data");
         let title = eventName.startsWith("skill.")
           ? skillProgressTitle(eventName)
           : eventName === "tool.started"
@@ -450,7 +568,13 @@ export const useTravelStore = defineStore("travel", {
         let detail = String(event.display?.detail || safeToolLabel(toolName, eventName) || this.statusText);
         const result = progressDetail(event);
         const toolFailed = /error|failed/.test(eventName);
-        if (toolName.includes("tavily") && toolFailed && this.progressItems.some((item) =>
+        const toolCode = String(event.metadata?.code || "");
+        if (toolName === "search_travel_hotels" && toolFailed) {
+          title = "携程酒店房价未取得";
+          detail = ["HOTEL_MANUAL_VERIFICATION_REQUIRED", "HOTEL_LOGIN_VERIFICATION_TIMEOUT", "HOTEL_AUTH_REQUIRED"].includes(toolCode)
+            ? "携程需要重新验证，本轮只使用明确标注的规划估算，不冒充实时房价。"
+            : "本次未取得指定日期房价，已有住宿地点信息继续保留。";
+        } else if (toolName.includes("tavily") && toolFailed && this.progressItems.some((item) =>
           item.result?.provider.toLocaleLowerCase().includes("tavily") && item.result.resultCount > 0
         )) {
           title = "Tavily 补充检索未成功";
@@ -469,6 +593,8 @@ export const useTravelStore = defineStore("travel", {
             detail,
             status,
             result,
+            lane: progressLane(toolName),
+            startedAt: status === "running" ? Date.now() : undefined,
           });
         }
         return;
@@ -492,31 +618,29 @@ export const useTravelStore = defineStore("travel", {
       }
       if (!this.generating) return;
       if (data.type === "error") {
-        this.generating = false;
-        this.clearPersistedSessionId();
-        this.stopRecoveryPolling();
         this.error = data.error?.message || "旅行规划失败";
-        this.recordProgress({ id: `error-${Date.now()}`, stage: this.stage, title: "规划未完成", detail: this.error, status: "error" });
+        this.statusText = "正在确认旅行规划的最终状态";
+        void this.checkGenerationStatus();
       } else if (data.type === "done" || data.type === "stopped") {
-        this.generating = false;
-        this.clearPersistedSessionId();
-        this.stopRecoveryPolling();
-        if (this.stage !== "complete" && !this.clarificationQuestions.length) {
-          if (data.type === "stopped") {
-            this.statusText = "旅行规划已停止";
-            this.finishProgress(this.stage, "旅行规划已停止", "可以修改需求后重新开始");
-          } else {
-            this.error = "旅行规划没有生成完整结果，请重试";
-            this.statusText = "旅行规划未完成";
-            this.recordProgress({ id: `not-finalized-${Date.now()}`, stage: this.stage, title: "规划未完成", detail: this.error, status: "error" });
-          }
+        if (data.type === "done" && this.autoCandidateContinuationPending) {
+          this.autoCandidateContinuationPending = "";
+          this.generating = false;
+          this.stopRecoveryPolling();
+          void this.retrySelectedCandidate();
+          return;
         }
+        this.statusText = data.type === "stopped" ? "正在确认旅行规划已停止" : "正在确认旅行规划结果";
+        void this.checkGenerationStatus();
       }
     },
     async restoreGeneration(): Promise<boolean> {
       const persisted = this.readPersistedSessionId();
+      const workspaceVersion = this.workspaceVersion;
       try {
-        await this.applyGenerationStatus(await api.travelGeneration(persisted), true);
+        const status = await api.travelGeneration(persisted);
+        if (this.workspaceVersion !== workspaceVersion) return true;
+        await this.applyGenerationStatus(status, true, workspaceVersion);
+        if (this.workspaceVersion !== workspaceVersion) return true;
         void webSocket.connect().catch(() => {
           if (this.generating) this.scheduleRecoveryPoll(0);
         });
@@ -531,35 +655,52 @@ export const useTravelStore = defineStore("travel", {
     },
     async checkGenerationStatus() {
       if (!this.sessionId) return;
+      const sessionId = this.sessionId;
+      const workspaceVersion = this.workspaceVersion;
       try {
-        await this.applyGenerationStatus(await api.travelGeneration(this.sessionId), false);
+        const status = await api.travelGeneration(sessionId);
+        if (this.sessionId !== sessionId || this.workspaceVersion !== workspaceVersion) return;
+        await this.applyGenerationStatus(status, false, workspaceVersion);
       } catch {
         if (this.generating) this.scheduleRecoveryPoll();
       }
     },
-    async applyGenerationStatus(status: TravelGenerationStatus, restoring: boolean) {
+    async applyGenerationStatus(status: TravelGenerationStatus, restoring: boolean, workspaceVersion?: number) {
+      const expectedWorkspaceVersion = workspaceVersion ?? this.workspaceVersion;
+      if (this.workspaceVersion !== expectedWorkspaceVersion) return;
       if (status.status === "running" || status.status === "pending") {
         this.sessionId = status.session_id;
-        this.loadProgress(status.session_id);
+        if (restoring) await this.restoreProgress(status.session_id);
+        else this.loadProgress(status.session_id);
+        if (this.workspaceVersion !== expectedWorkspaceVersion) return;
         this.generating = true;
         this.persistSessionId();
         if (!this.conversation.length && !this.conversationLoading) void this.loadDraft(status.session_id);
-        if (!this.progressItems.length) {
+        this.error = "";
+        const selectedFinalization = await this.restoreSelectedCandidateFinalization(status.session_id, status.error_code);
+        if (this.workspaceVersion !== expectedWorkspaceVersion) return;
+        if (!this.progressItems.length && !selectedFinalization) {
           this.stage = "requirements";
           this.progressItems = [{ id: "recovered", stage: "requirements", title: "已恢复旅行规划", detail: "后台仍在生成，正在同步最新状态", status: "running" }];
         }
-        this.statusText = restoring ? "已恢复正在生成的旅行计划" : "旅行计划仍在生成";
+        if (!selectedFinalization) {
+          this.statusText = restoring ? "已恢复正在生成的旅行计划" : "旅行计划仍在生成";
+        }
         this.scheduleRecoveryPoll();
         return;
       }
       if (status.status === "awaiting_candidate") {
         this.sessionId = status.session_id;
-        this.loadProgress(status.session_id);
+        if (restoring) await this.restoreProgress(status.session_id);
+        else this.loadProgress(status.session_id);
+        if (this.workspaceVersion !== expectedWorkspaceVersion) return;
         this.generating = false;
         this.persistSessionId();
         this.statusText = "请选择一个候选行程";
         try {
-          this.candidateReview = await api.travelCandidateReview(status.session_id);
+          const candidateReview = await api.travelCandidateReview(status.session_id);
+          if (this.workspaceVersion !== expectedWorkspaceVersion) return;
+          this.candidateReview = candidateReview;
         } catch (error) {
           this.error = error instanceof Error ? error.message : "候选行程暂时无法恢复";
         }
@@ -569,20 +710,111 @@ export const useTravelStore = defineStore("travel", {
       this.clearPersistedSessionId();
       if (status.status === "completed" && status.plan_id) {
         this.sessionId = status.session_id;
+        if (restoring) await this.restoreProgress(status.session_id);
+        else this.loadProgress(status.session_id);
+        if (this.workspaceVersion !== expectedWorkspaceVersion) return;
         this.generating = false;
         this.stage = "complete";
         this.statusText = "旅行计划已完成";
         this.markCompletedUnread();
-        this.finishProgress("complete", "旅行计划已保存", "已恢复完整行程");
-        await this.open(status.plan_id);
+        if (!this.progressItems.some((item) => item.stage === "complete" && item.status === "done")) {
+          this.finishProgress("complete", "旅行计划已保存", "已恢复完整行程");
+        }
+        await this.open(status.plan_id, status.session_id);
         await this.refresh();
         return;
       }
-      if (!this.generating && !restoring) return;
+      if (status.status === "failed") {
+        this.sessionId = status.session_id;
+        if (restoring) await this.restoreProgress(status.session_id);
+        if (this.workspaceVersion !== expectedWorkspaceVersion) return;
+        this.generating = false;
+        const selectedCandidateRestored = await this.restoreFailedCandidateReview(status.session_id, expectedWorkspaceVersion);
+        if (this.workspaceVersion !== expectedWorkspaceVersion) return;
+        if (selectedCandidateRestored) return;
+      }
       this.generating = false;
       if (status.status === "failed") this.error = status.error_code === "TRAVEL_PLAN_NOT_FINALIZED" ? "旅行规划没有生成完整结果，请重试" : "旅行规划未能完成，请重试";
       this.statusText = status.status === "stopped" ? "旅行规划已停止" : status.status === "failed" ? "旅行规划失败" : "旅行规划已结束，但没有生成完整计划";
-      if (status.status !== "idle") this.finishProgress(this.stage, this.statusText, this.error || "可以修改需求后重新开始");
+      if (status.status === "failed") {
+        this.progressItems = this.progressItems.map((entry) => entry.status === "running" ? { ...entry, status: "error" as const } : entry);
+        this.recordProgress({ id: `failed-${Date.now()}`, stage: this.stage, title: this.statusText, detail: this.error, status: "error" });
+      } else if (status.status !== "idle") {
+        this.finishProgress(this.stage, this.statusText, this.error || "可以修改需求后重新开始");
+      }
+    },
+    async restoreFailedCandidateReview(sessionId: string, workspaceVersion?: number): Promise<boolean> {
+      const expectedWorkspaceVersion = workspaceVersion ?? this.workspaceVersion;
+      let review: TravelCandidateReview;
+      try {
+        review = await api.travelCandidateReview(sessionId);
+      } catch {
+        return false;
+      }
+      if (this.workspaceVersion !== expectedWorkspaceVersion) return false;
+      if (review.status !== "selected" || !review.selected_candidate_id) return false;
+      this.candidateReview = review;
+      this.phase = "planning";
+      this.advanceStage("validate");
+      this.statusText = "上次最终校验未完成，可以继续完善已选方案";
+      this.error = "已选方案仍然保留，点击继续即可从最终校验阶段接着完成。";
+      return true;
+    },
+    async restoreSelectedCandidateFinalization(sessionId: string, errorCode = ""): Promise<boolean> {
+      let review = this.candidateReview;
+      if (review?.session_id !== sessionId || review.status !== "selected") {
+        try {
+          review = await api.travelCandidateReview(sessionId);
+        } catch {
+          return false;
+        }
+      }
+      if (!review || review.status !== "selected" || !review.selected_candidate_id) return false;
+      this.candidateReview = review;
+      this.advanceStage("validate");
+      const candidateId = review.selected_candidate_id;
+      const routeRepairing = errorCode === "TRAVEL_ROUTE_EVIDENCE_MISSING";
+      if (!this.progressItems.some((item) => item.id === `finalizing-${candidateId}`)) {
+        this.recordProgress({
+          id: `finalizing-${candidateId}`,
+          stage: "validate",
+          title: "正在完善所选方案",
+          detail: routeRepairing ? "正在补齐缺失的公共交通路线并重新校验" : "正在并行补齐住宿价格、交通路线并执行最终校验",
+          status: "running",
+          startedAt: Date.now(),
+        });
+      }
+      const laneDetails: Array<{ lane: TravelProgressLane; title: string; detail: string }> = routeRepairing
+        ? [{ lane: "transport", title: "正在补齐缺失的公共交通路线", detail: "正在改用景区可达入口，必要时核对高德驾车兜底" }]
+        : [
+            { lane: "lodging", title: "正在核对住宿与房价", detail: "正在查询具体酒店身份和指定日期价格" },
+            { lane: "transport", title: "正在核对公共交通路线", detail: "正在补齐线路号、上下车站和远郊往返" },
+      ];
+      for (const lane of laneDetails) {
+        const recoveredId = routeRepairing
+          ? `finalization-${lane.lane}-repair-${candidateId}`
+          : `finalization-${lane.lane}-recovered-${candidateId}`;
+        if (this.progressItems.some((item) => item.id === recoveredId)) continue;
+        if (!routeRepairing && this.progressItems.some((item) => item.lane === lane.lane)) continue;
+        this.recordProgress({
+          id: recoveredId,
+          stage: "validate",
+          title: lane.title,
+          detail: lane.detail,
+          status: "running",
+          lane: lane.lane,
+          startedAt: Date.now(),
+        });
+      }
+      const finalizationDone = !routeRepairing && ["lodging", "transport"].every((lane) =>
+        this.progressItems.some((item) => item.lane === lane && item.status === "done")
+      );
+      this.statusText = routeRepairing
+        ? "正在补齐缺失的公共交通路线"
+        : finalizationDone
+        ? "住宿与交通资料已汇总，正在生成最终计划"
+        : "正在并行补齐住宿价格与公共交通路线";
+      return true;
     },
     scheduleRecoveryPoll(delay = 2500) {
       if (!this.generating || !this.sessionId || this.recoveryTimer) return;
@@ -628,8 +860,21 @@ export const useTravelStore = defineStore("travel", {
       const key = this.unreadKey();
       if (key) localStorage.removeItem(key);
     },
+    advanceStage(next: TravelProgressStage, reset = false) {
+      if (reset || STAGE_RANK[next] > STAGE_RANK[this.stage]) this.stage = next;
+    },
     recordProgress(item: TravelProgressItem) {
-      this.progressItems = this.progressItems.map((entry) => entry.status === "running" && entry.id !== item.id ? { ...entry, status: "done" as const } : entry).slice(-MAX_CACHED_PROGRESS_ITEMS);
+      this.advanceStage(item.stage);
+      // Recovery placeholders are replaced by the live finalization aggregate
+      // as soon as the delegate event arrives; keep one row per Lane.
+      if (item.lane && item.stage === "validate" && (
+        item.id.startsWith("finalization-") || item.lane === "validation"
+      )) {
+        this.progressItems = this.progressItems.filter((entry) => (
+          entry.lane !== item.lane || entry.id === item.id
+        ));
+      }
+      this.progressItems = this.progressItems.slice(-MAX_CACHED_PROGRESS_ITEMS);
       const index = this.progressItems.findIndex((entry) => entry.id === item.id);
       if (index >= 0) this.progressItems[index] = item;
       else this.progressItems.push(item);
@@ -643,19 +888,41 @@ export const useTravelStore = defineStore("travel", {
     async chooseCandidate(candidateId: string) {
       if (!this.sessionId || this.candidateSelecting || this.generating) return;
       this.candidateSelecting = true;
+      this.generating = true;
       this.error = "";
+      const displayName = candidateDisplayName(this.candidateReview, candidateId);
+      const selectionProgressId = `candidate-${candidateId}`;
+      const finalizationProgressId = `finalizing-${candidateId}`;
+      let selectionConfirmed = false;
+      this.statusText = "正在确认所选方案";
+      this.recordProgress({
+        id: selectionProgressId,
+        stage: "solve",
+        title: "正在确认候选行程",
+        detail: displayName,
+        status: "running",
+        startedAt: Date.now(),
+      });
       try {
         this.candidateReview = await api.selectTravelCandidate(this.sessionId, candidateId);
+        selectionConfirmed = true;
         const models = useModelStore();
-        this.generating = true;
-        this.stage = "validate";
-        this.statusText = "正在按选定方案生成完整计划";
+        this.advanceStage("validate");
+        this.statusText = "正在并行补齐住宿价格、交通路线并执行最终校验";
         this.recordProgress({
-          id: `candidate-${candidateId}`,
+          id: selectionProgressId,
           stage: "solve",
           title: "已选择候选行程",
           detail: `正在完善 ${candidateDisplayName(this.candidateReview, candidateId)}`,
           status: "done",
+        });
+        this.recordProgress({
+          id: finalizationProgressId,
+          stage: "validate",
+          title: "正在完善所选方案",
+          detail: "正在并行补齐住宿价格、交通路线并执行最终校验",
+          status: "running",
+          startedAt: Date.now(),
         });
         await webSocket.sendMessage(
           this.sessionId,
@@ -666,8 +933,53 @@ export const useTravelStore = defineStore("travel", {
       } catch (error) {
         this.generating = false;
         this.error = error instanceof Error ? error.message : "候选行程选择失败";
+        this.recordProgress({
+          id: selectionConfirmed ? finalizationProgressId : selectionProgressId,
+          stage: this.stage,
+          title: selectionConfirmed ? "所选方案暂未完成" : "候选方案确认失败",
+          detail: this.error,
+          status: "error",
+        });
       } finally {
         this.candidateSelecting = false;
+      }
+    },
+    async retrySelectedCandidate() {
+      const candidateId = this.candidateReview?.selected_candidate_id;
+      if (!this.sessionId || !candidateId || this.generating || this.candidateSelecting) return;
+      this.generating = true;
+      this.error = "";
+      this.advanceStage("validate");
+      this.statusText = "正在继续完善所选方案";
+      this.recordProgress({
+        id: `retry-finalizing-${candidateId}-${Date.now()}`,
+        stage: "validate",
+        title: "正在继续完成旅行计划",
+        detail: "正在恢复子任务资料并重新执行最终校验",
+        status: "running",
+        lane: "validation",
+        startedAt: Date.now(),
+      });
+      try {
+        const models = useModelStore();
+        await webSocket.sendMessage(
+          this.sessionId,
+          `继续完成我已确认的候选方案：${candidateId}`,
+          models.current || "auto",
+        );
+        this.persistSessionId();
+        this.scheduleRecoveryPoll();
+      } catch (error) {
+        this.generating = false;
+        this.error = error instanceof Error ? error.message : "旅行规划重试失败";
+        this.recordProgress({
+          id: `retry-finalizing-error-${candidateId}-${Date.now()}`,
+          stage: "validate",
+          title: "继续规划未能启动",
+          detail: this.error,
+          status: "error",
+          lane: "validation",
+        });
       }
     },
     loadProgress(sessionId: string) {
@@ -679,10 +991,25 @@ export const useTravelStore = defineStore("travel", {
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed)) return;
         this.progressItems = parsed.slice(-MAX_CACHED_PROGRESS_ITEMS) as TravelProgressItem[];
-        const last = this.progressItems.at(-1);
-        if (last) this.stage = last.stage;
+        const highest = highestProgressStage(this.progressItems);
+        if (highest) this.stage = highest;
       } catch {
         sessionStorage.removeItem(progressCacheKey(this.initializedUserId, sessionId));
+      }
+    },
+    async restoreProgress(sessionId: string) {
+      this.loadProgress(sessionId);
+      if (!sessionId) return;
+      const localItems = this.progressItems.map((item) => ({ ...item }));
+      try {
+        const history = await api.travelProgress(sessionId);
+        if (this.sessionId !== sessionId) return;
+        this.progressItems = mergeProgressItems(history.items as TravelProgressItem[], localItems);
+        const highest = highestProgressStage(this.progressItems);
+        if (highest) this.stage = highest;
+        this.persistProgress();
+      } catch {
+        // The local cache remains usable when durable history is temporarily unavailable.
       }
     },
     persistProgress() {
@@ -703,6 +1030,26 @@ function progressCacheKey(userId: string, sessionId: string): string {
   return `${PROGRESS_CACHE_PREFIX}.${encodeURIComponent(userId)}.${encodeURIComponent(sessionId)}`;
 }
 
+function highestProgressStage(items: TravelProgressItem[]): TravelProgressStage | undefined {
+  return items.reduce<TravelProgressStage | undefined>((highest, item) => (
+    highest === undefined || STAGE_RANK[item.stage] > STAGE_RANK[highest]
+      ? item.stage
+      : highest
+  ), undefined);
+}
+
+function mergeProgressItems(serverItems: TravelProgressItem[], localItems: TravelProgressItem[]): TravelProgressItem[] {
+  const serverHasCompletion = serverItems.some((item) => item.stage === "complete" && item.status === "done");
+  const serverIds = new Set(serverItems.map((item) => item.id));
+  const merged = [...serverItems];
+  for (const item of localItems) {
+    if (serverHasCompletion && item.stage === "complete") continue;
+    if (serverIds.has(item.id)) continue;
+    merged.push(item);
+  }
+  return merged.slice(-MAX_CACHED_PROGRESS_ITEMS);
+}
+
 function candidateDisplayName(review: TravelCandidateReview | null, candidateId: string): string {
   const candidate = review?.candidates.find((item) => item.candidate_id === candidateId);
   const firstDay = candidate?.days[0];
@@ -717,7 +1064,9 @@ function safeToolLabel(name: string, eventName = "") {
   if (!name) return "";
   if (name === "finalize_travel_plan") return "校验并保存结构化计划";
   if (name === "run_skill") return "执行行程可行性与预算门控";
+  if (name === "delegate_tasks") return "并行旅行研究正在汇总";
   const running = eventName.endsWith("started");
+  if (name === "search_travel_hotels") return running ? "正在通过携程查询指定日期房价" : "携程酒店房价查询完成";
   if (name.includes("open-meteo")) return running ? "正在通过 Open-Meteo 核对天气" : "Open-Meteo 天气查询完成";
   if (name.includes("amap")) return running ? "正在高德地图查询地点与路线" : "高德地图查询完成";
   if (name.includes("12306")) return running ? "正在铁路 12306 核对车次" : "铁路交通查询完成";
@@ -733,6 +1082,8 @@ function progressTitle(stage: TravelProgressStage, toolName: string) {
 function toolProgressTitle(name: string) {
   if (name === "finalize_travel_plan") return "正在校验完整计划";
   if (name === "run_skill") return "正在比较候选行程";
+  if (name === "delegate_tasks") return "正在并行收集旅行资料";
+  if (name === "search_travel_hotels") return "正在通过携程查询指定日期房价";
   if (name.includes("open-meteo")) return "正在通过 Open-Meteo 核对天气";
   if (name.includes("amap")) return "正在高德地图查询地点与路线";
   if (name.includes("12306")) return "正在铁路 12306 核对车次";
@@ -744,6 +1095,8 @@ function toolProgressTitle(name: string) {
 function completedToolTitle(name: string, backendTitle: string) {
   if (name === "finalize_travel_plan") return backendTitle || "完整计划校验完成";
   if (name === "run_skill") return backendTitle || "候选行程比较完成";
+  if (name === "delegate_tasks") return "并行旅行资料已汇总";
+  if (name === "search_travel_hotels") return "携程酒店房价查询完成";
   if (name.includes("open-meteo")) return backendTitle && !backendTitle.includes("mcp__") ? backendTitle : "Open-Meteo 天气查询完成";
   if (name.includes("amap")) return backendTitle && !backendTitle.includes("mcp__") ? backendTitle : "高德地图查询完成";
   if (name.includes("12306")) return backendTitle && !backendTitle.includes("mcp__") ? backendTitle : "12306 查询完成";
@@ -754,6 +1107,14 @@ function completedToolTitle(name: string, backendTitle: string) {
 
 function isInternalTravelTool(name: string) {
   return ["discover_tools", "load_skills", "request_travel_clarification"].includes(name);
+}
+
+function progressLane(name: string): TravelProgressLane | undefined {
+  const normalized = name.toLocaleLowerCase();
+  if (name === "search_travel_hotels" || normalized.includes("hotel") || normalized.includes("ctrip")) return "lodging";
+  if (name === "finalize_travel_plan") return "validation";
+  if (normalized.includes("12306") || normalized.includes("amap") || normalized.includes("route") || normalized.includes("transit")) return "transport";
+  return undefined;
 }
 
 function skillProgressTitle(eventName: string) {

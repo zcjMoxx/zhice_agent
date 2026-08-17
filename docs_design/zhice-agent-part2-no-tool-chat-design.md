@@ -256,7 +256,7 @@ class LLMProvider(Protocol):
 
 新增职责：
 
-- 从 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 读取 endpoint
+- 从 `${ZHICE_AGENT_WORKSPACE}/config/models.json` 读取 endpoint 与用途路由
 - 解析 `api_key`
 - 初始化本地运行时文件
 - 在 workspace 确定后加载 `${workspace}/config/.env`
@@ -269,7 +269,7 @@ class LLMProvider(Protocol):
 - 显式 `--env-file` 可以兼容提供 workspace；项目 `config/.env` 仅作为遗留迁移 fallback
 - 真实 endpoint 配置放在工作目录，不放在仓库中
 - `zcagent init` 会在工作目录生成：
-  - `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json`
+  - `${ZHICE_AGENT_WORKSPACE}/config/models.json`
   - `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `skills` 分区
   - `${ZHICE_AGENT_WORKSPACE}/prompts/*.md`
   - `${ZHICE_AGENT_WORKSPACE}/config/.env`
@@ -316,37 +316,32 @@ chat 路径职责：
 
 ### 5.2 工作目录配置
 
-`${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 描述真实调用的 endpoint。
+`${ZHICE_AGENT_WORKSPACE}/config/models.json` 描述真实调用的 chat/embedding endpoint 与用途路由。
 
 示例：
 
 ```json
 {
-  "default": {
-    "protocol": "openai",
-    "base_url": "https://api.openai.com/v1",
-    "api_key": "your-local-key",
-    "model": "gpt-5",
-    "context_window": 131072,
-    "max_tokens": 4096,
-    "temperature": 0.7
+  "schema_version": 1,
+  "routing": {"chat": "请填写端点名称/请填写模型名称"},
+  "chat": {
+    "请填写端点名称": {
+      "protocol": "openai",
+      "provider": "",
+      "base_url": "请填写模型服务地址",
+      "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
+      "model": "请填写模型名称",
+      "supported_models": ["请填写模型名称"],
+      "context_window": 131072,
+      "max_tokens": 4096,
+      "temperature": 0.7,
+      "role": "default"
+    }
   }
 }
 ```
 
-当前实现还支持把 `api_key` 写成环境变量占位符：
-
-```json
-{
-  "default": {
-    "protocol": "openai",
-    "base_url": "https://api.openai.com/v1",
-    "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
-    "model": "gpt-5",
-    "context_window": 131072
-  }
-}
-```
+`zcagent init` 原样复制 `config/models.example.json`，不在代码中生成第二份模型配置。`api_key` 可以直接写在本地工作区，也可以像示例一样使用环境变量占位符；仓库模板只使用固定环境变量名，不包含真实 key。
 
 `context_window` 缺失时默认 `131072`；`max_tokens` 缺失时沿用当前默认输出上限，并且只表示单次最大输出 token。输入预算固定按二者差值计算，不再提供第三个输入预算配置字段。
 
@@ -364,7 +359,7 @@ zcagent init
 
 - 未显式指定时在 `Path.home() / ".zhice"` 初始化
 - 默认从公开 `config/.env.example` 生成 `${ZHICE_AGENT_WORKSPACE}/config/.env`
-- 在 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 创建 endpoint 配置
+- 在 `${ZHICE_AGENT_WORKSPACE}/config/models.json` 创建 endpoint 与路由配置
 - 在 `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 的 `skills` 分区创建 Skill source 配置
 - 复制默认 prompts
 - 默认保留已有用户文件，只补齐缺失文件
@@ -477,7 +472,7 @@ sequenceDiagram
 - LLM 抛错时会记录错误 assistant 消息
 - 缺少 API key 时能给出可操作提示
 - 缺少环境变量占位符时能明确指出变量名
-- Provider 请求失败时能指向 `llm_endpoints.json`
+- Provider 请求失败时能指向 `models.json`
 - Session 保存失败时不会覆盖原本的 LLM 返回
 
 ### 8.3 `OpenAIProvider` / `LiteLLMProvider`
@@ -503,7 +498,7 @@ sequenceDiagram
 - 普通 `zcagent init` 默认生成 `config/.env`；已有文件保留，`--force` 覆盖，`--write-env` 与普通 init 结果一致
 - `${workspace}/config/.env` 不能反向改变 workspace，显式 `--env-file` 可以兼容提供 workspace
 - 缺少启动 prompts 时能引导用户执行 `zcagent init`
-- 缺少或未正确填写 `${ZHICE_AGENT_WORKSPACE}/config/llm_endpoints.json` 时，`zcagent` 聊天入口直接失败并提示配置；因为 LLM 是聊天运行必需能力
+- 缺少或未正确填写 `${ZHICE_AGENT_WORKSPACE}/config/models.json` 时，`zcagent` 聊天入口直接失败并提示配置；因为 LLM 是聊天运行必需能力
 - `${ZHICE_AGENT_WORKSPACE}/config/config.yml` 缺少 `skills` 分区时静默跳过 Skill 同步并视为 disabled；只有显式配置后非法或同步失败才记录 warning
 
 提交前建议运行：

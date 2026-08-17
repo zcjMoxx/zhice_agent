@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, ArrowLeft, BookOpen, ChevronDown, Download, ExternalLink, FileClock, Gauge, LockKeyhole, RefreshCw, Server, Settings2, Shield, Trash2, Users } from "@lucide/vue";
+import { Activity, ArrowLeft, BookOpen, ChevronDown, Download, ExternalLink, FileClock, Gauge, LockKeyhole, RefreshCw, Server, Shield, Trash2, Users } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 
@@ -31,6 +31,8 @@ const technicalOpen = ref<Record<string, boolean>>({});
 const auditFilters = reactive({ event_type: "", actor_user_id: "", outcome: "", from_ts: "", to_ts: "" });
 const diagnosticFilters = reactive({ actor_user_id: "", session_id: "", component: "", error_code: "", status: "", minutes: "1440" });
 const newUser = reactive({ username: "", display_name: "", password: "", roles: ["viewer"] });
+const hotelCredentials = reactive({ username: "", password: "" });
+const hotelCredentialsOpen = ref(false);
 const deletingUser = ref<PublicUser | null>(null);
 const deleteConfirmation = ref("");
 const deleteConfirmationError = ref("");
@@ -40,6 +42,7 @@ const opsEmbedded = ref(false);
 const opsFrameFallback = ref(false);
 let opsFrameTimer: ReturnType<typeof setTimeout> | undefined;
 let xhsLoginTimer: ReturnType<typeof setInterval> | undefined;
+let hotelLoginTimer: ReturnType<typeof setInterval> | undefined;
 
 function tr(chinese: string, english: string): string { return uiText(ui.language, chinese, english); }
 
@@ -50,8 +53,16 @@ const tabs = computed(() => [
   { key: "skills", label: tr("MCP 与 Skills", "MCP & Skills"), icon: BookOpen, visible: auth.can("skill.sources.read") },
   { key: "monitor", label: tr("运行诊断", "Runtime diagnostics"), icon: Activity, visible: auth.can("turn.read.any") || auth.can("diagnostics.system.use") },
   { key: "operations", label: tr("服务器运维", "Server operations"), icon: Server, visible: auth.isOwner },
-  { key: "advanced", label: tr("高级设置", "Advanced"), icon: Settings2, visible: auth.can("audit.read") },
+  { key: "advanced", label: tr("安全审计", "Security audit"), icon: FileClock, visible: auth.can("audit.read") },
 ].filter((item) => item.visible));
+const orderedMcpServers = computed(() => {
+  const servers = admin.mcpStatus?.servers || [];
+  return [
+    ...servers.filter((server) => server.server_id !== "xhs-readonly"),
+    ...servers.filter((server) => server.server_id === "xhs-readonly"),
+  ];
+});
+const visibleServiceCount = computed(() => orderedMcpServers.value.length);
 const canOpenMonitor = computed(() => tabs.value.some((item) => item.key === "monitor"));
 const auditActionOptions = computed(() => [
   ["login", tr("登录", "Login")],
@@ -148,6 +159,7 @@ onMounted(async () => { await loadTab("overview"); });
 onBeforeUnmount(() => {
   if (opsFrameTimer) clearTimeout(opsFrameTimer);
   if (xhsLoginTimer) clearInterval(xhsLoginTimer);
+  if (hotelLoginTimer) clearInterval(hotelLoginTimer);
 });
 
 async function loadTab(next: string) {
@@ -169,7 +181,7 @@ async function loadTab(next: string) {
     if (next === "roles") { await admin.loadRoles(); selectedRole.value ||= orderedRoles.value[0]?.id || ""; }
     if (next === "skills") {
       const loads: Promise<unknown>[] = [admin.loadSkillSources(), admin.loadMcpStatus()];
-      if (auth.isOwner) loads.push(admin.loadXhsStatus());
+      if (auth.isOwner) loads.push(admin.loadXhsStatus(), admin.loadHotelBrowserStatus());
       await Promise.all(loads);
       convergeXhsAdminStatus();
     }
@@ -335,7 +347,7 @@ async function refreshMcpAdmin() {
   failure.value = "";
   try {
     const loads: Promise<unknown>[] = [admin.loadMcpStatus()];
-    if (auth.isOwner) loads.push(admin.loadXhsStatus());
+    if (auth.isOwner) loads.push(admin.loadXhsStatus(), admin.loadHotelBrowserStatus());
     await Promise.all(loads);
     convergeXhsAdminStatus();
   } catch (error) { failure.value = errorMessage(error); }
@@ -346,17 +358,23 @@ function convergeXhsAdminStatus() {
     watchXhsLogin();
     return;
   }
-  if (admin.xhsStatus.state === "unknown" && !admin.xhsAction) void checkXhsLogin();
+  if (admin.xhsStatus.state === "unknown" && !admin.xhsAction) void checkXhsLogin(true);
 }
-async function checkXhsLogin() {
-  failure.value = "";
-  actionStatus.value = "";
+async function checkXhsLogin(silent = false) {
+  if (!silent) {
+    failure.value = "";
+    actionStatus.value = "";
+  }
   try {
     await admin.checkXhsLogin();
-    actionStatus.value = admin.xhsStatus?.state === "authenticated"
-      ? tr("小红书只读账号已登录", "Xiaohongshu read-only account is logged in")
-      : tr("小红书只读账号需要重新登录", "Xiaohongshu read-only account needs login");
-  } catch (error) { failure.value = errorMessage(error); }
+    if (!silent) {
+      actionStatus.value = admin.xhsStatus?.state === "authenticated"
+        ? tr("小红书只读账号已登录", "Xiaohongshu read-only account is logged in")
+        : tr("小红书只读账号需要重新登录", "Xiaohongshu read-only account needs login");
+    }
+  } catch (error) {
+    if (!silent) failure.value = errorMessage(error);
+  }
 }
 async function startXhsLogin() {
   failure.value = "";
@@ -401,6 +419,87 @@ function watchXhsLogin() {
 function xhsStateLabel(value: string | undefined) {
   return ({ authenticated: tr("已登录", "Logged in"), auth_required: tr("需要登录", "Login required"), login_pending: tr("等待扫码", "Waiting for QR scan"), unavailable: tr("不可用", "Unavailable"), unknown: tr("未检查", "Not checked") } as Record<string, string>)[value || "unknown"];
 }
+async function saveHotelCredentials() {
+  failure.value = "";
+  actionStatus.value = "";
+  const username = hotelCredentials.username.trim();
+  const password = hotelCredentials.password;
+  if (!username || !password) {
+    failure.value = tr("请输入携程账号和登录密码", "Enter the Ctrip account and password");
+    return;
+  }
+  hotelCredentials.password = "";
+  try {
+    await admin.saveHotelBrowserCredentials(username, password);
+    hotelCredentialsOpen.value = false;
+    actionStatus.value = admin.hotelBrowserStatus?.login_in_progress
+      ? tr("凭据已保存到运行配置，正在自动登录携程", "Credentials were saved to runtime configuration and Ctrip login is running")
+      : hotelActionMessage(admin.hotelBrowserStatus?.code || "HOTEL_LOGIN_START_FAILED");
+    if (admin.hotelBrowserStatus?.login_in_progress) watchHotelLogin();
+  } catch (error) {
+    failure.value = errorMessage(error);
+  }
+}
+async function startHotelLogin() {
+  failure.value = "";
+  actionStatus.value = "";
+  try {
+    await admin.startHotelBrowserLogin();
+    if (!admin.hotelBrowserStatus?.login_in_progress) {
+      failure.value = hotelActionMessage(admin.hotelBrowserStatus?.code || "HOTEL_LOGIN_START_FAILED");
+      return;
+    }
+    actionStatus.value = tr("正在使用已保存凭据登录；需要验证时会保留可见浏览器", "Signing in with saved credentials; a visible browser remains open if verification is required");
+    watchHotelLogin();
+  } catch (error) { failure.value = errorMessage(error); }
+}
+async function deleteHotelCredentials() {
+  if (!window.confirm(tr("删除运行配置中保存的携程账号密码？浏览器登录态不会同时删除。", "Delete the Ctrip credentials saved in runtime configuration? The existing browser session will remain."))) return;
+  failure.value = "";
+  actionStatus.value = "";
+  try {
+    await admin.deleteHotelBrowserCredentials();
+    if (admin.hotelBrowserStatus?.code === "HOTEL_CREDENTIALS_EXTERNALLY_MANAGED") {
+      actionStatus.value = hotelActionMessage(admin.hotelBrowserStatus.code);
+      return;
+    }
+    hotelCredentials.username = "";
+    hotelCredentials.password = "";
+    actionStatus.value = tr("已删除保存的携程账号密码", "Saved Ctrip credentials were deleted");
+  } catch (error) { failure.value = errorMessage(error); }
+}
+function watchHotelLogin() {
+  if (hotelLoginTimer) clearInterval(hotelLoginTimer);
+  hotelLoginTimer = setInterval(async () => {
+    if (admin.hotelBrowserAction) return;
+    try {
+      await admin.loadHotelBrowserStatus();
+      if (admin.hotelBrowserStatus?.login_in_progress) return;
+      if (hotelLoginTimer) clearInterval(hotelLoginTimer);
+      hotelLoginTimer = undefined;
+      actionStatus.value = admin.hotelBrowserStatus?.state === "authenticated"
+        ? tr("携程账号登录成功，后续查询会自动复用", "Ctrip login succeeded and will be reused for later queries")
+        : hotelActionMessage(admin.hotelBrowserStatus?.code || "HOTEL_LOGIN_FAILED");
+    } catch {
+      // Explicit actions continue to use the normal page error surface.
+    }
+  }, 2500);
+}
+function hotelStateLabel(value: string | undefined) {
+  return ({ authenticated: tr("已登录", "Logged in"), auth_required: tr("需要验证", "Verification required"), login_pending: tr("登录中", "Signing in"), not_configured: tr("未配置", "Not configured"), unavailable: tr("不可用", "Unavailable"), unknown: tr("未检查", "Not checked") } as Record<string, string>)[value || "unknown"];
+}
+function hotelActionMessage(code: string) {
+  return ({
+    HOTEL_BROWSER_DEPENDENCY_MISSING: tr("未安装 hotel-browser 可选依赖，暂时不能打开携程登录浏览器", "The optional hotel-browser dependency is not installed"),
+    HOTEL_CREDENTIAL_STORE_UNAVAILABLE: tr("运行配置中的凭据保存不可用", "Runtime environment credential storage is unavailable"),
+    HOTEL_CREDENTIALS_EXTERNALLY_MANAGED: tr("凭据由服务器环境变量或部署 Secret 管理，请在部署配置中修改", "Credentials are managed by environment variables or deployment Secrets; update the deployment configuration"),
+    HOTEL_CREDENTIALS_NOT_CONFIGURED: tr("请先保存携程账号密码", "Save the Ctrip account credentials first"),
+    HOTEL_MANUAL_VERIFICATION_REQUIRED: tr("携程要求验证码或安全验证，请在弹出的浏览器中完成", "Ctrip requires manual verification in the opened browser"),
+    HOTEL_LOGIN_VERIFICATION_TIMEOUT: tr("携程安全验证等待超时，请重新登录", "Ctrip verification timed out; start login again"),
+    HOTEL_LOGIN_START_FAILED: tr("携程登录助手启动失败", "The Ctrip login helper could not be started"),
+    HOTEL_LOGIN_FAILED: tr("携程登录未完成", "Ctrip login did not complete"),
+  } as Record<string, string>)[code] || tr("携程账号操作未完成", "The Ctrip account action did not complete");
+}
 function xhsActionMessage(code: string) {
   return ({
     XHS_LOGIN_UNSUPPORTED: tr("当前运行环境不能弹出本机扫码窗口", "This runtime cannot open a local QR login window"),
@@ -410,17 +509,19 @@ function xhsActionMessage(code: string) {
     XHS_RESTART_FAILED: tr("小红书只读服务重启失败", "The Xiaohongshu read-only service could not be restarted"),
   } as Record<string, string>)[code] || tr("小红书管理操作未完成", "The Xiaohongshu management action did not complete");
 }
-function mcpAuthLabel(value: unknown): string {
+function mcpAuthLabel(serverId: string, value: unknown): string {
+  if (serverId === "xhs-readonly") return tr("扫码 / Cookie", "QR / Cookie");
+  if (["amap-maps", "tavily"].includes(serverId)) return "API Key";
   const state = String(value || "").toLowerCase();
   return ({
-    disabled: tr("无需 OAuth", "OAuth not used"),
+    disabled: tr("无需认证", "No authentication"),
     ready: tr("OAuth 已连接", "OAuth connected"),
     authenticated: tr("OAuth 已连接", "OAuth connected"),
     connected: tr("OAuth 已连接", "OAuth connected"),
     required: tr("需要 OAuth", "OAuth required"),
     pending: tr("等待 OAuth 授权", "OAuth pending"),
     error: tr("OAuth 异常", "OAuth error"),
-  } as Record<string, string>)[state] || String(value || "—");
+  } as Record<string, string>)[state] || tr("无需认证", "No authentication");
 }
 function componentLabel(value: string): string {
   return ({ agent: tr("Agent 运行时", "Agent runtime"), gateway: "Gateway", turn: tr("对话运行", "Turn runtime"), llm: tr("模型服务", "Model service"), tool: tr("工具调用", "Tool calls"), channel: tr("外部渠道", "Channels"), mcp: "MCP", session: tr("会话", "Sessions"), context: tr("上下文", "Context"), memory: "Memory", subagent: tr("子智能体", "Subagents") } as Record<string, string>)[value] || value;
@@ -469,7 +570,8 @@ function diagnosticEventKey(event: Record<string, unknown>): string {
   return String(event.event || event.tool_name || event.status || event.kind || "runtime.event");
 }
 function eventIsError(event: Record<string, unknown>): boolean {
-  return Boolean(event.is_error || event.code || event.error_code || event.reason_code);
+  if (typeof event.is_error === "boolean") return event.is_error;
+  return false;
 }
 function diagnosticFieldLabel(value: string): string {
   return ({ error_message: tr("错误消息", "Error message"), reason_code: tr("原因代码", "Reason code"), status: tr("状态", "Status"), route: tr("请求路径", "Route"), session_id: "Session ID", turn_id: "Turn ID", request_id: "Request / Trace ID", model: tr("模型", "Model"), endpoint: tr("模型端点", "Endpoint"), duration_ms: tr("耗时（毫秒）", "Duration (ms)") } as Record<string, string>)[value] || value;
@@ -541,21 +643,51 @@ function toggleTimelineEvent(evidenceId: unknown) {
         <div class="truth-banner"><BookOpen :size="22" /><span><strong>{{ tr('Skill source 运行真值', 'Skill source runtime truth') }}</strong><small>{{ tr('状态来自持久同步记录和派生索引；页面不显示凭据、仓库 URL、宿主机路径或原始 stderr。', 'Status comes from persistent sync records and the derived index. Credentials, repository URLs, host paths, and raw stderr are never shown.') }}</small></span></div>
         <section class="mcp-monitor-section">
           <header><div><span class="eyebrow">MCP Runtime</span><h2>{{ tr('MCP 服务监控', 'MCP server monitoring') }}</h2><p>{{ tr('连接、Catalog 和调用统计来自当前 Gateway 运行时；自动重连由 Runtime 按退避策略持续处理。', 'Connection, catalog, and call facts come from the current Gateway runtime. Runtime continues automatic reconnect with backoff.') }}</p></div><button type="button" @click="refreshMcpAdmin"><RefreshCw :size="15" />{{ tr('刷新', 'Refresh') }}</button></header>
-          <div class="mcp-summary-grid"><article><span>Servers</span><strong>{{ admin.mcpStatus?.servers.length || 0 }}</strong></article><article><span>{{ tr('活动调用', 'Active calls') }}</span><strong>{{ admin.mcpStatus?.active_calls || 0 }}</strong></article><article><span>{{ tr('自动重连', 'Reconnects') }}</span><strong>{{ admin.mcpStatus?.reconnect_count || 0 }}</strong></article><article><span>Catalog</span><strong>v{{ admin.mcpStatus?.catalog_version || 0 }}</strong></article></div>
+          <div class="mcp-summary-grid"><article><span>Servers</span><strong>{{ visibleServiceCount }}</strong></article><article><span>{{ tr('活动调用', 'Active calls') }}</span><strong>{{ admin.mcpStatus?.active_calls || 0 }}</strong></article><article><span>{{ tr('自动重连', 'Reconnects') }}</span><strong>{{ admin.mcpStatus?.reconnect_count || 0 }}</strong></article><article><span>Catalog</span><strong>v{{ admin.mcpStatus?.catalog_version || 0 }}</strong></article></div>
           <div class="mcp-server-grid">
-            <article v-for="server in admin.mcpStatus?.servers" :key="server.server_id" class="mcp-server-card" :data-state="server.state">
+            <article v-for="server in orderedMcpServers" :key="server.server_id" class="mcp-server-card" :data-state="server.state">
               <header><span><i :class="`status-dot ${server.state === 'ready' ? 'available' : server.state}`"></i><strong>{{ server.server_id }}</strong></span><b>{{ server.state }}</b></header>
-              <dl><dt>Tools</dt><dd>{{ server.tool_count }}</dd><dt>{{ tr('调用', 'Calls') }}</dt><dd>{{ server.call_count }}</dd><dt>{{ tr('成功', 'Success') }}</dt><dd>{{ server.success_count }}</dd><dt>{{ tr('失败', 'Failures') }}</dt><dd>{{ server.failure_count }}</dd><dt>{{ tr('取消', 'Cancelled') }}</dt><dd>{{ server.cancelled_count }}</dd><dt>{{ tr('认证方式', 'Authentication') }}</dt><dd>{{ mcpAuthLabel(server.oauth_state) }}</dd></dl>
-              <section v-if="auth.isOwner && server.server_id === 'xhs-readonly' && admin.xhsStatus" class="xhs-mcp-admin">
-                <header><span><i :class="`status-dot ${admin.xhsStatus.state === 'authenticated' ? 'available' : admin.xhsStatus.state === 'auth_required' ? 'degraded' : admin.xhsStatus.state}`"></i><strong>{{ tr('小红书登录管理', 'Xiaohongshu login management') }}</strong></span><b>{{ xhsStateLabel(admin.xhsStatus.state) }}</b></header>
-                <p>{{ admin.xhsStatus.state === 'authenticated' ? tr('旅行规划可读取社区公开笔记。', 'Travel planning can read public community notes.') : admin.xhsStatus.state === 'login_pending' ? tr('请在本机扫码窗口完成登录。', 'Complete login in the local QR window.') : tr('登录凭据由系统所有者维护，不向普通用户开放。', 'Login credentials are maintained by the system Owner and are not exposed to ordinary users.') }}</p>
-                <small>{{ tr('Cookie 最近更新', 'Cookie last updated') }}：{{ fmt(admin.xhsStatus.cookie_updated_at) }}</small>
-                <div class="xhs-mcp-actions"><button type="button" :disabled="Boolean(admin.xhsAction) || admin.xhsStatus.login_in_progress" @click="checkXhsLogin">{{ admin.xhsAction === 'check' ? tr('检查中…', 'Checking…') : tr('检查登录', 'Check login') }}</button><button type="button" :disabled="Boolean(admin.xhsAction) || !admin.xhsStatus.login_supported" @click="startXhsLogin">{{ admin.xhsStatus.login_in_progress ? tr('等待扫码…', 'Waiting for QR…') : admin.xhsAction === 'login' ? tr('打开中…', 'Opening…') : tr('重新登录', 'Log in again') }}</button><button type="button" :disabled="Boolean(admin.xhsAction) || !admin.xhsStatus.restart_supported" @click="restartXhsSidecar">{{ admin.xhsAction === 'restart' ? tr('重启中…', 'Restarting…') : tr('重启服务', 'Restart service') }}</button></div>
-              </section>
+              <dl><dt>Tools</dt><dd>{{ server.tool_count }}</dd><dt>{{ tr('调用', 'Calls') }}</dt><dd>{{ server.call_count }}</dd><dt>{{ tr('成功', 'Success') }}</dt><dd>{{ server.success_count }}</dd><dt>{{ tr('失败', 'Failures') }}</dt><dd>{{ server.failure_count }}</dd><dt>{{ tr('取消', 'Cancelled') }}</dt><dd>{{ server.cancelled_count }}</dd><dt>{{ tr('认证方式', 'Authentication') }}</dt><dd>{{ mcpAuthLabel(server.server_id, server.oauth_state) }}</dd></dl>
+              <div v-if="auth.isOwner && server.server_id === 'xhs-readonly' && admin.xhsStatus" class="mcp-server-actions"><button type="button" :disabled="Boolean(admin.xhsAction) || !admin.xhsStatus.restart_supported" @click="restartXhsSidecar">{{ admin.xhsAction === 'restart' ? tr('重启中…', 'Restarting…') : tr('重启 MCP 服务', 'Restart MCP server') }}</button></div>
               <div v-if="server.error_code || server.last_tool_error_code || server.last_connection_reason_code" class="source-safe-error"><code>{{ server.error_code || server.last_tool_error_code || server.last_connection_reason_code }}</code><span>{{ tr('最近连接或调用存在结构化错误；Runtime 会继续自动恢复连接，未知结果的调用不会自动重放。', 'A recent connection or call has a structured error. Runtime continues reconnecting automatically; calls with unknown outcomes are not replayed.') }}</span></div>
               <small v-if="server.last_connection_state">{{ tr('最近连接', 'Last connection') }}：{{ server.last_connection_state }} · {{ fmt(server.last_connection_at * 1000) }}</small>
             </article>
             <p v-if="!admin.mcpStatus?.servers.length" class="empty-note">{{ tr('当前没有已配置的 MCP Server。', 'No MCP Servers are currently configured.') }}</p>
+          </div>
+        </section>
+        <section v-if="auth.isOwner && (admin.xhsStatus || admin.hotelBrowserStatus)" class="external-platform-section">
+          <header><div><span class="eyebrow">External platforms</span><h2>{{ tr('外部平台账号', 'External platform accounts') }}</h2><p>{{ tr('这里只管理业务平台登录态；协议连接、Catalog 和调用健康仍归 MCP 服务监控。', 'This area manages business-platform sessions only. Protocol connections, catalogs, and call health remain in MCP server monitoring.') }}</p></div></header>
+          <div class="platform-account-grid">
+            <article v-if="admin.xhsStatus" class="platform-account-card" :data-state="admin.xhsStatus.state">
+              <header><span><i :class="`status-dot ${admin.xhsStatus.state === 'authenticated' ? 'available' : admin.xhsStatus.state === 'auth_required' ? 'degraded' : admin.xhsStatus.state}`"></i><strong>{{ tr('小红书', 'Xiaohongshu') }}</strong></span><b>{{ xhsStateLabel(admin.xhsStatus.state) }}</b></header>
+              <dl class="platform-account-facts"><dt>{{ tr('认证方式', 'Authentication') }}</dt><dd>{{ tr('扫码 / Cookie', 'QR scan / Cookie') }}</dd></dl>
+              <section class="platform-account-panel">
+                <header><span><LockKeyhole :size="15" /><strong>{{ tr('小红书账号登录', 'Xiaohongshu account login') }}</strong></span><b>{{ xhsStateLabel(admin.xhsStatus.state) }}</b></header>
+                <p>{{ admin.xhsStatus.state === 'authenticated' ? tr('旅行规划可读取社区公开笔记，后续会自动复用当前登录态。', 'Travel planning can read public community notes and will reuse the current session.') : admin.xhsStatus.state === 'login_pending' ? tr('请在本机扫码窗口完成登录。', 'Complete login in the local QR window.') : tr('登录态失效后需要重新扫码或完成手机验证，成功后系统自动复用 Cookie。', 'After the session expires, scan again or complete phone verification; the resulting Cookie is reused automatically.') }}</p>
+                <small>{{ tr('Cookie 最近更新', 'Cookie last updated') }}：{{ fmt(admin.xhsStatus.cookie_updated_at) }}</small>
+                <div class="platform-account-actions"><button type="button" :disabled="Boolean(admin.xhsAction) || admin.xhsStatus.login_in_progress" @click="checkXhsLogin()">{{ admin.xhsAction === 'check' ? tr('检查中…', 'Checking…') : tr('检查登录', 'Check login') }}</button><button type="button" :disabled="Boolean(admin.xhsAction) || !admin.xhsStatus.login_supported" @click="startXhsLogin">{{ admin.xhsStatus.login_in_progress ? tr('等待扫码…', 'Waiting for QR…') : admin.xhsAction === 'login' ? tr('打开中…', 'Opening…') : tr('重新登录', 'Log in again') }}</button></div>
+              </section>
+            </article>
+            <article v-if="admin.hotelBrowserStatus" class="platform-account-card" :data-state="admin.hotelBrowserStatus.state">
+              <header><span><i :class="`status-dot ${admin.hotelBrowserStatus.state === 'authenticated' ? 'available' : admin.hotelBrowserStatus.state === 'auth_required' ? 'degraded' : admin.hotelBrowserStatus.state}`"></i><strong>{{ tr('携程', 'Ctrip') }}</strong></span><b>{{ hotelStateLabel(admin.hotelBrowserStatus.state) }}</b></header>
+              <dl class="platform-account-facts"><dt>{{ tr('认证方式', 'Authentication') }}</dt><dd>{{ tr('账号登录', 'Account login') }}</dd></dl>
+              <section class="platform-account-panel">
+                <header><span><LockKeyhole :size="15" /><strong>{{ tr('携程账号登录', 'Ctrip account login') }}</strong></span><b>{{ admin.hotelBrowserStatus.account_hint || tr('未保存账号', 'No account saved') }}</b></header>
+                <p>{{ admin.hotelBrowserStatus.credential_configured ? tr('登录态会自动复用；仅查询酒店与账号观察价。', 'The session is reused automatically for read-only hotel and account-observed prices.') : tr('首次保存账号密码后自动登录，安全验证需要在弹出窗口完成。', 'Save credentials once to sign in; complete any security verification in the opened browser.') }}</p>
+                <form v-if="!admin.hotelBrowserStatus.credential_configured || hotelCredentialsOpen" class="platform-credential-form" autocomplete="off" @submit.prevent="saveHotelCredentials">
+                  <input v-model="hotelCredentials.username" name="ctrip-account" autocomplete="off" maxlength="320" required :placeholder="tr('携程手机号、用户名或邮箱', 'Ctrip phone, username, or email')" />
+                  <input v-model="hotelCredentials.password" name="ctrip-password" type="password" autocomplete="new-password" maxlength="4096" required :placeholder="admin.hotelBrowserStatus.credential_configured ? tr('输入新密码替换已保存凭据', 'Enter a new password to replace saved credentials') : tr('携程登录密码', 'Ctrip login password')" />
+                  <button type="submit" :disabled="Boolean(admin.hotelBrowserAction) || !admin.hotelBrowserStatus.credential_store_supported">{{ admin.hotelBrowserAction === 'save' ? tr('保存中…', 'Saving…') : admin.hotelBrowserStatus.credential_configured ? tr('保存并重新登录', 'Save and sign in again') : tr('保存并自动登录', 'Save and sign in') }}</button>
+                </form>
+                <small>{{ tr('凭据更新', 'Credentials updated') }}：{{ fmt(admin.hotelBrowserStatus.credentials_updated_at) }} · {{ admin.hotelBrowserStatus.browser_supported ? tr('浏览器已就绪', 'Browser ready') : tr('缺少浏览器依赖', 'Browser dependency missing') }}</small>
+                <div class="platform-account-actions">
+                  <button type="button" :disabled="Boolean(admin.hotelBrowserAction) || !admin.hotelBrowserStatus.login_supported || !admin.hotelBrowserStatus.credential_configured" @click="startHotelLogin">{{ admin.hotelBrowserStatus.login_in_progress ? tr('登录中…', 'Signing in…') : admin.hotelBrowserStatus.state === 'authenticated' ? tr('重新登录', 'Sign in again') : tr('使用已保存凭据登录', 'Sign in with saved credentials') }}</button>
+                  <button v-if="admin.hotelBrowserStatus.credential_configured && admin.hotelBrowserStatus.credential_store_supported" type="button" :disabled="Boolean(admin.hotelBrowserAction)" @click="hotelCredentialsOpen = !hotelCredentialsOpen">{{ hotelCredentialsOpen ? tr('取消更新', 'Cancel update') : tr('更新账号密码', 'Update credentials') }}</button>
+                  <button type="button" :disabled="Boolean(admin.hotelBrowserAction) || !admin.hotelBrowserStatus.credential_configured || admin.hotelBrowserStatus.credential_source === 'environment'" @click="deleteHotelCredentials">{{ admin.hotelBrowserAction === 'delete' ? tr('删除中…', 'Deleting…') : tr('删除凭据', 'Delete credentials') }}</button>
+                </div>
+              </section>
+              <div v-if="admin.hotelBrowserStatus.code && !['OK','HOTEL_AUTH_NOT_CHECKED','HOTEL_CREDENTIALS_NOT_CONFIGURED'].includes(admin.hotelBrowserStatus.code)" class="source-safe-error"><code>{{ admin.hotelBrowserStatus.code }}</code><span>{{ hotelActionMessage(admin.hotelBrowserStatus.code) }}</span></div>
+            </article>
           </div>
         </section>
         <div class="skill-source-list">

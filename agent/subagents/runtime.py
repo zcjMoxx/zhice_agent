@@ -113,9 +113,10 @@ def _configured_child_llm_factory(
     def create(profile: SubagentProfile) -> LLMProvider:
         selected = inherited
         if profile.model_role != "inherit":
-            selected = next(
+            selected = min(
                 (endpoint for endpoint in endpoints if endpoint.role == profile.model_role),
-                inherited,
+                key=lambda endpoint: endpoint.priority,
+                default=inherited,
             )
         return resolver.bind(ModelSelection(selected.name, selected.model, source="subagent_profile"))
 

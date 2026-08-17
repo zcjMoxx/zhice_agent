@@ -281,32 +281,40 @@ def create_app(
     if resolved_static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=resolved_static_dir), name="static")
 
+    def spa_index_response() -> FileResponse | None:
+        """Serve the mutable SPA entry without retaining an obsolete asset manifest."""
+
+        index_path = resolved_static_dir / "index.html"
+        if not index_path.is_file():
+            return None
+        return FileResponse(index_path, headers={"Cache-Control": "no-store"})
+
     @app.get("/")
     def index():
-        index_path = resolved_static_dir / "index.html"
-        if index_path.is_file():
-            return FileResponse(index_path)
+        response = spa_index_response()
+        if response is not None:
+            return response
         return JSONResponse(gateway_status(config, runtime=runtime))
 
     @app.get("/admin", include_in_schema=False)
     def administration():
-        index_path = resolved_static_dir / "index.html"
-        if index_path.is_file():
-            return FileResponse(index_path)
+        response = spa_index_response()
+        if response is not None:
+            return response
         return Response(status_code=404)
 
     @app.get("/travel", include_in_schema=False)
     def travel_planner():
-        index_path = resolved_static_dir / "index.html"
-        if index_path.is_file():
-            return FileResponse(index_path)
+        response = spa_index_response()
+        if response is not None:
+            return response
         return Response(status_code=404)
 
     @app.get("/bind/qq", include_in_schema=False)
     def qq_binding_page():
-        index_path = resolved_static_dir / "index.html"
-        if index_path.is_file():
-            return FileResponse(index_path)
+        response = spa_index_response()
+        if response is not None:
+            return response
         return Response(status_code=404)
 
     @app.get("/_setup", include_in_schema=False)
@@ -318,9 +326,9 @@ def create_app(
             or auth_service.store.has_owner()
         ):
             return Response(status_code=404)
-        index_path = resolved_static_dir / "index.html"
-        if index_path.is_file():
-            return FileResponse(index_path)
+        response = spa_index_response()
+        if response is not None:
+            return response
         return Response(status_code=404)
 
     @app.get("/health")

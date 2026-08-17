@@ -63,6 +63,8 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
     PATH=/opt/venv/bin:$PATH \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/zhice/playwright \
+    HOTEL_BROWSER_CHANNEL="" \
     HOME=/home/zhice
 
 RUN case "$APT_MIRROR" in \
@@ -99,7 +101,8 @@ COPY --from=weixin-build /src/integrations/weixin_sidecar/node_modules/ ./integr
 COPY --from=xhs-build /out/xiaohongshu-mcp-rednote /opt/zhice/bin/xiaohongshu-mcp-rednote
 COPY --from=xhs-build /out/xiaohongshu-login-rednote /opt/zhice/bin/xiaohongshu-login-rednote
 
-RUN pip install --no-cache-dir ".[gateway,qq]"
+RUN pip install --no-cache-dir ".[gateway,qq,hotel-browser]" \
+    && python -m playwright install chromium
 
 # These are the only local private build inputs. Runtime state is never copied.
 COPY --chown=zhice:zhice deploy/private/.env /home/zhice/.zhice/config/.env

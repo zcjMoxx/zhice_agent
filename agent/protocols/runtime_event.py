@@ -29,6 +29,9 @@ RUNTIME_EVENT_STATUS_BY_TYPE = {
     "skill.progress": "started",
     "skill.completed": "completed",
     "skill.failed": "failed",
+    "travel.intake_draft_updated": "completed",
+    "travel.main_chat_handoff": "waiting",
+    "travel.planning_confirmed": "completed",
     "travel.plan_ready": "completed",
     "travel.clarification_required": "waiting",
     "travel.candidate_review_required": "waiting",
@@ -40,7 +43,17 @@ _DISPLAY_KEYS = frozenset({"title", "detail", "icon", "visibility"})
 _DISPLAY_LIMITS = {"title": 120, "detail": 500, "icon": 40, "visibility": 20}
 _UI_METADATA_KEYS = frozenset({"detail_type", "detail_data"})
 RUNTIME_UI_DETAIL_TYPES = frozenset(
-    {"summary", "search_results", "travel_candidates", "code_preview", "table", "map"}
+    {
+        "summary",
+        "search_results",
+        "travel_candidates",
+        "travel_intake_draft",
+        "travel_main_chat_handoff",
+        "travel_planning_confirmed",
+        "code_preview",
+        "table",
+        "map",
+    }
 )
 _SENSITIVE_KEY_PARTS = (
     "api_key",

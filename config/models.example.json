@@ -1,17 +1,19 @@
 {
+  "_说明": "复制为运行态 models.json 后，请将所有以‘请填写’开头的值替换为真实配置。固定协议名、角色名和环境变量名不需要改。",
   "schema_version": 1,
   "routing": {
-    "chat": "openai/gpt-5.5",
-    "compaction": "openai/gpt-5.5",
-    "embedding": "openai_embedding/text-embedding-3-small"
+    "chat": "请填写端点名称/请填写模型名称",
+    "compaction": "请填写端点名称/请填写模型名称",
+    "embedding": "请填写向量端点名称/请填写向量模型名称"
   },
   "chat": {
-    "openai": {
+    "请填写端点名称": {
       "protocol": "openai",
-      "base_url": "https://api.openai.com/v1",
+      "provider": "",
+      "base_url": "请填写模型服务地址",
       "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
-      "model": "gpt-5.5",
-      "supported_models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+      "model": "请填写模型名称",
+      "supported_models": ["请填写模型名称"],
       "context_window": 131072,
       "max_tokens": 16384,
       "temperature": 0.7,
@@ -32,12 +34,12 @@
     }
   },
   "embedding": {
-    "openai_embedding": {
+    "请填写向量端点名称": {
       "protocol": "openai",
-      "base_url": "https://api.openai.com/v1",
+      "base_url": "请填写向量模型服务地址",
       "api_key": "${ZHICE_EMBEDDING_API_KEY}",
-      "model": "text-embedding-3-small",
-      "supported_models": ["text-embedding-3-small"],
+      "model": "请填写向量模型名称",
+      "supported_models": ["请填写向量模型名称"],
       "dimensions": 1536,
       "timeout": 30,
       "batch_size": 16,

@@ -487,7 +487,6 @@ def test_unavailable_subagent_auto_turn_exposes_error_facade_tool(tmp_path):
         {"query": "subagent delegation", "names": ["delegate_tasks"]},
     )
     assert [item["function"]["name"] for item in provider.definitions()] == [
-        "discover_tools",
         "delegate_tasks",
     ]
 

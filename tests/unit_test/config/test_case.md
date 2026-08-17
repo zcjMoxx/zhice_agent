@@ -47,14 +47,15 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 ### Case 6: dotenv 读取
 
 - 输入：读取 UTF-8、UTF-8 BOM 或 UTF-16 的 `.env`。
+- 输入：读取 JSON 风格双引号中包含反斜杠或引号的 Secret。
 - 预期：能加载合法 `KEY=VALUE`，不覆盖已有进程环境变量。
 - 检查点：不支持的编码抛出 `DotenvConfigurationError`。
 
 ### Case 7: 初始化运行时文件
 
 - 输入：调用 `init_runtime_files()`。
-- 预期：默认生成`${ZHICE_AGENT_WORKSPACE}/config/.env`、`models.json`、`config.yml`和prompts；env逐字来自仓库`config/.env.example`。
-- 检查点：公开env模板不含workspace key；已有文件默认保留，`force=True`统一刷新三个主模板；旧`create_env=False`不能关闭标准env初始化；模板缺失返回稳定错误；不会生成旧分散配置文件。
+- 预期：默认复制仓库 `config/.env.example`、`config/models.example.json`、`config/config.example.yml` 和全部 prompts 到运行 workspace，并创建通用目录骨架，不在 Python 中生成第二份模型模板。
+- 检查点：三份配置与全部 Prompt 均与仓库模板字节一致；非 Secret 可变值使用中文占位，Secret 保持空值并有中文填写提示；`contexts/sessions`、`contexts/memory`、`contexts/users`、`contexts/shared/readonly`、`state/mcp_runtime`、`extends`、`logs` 均存在；已有文件默认保留，`force=True`统一刷新三个主模板；旧`create_env=False`不能关闭标准env初始化；任一模板缺失返回稳定错误；不会生成旧分散配置文件。
 
 ### Case 8: config.yml分区隔离
 
@@ -67,3 +68,9 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 - 输入：读取`operations.terminal`中的`enabled/url/presentation`。
 - 预期：缺省关闭；生产地址使用显式HTTPS；本机loopback可用HTTP调试。
 - 检查点：启用时URL必填；拒绝credential、query、fragment、非本机HTTP和未知展示模式；配置不包含或推导宿主机权限。
+# 2026-08-16 代码协议 Prompt 同步与模型角色
+
+- Gateway 构建前刷新与代码/schema 强绑定的旅行及核心协议 Prompt，避免旧 workspace 副本使工具发现、Skill 执行、旅行意图和摘要规则失效。
+- 覆盖受控清单但不覆盖 `identity.md` 等用户可定制 Prompt。
+- 非空 `supported_models` 必须包含 endpoint 默认 `model`；`fast`、`reasoning` 是可选角色标签，无匹配角色时 Child 继承主模型，同角色按较小 `priority` 优先。
+- 新初始化不由代码选择 endpoint 名，而是逐字复制模型 Example；旧配置若把 endpoint 命名为 `default`，聊天路由别名不能覆盖该 endpoint。

@@ -16,9 +16,12 @@ from agent.applications.travel.service import TravelApplicationError
 from agent.core.turns import new_turn_id
 from agent.protocols.auth import AuditEvent
 from agent.protocols.errors import ErrorCode
+from agent.protocols.llm import LLMProviderError
 from agent.protocols.runtime_event import is_runtime_event_payload
 
 router = APIRouter()
+_MAX_TRAVEL_STAGE_TURNS = 6
+_MAX_TRAVEL_LLM_RETRIES = 1
 
 
 @router.websocket("/ws")
@@ -264,20 +267,60 @@ async def _run_message_frame(
                     request_id="",
                 )
             current_message = content
+            candidate_continuation = getattr(
+                runtime, "travel_candidate_continuation_message", None
+            )
+            if callable(candidate_continuation):
+                try:
+                    current_message = _runtime_call(
+                        runtime,
+                        "travel_candidate_continuation_message",
+                        actor,
+                        session_id,
+                    )
+                except TravelApplicationError as exc:
+                    if exc.code not in {
+                        "TRAVEL_CANDIDATE_REVIEW_NOT_FOUND",
+                        "TRAVEL_CANDIDATE_SELECTION_REQUIRED",
+                        "TRAVEL_GENERATION_NOT_FOUND",
+                    }:
+                        raise
             current_turn_id = turn_id
             result = None
-            for attempt in range(3):
-                result = _runtime_call(
-                    runtime,
-                    "run_chat_events",
-                    actor,
-                    session_id,
-                    current_message,
-                    turn_id=current_turn_id,
-                    on_event=on_event,
-                    command_profile=command_profile,
-                    request_id="",
-                )
+            llm_retries = 0
+            for attempt in range(_MAX_TRAVEL_STAGE_TURNS):
+                try:
+                    result = _runtime_call(
+                        runtime,
+                        "run_chat_events",
+                        actor,
+                        session_id,
+                        current_message,
+                        turn_id=current_turn_id,
+                        on_event=on_event,
+                        command_profile=command_profile,
+                        request_id="",
+                    )
+                except LLMProviderError as provider_error:
+                    if llm_retries >= _MAX_TRAVEL_LLM_RETRIES:
+                        raise
+                    continuation = getattr(runtime, "travel_continuation_message", None)
+                    if not callable(continuation):
+                        raise
+                    try:
+                        current_message = _runtime_call(
+                            runtime,
+                            "travel_continuation_message",
+                            actor,
+                            session_id,
+                        )
+                    except TravelApplicationError as exc:
+                        if exc.code == "TRAVEL_GENERATION_NOT_FOUND":
+                            raise provider_error from exc
+                        raise
+                    llm_retries += 1
+                    current_turn_id = new_turn_id()
+                    continue
                 if (
                     result.stopped
                     or terminal["plan_ready"]
@@ -299,7 +342,7 @@ async def _run_message_frame(
                     if exc.code == "TRAVEL_GENERATION_NOT_FOUND":
                         break
                     raise
-                if attempt >= 2:
+                if attempt >= _MAX_TRAVEL_STAGE_TURNS - 1:
                     raise TravelApplicationError(
                         "TRAVEL_PLAN_NOT_FINALIZED",
                         "旅行规划没有生成完整结果，请稍后重试。",
@@ -322,8 +365,16 @@ async def _run_message_frame(
                     await send_event(
                         "runtime_event",
                         payload,
-                        session_id=str(payload.get("session_id") or session_id),
-                        turn_id=str(payload.get("turn_id") or turn_id),
+                        session_id=str(
+                            payload.get("root_session_id")
+                            or payload.get("session_id")
+                            or session_id
+                        ),
+                        turn_id=str(
+                            payload.get("root_turn_id")
+                            or payload.get("turn_id")
+                            or turn_id
+                        ),
                     )
                 elif payload.get("type") == "text_delta":
                     await send_event(

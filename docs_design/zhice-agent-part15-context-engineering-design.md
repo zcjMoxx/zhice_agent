@@ -610,7 +610,7 @@ prompts/context_compaction.md
 prompts/history_query_planner.md
 prompts/context_query_rewrite.md
 config/context.example.yml
-config/embedding_endpoints.example.json
+config/models.example.json 的 embedding 分区
 tests/unit_test/context_engineering/test_case.md
 tests/unit_test/context_engineering/*
 ```

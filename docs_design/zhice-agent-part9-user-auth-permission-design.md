@@ -187,8 +187,8 @@ SessionAccessService
 ```text
 ${ZHICE_AGENT_WORKSPACE}/
   config/
-    llm_endpoints.json
-    config.yml  # skills 等统一运行配置
+    models.json # chat/compaction/embedding endpoint 与路由
+    config.yml  # context/skills/subagents/channels/hooks/mcp 等统一运行配置
   prompts/
   extends/
   logs/

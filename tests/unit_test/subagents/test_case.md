@@ -57,6 +57,7 @@
 - 异常：一个 child 失败时，其它 completed 结果保留，形成 partial 语义。
 - 并发上限：第四个 child 等待前三个 worker 中的空闲 slot。
 - 取消/超时：单 child timeout 返回 bounded 结果；父 token 取消会把未完成 child 标为 cancelled。
+- 旅行路线 Profile 的 240 秒上界只作为复杂真实路线 fan-in 的安全边界；路线 ToolResult 压缩在旅行应用 Provider 边界完成，不改变通用 Coordinator 的超时语义。
 
 ### Case 8：AgentLoop 上下文感知委派
 
@@ -70,3 +71,9 @@
 - 输入：Child factory 使用独立 Fake LLM 和经过父能力交集过滤的 ToolProvider。
 - 预期：child 只看到允许 Tool；transcript 写入 `_subagents/{root_session}` 且不进入普通 Session 列表；消息记录 parent turn，RuntimeEvent 带 agent/task/depth scope；父 Turn 的非空 ContextBudget 可传入 child，不因 builder 参数不匹配产生 TypeError。
 - 未分类 child 异常：terminal Trace 保留经过脱敏和截断的 `error_message`，不能只留下 `error_type` 和通用包装码。
+
+### Case 10：Profile 显式预激活工具
+
+- `initial_tools` 必须是 `tools` 中的精确项，不能借此扩大 Profile 权限或预激活通配符外能力。
+- Child 首轮看到被显式预激活的最小工具集；仍有未激活工具时保留 `discover_tools`，全部有效工具都已激活时隐藏无意义的发现入口。
+- 旅行固定 Profile 用该机制直接暴露 12306 站码/车票、高德与攻略检索，避免小模型用错误别名发现不到实际已允许的工具。

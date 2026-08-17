@@ -21,7 +21,7 @@ pyproject.toml
 README.md
 .env.example
 config/
-  llm_endpoints.example.json
+  models.example.json
 prompts/
   identity.md
   tool_use_policy.md

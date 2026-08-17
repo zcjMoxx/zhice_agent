@@ -290,13 +290,13 @@ class ChannelExecutionContext:
 运行态配置：
 
 ```text
-${ZHICE_AGENT_WORKSPACE}/config/channels.yml
+${ZHICE_AGENT_WORKSPACE}/config/config.yml#channels
 ```
 
 仓库只提交：
 
 ```text
-config/channels.example.yml
+config/config.example.yml 的 channels 分区
 ```
 
 示例：
@@ -324,7 +324,7 @@ channels:
 
 - 仓库禁止提交真实 AppID / AppSecret；
 - Docker、CI、云部署优先使用环境变量或平台 Secret；
-- 本地 workspace 不属于仓库，可按现有 `llm_endpoints.json` 口径保存明文，但启动、日志、异常和诊断必须脱敏；
+- 本地 workspace 不属于仓库，可按现有 `models.json` / `.env` 口径保存本地 Secret，但启动、日志、异常和诊断必须脱敏；
 - Adapter 不把 secret 放入 dataclass repr、RuntimeEvent、trace metadata 或错误 message；
 - 修改凭证采用原子写，旧文件保留最短必要备份且备份同样受保护；
 - 发现泄露时支持禁用账号、重置凭证、清理 token cache 和重新启动连接。
@@ -349,7 +349,7 @@ zcagent channels qq connect --account main
 
 `ChannelManager` 负责：
 
-- 读取 `channels.yml`；
+- 读取 `config.yml` 的 `channels` 分区；
 - 只加载显式启用的 Adapter；
 - 校验可选依赖和凭证引用；
 - 启动、停止、优雅退出和 capability status；

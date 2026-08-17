@@ -9,6 +9,7 @@ from agent.app.runtime import ActiveTurn, WebRuntime
 from agent.applications.travel.service import TravelApplicationError
 from agent.config import AppConfig
 from agent.core.loop import CancellationToken
+from agent.message import Message
 from agent.protocols.auth import ActorContext
 
 
@@ -26,6 +27,41 @@ def test_generation_status_reports_owned_active_travel_turn(tmp_path):
         "turn_id": "turn-a",
         "plan_id": "",
         "error_code": "",
+    }
+
+
+def test_generation_status_exposes_persisted_route_error_while_repair_is_running(tmp_path):
+    runtime = _runtime(tmp_path, _Store())
+    state = SimpleNamespace(
+        messages=[
+            Message(
+                role="tool",
+                content="route required",
+                name="finalize_travel_plan",
+                metadata={"is_error": True, "code": "TRAVEL_ROUTE_EVIDENCE_MISSING"},
+            )
+        ]
+    )
+    runtime.session_access = SimpleNamespace(
+        resolve_session=lambda actor, session_id, write=True: SimpleNamespace(
+            owner_user_id=actor.user_id,
+            channel="travel",
+            store=SimpleNamespace(load=lambda target: state),
+        )
+    )
+    runtime.travel_service = SimpleNamespace()
+    runtime._register_turn(
+        ("user-a", "travel-a"), ActiveTurn("turn-route-repair", CancellationToken())
+    )
+
+    status = runtime.travel_generation_status(_actor(), session_id="travel-a")
+
+    assert status == {
+        "status": "running",
+        "session_id": "travel-a",
+        "turn_id": "turn-route-repair",
+        "plan_id": "",
+        "error_code": "TRAVEL_ROUTE_EVIDENCE_MISSING",
     }
 
 
@@ -55,6 +91,39 @@ def test_generation_status_treats_a_done_turn_without_a_plan_as_failed(tmp_path)
 
     assert status["status"] == "failed"
     assert status["error_code"] == "TRAVEL_PLAN_NOT_FINALIZED"
+
+
+def test_generation_status_recovers_persisted_finalizer_error_for_selected_review(tmp_path):
+    runtime = _runtime(tmp_path, _Store())
+    state = SimpleNamespace(
+        messages=[
+            Message(
+                role="tool",
+                content="forecast required",
+                name="finalize_travel_plan",
+                metadata={"is_error": True, "code": "TRAVEL_WEATHER_FORECAST_REQUIRED"},
+            )
+        ]
+    )
+    runtime.session_access = SimpleNamespace(
+        resolve_session=lambda actor, session_id, write=True: SimpleNamespace(
+            owner_user_id=actor.user_id,
+            channel="travel",
+            store=SimpleNamespace(load=lambda target: state),
+        )
+    )
+    runtime.travel_service = SimpleNamespace(
+        list_plans=lambda actor, limit=50: [],
+        get_candidate_review=lambda actor, session_id: SimpleNamespace(
+            status="selected",
+            turn_id="turn-candidates",
+        ),
+    )
+
+    status = runtime.travel_generation_status(_actor(), session_id="travel-a")
+
+    assert status["status"] == "failed"
+    assert status["error_code"] == "TRAVEL_WEATHER_FORECAST_REQUIRED"
 
 
 def test_generation_status_rejects_other_user_and_non_travel_sessions(tmp_path):

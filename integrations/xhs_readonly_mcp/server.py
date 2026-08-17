@@ -105,6 +105,13 @@ async def search_notes(
             "note_type": _NOTE_TYPE_UPSTREAM[note_type],
         }
     result = await _call_upstream(_SEARCH_TOOL_NAMES, upstream_args)
+    if result.get("code") == "TRAVEL_SOURCE_PAGE_CONNECTION_CLOSED":
+        # This is a transport recovery, not a second keyword strategy. Keep the
+        # exact same destination query and allow only one fresh browser-page attempt.
+        await asyncio.sleep(
+            _env_float("XHS_READONLY_CONNECTION_RETRY_DELAY_SECONDS", 1.0, 0.0, 5.0)
+        )
+        result = await _call_upstream(_SEARCH_TOOL_NAMES, upstream_args)
     _limit_search_results(result, bounded)
     if _search_result_is_empty(result):
         login = await _call_upstream(_LOGIN_TOOL_NAMES, {})
@@ -194,10 +201,13 @@ async def _call_upstream(candidates: tuple[str, ...], args: dict[str, Any]) -> d
     data = _serialize_result(result)
     if bool(getattr(result, "isError", False) or getattr(result, "is_error", False)):
         text = json.dumps(data, ensure_ascii=False).casefold()
-        code = "TRAVEL_SOURCE_AUTH_REQUIRED" if any(
-            marker in text for marker in ("login", "登录", "cookie", "unauthorized")
-        ) else "TRAVEL_SOURCE_UNAVAILABLE"
-        return _error(code, "Xiaohongshu read-only query failed.")
+        code = _upstream_tool_error_code(text)
+        message = (
+            "Xiaohongshu query timed out."
+            if code == "TRAVEL_SOURCE_TIMEOUT"
+            else "Xiaohongshu read-only query failed."
+        )
+        return _error(code, message)
     return {
         "status": "success",
         "code": "OK",
@@ -227,6 +237,25 @@ def _group_error(exc: BaseExceptionGroup) -> dict[str, Any]:
     error = _error("TRAVEL_SOURCE_UNAVAILABLE", "Xiaohongshu source is unavailable.")
     error["error_type"] = next((type(item).__name__ for item in leaves), type(exc).__name__)
     return error
+
+
+def _upstream_tool_error_code(text: str) -> str:
+    """Preserve safe auth/timeout causes returned as an MCP tool error."""
+
+    normalized = str(text or "").casefold()
+    if any(marker in normalized for marker in ("login", "登录", "cookie", "unauthorized")):
+        return "TRAVEL_SOURCE_AUTH_REQUIRED"
+    if any(
+        marker in normalized
+        for marker in ("context deadline exceeded", "timed out", "timeout", "超时")
+    ):
+        return "TRAVEL_SOURCE_TIMEOUT"
+    if any(
+        marker in normalized
+        for marker in ("err_connection_closed", "connection closed", "连接被关闭")
+    ):
+        return "TRAVEL_SOURCE_PAGE_CONNECTION_CLOSED"
+    return "TRAVEL_SOURCE_UNAVAILABLE"
 
 
 def _exception_leaves(exc: BaseException) -> list[BaseException]:
@@ -299,9 +328,57 @@ def _limit_search_results(result: dict[str, Any], maximum: int) -> None:
         return
     feeds = payload["feeds"]
     payload["total_count"] = len(feeds)
-    payload["feeds"] = feeds[:maximum]
+    payload["feeds"] = [
+        compact
+        for item in feeds[:maximum]
+        if (compact := _compact_feed(item)) is not None
+    ]
     payload["count"] = len(payload["feeds"])
     data["text"] = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _compact_feed(value: Any) -> dict[str, Any] | None:
+    """Keep searchable note facts while dropping large cover/avatar payloads."""
+
+    if not isinstance(value, dict):
+        return None
+    card = value.get("noteCard") or value.get("note_card")
+    card = card if isinstance(card, dict) else {}
+    user = card.get("user") if isinstance(card.get("user"), dict) else {}
+    note_id = str(value.get("id") or value.get("note_id") or "").strip()
+    title = str(
+        card.get("displayTitle")
+        or card.get("display_title")
+        or value.get("title")
+        or value.get("name")
+        or ""
+    ).strip()
+    if not note_id and not title:
+        return None
+    nickname = str(user.get("nickname") or user.get("nickName") or "").strip()
+    description = str(
+        card.get("desc")
+        or card.get("description")
+        or value.get("desc")
+        or value.get("description")
+        or ""
+    ).strip()
+    token = str(value.get("xsecToken") or value.get("xsec_token") or "").strip()
+    compact: dict[str, Any] = {
+        "id": note_id,
+        "noteCard": {
+            "displayTitle": title[:300],
+            "user": {"nickname": nickname[:120]},
+        },
+        "source_url": (
+            f"https://www.xiaohongshu.com/explore/{note_id}" if note_id else ""
+        ),
+    }
+    if description:
+        compact["noteCard"]["description"] = description[:800]
+    if token:
+        compact["xsecToken"] = token[:1000]
+    return compact
 
 
 def _search_result_is_empty(result: dict[str, Any]) -> bool:

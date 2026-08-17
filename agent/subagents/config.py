@@ -147,6 +147,7 @@ def _parse_profile(name: Any, raw: Any) -> SubagentProfile:
     allowed = {
         "description",
         "tools",
+        "initial_tools",
         "denied_tools",
         "allowed_skills",
         "preload_skills",
@@ -160,6 +161,15 @@ def _parse_profile(name: Any, raw: Any) -> SubagentProfile:
     _reject_unknown(raw, allowed, f"Subagent Profile {name!r}")
     description = _required_text(raw.get("description"), f"profiles.{name}.description", 500)
     tools = _tool_patterns(raw.get("tools"), f"profiles.{name}.tools", required=True)
+    initial_tools = _tool_patterns(
+        raw.get("initial_tools", []),
+        f"profiles.{name}.initial_tools",
+        required=False,
+    )
+    if any("*" in tool or tool not in tools for tool in initial_tools):
+        raise SubagentConfigurationError(
+            f"Subagent Profile {name!r} initial_tools must be exact entries in tools"
+        )
     denied_tools = _tool_patterns(
         raw.get("denied_tools", ["delegate_tasks"]),
         f"profiles.{name}.denied_tools",
@@ -190,6 +200,7 @@ def _parse_profile(name: Any, raw: Any) -> SubagentProfile:
         name=name,
         description=description,
         tools=tools,
+        initial_tools=initial_tools,
         denied_tools=denied_tools,
         allowed_skills=allowed_skills,
         preload_skills=preload_skills,

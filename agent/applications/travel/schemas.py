@@ -408,7 +408,21 @@ class TravelPlanV1:
         if len({item.source_url for item in evidence if item.source_url}) > max_source_urls:
             _invalid("plan.evidence", "Travel plan has too many source URLs.")
         evidence_ids = {item.evidence_id for item in evidence}
+        evidence_by_id = {item.evidence_id: item for item in evidence}
+        transport_options = _normalize_transport_options(
+            raw.get("transport_options"),
+            request,
+            evidence_by_id,
+            aliases,
+        )
+        stay_recommendations = _normalize_stay_recommendations(
+            raw.get("stay_recommendations"),
+            request,
+            evidence_by_id,
+            aliases,
+        )
         days = _normalize_days(raw.get("days"), request, evidence_ids, aliases)
+        _validate_transport_day_envelope(transport_options, days, request)
         budget = _normalize_budget(raw.get("budget"), request)
         generated_at = _timestamp(
             raw.get("generated_at") or _utc_now(), "plan.generated_at", required=True
@@ -434,12 +448,8 @@ class TravelPlanV1:
             "freshness_summary": _bounded_json_copy(
                 raw.get("freshness_summary", {}), "plan.freshness_summary", max_bytes=16_000
             ),
-            "transport_options": _object_list(
-                raw.get("transport_options"), "plan.transport_options", maximum=20
-            ),
-            "stay_recommendations": _object_list(
-                raw.get("stay_recommendations"), "plan.stay_recommendations", maximum=20
-            ),
+            "transport_options": transport_options,
+            "stay_recommendations": stay_recommendations,
             "days": days,
             "budget": budget,
             "weather_summary": _object_list(
@@ -555,6 +565,351 @@ def normalized_source_url(value: str) -> str:
     return urlunsplit((parsed.scheme.casefold(), netloc, path, urlencode(query), ""))
 
 
+def _normalize_transport_options(
+    value: object,
+    request: TravelRequestV1,
+    evidence_by_id: dict[str, EvidenceItemV1],
+    aliases: dict[str, str],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > 20:
+        _invalid("plan.transport_options", "Transport options must be a bounded array.")
+    result: list[dict[str, Any]] = []
+    evidence_ids = set(evidence_by_id)
+    for index, item in enumerate(value):
+        field = f"plan.transport_options[{index}]"
+        raw = _object(item, field)
+        _reject_unknown(
+            raw,
+            {
+                "name",
+                "mode",
+                "from",
+                "to",
+                "service_name",
+                "departure",
+                "arrival",
+                "duration_minutes",
+                "seat",
+                "price_cny_per_person",
+                "price_cny_total",
+                "source",
+                "summary",
+                "evidence_ids",
+            },
+            field,
+        )
+        references = _evidence_references(
+            raw.get("evidence_ids", []), field, evidence_ids, aliases
+        )
+        service_name = _optional_text(
+            raw.get("service_name"), max_chars=100, field=f"{field}.service_name"
+        )
+        departure = _optional_text(
+            raw.get("departure"), max_chars=100, field=f"{field}.departure"
+        )
+        arrival = _optional_text(
+            raw.get("arrival"), max_chars=100, field=f"{field}.arrival"
+        )
+        seat = _optional_text(raw.get("seat"), max_chars=100, field=f"{field}.seat")
+        price_per_person = _optional_number(
+            raw.get("price_cny_per_person"),
+            f"{field}.price_cny_per_person",
+            minimum=0,
+            maximum=1_000_000,
+        )
+        price_total = _optional_number(
+            raw.get("price_cny_total"),
+            f"{field}.price_cny_total",
+            minimum=0,
+            maximum=10_000_000,
+        )
+        referenced = [evidence_by_id[item_id] for item_id in references]
+        has_verified_rail = any(_is_rail_evidence(item) for item in referenced)
+        source = _text(raw.get("source"), f"{field}.source", max_chars=200)
+        summary = _optional_text(
+            raw.get("summary"), max_chars=500, field=f"{field}.summary"
+        )
+        if has_verified_rail and not all(
+            (service_name, departure, arrival, seat, price_per_person is not None, price_total is not None)
+        ):
+            _invalid(
+                field,
+                "A transport option that cites verified railway evidence must include service, "
+                "times, seat, per-person price, and total price.",
+            )
+        mode = _text(raw.get("mode"), f"{field}.mode", max_chars=100)
+        if _looks_like_rail(mode) and not has_verified_rail:
+            estimate_copy = f"{source} {summary}".casefold()
+            if not any(
+                marker in estimate_copy
+                for marker in ("estimate", "estimated", "unavailable", "not_on_sale", "估算", "失败", "未开售", "待复核")
+            ):
+                _invalid(
+                    f"{field}.source",
+                    "Rail transport without verified railway evidence must be explicitly labelled as an estimate or unavailable.",
+                )
+        result.append(
+            {
+                "name": _text(raw.get("name"), f"{field}.name", max_chars=200),
+                "mode": mode,
+                "from": _optional_text(raw.get("from"), max_chars=200, field=f"{field}.from"),
+                "to": _optional_text(raw.get("to"), max_chars=200, field=f"{field}.to"),
+                "service_name": service_name,
+                "departure": departure,
+                "arrival": arrival,
+                "duration_minutes": _optional_number(
+                    raw.get("duration_minutes"),
+                    f"{field}.duration_minutes",
+                    minimum=0,
+                    maximum=10_000,
+                ),
+                "seat": seat,
+                "price_cny_per_person": price_per_person,
+                "price_cny_total": price_total,
+                "source": source,
+                "summary": summary,
+                "evidence_ids": references,
+            }
+        )
+    return result
+
+
+def _normalize_stay_recommendations(
+    value: object,
+    request: TravelRequestV1,
+    evidence_by_id: dict[str, EvidenceItemV1],
+    aliases: dict[str, str],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > 20:
+        _invalid("plan.stay_recommendations", "Stay recommendations must be a bounded array.")
+    result: list[dict[str, Any]] = []
+    evidence_ids = set(evidence_by_id)
+    for index, item in enumerate(value):
+        field = f"plan.stay_recommendations[{index}]"
+        raw = _object(item, field)
+        _reject_unknown(
+            raw,
+            {
+                "hotel_name",
+                "address",
+                "area",
+                "location",
+                "check_in",
+                "check_out",
+                "nights",
+                "observed_price_per_night_cny",
+                "planning_estimate_per_night_cny",
+                "price_status",
+                "evidence_ids",
+                "price_source_evidence_ids",
+                "reason",
+            },
+            field,
+        )
+        hotel_name = _text(raw.get("hotel_name"), f"{field}.hotel_name", max_chars=240)
+        address = _text(raw.get("address"), f"{field}.address", max_chars=300)
+        check_in = _date(raw.get("check_in"), f"{field}.check_in")
+        check_out = _date(raw.get("check_out"), f"{field}.check_out")
+        nights = _integer(raw.get("nights"), f"{field}.nights", minimum=1, maximum=60)
+        request_start = date.fromisoformat(request.start_date)
+        request_end = date.fromisoformat(request.end_date)
+        if check_in < request_start or check_out > request_end or check_in >= check_out:
+            _invalid(field, "Stay dates must remain within the confirmed travel request.")
+        if (check_out - check_in).days != nights:
+            _invalid(f"{field}.nights", "Stay nights must match check-in and check-out dates.")
+        references = _evidence_references(
+            raw.get("evidence_ids", []), field, evidence_ids, aliases
+        )
+        if not references:
+            _invalid(
+                f"{field}.evidence_ids",
+                "A concrete hotel recommendation must cite hotel identity or location evidence.",
+            )
+        if not any(
+            _evidence_matches_stay(evidence_by_id[item_id], hotel_name, address)
+            for item_id in references
+        ):
+            _invalid(
+                f"{field}.evidence_ids",
+                "Hotel evidence must match the recommended hotel name or address.",
+            )
+        price_references = _evidence_references(
+            raw.get("price_source_evidence_ids", []),
+            field,
+            evidence_ids,
+            aliases,
+            reference_name="price_source_evidence_ids",
+        )
+        observed_price = _optional_number(
+            raw.get("observed_price_per_night_cny"),
+            f"{field}.observed_price_per_night_cny",
+            minimum=0,
+            maximum=1_000_000,
+        )
+        estimate_price = _optional_number(
+            raw.get("planning_estimate_per_night_cny"),
+            f"{field}.planning_estimate_per_night_cny",
+            minimum=0,
+            maximum=1_000_000,
+        )
+        price_status = str(raw.get("price_status") or "").strip()
+        if price_status not in {
+            "live_observed",
+            "snapshot_observed",
+            "planning_estimate",
+            "unavailable",
+        }:
+            _invalid(f"{field}.price_status", "Stay price status is invalid.")
+        price_evidence = [evidence_by_id[item_id] for item_id in price_references]
+        if price_status == "planning_estimate":
+            if observed_price is not None or estimate_price is None:
+                _invalid(
+                    field,
+                    "Planning-estimate stays require only a planning estimate, not an observed price.",
+                )
+            if any(item.source_type != "model_estimate" for item in price_evidence):
+                _invalid(
+                    f"{field}.price_source_evidence_ids",
+                    "External POI or article evidence cannot be cited as the source of a planning estimate.",
+                )
+        elif price_status in {"live_observed", "snapshot_observed"}:
+            if observed_price is None or not price_evidence:
+                _invalid(field, "Observed stay prices require a price and external price evidence.")
+            if any(item.source_type == "model_estimate" for item in price_evidence):
+                _invalid(
+                    f"{field}.price_source_evidence_ids",
+                    "Observed stay prices cannot cite model-estimate evidence.",
+                )
+        elif observed_price is not None or estimate_price is not None:
+            _invalid(field, "Unavailable stay pricing must not contain a price.")
+        location = _location(raw.get("location"), f"{field}.location")
+        if location is None:
+            _invalid(f"{field}.location", "A concrete hotel recommendation requires coordinates.")
+        result.append(
+            {
+                "hotel_name": hotel_name,
+                "address": address,
+                "area": _text(raw.get("area"), f"{field}.area", max_chars=200),
+                "location": location,
+                "check_in": check_in.isoformat(),
+                "check_out": check_out.isoformat(),
+                "nights": nights,
+                "observed_price_per_night_cny": observed_price,
+                "planning_estimate_per_night_cny": estimate_price,
+                "price_status": price_status,
+                "evidence_ids": references,
+                "price_source_evidence_ids": price_references,
+                "reason": _text(raw.get("reason"), f"{field}.reason", max_chars=600),
+            }
+        )
+    if not result and _request_requires_concrete_stay(request):
+        _invalid(
+            "plan.stay_recommendations",
+            "An overnight plan requires at least one concrete stay recommendation unless the "
+            "confirmed request explicitly uses non-hotel lodging.",
+        )
+    if result:
+        _validate_stay_coverage(result, request)
+    return result
+
+
+def _validate_stay_coverage(
+    stays: list[dict[str, Any]], request: TravelRequestV1
+) -> None:
+    """Allow full-trip alternatives or one continuous multi-area stay sequence."""
+
+    request_start = request.start_date
+    request_end = request.end_date
+    if all(
+        item["check_in"] == request_start and item["check_out"] == request_end
+        for item in stays
+    ):
+        return
+    intervals = sorted(
+        ((item["check_in"], item["check_out"]) for item in stays),
+        key=lambda item: (item[0], item[1]),
+    )
+    if intervals[0][0] != request_start or intervals[-1][1] != request_end:
+        _invalid(
+            "plan.stay_recommendations",
+            "Segmented stays must cover every overnight date in the confirmed request.",
+        )
+    for previous, current in zip(intervals, intervals[1:], strict=False):
+        if previous[1] != current[0]:
+            _invalid(
+                "plan.stay_recommendations",
+                "Segmented stays must be continuous without gaps or overlapping nights.",
+            )
+
+
+def _request_requires_concrete_stay(request: TravelRequestV1) -> bool:
+    if request.duration_days <= 1:
+        return False
+    exemption_text = " ".join(
+        (*request.stay_preferences, *request.hard_constraints)
+    ).casefold()
+    exemptions = (
+        "无需住宿",
+        "不住酒店",
+        "住亲友",
+        "亲友家",
+        "自有住宿",
+        "露营",
+        "overnight train",
+        "no lodging",
+        "no hotel",
+    )
+    return not any(marker in exemption_text for marker in exemptions)
+
+
+def _validate_transport_day_envelope(
+    transport_options: list[dict[str, Any]],
+    days: list[dict[str, Any]],
+    request: TravelRequestV1,
+) -> None:
+    if not days:
+        return
+    first_start = str(days[0]["activities"][0]["start"])
+    last_end = str(days[-1]["activities"][-1]["end"])
+    origin = request.origin.casefold()
+    destinations = tuple(item.casefold() for item in request.destinations)
+    for index, option in enumerate(transport_options):
+        from_name = str(option.get("from") or "").casefold()
+        to_name = str(option.get("to") or "").casefold()
+        if origin in from_name and any(destination in to_name for destination in destinations):
+            arrival = _transport_datetime(option.get("arrival"))
+            if (
+                arrival is not None
+                and arrival.date().isoformat() == request.start_date
+                and arrival.strftime("%H:%M") > first_start
+            ):
+                _invalid(
+                    f"plan.transport_options[{index}].arrival",
+                    "Outbound arrival must not be later than the first travel-day activity.",
+                )
+        if any(destination in from_name for destination in destinations) and origin in to_name:
+            departure = _transport_datetime(option.get("departure"))
+            if (
+                departure is not None
+                and departure.date().isoformat() == request.end_date
+                and departure.strftime("%H:%M") < last_end
+            ):
+                _invalid(
+                    f"plan.transport_options[{index}].departure",
+                    "Return departure must not be earlier than the final travel-day activity end.",
+                )
+
+
+def _transport_datetime(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text or "T" not in text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _normalize_days(
     value: object,
     request: TravelRequestV1,
@@ -668,6 +1023,9 @@ def _normalize_days(
                     "source",
                     "evidence_ids",
                     "path",
+                    "transit_legs",
+                    "walking_distance",
+                    "fare_cny",
                 },
                 segment_field,
             )
@@ -677,21 +1035,56 @@ def _normalize_days(
             distance = _number(
                 segment_raw.get("distance"), f"{segment_field}.distance", minimum=0, maximum=20_000
             )
+            source = _text(
+                segment_raw.get("source"), f"{segment_field}.source", max_chars=100
+            )
+            mode = _text(
+                segment_raw.get("mode"), f"{segment_field}.mode", max_chars=50
+            )
+            transit_legs = _normalize_transit_legs(
+                segment_raw.get("transit_legs", []), f"{segment_field}.transit_legs"
+            )
+            if _requires_amap_transit_details(source, mode) and not transit_legs:
+                _invalid(
+                    f"{segment_field}.transit_legs",
+                    "A verified AMap transit segment must preserve its line and stop details.",
+                )
+            walking_distance_raw = segment_raw.get("walking_distance")
+            fare_raw = segment_raw.get("fare_cny")
             segments.append(
                 {
-                    "mode": _text(segment_raw.get("mode"), f"{segment_field}.mode", max_chars=50),
+                    "mode": mode,
                     "from": _text(segment_raw.get("from"), f"{segment_field}.from", max_chars=200),
                     "to": _text(segment_raw.get("to"), f"{segment_field}.to", max_chars=200),
                     "duration": duration,
                     "distance": distance,
-                    "source": _text(
-                        segment_raw.get("source"), f"{segment_field}.source", max_chars=100
-                    ),
+                    "source": source,
                     "evidence_ids": _evidence_references(
                         segment_raw.get("evidence_ids", []), segment_field, evidence_ids, aliases
                     ),
                     "path": _coordinate_path(
                         segment_raw.get("path", []), f"{segment_field}.path"
+                    ),
+                    "transit_legs": transit_legs,
+                    "walking_distance": (
+                        _number(
+                            walking_distance_raw,
+                            f"{segment_field}.walking_distance",
+                            minimum=0,
+                            maximum=50_000,
+                        )
+                        if walking_distance_raw is not None
+                        else 0.0
+                    ),
+                    "fare_cny": (
+                        _number(
+                            fare_raw,
+                            f"{segment_field}.fare_cny",
+                            minimum=0,
+                            maximum=1_000_000,
+                        )
+                        if fare_raw is not None
+                        else None
                     ),
                 }
             )
@@ -735,6 +1128,91 @@ def _normalize_days(
     return result
 
 
+def _normalize_transit_legs(value: object, field: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > 12:
+        _invalid(field, "Travel transit leg count is invalid.")
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        item_field = f"{field}[{index}]"
+        raw = _object(item, item_field)
+        _reject_unknown(
+            raw,
+            {"mode", "line_name", "departure_stop", "arrival_stop", "via_stops"},
+            item_field,
+        )
+        result.append(
+            {
+                "mode": _text(raw.get("mode"), f"{item_field}.mode", max_chars=40),
+                "line_name": _text(
+                    raw.get("line_name"), f"{item_field}.line_name", max_chars=160
+                ),
+                "departure_stop": _text(
+                    raw.get("departure_stop"),
+                    f"{item_field}.departure_stop",
+                    max_chars=160,
+                ),
+                "arrival_stop": _text(
+                    raw.get("arrival_stop"),
+                    f"{item_field}.arrival_stop",
+                    max_chars=160,
+                ),
+                "via_stops": list(
+                    _text_list(
+                        raw.get("via_stops", []),
+                        f"{item_field}.via_stops",
+                        minimum=0,
+                        maximum=80,
+                        item_chars=160,
+                    )
+                ),
+            }
+        )
+    return result
+
+
+def _requires_amap_transit_details(source: str, mode: str) -> bool:
+    source_text = source.casefold()
+    mode_text = mode.casefold()
+    verified_amap = "amap" in source_text or "高德" in source
+    transit_mode = any(
+        marker in mode_text
+        for marker in ("transit", "subway", "metro", "bus", "公交", "地铁")
+    )
+    return verified_amap and transit_mode
+
+
+def _is_rail_evidence(item: EvidenceItemV1) -> bool:
+    text = f"{item.provider} {item.title} {' '.join(item.facts)}".casefold()
+    unavailable_markers = (
+        "not_on_sale",
+        "not on sale",
+        "unavailable",
+        "未开售",
+        "待开售",
+        "暂不可售",
+    )
+    if any(marker in text for marker in unavailable_markers):
+        return False
+    return any(marker in text for marker in ("12306", "rail", "train", "铁路", "高铁", "动车"))
+
+
+def _looks_like_rail(mode: str) -> bool:
+    text = mode.casefold()
+    return any(marker in text for marker in ("rail", "train", "铁路", "高铁", "动车"))
+
+
+def _evidence_matches_stay(
+    item: EvidenceItemV1,
+    hotel_name: str,
+    address: str,
+) -> bool:
+    haystack = " ".join(
+        (item.provider, item.title, item.excerpt, *item.facts)
+    ).casefold()
+    needles = [hotel_name.casefold(), address.casefold()]
+    return any(needle and len(needle) >= 4 and needle in haystack for needle in needles)
+
+
 def _normalize_budget(value: object, request: TravelRequestV1) -> dict[str, Any]:
     raw = _object(value, "plan.budget")
     _reject_unknown(raw, {"lower", "expected", "upper", "items"}, "plan.budget")
@@ -754,15 +1232,18 @@ def _evidence_references(
     field: str,
     evidence_ids: set[str],
     aliases: dict[str, str],
+    *,
+    reference_name: str = "evidence_ids",
 ) -> list[str]:
+    reference_field = f"{field}.{reference_name}"
     references = _text_list(
-        value, f"{field}.evidence_ids", minimum=0, maximum=20, item_chars=100
+        value, reference_field, minimum=0, maximum=20, item_chars=100
     )
     normalized = []
     for item in references:
         resolved = aliases.get(item, item)
         if resolved not in evidence_ids:
-            _invalid(f"{field}.evidence_ids", "Travel plan references unknown evidence.")
+            _invalid(reference_field, "Travel plan references unknown evidence.")
         if resolved not in normalized:
             normalized.append(resolved)
     return normalized
@@ -981,6 +1462,18 @@ def _number(value: object, field: str, *, minimum: float, maximum: float) -> flo
     if not math.isfinite(result) or not minimum <= result <= maximum:
         _invalid(field, f"{field} is outside the supported range.")
     return result
+
+
+def _optional_number(
+    value: object,
+    field: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float | None:
+    if value is None:
+        return None
+    return _number(value, field, minimum=minimum, maximum=maximum)
 
 
 def _invalid(field: str, message: str) -> None:

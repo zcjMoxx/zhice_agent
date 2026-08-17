@@ -47,23 +47,22 @@ subagents:
   max_batches_per_parent_turn: 1
   max_batch_result_chars: 32000
   profiles:
-    travel-research:
-      description: Research one bounded travel evidence branch using read-only MCP sources.
-      tools:
-        - mcp__amap-maps__*
-        - mcp__tavily__*
-        - mcp__12306__*
-        - mcp__open-meteo__*
-        - mcp__xhs-readonly__*
-      denied_tools: [delegate_tasks]
+    # Travel planning injects its five fixed read-only profiles only for a
+    # travel Turn. Keep ordinary chat profiles here; an explicit same-name
+    # profile can override a built-in travel profile when necessary.
+    explorer:
+      description: Inspect workspace files and public read-only tools for a bounded research task.
+      tools: [read_file, list_dir, search_files]
+      initial_tools: [read_file, list_dir, search_files]
+      denied_tools: [delegate_tasks, write_file, apply_patch, exec]
       allowed_skills: []
       preload_skills: []
       workspace_mode: shared_readonly
-      max_tool_iterations: 12
-      timeout_seconds: 180
-      max_result_chars: 12000
+      max_tool_iterations: 4
+      timeout_seconds: 90
+      max_result_chars: 8000
       allow_model_invocation: true
-      model_role: fast
+      model_role: inherit
 
 channels:
   qq:
@@ -71,7 +70,7 @@ channels:
     transport: websocket
     # Each account may set http_timeout_seconds: 15 (allowed range: 1..60).
     # Public deployments must explicitly set web_base_url for every enabled account.
-    # Example account field: web_base_url: https://agent.example.com
+    # 需启用账号时请填写：web_base_url: "请填写可公网访问的服务地址"
     # Keep accounts empty until real credentials and the real reachable URL are configured.
     accounts: []
   weixin:
@@ -130,14 +129,24 @@ mcp:
     # For local process mode, a loopback XHS_READONLY_UPSTREAM_URL makes the
     # Gateway supervise the fixed binary under integrations/xhs/bin. Docker
     # and remote HTTPS upstreams remain independently managed sidecars.
+    # Travel planning exposes the bundled search_travel_hotels Tool directly after
+    # the Owner stores one Ctrip credential in the MCP administration page; no MCP
+    # server entry is required. The optional server below is only for standalone
+    # interoperability/smoke use and never exposes booking, payment, cancellation,
+    # credential, or generic browser tools.
+    # hotel-browser:
+    #   command: python
+    #   args: [-m, integrations.hotel_browser_mcp.server]
+    #   env:
+    #     ZHICE_AGENT_WORKSPACE: "${ZHICE_AGENT_WORKSPACE}"
+    #     HOTEL_BROWSER_CHANNEL: chrome
+    #     # When no runtime config/.env is mounted, explicitly forward deployment Secrets:
+    #     # ZHICE_CTRIP_USERNAME: "${ZHICE_CTRIP_USERNAME}"
+    #     # ZHICE_CTRIP_PASSWORD: "${ZHICE_CTRIP_PASSWORD}"
 
 travel:
   enabled: true
-  default_mode: quick
-  max_search_results: 8
   max_evidence_items: 40
-  deep_subagent_count: 3
-  xhs_readonly_enabled: true
   max_plan_bytes: 524288
 
 logging: {}
@@ -148,5 +157,6 @@ logging: {}
 operations:
   terminal:
     enabled: false
+    # 启用后请填写受保护的 HTTPS 运维终端地址；本机调试可填写 loopback HTTP 地址。
     url: ""
     presentation: both

@@ -144,7 +144,7 @@ export interface McpMonitorSnapshot {
 }
 
 export interface XhsReadonlyAdminStatus {
-  server_id: "xhs-readonly";
+  platform_id: "xhs";
   state: "unknown" | "authenticated" | "auth_required" | "login_pending" | "unavailable";
   code: string;
   message: string;
@@ -153,6 +153,23 @@ export interface XhsReadonlyAdminStatus {
   login_in_progress: boolean;
   restart_supported: boolean;
   cookie_updated_at: string;
+}
+
+export interface HotelBrowserAdminStatus {
+  platform_id: "ctrip";
+  state: "unknown" | "not_configured" | "authenticated" | "auth_required" | "login_pending" | "unavailable";
+  code: string;
+  message: string;
+  credential_store_supported: boolean;
+  credential_configured: boolean;
+  account_hint: string;
+  credential_source: "workspace_env" | "environment" | "";
+  credentials_updated_at: string;
+  browser_supported: boolean;
+  login_supported: boolean;
+  login_in_progress: boolean;
+  login_mode: "password_with_manual_verification_fallback";
+  last_checked_at: string;
 }
 
 export interface OperationsTerminal {
@@ -293,6 +310,26 @@ export interface TravelGenerationStatus {
   error_code: string;
 }
 
+export interface TravelProgressHistoryItem {
+  id: string;
+  stage: "requirements" | "data" | "guides" | "solve" | "validate" | "complete";
+  title: string;
+  detail: string;
+  status: "running" | "done" | "error";
+  result?: {
+    provider: string;
+    query: string;
+    summary: string;
+    resultCount: number;
+    items: Array<{ title: string; detail: string }>;
+  };
+}
+
+export interface TravelProgressHistory {
+  session_id: string;
+  items: TravelProgressHistoryItem[];
+}
+
 export interface TravelCandidateDay {
   date: string;
   city_or_area: string;
@@ -310,6 +347,10 @@ export interface TravelCandidate {
   daily_intensity_scores: number[];
   evidence_coverage: number;
   warnings: string[];
+  strategy_label?: string;
+  core_tradeoff?: string;
+  unique_highlights?: string[];
+  omitted_highlights?: string[];
 }
 
 export interface TravelCandidateReview {
@@ -359,6 +400,14 @@ export interface TravelEvidence {
 
 export interface TravelLocation { longitude: number; latitude: number }
 
+export interface TravelTransitLeg {
+  mode: string;
+  line_name: string;
+  departure_stop: string;
+  arrival_stop: string;
+  via_stops: string[];
+}
+
 export interface TravelActivity {
   start: string;
   end: string;
@@ -378,6 +427,48 @@ export interface TravelRouteSegment {
   source: string;
   evidence_ids: string[];
   path?: TravelLocation[];
+  transit_legs?: TravelTransitLeg[];
+  walking_distance?: number;
+  fare_cny?: number | null;
+}
+
+export interface TravelTransportOption extends Record<string, unknown> {
+  name?: string;
+  title?: string;
+  mode?: string;
+  from?: string;
+  to?: string;
+  service_name?: string;
+  departure?: string;
+  arrival?: string;
+  duration_minutes?: number;
+  seat?: string;
+  price_cny_per_person?: number;
+  price_cny_total?: number;
+  price_cny_total_for_2?: number;
+  source?: string;
+  summary?: string;
+  evidence_ids?: string[];
+  recommended_segment?: Record<string, unknown>;
+}
+
+export interface TravelStayRecommendation extends Record<string, unknown> {
+  hotel_name?: string;
+  suggested_poi?: string;
+  name?: string;
+  address?: string;
+  area?: string;
+  check_in?: string;
+  check_out?: string;
+  nights?: number;
+  observed_price_per_night_cny?: number | null;
+  planning_estimate_per_night_cny?: number | null;
+  price_status?: string;
+  evidence_ids?: string[];
+  price_source_evidence_ids?: string[];
+  reason?: string;
+  summary?: string;
+  location?: TravelLocation | null;
 }
 
 export interface TravelDay {
@@ -409,8 +500,8 @@ export interface TravelPlan {
   };
   assumptions: string[];
   freshness_summary: Record<string, unknown> | unknown[];
-  transport_options: Array<Record<string, unknown>>;
-  stay_recommendations: Array<Record<string, unknown>>;
+  transport_options: TravelTransportOption[];
+  stay_recommendations: TravelStayRecommendation[];
   days: TravelDay[];
   budget: { lower: number; expected: number; upper: number; items: Array<Record<string, unknown>> };
   weather_summary: Array<Record<string, unknown>>;

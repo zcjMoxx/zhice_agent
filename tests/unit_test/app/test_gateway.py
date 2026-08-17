@@ -238,6 +238,23 @@ def test_packaged_vue_entry_serves_home_admin_and_static_assets(tmp_path):
     assert logo.status_code == 200
 
 
+def test_spa_entry_routes_disable_index_caching(tmp_path):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    static_dir.joinpath("index.html").write_text(
+        "<html><body>Current SPA</body></html>", encoding="utf-8"
+    )
+    client = TestClient(
+        create_app(config=_config(tmp_path), runtime=_FakeRuntime(), static_dir=static_dir)
+    )
+
+    for path in ("/", "/travel", "/admin", "/bind/qq"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+        assert "Current SPA" in response.text
+
+
 def test_vue_source_uses_single_initials_node_and_part16_surfaces():
     root = Path(__file__).resolve().parents[3] / "web" / "frontend" / "src"
     avatar = root.joinpath("components/UserAvatar.vue").read_text(encoding="utf-8")
@@ -255,7 +272,7 @@ def test_vue_source_uses_single_initials_node_and_part16_surfaces():
             "Skills",
             "运行诊断",
             "服务器运维",
-            "高级设置",
+            "安全审计",
         )
     )
     assert "近期运行记录" in admin
