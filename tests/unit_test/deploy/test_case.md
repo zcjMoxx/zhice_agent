@@ -8,6 +8,8 @@
 - `config apply` 调用内部 `apply.sh`，从 root-owned 固定 deployment spec 使用当前 Digest/mounts 重建容器；不再以单纯 restart 代替 bind-mount 配置生效。
 - 高德 JS API Key/安全密钥只从 Git 忽略的 `deploy/private/.env` 读取并注入前端构建；缺失、空值或重复项前置失败，公开模板和构建摘要不含真实值。
 - 固定拓扑 restart 先重启并等待小红书 sidecar 端口就绪，再重启主容器；发布主容器失败时同时回滚 sidecar，Cookie seed 临时容器在正常与中断路径均清理。
+- 小红书 sidecar 首次下载并解压固定浏览器时允许最多 15 分钟就绪，Paramiko 远端发布上限覆盖该窗口；部署和重启失败前仅输出 80 行、64 KiB 有界日志，浏览器 cache 继续由命名卷复用。
+- 云端 `docker run` 为小红书 sidecar 覆盖主镜像的 Gateway HEALTHCHECK，固定探测容器内 `127.0.0.1:18060`，其启动窗口与 15 分钟首次浏览器准备上限一致。
 - Docker Ops 日志页默认每秒刷新固定容器的有界日志并自动滚动；用户向上查看历史时暂停，Continue follow 恢复，不使用无限输出缓冲。
 - 本地 Docker 与本地进程复用同一双视图静态页面和通用 restricted 命令集；页面不能提交容器名、Docker 参数、路径或服务器配置命令。
 - 服务器 Ops 使用 loopback Caddy 的长期签名 Cookie 统一认证，在同一 origin 提供共享监控页、固定 dashboard API 和 `/terminal/` ttyd；Caddy 只在 loopback 代理到仍保留 Basic Auth 的 ttyd 时注入固定认证，dashboard/terminal adapter 分离为受 systemd 保护的非 root 服务。
@@ -25,6 +27,7 @@
 - `private/.env`、`private/config.yml`、`private/models.json` 三个镜像私有文件以及本机云目标 `private/cloud-target.json` 被目录级 Git ignore 覆盖；公开 `private/cloud-target.example.json` 的 registry、SSH 主机、SSH 用户、SSH 密码、运维脚本目录和公网地址全部使用中文占位，未替换时流水线明确拒绝。
 - Deploy README 优先从当前 `${workspace}/config/` 复制三个私有文件到 `deploy/private/`，给出默认 Windows `.zhice` 路径，将项目 `config/.env` 标为 legacy migration，并要求任一来源的 `deploy/private/.env` 删除 `ZHICE_AGENT_WORKSPACE`；`ZHICE_AGENT_SKILL_REPO` 缺失时自动使用 `/app/skill_repo`，默认 source 不携带虚假远端地址。
 - Dockerfile 从仓库构建 Python、Vue、Prompt、Skill、微信 sidecar和固定版本旅行 MCP，只从 `deploy/` 复制三个私有文件；RedNote 兼容小红书二进制锁定上游提交并应用可审计 patch。
+- Playwright Chromium 的安装与 `/opt/zhice` 权限收敛必须位于同一镜像层；微信 sidecar 和小红书跨 stage 产物使用 `COPY --chown`，末尾运行目录初始化不得再次递归触碰这些大型路径，避免 Docker copy-up 重复浏览器内容。
 - 微信 Sidecar 使用 Node `pathToFileURL` 判断 Linux/Windows 直接入口；Docker 通过 `.[gateway,qq,hotel-browser]` 显式安装 Gateway、QQ 与携程只读浏览器依赖，并安装 bundled Chromium，不依赖宿主机 Chrome 或传递依赖碰巧可用。
 - 容器以专用非 root `zhice` 用户运行，使用与本地一致的 `Path.home()/.zhice` 默认目录，并通过显式 `--env-file` 加载镜像内私有环境变量。
 - Dockerfile 不预设 `ZHICE_AGENT_SKILL_REPO`；私有 `.env` 显式配置时使用配置值，未配置或为空时由运行时代码自动定位镜像内 `/app/skill_repo`。

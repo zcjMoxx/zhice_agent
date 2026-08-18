@@ -35,6 +35,7 @@ RUNTIME_EVENT_STATUS_BY_TYPE = {
     "travel.plan_ready": "completed",
     "travel.clarification_required": "waiting",
     "travel.candidate_review_required": "waiting",
+    "travel.candidate_review_auto_selected": "completed",
 }
 RUNTIME_EVENT_TYPES = frozenset(RUNTIME_EVENT_STATUS_BY_TYPE)
 RUNTIME_EVENT_STATUSES = frozenset(RUNTIME_EVENT_STATUS_BY_TYPE.values())

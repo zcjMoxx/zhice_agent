@@ -141,6 +141,22 @@ def test_ctrip_destination_selection_uses_visible_exact_city_candidate():
     hotel_city_fragment.click.assert_not_called()
 
 
+def test_ctrip_destination_candidates_remove_one_province_level_prefix():
+    assert ctrip._destination_query_candidates("重庆忠县") == (  # noqa: SLF001
+        "重庆忠县",
+        "忠县",
+    )
+    assert ctrip._destination_query_candidates("四川省阿坝州") == (  # noqa: SLF001
+        "四川省阿坝州",
+        "阿坝州",
+    )
+    assert ctrip._destination_query_candidates("河南洛阳") == (  # noqa: SLF001
+        "河南洛阳",
+        "洛阳",
+    )
+    assert ctrip._destination_query_candidates("西安") == ("西安",)  # noqa: SLF001
+
+
 def test_ctrip_card_parser_removes_advertisement_suffix_from_hotel_name():
     page = MagicMock()
     page.evaluate.return_value = [{

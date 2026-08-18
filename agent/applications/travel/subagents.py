@@ -264,9 +264,13 @@ def with_travel_research_profile(config: SubagentConfig) -> SubagentConfig:
         SubagentProfile(
             name=TRAVEL_TRANSPORT_WEATHER_PROFILE,
             description=(
-                "Query both railway and weather for one travel request before returning. Use "
-                "the city station-code lookup once, query outbound and return tickets once each, "
-                "and call one weather Tool. Resolve the destination city coordinates with the "
+                "Query both railway applicability and weather before returning. Use the city "
+                "station-code lookup once. Only when both endpoints have verified station codes, "
+                "query outbound and return tickets once each. If either endpoint "
+                "has no returned station code, report railway as not applicable and preserve "
+                "road-coach, driving, or hired-car fallback assumptions instead of guessing a "
+                "station code or omitting the transport conclusion. Always call one weather "
+                "Tool. Resolve the destination city coordinates with the "
                 "city-scoped AMap geocoder first and pass those coordinates directly to the "
                 "weather endpoint; use Open-Meteo place geocoding only as a fallback, and reject "
                 "same-name places whose province or country conflicts with the requested destination. "

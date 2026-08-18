@@ -273,6 +273,36 @@ describe("travel store", () => {
     });
   });
 
+  it("treats missing verified transit evidence as a route repair", async () => {
+    vi.spyOn(api, "travelCandidateReview").mockResolvedValue({
+      session_id: "travel-transit-repair",
+      status: "selected",
+      recommended_candidate_id: "candidate-a",
+      selected_candidate_id: "candidate-a",
+      candidates: [],
+      created_at: "",
+      updated_at: "",
+    });
+    const travel = useTravelStore();
+    travel.sessionId = "travel-transit-repair";
+    travel.generating = true;
+
+    await travel.applyGenerationStatus({
+      session_id: "travel-transit-repair",
+      turn_id: "turn-repair",
+      status: "running",
+      plan_id: "",
+      error_code: "TRAVEL_TRANSIT_EVIDENCE_MISSING",
+    }, false);
+
+    expect(travel.statusText).toBe("正在补齐缺失的公共交通路线");
+    expect(travel.progressItems.at(-1)).toMatchObject({
+      id: "finalization-transport-repair-candidate-a",
+      lane: "transport",
+      status: "running",
+    });
+  });
+
   it("keeps the complete truthful progress timeline", () => {
     const travel = useTravelStore();
     travel.sessionId = "travel-session";
@@ -626,7 +656,7 @@ describe("travel store", () => {
 
     expect(travel.candidateReview).toBeNull();
     expect(travel.stage).toBe("requirements");
-    expect(travel.error).toContain("重新开始");
+    expect(travel.error).toContain("未完成步骤继续");
   });
 
   it("restores a failed selected candidate from the persisted session", async () => {
@@ -657,6 +687,73 @@ describe("travel store", () => {
     expect(travel.candidateReview?.selected_candidate_id).toBe("candidate-a");
     expect(travel.stage).toBe("validate");
     expect(travel.statusText).toContain("继续完善已选方案");
+  });
+
+  it("does not query or restore a generation when no active session is persisted", async () => {
+    const generation = vi.spyOn(api, "travelGeneration");
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+
+    await travel.restoreGeneration();
+
+    expect(generation).not.toHaveBeenCalled();
+    expect(travel.sessionId).toBe("");
+    expect(travel.statusText).toBe("");
+  });
+
+  it("keeps a persisted failed task available for checkpoint continuation", async () => {
+    vi.spyOn(api, "travelGeneration").mockResolvedValue({
+      session_id: "travel-old-failed",
+      turn_id: "turn-failed",
+      status: "failed",
+      plan_id: "",
+      error_code: "TRAVEL_PLAN_NOT_FINALIZED",
+    });
+    vi.spyOn(api, "travelProgress").mockResolvedValue({
+      session_id: "travel-old-failed",
+      items: [],
+    });
+    vi.spyOn(api, "travelCandidateReview").mockRejectedValue(new Error("not found"));
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+    sessionStorage.setItem("zhice.travel.active.user-a", "travel-old-failed");
+
+    await travel.restoreGeneration();
+
+    expect(travel.sessionId).toBe("travel-old-failed");
+    expect(travel.statusText).toBe("旅行规划失败");
+    expect(travel.error).toContain("没有生成完整结果");
+    expect(sessionStorage.getItem("zhice.travel.active.user-a")).toBe("travel-old-failed");
+  });
+
+  it("resumes the same failed session without clearing completed progress", async () => {
+    const send = vi.spyOn(webSocket, "sendMessage").mockResolvedValue();
+    const confirm = vi.spyOn(api, "confirmTravelPlanning");
+    const travel = useTravelStore();
+    travel.initializedUserId = "user-a";
+    travel.sessionId = "travel-failed";
+    travel.phase = "planning";
+    travel.error = "旅行规划没有生成完整结果，请重试";
+    travel.conversation = [{ role: "user", content: "重庆到大理五日游" }];
+    travel.progressItems = [
+      { id: "transport", stage: "data", title: "交通天气已完成", detail: "已保留", status: "done" },
+      { id: "guides", stage: "data", title: "攻略查询失败", detail: "超时", status: "error" },
+    ];
+
+    await travel.resumeFailedPlanning();
+
+    expect(travel.sessionId).toBe("travel-failed");
+    expect(travel.conversation).toEqual([{ role: "user", content: "重庆到大理五日游" }]);
+    expect(travel.progressItems.find((item) => item.id === "transport")?.status).toBe("done");
+    expect(travel.progressItems.find((item) => item.id === "guides")?.status).toBe("error");
+    expect(travel.progressItems.at(-1)?.title).toBe("正在继续未完成步骤");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith(
+      "travel-failed",
+      "继续当前旅行规划，只从上次失败或未完成的步骤接着执行，复用所有已完成结果。",
+      "auto",
+    );
+    travel.stopRecoveryPolling();
   });
 
   it("never moves the main stage backwards when a late map event arrives", () => {
@@ -1374,6 +1471,37 @@ describe("travel store", () => {
 
     expect(travel.progressItems.at(-1)?.title).toBe("携程酒店房价查询完成");
     expect(travel.progressItems.at(-1)?.title).not.toContain("search_travel_hotels");
+  });
+
+  it("does not mislabel an Xiaohongshu note detail read as an empty search", () => {
+    const travel = useTravelStore();
+    travel.sessionId = "travel-a";
+    travel.generating = true;
+
+    travel.handleEnvelope({
+      event: "runtime_event",
+      session_id: "travel-a",
+      data: {
+        type: "tool.completed",
+        tool_call_id: "xhs-detail",
+        metadata: { tool_name: "mcp__xhs-readonly__get_note_detail" },
+        display: { title: "详情读取完成", detail: "公开笔记已返回" },
+        ui_metadata: {
+          detail_type: "search_results",
+          detail_data: {
+            provider: "小红书只读",
+            query: "旅行经验与避坑",
+            summary: "公开笔记已返回，但当前格式暂无法生成摘要",
+            result_count: 0,
+            items: [],
+          },
+        },
+      },
+    });
+
+    expect(travel.progressItems.at(-1)?.title).toBe("小红书笔记详情读取完成");
+    expect(travel.progressItems.at(-1)?.detail).toBe("公开笔记已返回");
+    expect(travel.progressItems.at(-1)?.result).toBeUndefined();
   });
 
   it("restores a running session from safe per-user session storage", async () => {

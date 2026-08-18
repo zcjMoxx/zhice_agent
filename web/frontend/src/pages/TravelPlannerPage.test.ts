@@ -46,6 +46,33 @@ describe("TravelPlannerPage generation continuity", () => {
     remounted.unmount();
   });
 
+  it("keeps the plain travel route blank instead of auto-opening an unfinished task", async () => {
+    const { wrapper, router, pinia, travel } = await mountPage();
+    wrapper.unmount();
+    vi.mocked(api.travelWorkItems).mockResolvedValue({
+      items: [{
+        session_id: "travel-old-failed",
+        plan_id: "",
+        status: "failed",
+        title: "旧的未完成任务",
+        preview: "",
+        updated_at: "2026-08-17T00:00:00Z",
+        error_code: "TRAVEL_PLAN_NOT_FINALIZED",
+      }],
+    });
+    const openWorkItem = vi.spyOn(travel, "openWorkItem");
+    const startNew = vi.spyOn(travel, "startNew");
+
+    const remounted = mount(TravelPlannerPage, { global: pageGlobals(pinia, router) });
+    await flushPromises();
+
+    expect(openWorkItem).not.toHaveBeenCalled();
+    expect(startNew).toHaveBeenCalled();
+    expect(travel.sessionId).toBe("");
+    expect(travel.conversation).toEqual([]);
+    remounted.unmount();
+  });
+
   it("keeps new-plan available during background generation and intake thinking", async () => {
     const { wrapper, travel } = await mountPage();
     travel.generating = true;
@@ -117,6 +144,32 @@ describe("TravelPlannerPage generation continuity", () => {
     wrapper.unmount();
   });
 
+  it("continues the failed step in the same plan instead of starting a blank plan", async () => {
+    const { wrapper, travel } = await mountPage();
+    travel.sessionId = "travel-failed";
+    travel.phase = "planning";
+    travel.conversation = [{ role: "user", content: "重庆到大理五日游" }];
+    travel.progressItems = [{ id: "guides", stage: "data", title: "攻略查询失败", detail: "超时", status: "error" }];
+    travel.error = "上次规划未生成完整计划，请继续未完成步骤。";
+    const startNew = vi.spyOn(travel, "startNew");
+    const resume = vi.spyOn(travel, "resumeFailedPlanning").mockResolvedValue();
+    await wrapper.vm.$nextTick();
+
+    const continueButton = wrapper.get(".travel-error-recovery button");
+    expect(continueButton.text()).toContain("继续未完成步骤");
+    expect(continueButton.attributes("title")).toContain("只补做失败或未完成的步骤");
+
+    await continueButton.trigger("click");
+    await wrapper.vm.$nextTick();
+
+    expect(resume).toHaveBeenCalledOnce();
+    expect(startNew).not.toHaveBeenCalled();
+    expect(travel.sessionId).toBe("travel-failed");
+    expect(travel.conversation).toEqual([{ role: "user", content: "重庆到大理五日游" }]);
+    expect(travel.progressItems[0]?.id).toBe("guides");
+    wrapper.unmount();
+  });
+
   it("renders the real flat train and hotel fields instead of placeholder dashes", async () => {
     const { wrapper, travel } = await mountPage();
     travel.activePlan = evidenceRichPlan();
@@ -130,6 +183,8 @@ describe("TravelPlannerPage generation continuity", () => {
     expect(wrapper.text()).toContain("规划估算 ¥750/晚（非实时房价）");
     expect(wrapper.text()).toContain("住宿信息来源：高德地图：酒店 POI");
     expect(wrapper.text()).toContain("价格来源：规划估算，无外部实时报价");
+    expect(wrapper.text()).toContain("阵雨概率较高 · 24.4–32℃ · 最高降水概率 98%");
+    expect(wrapper.text()).toContain("实时查询 · Open-Meteo 天气");
     wrapper.unmount();
   });
 
@@ -241,7 +296,15 @@ function evidenceRichPlan(): TravelPlan {
     }],
     days: [],
     budget: { lower: 3500, expected: 4200, upper: 4900, items: [] },
-    weather_summary: [],
+    weather_summary: [{
+      date: "2026-08-20",
+      overview: "阵雨概率较高",
+      temp_min_c: 24.4,
+      temp_max_c: 32,
+      precipitation_probability_max_pct: 98,
+      provider: "Open-Meteo",
+      freshness: "live",
+    }],
     fallbacks: [],
     avoidance_tips: [],
     evidence: [{

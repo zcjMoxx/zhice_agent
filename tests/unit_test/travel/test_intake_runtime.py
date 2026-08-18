@@ -12,6 +12,8 @@ from agent.app.runtime import (
     WebRuntime,
     _persisted_finalization_child_ids,
     _persisted_finalization_completed_categories,
+    _persisted_travel_finalizer_attempts,
+    _persisted_travel_finalizer_plans,
     _travel_finalization_repair_profiles,
     _travel_forecast_window_context,
 )
@@ -30,6 +32,52 @@ from agent.protocols.auth import ActorContext
 from agent.protocols.tool import ToolResult
 from agent.session import JsonlSessionStore
 from agent.tools.base import BaseTool
+
+
+def _delegation_message(call_id: str, task_id: str, profile: str) -> Message:
+    return Message(
+        role="assistant",
+        content="",
+        tool_calls=[{
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": "delegate_tasks",
+                "arguments": json.dumps(
+                    {"tasks": [{"id": task_id, "profile": profile}]}
+                ),
+            },
+        }],
+    )
+
+
+def _delegation_result(call_id: str, task_id: str) -> Message:
+    return Message(
+        role="tool",
+        content=json.dumps({
+            "status": "success",
+            "output": json.dumps({
+                "results": [{"id": task_id, "status": "completed", "code": "OK"}]
+            }),
+        }),
+        name="delegate_tasks",
+        tool_call_id=call_id,
+    )
+
+
+def _finalizer_message(call_id: str, plan: dict) -> Message:
+    return Message(
+        role="assistant",
+        content="",
+        tool_calls=[{
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": "finalize_travel_plan",
+                "arguments": json.dumps({"plan": plan}),
+            },
+        }],
+    )
 
 
 def test_persisted_child_phase_mapping_uses_delegate_profiles_and_result_ids():
@@ -121,6 +169,74 @@ def test_persisted_finalization_recovers_only_completed_ok_lanes():
     )
 
 
+def test_persisted_finalizer_plans_restore_every_valid_tool_call_in_order():
+    plans = [{"schema_version": "1", "marker": "weather"}, {"schema_version": "1", "marker": "route"}]
+    messages = [
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[{
+                "id": f"call-{index}",
+                "type": "function",
+                "function": {
+                    "name": "finalize_travel_plan",
+                    "arguments": json.dumps({"plan": plan}),
+                },
+            }],
+        )
+        for index, plan in enumerate(plans)
+    ]
+    messages.append(
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[{
+                "id": "call-invalid",
+                "type": "function",
+                "function": {"name": "finalize_travel_plan", "arguments": "{"},
+            }],
+        )
+    )
+
+    assert _persisted_travel_finalizer_plans(messages) == plans
+
+
+def test_persisted_finalizer_attempts_only_trust_sources_completed_before_plan():
+    weather_plan = {"schema_version": "1", "marker": "weather"}
+    route_plan = {"schema_version": "1", "marker": "route"}
+    messages = [
+        _delegation_message(
+            "call-weather",
+            "weather",
+            TRAVEL_FINAL_WEATHER_PROFILE,
+        ),
+        _delegation_result("call-weather", "weather"),
+        _finalizer_message("call-weather-plan", weather_plan),
+        _delegation_message("call-route", "route", TRAVEL_FINAL_ROUTE_PROFILE),
+        _delegation_result("call-route", "route"),
+        _finalizer_message("call-route-plan", route_plan),
+    ]
+
+    attempts = _persisted_travel_finalizer_attempts(
+        messages,
+        weather_source_verified=True,
+        transit_source_verified=True,
+    )
+
+    assert attempts == [
+        {
+            "plan": weather_plan,
+            "live_weather_verified": True,
+            "transit_verified": False,
+        },
+        {
+            "plan": route_plan,
+            "live_weather_verified": True,
+            "transit_verified": True,
+        },
+    ]
+
+
 def test_finalizer_forecast_error_routes_to_one_weather_repair_profile():
     messages = [
         Message(
@@ -150,6 +266,18 @@ def test_finalizer_forecast_error_routes_to_one_weather_repair_profile():
     ]
     assert _travel_finalization_repair_profiles(
         route_messages,
+        SimpleNamespace(route_repair_attempted=False),
+    ) == frozenset({TRAVEL_FINAL_ROUTE_PROFILE})
+    transit_messages = [
+        Message(
+            role="tool",
+            content="transit evidence required",
+            name="finalize_travel_plan",
+            metadata={"is_error": True, "code": "TRAVEL_TRANSIT_EVIDENCE_MISSING"},
+        )
+    ]
+    assert _travel_finalization_repair_profiles(
+        transit_messages,
         SimpleNamespace(route_repair_attempted=False),
     ) == frozenset({TRAVEL_FINAL_ROUTE_PROFILE})
 

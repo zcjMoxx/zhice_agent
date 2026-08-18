@@ -1193,7 +1193,42 @@ def _is_rail_evidence(item: EvidenceItemV1) -> bool:
     )
     if any(marker in text for marker in unavailable_markers):
         return False
-    return any(marker in text for marker in ("12306", "rail", "train", "铁路", "高铁", "动车"))
+    rail_source = any(
+        marker in text for marker in ("12306", "rail", "train", "铁路", "高铁", "动车")
+    )
+    if not rail_source:
+        return False
+    # A city/station-code lookup only proves whether railway is applicable. It is
+    # not timetable, seat or fare evidence and must not force road options to
+    # carry fabricated train fields.
+    station_lookup_only = any(
+        marker in text
+        for marker in ("station code", "station_code", "station-code", "站码", "车站代码")
+    ) and not any(
+        marker in text
+        for marker in ("车次", "余票", "票价", "出发", "到达", "二等座", "一等座", "硬座", "软卧")
+    )
+    if station_lookup_only:
+        return False
+    return bool(
+        re.search(r"(?:^|\s)[gdcztkys]\d{1,5}(?:\s|$)", text, flags=re.IGNORECASE)
+        or any(
+            marker in text
+            for marker in (
+                "车次",
+                "余票",
+                "票价",
+                "出发",
+                "到达",
+                "departure",
+                "arrival",
+                "二等座",
+                "一等座",
+                "硬座",
+                "软卧",
+            )
+        )
+    )
 
 
 def _looks_like_rail(mode: str) -> bool:

@@ -590,7 +590,6 @@ class FinalizeTravelPlanTool(BaseTool):
     def __init__(self, workspace: Path | str, service: TravelApplicationService):
         super().__init__(workspace)
         self.service = service
-        self._last_plan_attempts: dict[str, dict[str, Any]] = {}
 
     def _execute(self, args: dict[str, Any]) -> ToolResult:
         del args
@@ -613,9 +612,17 @@ class FinalizeTravelPlanTool(BaseTool):
         if isinstance(raw_plan, dict):
             raw_plan = _coerce_plan_route_numeric_strings(raw_plan)
             raw_plan = _sanitize_plan_evidence_urls(raw_plan)
-        previous_plan = self._last_plan_attempts.get(context.session_id)
-        if isinstance(raw_plan, dict) and previous_plan is not None:
-            raw_plan = _merge_previous_verified_transit(raw_plan, previous_plan)
+        if isinstance(raw_plan, dict):
+            for previous_attempt in self.service.source_ledger.plan_attempts(
+                context.session_id
+            ):
+                previous_plan = previous_attempt.get("plan")
+                if not isinstance(previous_plan, dict):
+                    continue
+                if previous_attempt.get("transit_verified"):
+                    raw_plan = _merge_previous_verified_transit(raw_plan, previous_plan)
+                if previous_attempt.get("live_weather_verified"):
+                    raw_plan = _merge_previous_live_weather(raw_plan, previous_plan)
         if context.channel == "travel":
             if isinstance(raw_plan, dict):
                 raw_plan = _merge_ledger_search_evidence(
@@ -641,7 +648,9 @@ class FinalizeTravelPlanTool(BaseTool):
             )
             if research_error is not None:
                 if isinstance(raw_plan, dict):
-                    self._last_plan_attempts[context.session_id] = deepcopy(raw_plan)
+                    self.service.source_ledger.remember_plan_attempt(
+                        context.session_id, raw_plan
+                    )
                 return research_error
         try:
             plan = self.service.finalize(
@@ -654,14 +663,15 @@ class FinalizeTravelPlanTool(BaseTool):
             )
         except TravelApplicationError as exc:
             if isinstance(raw_plan, dict):
-                self._last_plan_attempts[context.session_id] = deepcopy(raw_plan)
+                self.service.source_ledger.remember_plan_attempt(
+                    context.session_id, raw_plan
+                )
             metadata = {"code": exc.code, "tool_name": self.name}
             if exc.field:
                 metadata["field"] = exc.field
             output = f"{exc.field}: {exc.message}" if exc.field else exc.message
             return ToolResult(output=output, is_error=True, metadata=metadata)
         plan_id = str(plan.data["plan_id"])
-        self._last_plan_attempts.pop(context.session_id, None)
         self.service.source_ledger.clear(context.session_id)
         view_url = f"/travel?plan={plan_id}"
         if context.runtime_events is not None:
@@ -793,6 +803,18 @@ def _coerce_plan_route_numeric_strings(raw_plan: dict[str, Any]) -> dict[str, An
         for segment in segments:
             if not isinstance(segment, dict):
                 continue
+            distance = segment.get("distance")
+            source = str(segment.get("source") or "").casefold()
+            if (
+                isinstance(distance, (int, float))
+                and not isinstance(distance, bool)
+                and distance > 20_000
+                and any(marker in source for marker in ("amap", "高德"))
+            ):
+                # AMap route responses use metres while TravelPlanV1 exposes
+                # route distance in kilometres. Repair the unambiguous raw-unit
+                # carry-over before strict validation.
+                segment["distance"] = float(distance) / 1000
             value = segment.get("walking_distance")
             if isinstance(value, str) and re.fullmatch(r"\d+(?:\.\d+)?", value):
                 segment["walking_distance"] = float(value)
@@ -1581,6 +1603,67 @@ def _merge_previous_verified_transit(
             ):
                 if key in previous_segment:
                     current_segment[key] = deepcopy(previous_segment[key])
+    return merged
+
+
+def _merge_previous_live_weather(
+    current_plan: dict[str, Any],
+    previous_plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Preserve a verified live forecast while another finalizer field is patched."""
+
+    if _plan_has_live_weather(current_plan) or not _plan_has_live_weather(previous_plan):
+        return current_plan
+    merged = deepcopy(current_plan)
+    previous_weather = previous_plan.get("weather_summary")
+    merged["weather_summary"] = deepcopy(previous_weather)
+
+    current_evidence = merged.get("evidence")
+    previous_evidence = previous_plan.get("evidence")
+    if isinstance(current_evidence, list) and isinstance(previous_evidence, list):
+        known_ids = {
+            str(item.get("evidence_id") or "")
+            for item in current_evidence
+            if isinstance(item, dict)
+        }
+        weather_providers = {
+            str(item.get("provider") or "").strip().casefold()
+            for item in previous_weather
+            if isinstance(item, dict) and str(item.get("provider") or "").strip()
+        }
+        for item in previous_evidence:
+            if not isinstance(item, dict):
+                continue
+            evidence_id = str(item.get("evidence_id") or "")
+            identity = " ".join(
+                str(item.get(key) or "").casefold()
+                for key in ("provider", "title", "excerpt")
+            )
+            is_weather = (
+                str(item.get("freshness") or "").casefold() == "live"
+                and (
+                    str(item.get("provider") or "").strip().casefold()
+                    in weather_providers
+                    or any(marker in identity for marker in ("weather", "forecast", "天气", "预报"))
+                )
+            )
+            if is_weather and evidence_id not in known_ids:
+                current_evidence.append(deepcopy(item))
+                known_ids.add(evidence_id)
+
+    previous_days = previous_plan.get("days")
+    current_days = merged.get("days")
+    if isinstance(previous_days, list) and isinstance(current_days, list):
+        adjustments = {
+            str(day.get("date") or ""): day.get("weather_adjustment")
+            for day in previous_days
+            if isinstance(day, dict) and day.get("weather_adjustment")
+        }
+        for day in current_days:
+            if isinstance(day, dict) and str(day.get("date") or "") in adjustments:
+                day["weather_adjustment"] = deepcopy(
+                    adjustments[str(day.get("date") or "")]
+                )
     return merged
 
 

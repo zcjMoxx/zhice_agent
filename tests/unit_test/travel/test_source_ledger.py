@@ -13,7 +13,10 @@ from agent.applications.travel.source_ledger import (
     source_category,
     source_operation,
 )
-from agent.applications.travel.tools import _merge_previous_verified_transit
+from agent.applications.travel.tools import (
+    _merge_previous_live_weather,
+    _merge_previous_verified_transit,
+)
 from agent.protocols.auth import ActorContext
 from agent.protocols.tool import ToolExecutionContext, ToolResult
 
@@ -102,6 +105,42 @@ def test_finalizer_retry_preserves_previous_verified_transit_fields():
     assert segment["source"] == "amap_transit"
     assert segment["transit_legs"][0]["line_name"] == "地铁4号线"
     assert current["days"][0]["route_segments"][0]["source"] == "planning_estimate"
+
+
+def test_finalizer_retry_preserves_previous_live_weather_and_evidence():
+    previous = {
+        "weather_summary": [{
+            "date": "2026-09-15",
+            "summary": "阵雨",
+            "provider": "Open-Meteo",
+            "freshness": "live",
+        }],
+        "days": [{"date": "2026-09-15", "weather_adjustment": "携带雨具"}],
+        "evidence": [{
+            "evidence_id": "weather-live",
+            "source_type": "official_api",
+            "provider": "Open-Meteo",
+            "title": "实时天气预报",
+            "freshness": "live",
+        }],
+    }
+    current = {
+        "weather_summary": [{
+            "date": "2026-09-15",
+            "summary": "历史同期",
+            "provider": "Open-Meteo",
+            "freshness": "historical",
+        }],
+        "days": [{"date": "2026-09-15", "weather_adjustment": "参考历史气候"}],
+        "evidence": [],
+    }
+
+    merged = _merge_previous_live_weather(current, previous)
+
+    assert merged["weather_summary"][0]["freshness"] == "live"
+    assert merged["days"][0]["weather_adjustment"] == "携带雨具"
+    assert merged["evidence"][0]["evidence_id"] == "weather-live"
+    assert current["weather_summary"][0]["freshness"] == "historical"
 
 
 def test_source_ledger_tracks_expected_attempted_and_successful_categories():
@@ -219,6 +258,80 @@ def test_station_lookup_does_not_satisfy_two_dated_ticket_attempts():
     assert snapshot.transport_ticket_attempt_count == 2
     assert snapshot.transport_ticket_success_count == 2
     assert snapshot.transport_ticket_not_on_sale is True
+
+
+def test_completed_candidate_fan_in_allows_county_without_rail_ticket_calls():
+    ledger = TravelSourceLedger()
+    ledger.register_expected(
+        "session-county",
+        [
+            "mcp__12306__get-tickets",
+            "mcp__open-meteo__get_forecast",
+            "mcp__hotel-browser__search_travel_hotels",
+            "mcp__tavily__tavily_search",
+            "mcp__xhs-readonly__search_notes",
+        ],
+    )
+    ledger.observe(
+        "session-county",
+        "mcp__12306__get-station-code-of-citys",
+        ToolResult(
+            output='[{"station_name":"重庆","station_code":"CQW"}]',
+            metadata={"code": "MCP_OK"},
+        ),
+    )
+    assert ledger.snapshot("session-county").candidate_missing_attempts == (
+        "lodging",
+        "social",
+        "transport",
+        "weather",
+        "web",
+    )
+
+    ledger.mark_candidate_profiles_completed(
+        "session-county",
+        {
+            "travel-transport-weather",
+            "travel-stay-poi",
+            "travel-guides",
+        },
+    )
+    snapshot = ledger.snapshot("session-county")
+    assert snapshot.candidate_research_complete is True
+    assert snapshot.transport_ticket_attempt_count == 0
+    assert snapshot.candidate_missing_attempts == ()
+
+    provider = require_travel_research_before_solving(
+        _Provider(), ledger, "session-county"
+    )
+    assert [item["function"]["name"] for item in provider.definitions()] == [
+        "run_skill",
+        "finalize_travel_plan",
+    ]
+
+
+def test_partial_candidate_profiles_do_not_bypass_rail_research_gate():
+    ledger = TravelSourceLedger()
+    ledger.register_expected("session-partial", ["mcp__12306__get-tickets"])
+    ledger.mark_candidate_profiles_completed(
+        "session-partial", {"travel-transport-weather", "travel-stay-poi"}
+    )
+
+    snapshot = ledger.snapshot("session-partial")
+    assert snapshot.candidate_research_complete is False
+    assert snapshot.candidate_missing_attempts == ("transport",)
+
+
+def test_partial_candidate_profiles_keep_only_the_failed_lane_resumable():
+    ledger = TravelSourceLedger()
+    ledger.mark_candidate_profiles_completed(
+        "session-partial-lane", {"travel-transport-weather", "travel-stay-poi"}
+    )
+
+    snapshot = ledger.snapshot("session-partial-lane")
+
+    assert snapshot.candidate_research_complete is False
+    assert snapshot.candidate_missing_attempts == ("travel-guides",)
 
 
 def test_weather_geocode_does_not_satisfy_weather_data_attempt():
@@ -466,6 +579,33 @@ def test_finalization_weather_repair_hides_finalizer_until_forecast_succeeds():
     assert [item["function"]["name"] for item in provider.definitions()] == [
         "finalize_travel_plan"
     ]
+
+
+def test_finalizer_plan_attempts_are_bounded_isolated_and_cleared():
+    ledger = TravelSourceLedger()
+    session_id = "session-plan-attempts"
+    plans = [
+        {
+            "plan": {"marker": index, "nested": {"value": index}},
+            "live_weather_verified": index >= 5,
+            "transit_verified": index >= 7,
+        }
+        for index in range(10)
+    ]
+
+    ledger.restore_plan_attempts(session_id, plans)
+    restored = ledger.plan_attempts(session_id)
+
+    assert [item["plan"]["marker"] for item in restored] == list(reversed(range(2, 10)))
+    restored[0]["plan"]["nested"]["value"] = -1
+    assert ledger.plan_attempts(session_id)[0]["plan"]["nested"]["value"] == 9
+
+    ledger.remember_plan_attempt(session_id, {"marker": 10})
+    assert [item["plan"]["marker"] for item in ledger.plan_attempts(session_id)] == list(
+        reversed(range(3, 11))
+    )
+    ledger.clear(session_id)
+    assert ledger.plan_attempts(session_id) == []
 
 
 def test_finalization_route_repair_reopens_map_budget_and_then_finalizer():

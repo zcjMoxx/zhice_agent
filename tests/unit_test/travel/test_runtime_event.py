@@ -86,3 +86,30 @@ def test_travel_clarification_is_a_safe_waiting_runtime_event():
     assert event is not None
     assert event.status == "waiting"
     assert items[0].ui_metadata["detail_data"]["questions"] == ["一共几位出行？"]
+
+
+def test_travel_candidate_auto_selection_is_a_valid_completed_runtime_event():
+    items = []
+    emitter = RuntimeEventEmitter(
+        session_id="session-1",
+        turn_id="turn-1",
+        sink=type("Sink", (), {"emit": lambda self, event: items.append(event)})(),
+    )
+
+    event = emitter.emit(
+        "travel.candidate_review_auto_selected",
+        ui_metadata={
+            "detail_type": "travel_candidates",
+            "detail_data": {
+                "status": "selected",
+                "selected_candidate_id": "candidate-a",
+                "candidates": [{"candidate_id": "candidate-a"}],
+            },
+        },
+        metadata={"candidate_count": 1},
+    )
+
+    assert event is not None
+    assert event.status == "completed"
+    assert event.display["title"] == "行程方向已确定"
+    assert items == [event]

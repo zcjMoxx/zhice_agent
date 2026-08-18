@@ -4,6 +4,7 @@ set -eu
 CONTAINER_NAME=zhice-agent
 XHS_CONTAINER_NAME=zhice-xhs-readonly
 DOCKER=/usr/bin/docker
+XHS_READINESS_ATTEMPTS=450
 
 for name in "$XHS_CONTAINER_NAME" "$CONTAINER_NAME"; do
   if ! "$DOCKER" container inspect "$name" >/dev/null 2>&1; then
@@ -17,7 +18,7 @@ attempt=0
 until "$DOCKER" exec "$XHS_CONTAINER_NAME" python -c \
   "import socket; socket.create_connection(('127.0.0.1', 18060), 3).close()" >/dev/null 2>&1; do
   attempt=$((attempt + 1))
-  if [ "$attempt" -ge 90 ]; then
+  if [ "$attempt" -ge "$XHS_READINESS_ATTEMPTS" ]; then
     echo "Restart readiness verification failed: $XHS_CONTAINER_NAME" >&2
     exit 1
   fi

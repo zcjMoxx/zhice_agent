@@ -355,3 +355,39 @@ def test_12306_not_on_sale_evidence_allows_explicit_estimate_without_fake_ticket
     assert plan.data["transport_options"][0]["evidence_ids"] == [
         "ev-rail-not-on-sale"
     ]
+
+
+def test_12306_station_code_evidence_does_not_turn_a_road_option_into_a_verified_train():
+    raw = plan_payload()
+    station_lookup = dict(raw["evidence"][0])
+    station_lookup.update(
+        {
+            "evidence_id": "ev-station-code",
+            "provider": "铁路 12306",
+            "title": "忠县车站代码查询",
+            "source_url": "https://www.12306.cn/index/",
+            "excerpt": "get-station-code-of-citys 未返回忠县有效铁路站码",
+            "facts": ["station_code lookup", "忠县没有可用铁路站码"],
+            "content_hash": "",
+        }
+    )
+    raw["evidence"].append(station_lookup)
+    raw["transport_options"][0].update(
+        {
+            "name": "重庆至忠县公路客运",
+            "mode": "大巴",
+            "source": "公路客运规划估算",
+            "summary": "铁路不适用，改走公路客运",
+            "evidence_ids": ["ev-station-code"],
+            "service_name": "",
+            "departure": "",
+            "arrival": "",
+            "seat": "",
+            "price_cny_per_person": None,
+            "price_cny_total": None,
+        }
+    )
+
+    plan = TravelPlanV1.from_dict(raw)
+
+    assert plan.data["transport_options"][0]["mode"] == "大巴"

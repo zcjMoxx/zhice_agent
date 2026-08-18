@@ -30,6 +30,12 @@ const travelTone = computed(() => ({
 const leftCollapsed = ref(false);
 const formInspectorOpen = ref(false);
 const progressSection = ref<HTMLElement | null>(null);
+const resultsScroll = ref<HTMLElement | null>(null);
+const canResumePlanning = computed(() => Boolean(travel.error)
+  && !travel.generating
+  && Boolean(travel.sessionId)
+  && !plan.value
+  && travel.candidateReview?.status !== "selected");
 
 onMounted(async () => {
   if (!auth.authenticated) { await router.replace("/"); return; }
@@ -43,9 +49,7 @@ onMounted(async () => {
     const item = travel.workItems.find((entry) => entry.session_id === requestedSession);
     if (item) await travel.openWorkItem(item);
   } else if (!travel.generating && !travel.sessionId && !travel.activePlan && !travel.progressItems.length) {
-    const unfinished = travel.workItems.find((entry) => entry.status !== "completed");
-    if (unfinished) await travel.openWorkItem(unfinished);
-    else travel.startNew();
+    travel.startNew();
   }
 });
 
@@ -60,6 +64,12 @@ async function chooseCandidate(candidateId: string) {
   await nextTick();
   progressSection.value?.scrollIntoView({ behavior: "smooth", block: "start" });
   await selection;
+}
+
+async function resumePlanning() {
+  await travel.resumeFailedPlanning();
+  await nextTick();
+  progressSection.value?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function workStatusLabel(status: import("@/api/types").TravelWorkStatus) {
@@ -150,6 +160,18 @@ function stayPriceSourceLine(item: TravelStayRecommendation): string {
   return "没有指定日期价格来源";
 }
 
+function weatherSummaryLine(item: Record<string, unknown>): string {
+  const overview = text(item.summary || item.condition || item.overview, "");
+  const minimum = Number(item.temp_min_c ?? item.temperature_min_c);
+  const maximum = Number(item.temp_max_c ?? item.temperature_max_c);
+  const temperature = Number.isFinite(minimum) && Number.isFinite(maximum)
+    ? `${minimum}–${maximum}℃`
+    : "";
+  const rainProbability = Number(item.precipitation_probability_max_pct);
+  const rain = Number.isFinite(rainProbability) ? `最高降水概率 ${rainProbability}%` : "";
+  return [overview, temperature, rain].filter(Boolean).join(" · ") || "天气数据待补充";
+}
+
 function unknownSummary(value: string): { title: string; detail: string } {
   const normalized = String(value || "").replace(/https?:\/\/\S+/gi, "").replace(/\bmcp__\S+/gi, "").replace(/\bevidence\b/gi, "来源记录").replace(/\s+/g, " ").trim();
   if (/open-meteo|天气|预报/i.test(normalized)) return { title: "天气预报暂未确认", detail: "本次天气服务查询失败或日期不在可靠预报窗口内。建议出发前 1–2 天重新查询，再调整室内外顺序。" };
@@ -190,14 +212,18 @@ async function handoffToChat(question: string) {
       </aside>
 
       <main class="travel-results">
-        <div class="travel-results-scroll">
+        <div ref="resultsScroll" class="travel-results-scroll">
           <TravelPlanForm :busy="travel.generating || Boolean(travel.candidateReview)" :intake-busy="travel.intakeBusy" :clarification-questions="travel.clarificationQuestions" :restored-conversation="travel.conversation" :restored-draft="travel.activeDraft" :handoff-question="travel.handoffQuestion" :history-mode="Boolean(plan)" @intake-message="travel.sendIntake" @submit="travel.generate" @details-change="formInspectorOpen = $event" @handoff-chat="handoffToChat" @dismiss-handoff="travel.handoffQuestion = ''" />
           <p v-if="travel.conversationLoading" class="travel-conversation-inline-status">正在恢复需求问答…</p>
           <p v-else-if="travel.conversationError" class="travel-conversation-inline-status error">需求问答暂时无法恢复：{{ travel.conversationError }}。完整计划仍可正常查看。</p>
           <div ref="progressSection" class="travel-progress-anchor">
             <TravelProgress :stage="travel.stage" :status-text="travel.statusText" :active="travel.generating" :items="travel.progressItems" :candidate-review="travel.candidateReview" :candidate-busy="travel.candidateSelecting" :travel-tone="travelTone" @choose-candidate="chooseCandidate" />
           </div>
-          <div v-if="travel.error" class="form-error travel-error-recovery"><span>{{ travel.error }}</span><button v-if="travel.candidateReview?.status === 'selected' && !travel.generating" class="primary-button" type="button" @click="travel.retrySelectedCandidate">继续完成当前方案</button></div>
+          <div v-if="travel.error" class="form-error travel-error-recovery">
+            <span>{{ travel.error }}</span>
+            <button v-if="travel.candidateReview?.status === 'selected' && !travel.generating" class="primary-button" type="button" @click="travel.retrySelectedCandidate">继续完成当前方案</button>
+            <button v-else-if="canResumePlanning" class="primary-button" type="button" title="保留当前计划和已完成结果，只补做失败或未完成的步骤" @click="resumePlanning"><RefreshCw :size="15" />继续未完成步骤</button>
+          </div>
           <template v-if="plan">
           <section class="travel-plan-hero travel-card">
             <div><span class="eyebrow">旅行规划 · {{ travelPlanningModeLabel(plan.request.planning_mode) }}</span><h1>{{ plan.request.origin }} → {{ plan.request.destinations.join(' / ') }}</h1><p>{{ plan.request.start_date }} 至 {{ plan.request.end_date }} · {{ plan.request.duration_days }} 天 · {{ plan.request.travellers.reduce((sum, item) => sum + item.count, 0) }} 人</p></div>
@@ -214,7 +240,7 @@ async function handoffToChat(question: string) {
           <TravelBudget :budget="displayedBudget" />
 
           <section class="travel-comparison-grid">
-            <article class="travel-card"><header><span class="eyebrow">天气与雨天替代</span><h2>预报和历史气候分开看</h2></header><div class="travel-weather-list"><div v-for="(item, index) in plan.weather_summary" :key="index"><strong>{{ text(item.date || item.period, `时段 ${index + 1}`) }}</strong><p>{{ text(item.summary || item.condition) }}</p><small :data-freshness="text(item.freshness, 'unknown')">{{ travelFreshnessLabel(item.freshness) }} · {{ travelProviderLabel(item.provider) }}</small></div></div><ul><li v-for="item in plan.fallbacks" :key="item">{{ travelPublicText(item) }}</li></ul></article>
+            <article class="travel-card"><header><span class="eyebrow">天气与雨天替代</span><h2>预报和历史气候分开看</h2></header><div class="travel-weather-list"><div v-for="(item, index) in plan.weather_summary" :key="index"><strong>{{ text(item.date || item.period, `时段 ${index + 1}`) }}</strong><p>{{ weatherSummaryLine(item) }}</p><small :data-freshness="text(item.freshness, 'unknown')">{{ travelFreshnessLabel(item.freshness) }} · {{ travelProviderLabel(item.provider) }}</small></div></div><ul><li v-for="item in plan.fallbacks" :key="item">{{ travelPublicText(item) }}</li></ul></article>
             <article class="travel-card"><header><span class="eyebrow">避坑与小众体验</span><h2>经验不冒充事实</h2></header><ul class="travel-tip-list"><li v-for="item in plan.avoidance_tips" :key="item"><Compass :size="16" />{{ item }}</li></ul></article>
           </section>
 

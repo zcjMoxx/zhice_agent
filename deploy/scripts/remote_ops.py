@@ -206,7 +206,7 @@ def sudo_deploy(
     port: int,
     public_url: str,
     ops_url: str,
-    timeout_seconds: float = 300,
+    timeout_seconds: float = 1200,
 ) -> tuple[str, str]:
     inner = (
         f"sh {shlex.quote(posixpath.join(current_dir, 'deploy.sh'))} "

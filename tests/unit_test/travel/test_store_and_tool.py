@@ -38,6 +38,17 @@ def _intake_call(patch):
     }
 
 
+def test_amap_route_distance_in_metres_is_normalized_to_plan_kilometres():
+    plan = plan_payload()
+    segment = plan["days"][0]["route_segments"][0]
+    segment.update({"distance": 24_193, "source": "高德地图驾车路线"})
+
+    normalized = travel_tools_module._coerce_plan_route_numeric_strings(plan)  # noqa: SLF001
+
+    assert normalized["days"][0]["route_segments"][0]["distance"] == 24.193
+    assert plan["days"][0]["route_segments"][0]["distance"] == 24_193
+
+
 def test_structured_ledger_results_replace_matching_hotel_price_estimate():
     plan = plan_payload()
     plan["stay_recommendations"][0]["hotel_name"] = "全季酒店(大理古城店)"
@@ -1125,6 +1136,46 @@ def test_travel_finalize_requires_forecast_inside_available_window(tmp_path, mon
         ),
     )
     assert discarded_forecast.metadata["code"] == "TRAVEL_WEATHER_FORECAST_EVIDENCE_MISSING"
+
+
+def test_travel_finalize_merges_live_weather_from_cross_turn_ledger_attempt(tmp_path):
+    service = TravelApplicationService(
+        TravelConfig(enabled=True),
+        FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path),
+    )
+    actor = _actor("user-a")
+    previous = plan_payload()
+    current = deepcopy(previous)
+    for item in current["weather_summary"]:
+        item["summary"] = "历史同期参考"
+        item["freshness"] = "historical"
+    current["evidence"] = [
+        item for item in current["evidence"] if item["evidence_id"] != "ev-weather"
+    ]
+    service.source_ledger.restore_plan_attempts(
+        "session-travel",
+        [{
+            "plan": previous,
+            "live_weather_verified": True,
+            "transit_verified": True,
+        }],
+    )
+
+    result = service.tools_for_actor(actor)[0].execute_with_context(
+        {"plan": current},
+        ToolExecutionContext(
+            actor=actor,
+            session_id="session-travel",
+            turn_id="turn-route-repair",
+            turn_index=1,
+            channel="web",
+        ),
+    )
+
+    assert not result.is_error
+    saved = service.get_plan(actor, result.metadata["plan_id"])
+    assert all(item["freshness"] == "live" for item in saved.data["weather_summary"])
+    assert any(item["evidence_id"] == "ev-weather" for item in saved.data["evidence"])
 
 
 @pytest.mark.parametrize(

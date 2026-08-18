@@ -297,8 +297,10 @@ def _travel_finalization_categories_for_profiles(
     }
 
 
-def _persisted_candidate_research_complete(messages: list[Message]) -> bool:
-    """Recognize one fully successful candidate fan-in from parent Session history."""
+def _persisted_candidate_research_profiles(
+    messages: list[Message],
+) -> frozenset[str]:
+    """Return every successful candidate lane persisted across delegation Turns."""
 
     candidate_calls: dict[str, dict[str, str]] = {}
     for message in messages:
@@ -330,12 +332,15 @@ def _persisted_candidate_research_complete(messages: list[Message]) -> bool:
                 and str(task.get("id") or "").strip()
                 and str(task.get("profile") or "").strip()
             }
+            profiles = frozenset(task_profiles.values())
             if (
-                len(task_profiles) == len(_TRAVEL_CANDIDATE_RESEARCH_PROFILES)
-                and frozenset(task_profiles.values()) == _TRAVEL_CANDIDATE_RESEARCH_PROFILES
+                profiles
+                and len(profiles) == len(task_profiles)
+                and profiles.issubset(_TRAVEL_CANDIDATE_RESEARCH_PROFILES)
             ):
                 candidate_calls[call_id] = task_profiles
 
+    completed_profiles: set[str] = set()
     for message in messages:
         call_id = str(message.tool_call_id or "").strip()
         expected = candidate_calls.get(call_id)
@@ -343,9 +348,7 @@ def _persisted_candidate_research_complete(messages: list[Message]) -> bool:
             continue
         payload = _stored_tool_payload(message.content)
         results = payload.get("results") if isinstance(payload, dict) else None
-        if str(payload.get("status") or "").casefold() != "completed" or not isinstance(
-            results, list
-        ):
+        if not isinstance(results, list):
             continue
         completed = {
             str(result.get("id") or "").strip()
@@ -355,9 +358,16 @@ def _persisted_candidate_research_complete(messages: list[Message]) -> bool:
             and str(result.get("status") or "").casefold() == "completed"
             and str(result.get("code") or "").upper() == "OK"
         }
-        if completed == set(expected):
-            return True
-    return False
+        completed_profiles.update(expected[task_id] for task_id in completed)
+    return frozenset(completed_profiles)
+
+
+def _persisted_candidate_research_complete(messages: list[Message]) -> bool:
+    """Recognize one fully successful candidate fan-in from parent Session history."""
+
+    return _TRAVEL_CANDIDATE_RESEARCH_PROFILES.issubset(
+        _persisted_candidate_research_profiles(messages)
+    )
 
 
 def _latest_travel_finalizer_error_code(messages: list[Message]) -> str:
@@ -372,6 +382,109 @@ def _latest_travel_finalizer_error_code(messages: list[Message]) -> str:
     return ""
 
 
+def _persisted_travel_finalizer_plans(
+    messages: list[Message],
+) -> list[dict[str, Any]]:
+    """Return Finalizer plan arguments in durable Session order."""
+
+    plans: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role != "assistant":
+            continue
+        for raw in message.tool_calls:
+            if not isinstance(raw, dict):
+                continue
+            function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+            if str(function.get("name") or "").casefold() != "finalize_travel_plan":
+                continue
+            try:
+                raw_arguments = function.get("arguments")
+                arguments = (
+                    json.loads(raw_arguments)
+                    if isinstance(raw_arguments, str)
+                    else raw_arguments
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            plan = arguments.get("plan") if isinstance(arguments, dict) else None
+            if isinstance(plan, dict):
+                plans.append(plan)
+    return plans
+
+
+def _persisted_travel_finalizer_attempts(
+    messages: list[Message],
+    *,
+    weather_source_verified: bool,
+    transit_source_verified: bool,
+) -> list[dict[str, Any]]:
+    """Recover Finalizer drafts with source verification available at that point."""
+
+    delegate_calls: dict[str, dict[str, str]] = {}
+    attempts: list[dict[str, Any]] = []
+    weather_ready = False
+    route_ready = False
+    for message in messages:
+        if message.role == "assistant":
+            for raw in message.tool_calls:
+                if not isinstance(raw, dict):
+                    continue
+                call_id = str(raw.get("id") or "").strip()
+                function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+                name = str(function.get("name") or "").casefold()
+                try:
+                    raw_arguments = function.get("arguments")
+                    arguments = (
+                        json.loads(raw_arguments)
+                        if isinstance(raw_arguments, str)
+                        else raw_arguments
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if name == "delegate_tasks":
+                    tasks = arguments.get("tasks") if isinstance(arguments, dict) else None
+                    if call_id and isinstance(tasks, list):
+                        delegate_calls[call_id] = {
+                            str(task.get("id") or "").strip(): str(task.get("profile") or "").strip()
+                            for task in tasks
+                            if isinstance(task, dict) and str(task.get("id") or "").strip()
+                        }
+                elif name == "finalize_travel_plan":
+                    plan = arguments.get("plan") if isinstance(arguments, dict) else None
+                    if isinstance(plan, dict):
+                        attempts.append(
+                            {
+                                "plan": plan,
+                                "live_weather_verified": weather_ready,
+                                "transit_verified": route_ready,
+                            }
+                        )
+            continue
+        call_profiles = delegate_calls.get(str(message.tool_call_id or "").strip())
+        if message.role != "tool" or call_profiles is None:
+            continue
+        payload = _stored_tool_payload(message.content)
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            continue
+        completed_profiles = {
+            call_profiles.get(str(result.get("id") or "").strip(), "")
+            for result in results
+            if isinstance(result, dict)
+            and str(result.get("status") or "").casefold() == "completed"
+            and str(result.get("code") or "").upper() == "OK"
+        }
+        weather_ready = weather_ready or (
+            weather_source_verified
+            and TRAVEL_FINAL_WEATHER_PROFILE in completed_profiles
+        )
+        route_ready = route_ready or (
+            transit_source_verified
+            and TRAVEL_FINAL_ROUTE_PROFILE in completed_profiles
+        )
+    return attempts
+
+
 def _travel_finalization_repair_profiles(
     messages: list[Message],
     snapshot: Any,
@@ -379,11 +492,18 @@ def _travel_finalization_repair_profiles(
     """Map a persisted, source-repairable finalizer error to one bounded Profile."""
 
     code = _latest_travel_finalizer_error_code(messages)
-    if code == "TRAVEL_WEATHER_FORECAST_REQUIRED" and not bool(
+    if code in {
+        "TRAVEL_WEATHER_FORECAST_REQUIRED",
+        "TRAVEL_WEATHER_FORECAST_EVIDENCE_MISSING",
+        "TRAVEL_WEATHER_EVIDENCE_MISSING",
+    } and not bool(
         getattr(snapshot, "forecast_successful", False)
     ):
         return frozenset({TRAVEL_FINAL_WEATHER_PROFILE})
-    if code == "TRAVEL_ROUTE_EVIDENCE_MISSING" and not bool(
+    if code in {
+        "TRAVEL_ROUTE_EVIDENCE_MISSING",
+        "TRAVEL_TRANSIT_EVIDENCE_MISSING",
+    } and not bool(
         getattr(snapshot, "route_repair_attempted", False)
     ):
         return frozenset({TRAVEL_FINAL_ROUTE_PROFILE})
@@ -1297,21 +1417,48 @@ class WebRuntime:
         )
         if review is None:
             parent_messages = resolved.store.load(session_id).messages
-            persisted_research_complete = _persisted_candidate_research_complete(
+            persisted_profiles = _persisted_candidate_research_profiles(
                 parent_messages
             )
             ledger = getattr(self.travel_service, "source_ledger", None)
+            mark_profiles = getattr(ledger, "mark_candidate_profiles_completed", None)
+            if persisted_profiles and callable(mark_profiles):
+                mark_profiles(session_id, persisted_profiles)
             snapshot = getattr(ledger, "snapshot", None)
             research = snapshot(session_id) if callable(snapshot) else None
-            if persisted_research_complete or (
-                research is not None and not research.candidate_missing_attempts
+            completed_profiles = frozenset(
+                getattr(research, "candidate_completed_profiles", frozenset())
+            ) | persisted_profiles
+            missing_profiles = _TRAVEL_CANDIDATE_RESEARCH_PROFILES - completed_profiles
+            if not missing_profiles or (
+                research is not None
+                and (
+                    bool(getattr(research, "candidate_research_complete", False))
+                    or not research.candidate_missing_attempts
+                )
             ):
                 return (
                     "三路旅行研究已经完成，不要重新查询外部来源，也不要再次调用 delegate_tasks。"
                     "当前只需复用本 Session 已有的交通天气、住宿景点和攻略结果，加载 travel-planner Skill，"
-                    "构造恰好两个差异明确且都满足预算、每日总分钟和强度硬门槛的候选，并立即运行 optimizer。"
+                    "按已确认天数与真实取舍构造一至三个都满足预算、每日总分钟和强度硬门槛的候选，"
+                    "并立即运行 optimizer；短途取舍明显时最多三个，中等天数通常两个，"
+                    "天数足以覆盖核心兴趣或差异不足时允许一个。"
                     "如果上一轮只有一个可行候选，只调整被拒候选对应的活动时长与安排一次；"
                     "不要用普通文字提前结束。"
+                )
+            if completed_profiles:
+                task_by_profile = {
+                    "travel-transport-weather": "travel-transport-weather 只补去返程交通或天气未完成部分",
+                    "travel-stay-poi": "travel-stay-poi 只补住宿或景点未完成部分",
+                    "travel-guides": "travel-guides 只补网页或小红书攻略未完成部分",
+                }
+                tasks = "；".join(task_by_profile[profile] for profile in sorted(missing_profiles))
+                return (
+                    "上一轮旅行研究已有成功子任务，禁止重跑这些已完成子任务，也禁止重新查询其外部来源。"
+                    "本轮只调用一次 delegate_tasks，并且只创建以下失败或未完成的子任务："
+                    f"{tasks}。等待这些补做结果后，与本 Session 已保存的成功子任务结果合并，"
+                    "再加载 travel-planner Skill 并运行 optimizer；不得丢弃已有证据或从头规划，"
+                    "也不得用普通文字提前结束。"
                 )
             return (
                 "候选行程尚未生成。本轮必须立即调用当前唯一的 delegate_tasks 入口，"
@@ -1557,9 +1704,21 @@ class WebRuntime:
                         and travel_candidate_review_state.status == "selected"
                     )
                     parent_messages = resolved.store.load(session_id).messages
+                    persisted_candidate_profiles = (
+                        _persisted_candidate_research_profiles(parent_messages)
+                        if travel_candidate_review_state is None
+                        else frozenset()
+                    )
+                    if persisted_candidate_profiles:
+                        self.travel_service.source_ledger.mark_candidate_profiles_completed(
+                            session_id,
+                            persisted_candidate_profiles,
+                        )
                     travel_candidate_research_complete = (
                         travel_candidate_review_state is None
-                        and _persisted_candidate_research_complete(parent_messages)
+                        and self.travel_service.source_ledger.snapshot(
+                            session_id
+                        ).candidate_research_complete
                     )
                     if travel_candidate_research_complete:
                         candidate_messages, _ = _persisted_travel_child_messages(
@@ -1647,12 +1806,32 @@ class WebRuntime:
                                 finalization=True,
                                 only_categories=remaining_categories,
                             )
+                        if (
+                            finalization_messages
+                            and not ledger.snapshot(session_id).forecast_successful
+                        ):
+                            _rehydrate_travel_search_evidence(
+                                ledger,
+                                session_id,
+                                finalization_messages,
+                                finalization=True,
+                                only_categories=frozenset({"weather"}),
+                            )
                         ledger.mark_finalization_attempted(
                             session_id,
                             set(
                                 _persisted_finalization_completed_categories(
                                     parent_messages
                                 )
+                            ),
+                        )
+                        restored_snapshot = ledger.snapshot(session_id)
+                        ledger.restore_plan_attempts(
+                            session_id,
+                            _persisted_travel_finalizer_attempts(
+                                parent_messages,
+                                weather_source_verified=restored_snapshot.forecast_successful,
+                                transit_source_verified=restored_snapshot.verified_transit_available,
                             ),
                         )
                         travel_finalization_repair_profiles = (
@@ -1936,7 +2115,17 @@ class WebRuntime:
                     finalization=travel_finalization_active,
                     final_stay_context=final_stay_context,
                     final_weather_context=final_weather_context,
-                    expected_profiles=(travel_finalization_repair_profiles or None),
+                    expected_profiles=(
+                        (travel_finalization_repair_profiles or None)
+                        if travel_finalization_active
+                        else (
+                            _TRAVEL_CANDIDATE_RESEARCH_PROFILES
+                            - self.travel_service.source_ledger.snapshot(
+                                session_id
+                            ).candidate_completed_profiles
+                        )
+                        or None
+                    ),
                     on_profiles_completed=(
                         (
                             lambda profiles: self.travel_service.source_ledger.mark_finalization_attempted(
@@ -1945,7 +2134,12 @@ class WebRuntime:
                             )
                         )
                         if travel_finalization_active
-                        else None
+                        else (
+                            lambda profiles: self.travel_service.source_ledger.mark_candidate_profiles_completed(
+                                session_id,
+                                profiles,
+                            )
+                        )
                     ),
                 )
                 # The travel parent orchestrates bounded child research. ChildAgentFactory

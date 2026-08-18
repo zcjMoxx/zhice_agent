@@ -92,6 +92,13 @@ def test_deploy_readme_uses_current_workspace_config_and_marks_legacy_env() -> N
     assert "deploy/private/.env` 不包含 `ZHICE_AGENT_WORKSPACE" in readme
     assert "普通 `zcagent init` 已默认" in readme
     assert "`--write-env` 仅作为兼容参数" in readme
+    for deprecated in (
+        "default_mode",
+        "max_search_results",
+        "deep_subagent_count",
+        "xhs_readonly_enabled",
+    ):
+        assert deprecated not in readme
 
 
 def test_deploy_readme_explains_cloud_fields_and_credential_storage() -> None:
@@ -270,7 +277,12 @@ def test_cloud_deploy_requires_digest_and_fixed_gateway_plus_xhs_sidecar() -> No
     assert '"$TRAVEL_DATA_VOLUME":/home/zhice/.zhice/travel' in script
     assert '--entrypoint /opt/zhice/bin/xiaohongshu-mcp-rednote' in script
     assert '-port=:18060' in script
+    assert '--health-cmd "python -c' in script
+    assert "socket.create_connection(('127.0.0.1', 18060), 3)" in script
+    assert '--health-start-period 15m' in script
     assert 'rollback_xhs' in script
+    assert 'XHS_READINESS_ATTEMPTS=450' in script
+    assert 'docker logs --tail 80 "$XHS_CONTAINER_NAME"' not in script
     assert 'XHS_SEED_CONTAINER=' in script
     assert 'rm -f "$XHS_SEED_CONTAINER"' in script
     assert '-p "18060:18060"' not in script
@@ -294,6 +306,27 @@ def test_travel_runtime_dependencies_are_pinned_and_xhs_patch_is_auditable() -> 
     assert "userInfo" in patch and "!info.guest" in patch
     assert "command -v mcp-amap" in smoke
     assert "command -v 12306-mcp" in smoke
+
+
+def test_runtime_image_ownership_does_not_duplicate_large_browser_layers() -> None:
+    dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
+
+    assert (
+        "COPY --from=weixin-build --chown=zhice:zhice "
+        "/src/integrations/weixin_sidecar/node_modules/"
+    ) in dockerfile
+    assert (
+        "COPY --from=xhs-build --chown=zhice:zhice "
+        "/out/xiaohongshu-mcp-rednote"
+    ) in dockerfile
+    browser_layer = dockerfile.split(
+        'RUN pip install --no-cache-dir ".[gateway,qq,hotel-browser]"', 1
+    )[1].split("\n\n", 1)[0]
+    assert "python -m playwright install chromium" in browser_layer
+    assert "chown -R zhice:zhice /opt/zhice" in browser_layer
+    runtime_directories_layer = dockerfile.split("RUN mkdir -p /home/zhice/.zhice/contexts", 1)[1]
+    assert "/opt/zhice" not in runtime_directories_layer
+    assert "/app/integrations/weixin_sidecar" not in runtime_directories_layer
 
 
 def test_xhs_sidecar_is_private_persistent_and_explicitly_allowlisted() -> None:
@@ -522,6 +555,7 @@ def test_remote_operations_scripts_have_safe_maintenance_semantics() -> None:
     stop = (DEPLOY / "scripts" / "stop.sh").read_text(encoding="utf-8")
     restart = (DEPLOY / "scripts" / "restart.sh").read_text(encoding="utf-8")
     deploy = (DEPLOY / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    diagnose = (DEPLOY / "scripts" / "diagnose.sh").read_text(encoding="utf-8")
 
     for field in ("image=", "status=", "health=", "created=", "restarts="):
         assert field in status
@@ -531,11 +565,20 @@ def test_remote_operations_scripts_have_safe_maintenance_semantics() -> None:
     assert "already stopped" in stop
     assert '"$DOCKER" restart --time 30' in restart
     assert 'XHS_CONTAINER_NAME=zhice-xhs-readonly' in restart
+    assert 'XHS_READINESS_ATTEMPTS=450' in restart
+    assert 'logs --tail 80 "$XHS_CONTAINER_NAME"' not in restart
     assert '"$DOCKER" restart --time 30 "$XHS_CONTAINER_NAME"' in restart
     assert "socket.create_connection(('127.0.0.1', 18060), 3)" in restart
     assert "rollback()" in deploy
     assert "restored previous container" in deploy
     assert "rollback\n  rollback_xhs" in deploy
+    assert "zhice-travel-data" in diagnose
+
+
+def test_remote_deploy_timeout_covers_xhs_first_browser_download() -> None:
+    helper = (DEPLOY / "scripts" / "remote_ops.py").read_text(encoding="utf-8")
+
+    assert "timeout_seconds: float = 1200" in helper
 
 
 def test_cloud_cmd_files_are_thin_double_click_launchers() -> None:

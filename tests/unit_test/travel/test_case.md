@@ -160,6 +160,7 @@
 - AgentLoop 因 Child 工具迭代耗尽而生成的 `TOOL_ITERATION_LIMIT` 占位 ToolResult 不是真实高德调用，不计入 finalization route attempt；跨重启恢复后仍应允许路线 Child 重试。
 - 天气修复闭环：服务端按北京时间注入 16 日 forecast 窗口；候选误用历史天气并被 finalizer 返回 `TRAVEL_WEATHER_FORECAST_REQUIRED` 后，只开放一次 `travel-final-weather` 定向补查，forecast 成功后同一轮重新开放 finalizer，禁止重复铁路、住宿、路线、网页或社区研究。
 - 路线修复闭环：finalizer 返回 `TRAVEL_ROUTE_EVIDENCE_MISSING` 后只开放一次 `travel-final-route`，用独立的最多 16 段修复预算补齐缺失的本地公交/地铁段；重试入口不得先重复普通住宿+路线双任务。
+- 最终证据跨轮恢复：父 Session 中历次 `finalize_travel_plan` 草稿会有界回放到来源账本；修复交通时保留已验证的实时天气，修复天气或其他字段时保留已验证的高德公交线路，进程重启后也不得在天气与交通错误之间循环。
 - 远郊景区中心 POI 的高德公交返回 `transits=[]` 时，路线 Child 只允许改查同景区游客中心、主入口、售票处或接驳点一次；仍为空则以高德驾车距离和时长生成透明的出租车/网约车兜底，不伪造公交线路或站点。
 - WebSocket 当前旅行 Turn 收到 `done/error/stopped` 后必须立即用 Generation API 的持久化终态覆盖本地推断；路线修复期间只恢复交通 Lane，已完成住宿 Lane 不得回退为运行中。
 - 最终模型写出的酒店名若与携程观察候选不一致，单住宿计划只允许确定性改用“携程名称与高德酒店 POI 严格同名”的最低观察价候选；缺少同名双来源时继续拒绝保存，不能把相似酒店的价格与地址拼接。

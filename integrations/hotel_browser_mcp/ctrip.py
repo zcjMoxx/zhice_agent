@@ -23,6 +23,24 @@ _CTRIP_LOGIN_URL = "https://passport.ctrip.com/user/login"
 _CTRIP_HOTEL_HOME = "https://hotels.ctrip.com/"
 _PROFILE_LOCK = threading.Lock()
 _MAX_CARD_TEXT = 1600
+_PROVINCE_PREFIXES = tuple(
+    sorted(
+        {
+            "北京市", "天津市", "上海市", "重庆市", "北京", "天津", "上海", "重庆",
+            "河北省", "山西省", "辽宁省", "吉林省", "黑龙江省", "江苏省", "浙江省",
+            "安徽省", "福建省", "江西省", "山东省", "河南省", "湖北省", "湖南省",
+            "广东省", "海南省", "四川省", "贵州省", "云南省", "陕西省", "甘肃省",
+            "青海省", "台湾省", "内蒙古自治区", "广西壮族自治区", "西藏自治区",
+            "宁夏回族自治区", "新疆维吾尔自治区", "香港特别行政区", "澳门特别行政区",
+            "河北", "山西", "辽宁", "吉林", "黑龙江", "江苏", "浙江", "安徽", "福建",
+            "江西", "山东", "河南", "湖北", "湖南", "广东", "海南", "四川", "贵州",
+            "云南", "陕西", "甘肃", "青海", "台湾", "内蒙古", "广西", "西藏", "宁夏",
+            "新疆", "香港", "澳门",
+        },
+        key=len,
+        reverse=True,
+    )
+)
 
 
 class HotelBrowserError(RuntimeError):
@@ -352,29 +370,46 @@ def _discover_city_result_url(page: Any, city: str, keyword: str) -> str:
 
 def _select_destination_candidate(page: Any, city: str) -> None:
     destination = page.get_by_placeholder("\u76ee\u7684\u5730").first
-    destination.click()
-    destination.fill("")
-    destination.type(city, delay=120)
-    deadline = time.monotonic() + 8.0
-    while time.monotonic() < deadline:
-        candidates = page.get_by_text(city, exact=True)
-        for index in range(min(candidates.count(), 50)):
-            candidate = candidates.nth(index)
-            try:
-                if not candidate.is_visible():
+    for query in _destination_query_candidates(city):
+        destination.click()
+        destination.fill("")
+        destination.type(query, delay=120)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            candidates = page.get_by_text(query, exact=True)
+            for index in range(min(candidates.count(), 50)):
+                candidate = candidates.nth(index)
+                try:
+                    if not candidate.is_visible():
+                        continue
+                    candidate.click()
+                    page.wait_for_timeout(200)
+                    selected = str(destination.input_value() or "").strip()
+                    if query in selected or selected in query:
+                        return
+                except Exception:
                     continue
-                candidate.click()
-                page.wait_for_timeout(200)
-                selected = str(destination.input_value() or "").strip()
-                if city in selected or selected in city:
-                    return
-            except Exception:
-                continue
-        page.wait_for_timeout(250)
+            page.wait_for_timeout(250)
     raise HotelBrowserError(
         "HOTEL_CITY_RESOLUTION_FAILED",
         "Ctrip did not return a selectable destination.",
     )
+
+
+def _destination_query_candidates(city: str) -> tuple[str, ...]:
+    """Return the original destination and one bounded county/city fallback."""
+
+    original = re.sub(r"\s+", "", str(city or "")).strip()
+    if not original:
+        return ()
+    variants = [original]
+    for prefix in _PROVINCE_PREFIXES:
+        if original.startswith(prefix):
+            remainder = original[len(prefix):].strip()
+            if len(remainder) >= 2 and remainder not in variants:
+                variants.append(remainder)
+            break
+    return tuple(variants[:2])
 
 
 def _dated_result_url(value: str, checkin: date, checkout: date) -> str:

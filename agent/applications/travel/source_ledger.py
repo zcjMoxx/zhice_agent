@@ -22,7 +22,11 @@ TRAVEL_SOURCE_CATEGORIES = frozenset(
 )
 _CANDIDATE_REQUIRED_CATEGORIES = TRAVEL_SOURCE_CATEGORIES - {"maps"}
 _FINALIZATION_REQUIRED_CATEGORIES = frozenset({"maps", "lodging"})
+_CANDIDATE_RESEARCH_PROFILES = frozenset(
+    {"travel-transport-weather", "travel-stay-poi", "travel-guides"}
+)
 _MAX_SESSIONS = 128
+_MAX_PLAN_ATTEMPTS = 8
 _MAX_RESULT_PARSE_CHARS = 128_000
 _CALL_BUDGETS = {
     "transport_lookup": 4,
@@ -87,6 +91,7 @@ class _SessionSources:
     attempt_counts: dict[str, int] = field(default_factory=dict)
     call_fingerprints: set[str] = field(default_factory=set)
     operation_counts: dict[str, int] = field(default_factory=dict)
+    candidate_completed_profiles: set[str] = field(default_factory=set)
     verified_transit_available: bool = False
     transport_ticket_attempted: bool = False
     transport_ticket_attempt_count: int = 0
@@ -113,6 +118,7 @@ class _SessionSources:
     social_destination: str = ""
     social_empty_search: bool = False
     web_destination: str = ""
+    plan_attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
 class _AmapRequestGate:
@@ -162,6 +168,13 @@ class TravelSourceSnapshot:
     finalization_budget_started: bool = False
     finalization_attempted: frozenset[str] = frozenset()
     route_repair_attempted: bool = False
+    candidate_completed_profiles: frozenset[str] = frozenset()
+
+    @property
+    def candidate_research_complete(self) -> bool:
+        return _CANDIDATE_RESEARCH_PROFILES.issubset(
+            self.candidate_completed_profiles
+        )
 
     @property
     def missing_attempts(self) -> tuple[str, ...]:
@@ -176,6 +189,12 @@ class TravelSourceSnapshot:
 
     @property
     def candidate_missing_attempts(self) -> tuple[str, ...]:
+        # A completed fixed three-lane fan-in is the durable stage boundary. A lane
+        # may legitimately finish without dated railway calls when one endpoint has
+        # no station code, or with a stable source failure. Never demand the same
+        # delegation batch again after that bounded outcome.
+        if self.candidate_research_complete:
+            return ()
         missing = set(
             (self.expected & _CANDIDATE_REQUIRED_CATEGORIES) - self.attempted
         )
@@ -183,6 +202,13 @@ class TravelSourceSnapshot:
             missing.add("transport")
         if "weather" in self.expected and not self.weather_data_attempted:
             missing.add("weather")
+        if not missing and self.candidate_completed_profiles:
+            # Source attempts can all be terminal while one delegated lane itself
+            # failed (for example its LLM timed out). Keep delegation available for
+            # exactly that persisted lane instead of treating the stage as complete.
+            missing.update(
+                _CANDIDATE_RESEARCH_PROFILES - self.candidate_completed_profiles
+            )
         return tuple(sorted(missing))
 
     @property
@@ -490,6 +516,21 @@ class TravelSourceLedger:
             )
             state.finalization_budget_started = True
 
+    def mark_candidate_profiles_completed(
+        self,
+        session_id: str,
+        profiles: set[str] | frozenset[str],
+    ) -> None:
+        """Persist the fixed candidate fan-in as the shared stage completion fact."""
+
+        if not session_id or not profiles:
+            return
+        with self._lock:
+            state = self._sessions.setdefault(session_id, _SessionSources())
+            state.candidate_completed_profiles.update(
+                set(profiles) & _CANDIDATE_RESEARCH_PROFILES
+            )
+
     def mark_finalization_attempted(
         self,
         session_id: str,
@@ -562,6 +603,9 @@ class TravelSourceLedger:
                 finalization_budget_started=state.finalization_budget_started,
                 finalization_attempted=frozenset(state.finalization_attempted),
                 route_repair_attempted=state.route_repair_attempted,
+                candidate_completed_profiles=frozenset(
+                    state.candidate_completed_profiles
+                ),
             )
 
     def search_evidence(
@@ -593,6 +637,53 @@ class TravelSourceLedger:
                 "hotel_observations": deepcopy(state.hotel_observations),
                 "rail_options": deepcopy(state.rail_options),
             }
+
+    def restore_plan_attempts(
+        self, session_id: str, attempts: list[dict[str, Any]]
+    ) -> None:
+        """Restore bounded Finalizer drafts already persisted in parent Session history."""
+
+        if not session_id:
+            return
+        safe = [
+            {
+                "plan": deepcopy(attempt["plan"]),
+                "live_weather_verified": bool(attempt.get("live_weather_verified")),
+                "transit_verified": bool(attempt.get("transit_verified")),
+            }
+            for attempt in attempts
+            if isinstance(attempt, dict) and isinstance(attempt.get("plan"), dict)
+        ][-_MAX_PLAN_ATTEMPTS:]
+        if not safe:
+            return
+        with self._lock:
+            state = self._sessions.setdefault(session_id, _SessionSources())
+            state.plan_attempts = safe
+
+    def remember_plan_attempt(self, session_id: str, plan: dict[str, Any]) -> None:
+        """Keep one failed Finalizer draft for deterministic cross-Turn fact merging."""
+
+        if not session_id or not isinstance(plan, dict):
+            return
+        with self._lock:
+            state = self._sessions.setdefault(session_id, _SessionSources())
+            state.plan_attempts.append(
+                {
+                    "plan": deepcopy(plan),
+                    "live_weather_verified": state.forecast_successful,
+                    "transit_verified": state.verified_transit_available,
+                }
+            )
+            del state.plan_attempts[:-_MAX_PLAN_ATTEMPTS]
+
+    def plan_attempts(self, session_id: str) -> list[dict[str, Any]]:
+        """Return isolated newest-first failed Finalizer drafts for one Session."""
+
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return []
+            return deepcopy(list(reversed(state.plan_attempts)))
 
     def clear(self, session_id: str) -> None:
         with self._lock:

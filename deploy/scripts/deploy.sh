@@ -13,6 +13,7 @@ TRAVEL_NETWORK=zhice-travel
 XHS_DATA_VOLUME=zhice-xhs-data
 XHS_CACHE_VOLUME=zhice-xhs-cache
 TRAVEL_DATA_VOLUME=zhice-travel-data
+XHS_READINESS_ATTEMPTS=450
 RUNTIME_PARENT=/etc/zhice-agent
 RUNTIME_DIR=$RUNTIME_PARENT/runtime
 XHS_SEED_DIR=$RUNTIME_PARENT/xhs
@@ -211,6 +212,8 @@ fi
 if ! /usr/bin/docker run -d --name "$XHS_CONTAINER_NAME" --init --restart unless-stopped \
   --network "$TRAVEL_NETWORK" \
   --security-opt no-new-privileges:true --cap-drop ALL \
+  --health-cmd "python -c \"import socket; socket.create_connection(('127.0.0.1', 18060), 3).close()\"" \
+  --health-interval 30s --health-timeout 5s --health-start-period 15m --health-retries 3 \
   -e COOKIES_PATH=/home/zhice/.zhice/integrations/xhs/data/cookies.json \
   -v "$XHS_DATA_VOLUME":/home/zhice/.zhice/integrations/xhs/data \
   -v "$XHS_CACHE_VOLUME":/home/zhice/.cache/xiaohongshu-mcp \
@@ -224,7 +227,7 @@ attempt=0
 until /usr/bin/docker exec "$XHS_CONTAINER_NAME" python -c \
   "import socket; socket.create_connection(('127.0.0.1', 18060), 3).close()" >/dev/null 2>&1; do
   attempt=$((attempt + 1))
-  if [ "$attempt" -ge 90 ]; then
+  if [ "$attempt" -ge "$XHS_READINESS_ATTEMPTS" ]; then
     echo "Xiaohongshu sidecar failed readiness verification" >&2
     rollback_xhs
     exit 1

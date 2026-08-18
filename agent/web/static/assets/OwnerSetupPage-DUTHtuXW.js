@@ -1,2 +1,0 @@
-import{d as o,m as r,u as n,C as s,o as a}from"./index-CKA4XnMB.js";import{_ as p}from"./AuthLayout.vue_vue_type_script_setup_true_lang-DPGSCWmt.js";import"./QuickPreferences.vue_vue_type_script_setup_true_lang-MxQqOAJC.js";const d=o({__name:"OwnerSetupPage",setup(u){const t=s();return(m,e)=>(a(),r(p,{setup:"",onAuthenticated:e[0]||(e[0]=_=>n(t).replace("/"))}))}});export{d as default};
-//# sourceMappingURL=OwnerSetupPage-DUTHtuXW.js.map

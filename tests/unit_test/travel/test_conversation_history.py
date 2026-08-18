@@ -5,8 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.app.runtime import WebRuntime, _persisted_candidate_research_complete
+from agent.app.runtime import (
+    WebRuntime,
+    _persisted_candidate_research_complete,
+    _persisted_candidate_research_profiles,
+)
 from agent.applications.travel.service import TravelApplicationError
+from agent.applications.travel.source_ledger import TravelSourceLedger
 from agent.config import AppConfig
 from agent.message import Message
 from agent.protocols.auth import ActorContext
@@ -107,7 +112,7 @@ def test_candidate_stage_continuation_reuses_completed_research_for_optimizer(tm
     message = runtime.travel_continuation_message(_actor(), "travel-a")
 
     assert "不要再次调用 delegate_tasks" in message
-    assert "恰好两个" in message
+    assert "一至三个" in message
     assert "立即运行 optimizer" in message
 
 
@@ -121,6 +126,13 @@ def test_persisted_complete_candidate_batch_is_durable_completion_fact():
     )
 
     assert _persisted_candidate_research_complete(messages) is True
+    assert _persisted_candidate_research_profiles(messages) == frozenset(
+        {
+            "travel-transport-weather",
+            "travel-stay-poi",
+            "travel-guides",
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -138,9 +150,48 @@ def test_persisted_complete_candidate_batch_is_durable_completion_fact():
     ],
 )
 def test_persisted_partial_candidate_batch_is_not_complete(statuses):
-    assert _persisted_candidate_research_complete(
-        _candidate_delegation_messages(statuses=statuses)
-    ) is False
+    messages = _candidate_delegation_messages(statuses=statuses)
+    assert _persisted_candidate_research_complete(messages) is False
+    assert _persisted_candidate_research_profiles(messages) == frozenset(
+        {
+            profile
+            for task_id, profile in {
+                "transport": "travel-transport-weather",
+                "stay": "travel-stay-poi",
+                "guides": "travel-guides",
+            }.items()
+            if statuses.get(task_id) == ("completed", "OK")
+        }
+    )
+
+
+def test_candidate_continuation_retries_only_the_failed_persisted_lane(tmp_path):
+    access = _SessionAccess(channel="travel")
+    access.store.update_metadata("travel-a", {"travel_phase": "planning"})
+    access.store.messages = _candidate_delegation_messages(
+        statuses={
+            "transport": ("completed", "OK"),
+            "stay": ("completed", "OK"),
+            "guides": ("failed", "SUBAGENT_LLM_FAILED"),
+        }
+    )
+    runtime = _runtime(tmp_path, access)
+    runtime.prompt_loader = SimpleNamespace(load=lambda name: f"prompt:{name}")
+    ledger = TravelSourceLedger()
+    runtime.travel_service = SimpleNamespace(
+        get_candidate_review=lambda actor, session_id: None,
+        source_ledger=ledger,
+    )
+
+    message = runtime.travel_continuation_message(_actor(), "travel-a")
+
+    assert "禁止重跑这些已完成子任务" in message
+    assert "travel-guides 只补" in message
+    assert "travel-transport-weather 只补" not in message
+    assert "travel-stay-poi 只补" not in message
+    assert ledger.snapshot("travel-a").candidate_completed_profiles == frozenset(
+        {"travel-transport-weather", "travel-stay-poi"}
+    )
 
 
 def test_candidate_continuation_uses_persisted_fan_in_after_ledger_loss(tmp_path):

@@ -96,13 +96,14 @@ COPY prompts/ ./prompts/
 COPY skill_repo/ ./skill_repo/
 COPY integrations/ ./integrations/
 COPY --from=web-build /src/agent/web/static/ ./agent/web/static/
-COPY --from=weixin-build /src/integrations/weixin_sidecar/dist/ ./integrations/weixin_sidecar/dist/
-COPY --from=weixin-build /src/integrations/weixin_sidecar/node_modules/ ./integrations/weixin_sidecar/node_modules/
-COPY --from=xhs-build /out/xiaohongshu-mcp-rednote /opt/zhice/bin/xiaohongshu-mcp-rednote
-COPY --from=xhs-build /out/xiaohongshu-login-rednote /opt/zhice/bin/xiaohongshu-login-rednote
+COPY --from=weixin-build --chown=zhice:zhice /src/integrations/weixin_sidecar/dist/ ./integrations/weixin_sidecar/dist/
+COPY --from=weixin-build --chown=zhice:zhice /src/integrations/weixin_sidecar/node_modules/ ./integrations/weixin_sidecar/node_modules/
+COPY --from=xhs-build --chown=zhice:zhice /out/xiaohongshu-mcp-rednote /opt/zhice/bin/xiaohongshu-mcp-rednote
+COPY --from=xhs-build --chown=zhice:zhice /out/xiaohongshu-login-rednote /opt/zhice/bin/xiaohongshu-login-rednote
 
 RUN pip install --no-cache-dir ".[gateway,qq,hotel-browser]" \
-    && python -m playwright install chromium
+    && python -m playwright install chromium \
+    && chown -R zhice:zhice /opt/zhice
 
 # These are the only local private build inputs. Runtime state is never copied.
 COPY --chown=zhice:zhice deploy/private/.env /home/zhice/.zhice/config/.env
@@ -115,8 +116,7 @@ RUN mkdir -p /home/zhice/.zhice/contexts /home/zhice/.zhice/state /home/zhice/.z
         /home/zhice/.zhice/integrations/xhs/data \
         /home/zhice/.cache/xiaohongshu-mcp \
         /home/zhice/.zhice/config/channels/weixin/accounts \
-    && chown -R zhice:zhice /home/zhice/.zhice /home/zhice/.cache \
-        /app/integrations/weixin_sidecar /opt/zhice
+    && chown -R zhice:zhice /home/zhice/.zhice /home/zhice/.cache
 
 USER zhice
 EXPOSE 10086

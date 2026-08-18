@@ -163,6 +163,7 @@ def _default_display(event_type: str, metadata: dict[str, Any]) -> dict[str, str
         "travel.plan_ready": "旅行计划已生成",
         "travel.clarification_required": "需要补充旅行信息",
         "travel.candidate_review_required": "请选择行程方案",
+        "travel.candidate_review_auto_selected": "行程方向已确定",
     }
     icons = {
         "turn": "turn",

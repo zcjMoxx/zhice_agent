@@ -392,6 +392,29 @@ def test_travel_delegation_requires_every_stage_profile_in_one_batch():
     assert complete.is_error is False
     assert len(delegate.calls) == 1
 
+    resumed_candidate = require_exact_travel_delegation(
+        delegate,
+        finalization=False,
+        expected_profiles=frozenset({TRAVEL_GUIDES_PROFILE}),
+    )
+    resumed = resumed_candidate.execute(
+        "delegate_tasks",
+        {
+            "tasks": [{
+                "id": "guides-retry",
+                "task": "retry only failed guides",
+                "profile": TRAVEL_GUIDES_PROFILE,
+            }]
+        },
+    )
+    repeated_successes = resumed_candidate.execute(
+        "delegate_tasks", {"tasks": complete_tasks}
+    )
+
+    assert resumed.is_error is False
+    assert repeated_successes.is_error is True
+    assert len(delegate.calls) == 2
+
     finalization = require_exact_travel_delegation(
         delegate,
         finalization=True,
@@ -434,7 +457,7 @@ def test_travel_delegation_requires_every_stage_profile_in_one_batch():
 
     assert duplicate.is_error is True
     assert exact.is_error is False
-    assert len(delegate.calls) == 2
+    assert len(delegate.calls) == 3
     delegated_stay = next(
         task
         for task in delegate.calls[-1][1]["tasks"]

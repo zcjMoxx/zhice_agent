@@ -256,7 +256,7 @@ export const useTravelStore = defineStore("travel", {
           if (!selectedCandidateRestored) {
             this.stage = "requirements";
             this.statusText = "上次规划未完成，可以补充或修正需求后继续";
-            this.error = "上次规划未生成完整计划，请检查需求后重新开始。";
+            this.error = "上次规划未生成完整计划，可以从未完成步骤继续。";
           }
         } else {
           this.stage = "requirements";
@@ -339,6 +339,47 @@ export const useTravelStore = defineStore("travel", {
         this.clearPersistedSessionId();
         this.error = error instanceof Error ? error.message : "旅行规划请求未能启动";
         this.recordProgress({ id: `error-${Date.now()}`, stage: this.stage, title: "规划未能启动", detail: this.error, status: "error" });
+      }
+    },
+    async resumeFailedPlanning() {
+      if (!this.sessionId || this.generating || this.candidateSelecting) return;
+      if (this.candidateReview?.status === "selected") {
+        await this.retrySelectedCandidate();
+        return;
+      }
+      const sessionId = this.sessionId;
+      const models = useModelStore();
+      this.generating = true;
+      this.phase = "planning";
+      this.error = "";
+      this.statusText = "正在从上次失败步骤继续";
+      this.recordProgress({
+        id: `resume-${Date.now()}`,
+        stage: this.stage,
+        title: "正在继续未完成步骤",
+        detail: "已完成的查询与方案保持不变，只补做失败或未完成的部分",
+        status: "running",
+        startedAt: Date.now(),
+      });
+      try {
+        this.persistSessionId();
+        await webSocket.sendMessage(
+          sessionId,
+          "继续当前旅行规划，只从上次失败或未完成的步骤接着执行，复用所有已完成结果。",
+          models.current || "auto",
+        );
+        this.scheduleRecoveryPoll();
+      } catch (error) {
+        this.generating = false;
+        this.clearPersistedSessionId();
+        this.error = error instanceof Error ? error.message : "继续旅行规划失败";
+        this.recordProgress({
+          id: `resume-error-${Date.now()}`,
+          stage: this.stage,
+          title: "未能继续规划",
+          detail: this.error,
+          status: "error",
+        });
       }
     },
     async loadConversation(sessionId: string) {
@@ -566,7 +607,7 @@ export const useTravelStore = defineStore("travel", {
             ? toolProgressTitle(toolName)
             : completedToolTitle(toolName, String(event.display?.title || ""));
         let detail = String(event.display?.detail || safeToolLabel(toolName, eventName) || this.statusText);
-        const result = progressDetail(event);
+        const result = isXhsDetailTool(toolName) ? undefined : progressDetail(event);
         const toolFailed = /error|failed/.test(eventName);
         const toolCode = String(event.metadata?.code || "");
         if (toolName === "search_travel_hotels" && toolFailed) {
@@ -579,7 +620,7 @@ export const useTravelStore = defineStore("travel", {
         )) {
           title = "Tavily 补充检索未成功";
           detail = "前面已取得的网页资料继续保留，本次补充查询超时或未完成。";
-        } else if (toolName.includes("xhs") && !toolFailed && result?.resultCount === 0) {
+        } else if (isXhsSearchTool(toolName) && !toolFailed && result?.resultCount === 0) {
           title = "小红书本轮未查到结果";
           detail = "将收窄为单个景点或区域关键词，再检索一次。";
         }
@@ -635,6 +676,7 @@ export const useTravelStore = defineStore("travel", {
     },
     async restoreGeneration(): Promise<boolean> {
       const persisted = this.readPersistedSessionId();
+      if (!persisted) return true;
       const workspaceVersion = this.workspaceVersion;
       try {
         const status = await api.travelGeneration(persisted);
@@ -707,7 +749,12 @@ export const useTravelStore = defineStore("travel", {
         return;
       }
       this.stopRecoveryPolling();
-      this.clearPersistedSessionId();
+      if (["failed", "stopped"].includes(status.status)) {
+        this.sessionId = status.session_id;
+        this.persistSessionId();
+      } else {
+        this.clearPersistedSessionId();
+      }
       if (status.status === "completed" && status.plan_id) {
         this.sessionId = status.session_id;
         if (restoring) await this.restoreProgress(status.session_id);
@@ -773,7 +820,10 @@ export const useTravelStore = defineStore("travel", {
       this.candidateReview = review;
       this.advanceStage("validate");
       const candidateId = review.selected_candidate_id;
-      const routeRepairing = errorCode === "TRAVEL_ROUTE_EVIDENCE_MISSING";
+      const routeRepairing = [
+        "TRAVEL_ROUTE_EVIDENCE_MISSING",
+        "TRAVEL_TRANSIT_EVIDENCE_MISSING",
+      ].includes(errorCode);
       if (!this.progressItems.some((item) => item.id === `finalizing-${candidateId}`)) {
         this.recordProgress({
           id: `finalizing-${candidateId}`,
@@ -1071,6 +1121,7 @@ function safeToolLabel(name: string, eventName = "") {
   if (name.includes("amap")) return running ? "正在高德地图查询地点与路线" : "高德地图查询完成";
   if (name.includes("12306")) return running ? "正在铁路 12306 核对车次" : "铁路交通查询完成";
   if (name.includes("tavily")) return running ? "正在通过 Tavily 检索公开资料" : "网页资料检索完成";
+  if (isXhsDetailTool(name)) return running ? "正在读取一条小红书公开笔记" : "小红书笔记详情读取完成";
   if (name.includes("xhs")) return running ? "正在小红书只读查询旅行经验" : "社区经验查询完成";
   return "正在调用规划能力";
 }
@@ -1088,6 +1139,7 @@ function toolProgressTitle(name: string) {
   if (name.includes("amap")) return "正在高德地图查询地点与路线";
   if (name.includes("12306")) return "正在铁路 12306 核对车次";
   if (name.includes("tavily")) return "正在通过 Tavily 检索公开资料";
+  if (isXhsDetailTool(name)) return "正在读取一条小红书公开笔记";
   if (name.includes("xhs")) return "正在小红书只读查询旅行经验";
   return progressTitle("data", name);
 }
@@ -1101,12 +1153,27 @@ function completedToolTitle(name: string, backendTitle: string) {
   if (name.includes("amap")) return backendTitle && !backendTitle.includes("mcp__") ? backendTitle : "高德地图查询完成";
   if (name.includes("12306")) return backendTitle && !backendTitle.includes("mcp__") ? backendTitle : "12306 查询完成";
   if (name.includes("tavily")) return backendTitle && !backendTitle.includes("mcp__") ? backendTitle : "Tavily 网页检索完成";
+  if (isXhsDetailTool(name)) return "小红书笔记详情读取完成";
   if (name.includes("xhs")) return backendTitle && !backendTitle.includes("mcp__") ? backendTitle : "小红书只读查询完成";
   return backendTitle && !backendTitle.includes("mcp__") ? backendTitle : "规划能力执行完成";
 }
 
 function isInternalTravelTool(name: string) {
   return ["discover_tools", "load_skills", "request_travel_clarification"].includes(name);
+}
+
+function isXhsSearchTool(name: string) {
+  const normalized = name.toLocaleLowerCase();
+  return normalized.includes("xhs") && normalized.includes("search") && !isXhsDetailTool(name);
+}
+
+function isXhsDetailTool(name: string) {
+  const normalized = name.toLocaleLowerCase();
+  return normalized.includes("xhs") && (
+    normalized.includes("note_detail")
+    || normalized.includes("feed_detail")
+    || normalized.includes("get_note")
+  );
 }
 
 function progressLane(name: string): TravelProgressLane | undefined {

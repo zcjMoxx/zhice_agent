@@ -47,7 +47,7 @@ else
 fi
 
 echo "section=volumes"
-for volume in zhice-contexts zhice-state zhice-logs zhice-extends zhice-weixin-credentials zhice-xhs-data zhice-xhs-cache; do
+for volume in zhice-contexts zhice-state zhice-travel-data zhice-logs zhice-extends zhice-weixin-credentials zhice-xhs-data zhice-xhs-cache; do
   if [ "$DOCKER_AVAILABLE" -eq 0 ]; then
     echo "volume=$volume exists=unknown reason=docker-unavailable"
   elif "$DOCKER" volume inspect "$volume" >/dev/null 2>&1; then
