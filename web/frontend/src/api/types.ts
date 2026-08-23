@@ -518,3 +518,108 @@ export interface WsEnvelope {
   session_id?: string;
   turn_id?: string;
 }
+
+export type WorkflowNodeType = "schedule_trigger" | "mcp_query" | "mcp_action" | "llm_transform" | "template" | "condition" | "official_notification" | "personal_email" | "qq_notification";
+
+export interface WorkflowToolCatalogItem {
+  name: string;
+  description: string;
+  kind: "query" | "action";
+  parameters: { type?: string; properties?: Record<string, Record<string, unknown>>; required?: string[] };
+  schema_hash: string;
+  available: boolean;
+}
+
+export interface WorkflowEmailConnection {
+  id: string;
+  provider: "smtp_personal" | string;
+  account_display: string;
+  status: string;
+}
+
+export interface WorkflowCapabilities {
+  official_notification?: { available: boolean; code: string };
+  personal_email?: { available: boolean; code: string };
+  qq_notification?: { available: boolean; bound: boolean; code: string };
+  external_actions?: { available: boolean; count: number };
+}
+
+export interface WorkflowNode {
+  id: string;
+  type: WorkflowNodeType;
+  position: { x: number; y: number };
+  config: Record<string, unknown>;
+  title?: string;
+  input_bindings?: Record<string, unknown>;
+  timeout_seconds?: number;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  source_node_id: string;
+  target_node_id: string;
+  source_port?: string;
+  target_port?: string;
+  condition_branch?: "true" | "false";
+}
+
+export interface WorkflowDefinitionV1 {
+  schema_version: 1;
+  workflow_id?: string;
+  owner_user_id?: string;
+  name: string;
+  description: string;
+  timezone: string;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  version?: number;
+  status?: string;
+  required_permissions?: string[];
+  connection_ids?: string[];
+}
+
+export interface WorkflowSummary {
+  workflow_id: string;
+  name: string;
+  status: "draft" | "active" | "paused" | "paused_attention" | "archived";
+  version?: number;
+  next_run_at?: string | null;
+  updated_at?: string;
+  pause_reason?: string | null;
+  active_version?: number | null;
+  has_unpublished_changes: boolean;
+}
+
+export interface WorkflowDetail extends WorkflowDefinitionV1 {
+  workflow_id: string;
+  owner_user_id: string;
+  status: WorkflowSummary["status"];
+  version: number;
+  published_at?: string | null;
+  active_version?: number | null;
+  has_unpublished_changes: boolean;
+}
+
+export interface WorkflowRun {
+  id?: string;
+  run_id: string;
+  workflow_id: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "partial" | "cancelled";
+  trigger_type?: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error_code?: string | null;
+  node_runs?: Array<{ node_id: string; status: string; summary?: string }>;
+  nodes?: Array<{
+    node_id: string;
+    node_type: string;
+    status: string;
+    attempt: number;
+    started_at?: string;
+    finished_at?: string;
+    input_summary?: string;
+    output_summary?: string;
+    error_code?: string | null;
+  }>;
+  events?: Array<{ cursor: number; type: string; payload: Record<string, unknown>; created_at: string }>;
+}

@@ -43,6 +43,7 @@ MANAGED_APPLICATION_PROMPTS = (
     "travel_planning.md",
     "travel_planning_continuation.md",
     "travel_requirement_extraction.md",
+    "workflow_transform.md",
 )
 
 
@@ -69,6 +70,18 @@ class AppConfig:
         """SQLite path for the Part 9 local auth and audit store."""
 
         return self.state_dir / "auth.sqlite3"
+
+    @property
+    def workflows_db_path(self) -> Path:
+        """SQLite business truth for workflow definitions and runs."""
+
+        return self.state_dir / "workflows.sqlite3"
+
+    @property
+    def connections_db_path(self) -> Path:
+        """SQLite store for encrypted per-user external connections."""
+
+        return self.state_dir / "connections.sqlite3"
 
     @property
     def mcp_config_path(self) -> Path:

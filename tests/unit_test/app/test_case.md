@@ -12,7 +12,7 @@
 - QQ 账号级 Adapter 状态在 Runtime 内聚合成唯一 `channel.qq`；公共 health 和管理监控不暴露 `qq.main` 等内部账号 key，混合多账号状态降级为渠道级状态。
 - 聊天 Web 不渲染或主动请求 capability 启动横幅；health 状态保留给诊断、系统监控和自动化检查。
 - Gateway/CLI缺少`config.yml.skills`时按未启用的可选扩展静默处理；分区存在但非法时只记录一次结构化`skills.runtime_unavailable` WARNING，包含稳定code且不泄露绝对路径。
-- `/` 从可替换 `static_dir` 返回 SPA 首页；`/_setup`、`/admin`、`/travel` 和 `/bind/qq` 继续返回同一 Vue 入口并保留服务端安全条件；所有 SPA 入口使用 `Cache-Control: no-store`，避免部署后旧入口继续引用过期资源。
+- `/` 从可替换 `static_dir` 返回 SPA 首页；`/_setup`、`/admin`、`/travel`、`/workflows`、`/workflows/{workflow_id}` 和 `/bind/qq` 继续返回同一 Vue 入口并保留服务端安全条件；所有 SPA 入口使用 `Cache-Control: no-store`，避免部署后旧入口继续引用过期资源或硬刷新工作流详情时 404。
 - 默认静态目录定位 `agent/web/static` 包内 production build；首页引用 `/static/assets/*`，Python wheel 运行不要求 Node.js。
 - `GET /api/sessions` 返回会话摘要并把更新时间格式化为 ISO 8601。
 - `GET /api/sessions/{session_id}` 返回指定会话消息。

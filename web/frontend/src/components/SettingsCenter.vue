@@ -1,13 +1,35 @@
 <script setup lang="ts">
-import { KeyRound, Link2, Monitor, Moon, Palette, Settings2, Sun, UserRound, X } from "@lucide/vue";
+import { KeyRound, Link2, Mail, Monitor, Moon, Palette, Settings2, Sun, UserRound, X } from "@lucide/vue";
 import { computed, onMounted, ref } from "vue";
 
+import { ApiError, api } from "@/api/client";
+import type { WorkflowCapabilities, WorkflowEmailConnection } from "@/api/types";
 import { uiText, type UiLanguage } from "@/i18n";
 import { useAuthStore } from "@/stores/auth";
 import { isWeixinAttemptTerminal, useChannelStore } from "@/stores/channels";
 import { errorMessage } from "@/stores/chat";
 import { useUiStore, type ColorModePreference, type ThemeFamily } from "@/stores/ui";
 import UserAvatar from "./UserAvatar.vue";
+
+type MailboxProvider = "qq" | "163" | "126" | "other";
+type SmtpDraft = {
+  provider: MailboxProvider;
+  host: string;
+  port: number;
+  security: "tls" | "starttls";
+  username: string;
+  app_password: string;
+};
+
+const mailboxPresets: Record<Exclude<MailboxProvider, "other">, { host: string; port: number; security: "tls" | "starttls" }> = {
+  qq: { host: "smtp.qq.com", port: 465, security: "tls" },
+  "163": { host: "smtp.163.com", port: 465, security: "tls" },
+  "126": { host: "smtp.126.com", port: 465, security: "tls" },
+};
+
+function initialSmtpDraft(): SmtpDraft {
+  return { provider: "qq", ...mailboxPresets.qq, username: "", app_password: "" };
+}
 
 const auth = useAuthStore();
 const channels = useChannelStore();
@@ -19,6 +41,13 @@ const confirmPassword = ref("");
 const status = ref("");
 const failure = ref("");
 const settingsAction = ref<"" | "profile" | "password">("");
+const emailConnections = ref<WorkflowEmailConnection[]>([]);
+const emailCapabilities = ref<WorkflowCapabilities>({});
+const emailAction = ref("");
+const emailFeedback = ref("");
+const showSmtpForm = ref(false);
+const smtp = ref<SmtpDraft>(initialSmtpDraft());
+const testRecipients = ref<Record<string, string>>({});
 const qqToken = computed({
   get: () => channels.pendingQqToken,
   set: (value: string) => { channels.pendingQqToken = value; },
@@ -31,7 +60,7 @@ const sections = computed(() => [
   { key: "personalization", label: tr("个性化", "Personalization"), icon: Palette },
   { key: "profile", label: tr("个人资料", "Profile"), icon: UserRound },
   { key: "security", label: tr("账号与安全", "Account & security"), icon: KeyRound },
-  { key: "channels", label: tr("渠道连接", "Channel connections"), icon: Link2 },
+  { key: "connections", label: tr("连接与账号", "Connections & accounts"), icon: Link2 },
 ]);
 const title = computed(() => sections.value.find((item) => item.key === ui.settingsSection)?.label || tr("设置", "Settings"));
 const colorModes = computed(() => [
@@ -48,6 +77,12 @@ const themeFamilies = computed(() => [
   { key: "amber" as ThemeFamily, label: tr("琥珀暖砂", "Amber Sand") },
 ]);
 const qqBindings = computed(() => channels.bindings.filter((item) => item.channel === "qq"));
+const customMailbox = computed(() => smtp.value.provider === "other");
+const authorizationHint = computed(() => {
+  if (smtp.value.provider === "qq") return tr("在 QQ 邮箱设置中开启 SMTP 服务后生成；不是 QQ 登录密码。", "Generate it after enabling SMTP in QQ Mail settings; it is not your QQ password.");
+  if (smtp.value.provider === "163" || smtp.value.provider === "126") return tr("在网易邮箱设置中开启 SMTP 服务后生成；不是邮箱登录密码。", "Generate it after enabling SMTP in NetEase Mail settings; it is not your mailbox password.");
+  return tr("请填写邮箱服务商或企业管理员提供的 SMTP 授权码，不要填写网页登录密码。", "Use the SMTP app password from your provider or administrator, not your web password.");
+});
 const weixinQrSource = computed(() => {
   const value = channels.weixinAttempt?.qr_data || "";
   return /^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(value) ? value : "";
@@ -74,7 +109,10 @@ const weixinAttemptLabel = computed(() => {
   return label ? tr(label[0], label[1]) : statusValue;
 });
 
-onMounted(() => { if (ui.settingsSection === "channels") void channels.refresh(); });
+onMounted(() => {
+  if (ui.settingsSection === "channels") ui.settingsSection = "connections";
+  if (ui.settingsSection === "connections") void refreshConnections();
+});
 
 async function saveProfile() {
   if (settingsAction.value) return;
@@ -104,10 +142,105 @@ async function authorizeQq() {
   }
   catch (error) { failure.value = errorMessage(error); }
 }
-function selectSection(key: string) { ui.settingsSection = key; if (key === "channels") void channels.refresh(); }
+function selectSection(key: string) { ui.settingsSection = key; if (key === "connections") void refreshConnections(); }
 function chooseColorMode(colorMode: ColorModePreference) { ui.setColorMode(colorMode, userId()); }
 function chooseThemeFamily(themeFamily: ThemeFamily) { ui.setThemeFamily(themeFamily, userId()); }
 function chooseLanguage(language: UiLanguage) { ui.setLanguage(language, userId()); }
+
+function applyMailboxProvider(): void {
+  if (smtp.value.provider === "other") {
+    smtp.value.host = "";
+    smtp.value.port = 465;
+    smtp.value.security = "tls";
+    return;
+  }
+  Object.assign(smtp.value, mailboxPresets[smtp.value.provider]);
+}
+
+function detectMailboxProvider(): void {
+  const domain = smtp.value.username.trim().split("@").pop()?.toLowerCase();
+  const detected: MailboxProvider | undefined = domain === "qq.com" ? "qq" : domain === "163.com" ? "163" : domain === "126.com" ? "126" : domain?.includes(".") ? "other" : undefined;
+  if (!detected || detected === smtp.value.provider) return;
+  smtp.value.provider = detected;
+  applyMailboxProvider();
+}
+
+function connectionProviderLabel(provider: string): string {
+  return provider === "smtp_personal"
+    ? tr("个人邮箱（SMTP）", "Personal email (SMTP)")
+    : tr("不再支持的邮箱连接", "Unsupported email connection");
+}
+
+function connectionStatusLabel(value: string): string {
+  if (value === "active") return tr("连接正常", "Connected");
+  if (value === "reauthorization_required") return tr("需要重新连接", "Reconnect required");
+  return tr("暂不可用", "Unavailable");
+}
+
+function emailError(error: unknown): string {
+  if (!(error instanceof ApiError)) return errorMessage(error);
+  const labels: Record<string, string> = {
+    CONNECTION_PROVIDER_UNSUPPORTED: tr("系统还没有完成邮件连接配置。", "Email connections are not configured on this system."),
+    CONNECTION_CREDENTIAL_KEY_MISSING: tr("系统还没有配置连接加密密钥。", "The connection encryption key is not configured."),
+    CONNECTION_SMTP_INSECURE: tr("请使用 465/TLS 或 587/STARTTLS。", "Use 465/TLS or 587/STARTTLS."),
+    EMAIL_REJECTED: tr("邮箱服务器拒绝了连接或邮件，请检查账号和授权码。", "The email server rejected the connection or message."),
+    EMAIL_OUTCOME_UNKNOWN: tr("邮件结果暂时无法确认，请先检查收件箱，不要立即重复发送。", "The email outcome is unknown. Check the inbox before retrying."),
+    EMAIL_RECIPIENT_INVALID: tr("请输入正确的测试收件邮箱。", "Enter a valid test recipient."),
+  };
+  return labels[error.code] || tr("邮件连接操作失败，请检查配置后重试。", "The email connection action failed. Check the configuration and retry.");
+}
+
+async function refreshConnections() {
+  failure.value = "";
+  emailFeedback.value = "";
+  try { emailCapabilities.value = await api.workflowCapabilities(); }
+  catch { emailCapabilities.value = {}; }
+  if (emailCapabilities.value.personal_email?.available === false) {
+    emailConnections.value = [];
+  } else {
+    try { emailConnections.value = (await api.workflowEmailConnections()).connections || []; }
+    catch (error) { failure.value = emailError(error); emailConnections.value = []; }
+  }
+  await channels.refresh();
+}
+
+async function saveSmtpConnection() {
+  emailAction.value = "smtp";
+  failure.value = ""; emailFeedback.value = "";
+  try {
+    await api.createSmtpEmailConnection({
+      host: smtp.value.host.trim(),
+      port: Number(smtp.value.port),
+      security: smtp.value.security,
+      username: smtp.value.username.trim(),
+      app_password: smtp.value.app_password,
+    });
+    smtp.value = initialSmtpDraft();
+    showSmtpForm.value = false;
+    emailFeedback.value = tr("邮箱连接成功。建议立即发送一封测试邮件。", "Email connected. Send a test message now.");
+    await refreshConnections();
+  } catch (error) { failure.value = emailError(error); }
+  finally { emailAction.value = ""; }
+}
+
+async function testEmail(connection: WorkflowEmailConnection) {
+  emailAction.value = `test:${connection.id}`;
+  failure.value = ""; emailFeedback.value = "";
+  try {
+    await api.testEmailConnection(connection.id, testRecipients.value[connection.id] || connection.account_display);
+    emailFeedback.value = tr("测试邮件已被服务商接收，请到收件箱确认。", "The provider accepted the test email. Confirm it in the inbox.");
+  } catch (error) { failure.value = emailError(error); }
+  finally { emailAction.value = ""; }
+}
+
+async function deleteEmail(connection: WorkflowEmailConnection) {
+  if (!window.confirm(tr(`确认删除 ${connection.account_display} 的邮件连接？`, `Delete the email connection for ${connection.account_display}?`))) return;
+  emailAction.value = `delete:${connection.id}`;
+  failure.value = "";
+  try { await api.deleteEmailConnection(connection.id); await refreshConnections(); }
+  catch (error) { failure.value = emailError(error); }
+  finally { emailAction.value = ""; }
+}
 </script>
 
 <template>
@@ -155,7 +288,40 @@ function chooseLanguage(language: UiLanguage) { ui.setLanguage(language, userId(
           <div class="security-note"><KeyRound :size="21" /><span><strong>{{ tr('修改密码后将退出当前账号', 'Changing your password signs you out') }}</strong><small>{{ tr('所有现有登录 Session 会被撤销，需要重新登录。', 'All active login sessions will be revoked.') }}</small></span></div>
           <label><span>{{ tr('当前密码', 'Current password') }}</span><input v-model="currentPassword" type="password" autocomplete="current-password" required /></label><label><span>{{ tr('新密码', 'New password') }}</span><input v-model="newPassword" type="password" autocomplete="new-password" minlength="8" required /></label><label><span>{{ tr('确认新密码', 'Confirm new password') }}</span><input v-model="confirmPassword" type="password" autocomplete="new-password" minlength="8" required /></label><button class="primary-button" :disabled="Boolean(settingsAction)">{{ settingsAction === 'password' ? tr('修改中…', 'Changing…') : tr('修改密码', 'Change password') }}</button>
         </form>
-        <section v-else class="setting-section channel-settings">
+        <section v-else class="setting-section channel-settings connection-settings">
+          <div class="connection-intro">
+            <span><Mail :size="20" /></span>
+            <div><strong>{{ tr('邮件账号', 'Email accounts') }}</strong><p>{{ tr('连接你自己的邮箱后，工作流才能用该账号发送结果。连接凭据只加密保存在你的账号下。', 'Connect your own mailbox before workflows can send results from it. Credentials are encrypted and isolated to your account.') }}</p></div>
+          </div>
+          <p v-if="emailCapabilities.personal_email?.available === false" class="connection-unavailable">{{ tr('当前系统还没有启用安全的邮件连接存储。管理员需要先配置连接加密密钥，之后这里才会开放邮箱绑定。', 'Secure email connection storage is not enabled. An administrator must configure the connection encryption key first.') }}</p>
+          <template v-else>
+            <div class="email-provider-grid">
+              <article class="email-provider-card" data-enabled="true"><span class="email-provider-mark smtp">@</span><div><strong>{{ tr('个人邮箱', 'Personal email') }}</strong><small>{{ tr('使用 SMTP 授权码连接', 'Connect with an SMTP app password') }}</small></div><button :disabled="Boolean(emailAction)" @click="showSmtpForm = !showSmtpForm">{{ showSmtpForm ? tr('收起', 'Close') : tr('连接邮箱', 'Connect mailbox') }}</button></article>
+            </div>
+            <form v-if="showSmtpForm" class="smtp-connection-form" @submit.prevent="saveSmtpConnection">
+              <header><div><strong>{{ tr('连接个人邮箱', 'Connect personal mailbox') }}</strong><small>{{ tr('选择邮箱类型，再填写邮箱地址和授权码，其余设置由系统自动完成。', 'Choose your mailbox type, then enter the address and app password. The remaining settings are automatic.') }}</small></div></header>
+              <label>{{ tr('邮箱类型', 'Mailbox type') }}<select v-model="smtp.provider" class="mailbox-provider-select" @change="applyMailboxProvider"><option value="qq">QQ 邮箱</option><option value="163">网易 163 邮箱</option><option value="126">网易 126 邮箱</option><option value="other">{{ tr('其他或企业邮箱', 'Other or business mailbox') }}</option></select></label>
+              <label>{{ tr('邮箱地址', 'Email address') }}<input v-model="smtp.username" type="email" autocomplete="username" placeholder="name@example.com" required @blur="detectMailboxProvider" /><small>{{ tr('工作流会直接使用这个邮箱发送结果。', 'Workflows will send results directly from this mailbox.') }}</small></label>
+              <label>{{ tr('邮箱授权码', 'App password') }}<input v-model="smtp.app_password" type="password" autocomplete="new-password" required /><small>{{ authorizationHint }}</small></label>
+              <section v-if="customMailbox" class="custom-smtp-settings">
+                <header><strong>{{ tr('其他邮箱服务器设置', 'Other mailbox server settings') }}</strong><small>{{ tr('以下三项请向邮箱服务商或企业管理员索取。', 'Ask your email provider or administrator for these three values.') }}</small></header>
+                <label>{{ tr('发信服务器', 'Outgoing mail server') }}<input v-model="smtp.host" placeholder="smtp.example.com" required /></label>
+                <div class="workflow-inline-fields"><label>{{ tr('连接方式', 'Connection security') }}<select v-model="smtp.security" @change="smtp.port = smtp.security === 'tls' ? 465 : 587"><option value="tls">TLS（465）</option><option value="starttls">STARTTLS（587）</option></select></label><label>{{ tr('端口', 'Port') }}<input v-model.number="smtp.port" type="number" :min="smtp.security === 'tls' ? 465 : 587" :max="smtp.security === 'tls' ? 465 : 587" required /></label></div>
+              </section>
+              <button class="primary-button" :disabled="Boolean(emailAction)">{{ emailAction === 'smtp' ? tr('正在验证…', 'Verifying…') : tr('验证并连接', 'Verify and connect') }}</button>
+            </form>
+            <section v-if="emailConnections.length" class="connected-email-list">
+              <h3>{{ tr('已连接的邮件账号', 'Connected email accounts') }}</h3>
+              <article v-for="connection in emailConnections" :key="connection.id">
+                <div><span class="email-provider-mark">{{ connectionProviderLabel(connection.provider).slice(0, 1) }}</span><span><strong>{{ connection.account_display }}</strong><small>{{ connectionProviderLabel(connection.provider) }} · {{ connectionStatusLabel(connection.status) }}</small></span></div>
+                <label>{{ tr('测试收件邮箱', 'Test recipient') }}<input v-model="testRecipients[connection.id]" type="email" :placeholder="connection.account_display" /></label>
+                <span class="connection-row-actions"><button :disabled="Boolean(emailAction) || connection.status !== 'active'" @click="testEmail(connection)">{{ emailAction === `test:${connection.id}` ? tr('发送中…', 'Sending…') : tr('发送测试', 'Send test') }}</button><button class="danger-text" :disabled="Boolean(emailAction)" @click="deleteEmail(connection)">{{ tr('删除', 'Delete') }}</button></span>
+              </article>
+            </section>
+            <p v-else class="muted">{{ tr('还没有连接邮件账号。连接后，工作流的“发送结果”中才会出现个人邮件。', 'No mailbox is connected. Personal email appears in Send result after a connection is ready.') }}</p>
+            <p v-if="emailFeedback" class="form-success">{{ emailFeedback }}</p>
+          </template>
+          <div class="connection-divider"><span>{{ tr('消息渠道', 'Messaging channels') }}</span></div>
           <p v-if="channels.error" class="form-error">{{ channels.error }}</p>
           <p v-if="channels.qqAuthorizationError" class="form-error">{{ channels.qqAuthorizationError }}</p>
           <div class="channel-card">

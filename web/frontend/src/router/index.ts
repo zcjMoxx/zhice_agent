@@ -8,6 +8,8 @@ const router = createRouter({
     { path: "/_setup", name: "setup", component: () => import("@/pages/OwnerSetupPage.vue") },
     { path: "/admin", name: "admin", component: () => import("@/pages/AdminPage.vue") },
     { path: "/travel", name: "travel", component: () => import("@/pages/TravelPlannerPage.vue") },
+    { path: "/workflows", name: "workflows", component: () => import("@/pages/WorkflowPage.vue") },
+    { path: "/workflows/:workflowId", name: "workflow-detail", component: () => import("@/pages/WorkflowPage.vue") },
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
 });

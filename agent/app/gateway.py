@@ -16,8 +16,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from agent.app.api.connection_routes import router as connection_router
 from agent.app.api.routes import ApiError, router
 from agent.app.api.travel_routes import router as travel_router
+from agent.app.api.workflow_routes import router as workflow_router
 from agent.app.api.ws import router as ws_router
 from agent.app.auth import AuthHttpError
 from agent.app.instance_lock import WorkspaceGatewayLock
@@ -273,7 +275,9 @@ def create_app(
         return response
 
     app.include_router(router)
+    app.include_router(connection_router)
     app.include_router(travel_router)
+    app.include_router(workflow_router)
     app.include_router(ws_router)
     _register_error_handlers(app)
 
@@ -305,6 +309,21 @@ def create_app(
 
     @app.get("/travel", include_in_schema=False)
     def travel_planner():
+        response = spa_index_response()
+        if response is not None:
+            return response
+        return Response(status_code=404)
+
+    @app.get("/workflows", include_in_schema=False)
+    def workflow_editor():
+        response = spa_index_response()
+        if response is not None:
+            return response
+        return Response(status_code=404)
+
+    @app.get("/workflows/{workflow_id}", include_in_schema=False)
+    def workflow_editor_detail(workflow_id: str):
+        del workflow_id
         response = spa_index_response()
         if response is not None:
             return response

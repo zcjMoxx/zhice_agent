@@ -36,6 +36,20 @@ RUNTIME_EVENT_STATUS_BY_TYPE = {
     "travel.clarification_required": "waiting",
     "travel.candidate_review_required": "waiting",
     "travel.candidate_review_auto_selected": "completed",
+    "workflow.run.queued": "waiting",
+    "workflow.run.started": "started",
+    "workflow.node.started": "started",
+    "workflow.node.progress": "started",
+    "workflow.node.completed": "completed",
+    "workflow.node.failed": "failed",
+    "workflow.node.skipped": "stopped",
+    "workflow.run.completed": "completed",
+    "workflow.run.failed": "failed",
+    "workflow.run.cancelled": "stopped",
+    "workflow.schedule.misfired": "failed",
+    "workflow.paused_attention": "waiting",
+    "connection.authorization.completed": "completed",
+    "connection.authorization.revoked": "stopped",
 }
 RUNTIME_EVENT_TYPES = frozenset(RUNTIME_EVENT_STATUS_BY_TYPE)
 RUNTIME_EVENT_STATUSES = frozenset(RUNTIME_EVENT_STATUS_BY_TYPE.values())

@@ -228,12 +228,18 @@ def test_packaged_vue_entry_serves_home_admin_and_static_assets(tmp_path):
     )
     home = client.get("/")
     admin = client.get("/admin")
+    workflows = client.get("/workflows")
+    workflow_detail = client.get("/workflows/workflow-123")
     logo = client.get("/static/zhice-logo-a.png")
 
     assert home.status_code == 200
     assert admin.status_code == 200
+    assert workflows.status_code == 200
+    assert workflow_detail.status_code == 200
     assert '<div id="app"></div>' in home.text
     assert home.text == admin.text
+    assert home.text == workflows.text
+    assert home.text == workflow_detail.text
     assert 'type="module"' in home.text
     assert logo.status_code == 200
 
@@ -248,7 +254,7 @@ def test_spa_entry_routes_disable_index_caching(tmp_path):
         create_app(config=_config(tmp_path), runtime=_FakeRuntime(), static_dir=static_dir)
     )
 
-    for path in ("/", "/travel", "/admin", "/bind/qq"):
+    for path in ("/", "/travel", "/admin", "/workflows", "/workflows/workflow-123", "/bind/qq"):
         response = client.get(path)
         assert response.status_code == 200
         assert response.headers["Cache-Control"] == "no-store"
@@ -262,7 +268,7 @@ def test_vue_source_uses_single_initials_node_and_part16_surfaces():
     admin = root.joinpath("layouts/AdminLayout.vue").read_text(encoding="utf-8")
 
     assert '<span class="user-avatar" aria-hidden="true">{{ initials }}</span>' in avatar
-    assert all(name in settings for name in ("常规", "个性化", "个人资料", "账号与安全", "渠道连接"))
+    assert all(name in settings for name in ("常规", "个性化", "个人资料", "账号与安全", "连接与账号"))
     assert all(
         name in admin
         for name in (

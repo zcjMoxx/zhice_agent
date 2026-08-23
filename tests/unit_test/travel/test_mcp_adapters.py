@@ -26,7 +26,7 @@ class Response:
 
 def test_open_meteo_geocode_forecast_and_historical_labels(monkeypatch):
     monkeypatch.setattr(
-        weather.httpx,
+        weather._HTTP_CLIENT,
         "get",
         lambda *args, **kwargs: Response(
             {
@@ -54,7 +54,7 @@ def test_open_meteo_out_of_forecast_window_never_calls_network(monkeypatch):
         called = True
         raise AssertionError("network must not be called")
 
-    monkeypatch.setattr(weather.httpx, "get", fail)
+    monkeypatch.setattr(weather._HTTP_CLIENT, "get", fail)
     result = weather.get_forecast(25.6, 100.2, "2035-01-01", "2035-01-03")
 
     assert result["code"] == "TRAVEL_WEATHER_OUT_OF_RANGE"

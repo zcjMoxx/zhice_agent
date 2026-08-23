@@ -1510,7 +1510,7 @@ python -m pytest
 
 ## 17. 实现路线图
 
-本节同时保留已完成 Milestone 的实现记录和尚未实现部分的依赖顺序。当前代码基线已完成到 Part 19；Milestone 19 的真实外部服务 smoke 仍按显式凭据单列，Milestone 20 是已确认但尚未实现的下一项特色应用方案。
+本节同时保留已完成 Milestone 的实现记录和尚未实现部分的依赖顺序。当前代码基线已完成到 Part 20；Milestone 19/20 的真实外部服务 smoke 仍按显式凭据和测试账号单列。
 
 ### Milestone 0：项目骨架（已实现）
 
@@ -1921,14 +1921,14 @@ Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费
 
 当前实现：`agent/applications/travel/` 已落地三类领域协议、证据去重、owner-scoped Store、service 和 `finalize_travel_plan`；`skill_repo/skills/travel-planner` 已落地严格 runtime schema 与纯计算 optimizer；`integrations/open_meteo_mcp` 和 `integrations/xhs_readonly_mcp` 已落地只读适配；`/api/travel/plans`、`travel.plan_ready` 和 Vue `/travel` 已接通。默认单元/Vue 测试和本地 Fake MCP Web→AgentLoop→Skill→Store 集成已覆盖；真实高德、Tavily、12306、小红书登录态和高德 JS 浏览器 smoke 必须在提供运行时凭据后单列执行。当前事实见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。
 
-### Milestone 20：拖拽工作流、定时调度与用户连接（方案已确认，尚未实现）
+### Milestone 20：拖拽工作流、定时调度与用户连接（已实现）
 
 目标：
 
 - 所有正常登录用户都能创建、发布、立即运行、定时、暂停和查看本人的工作流。
 - 使用 Vue Flow 展示 Schedule、MCP Query、MCP Action、LLM Transform、Template、Condition、官方通知和个人邮件节点。
 - 使用独立 WorkflowRuntime、SQLite真值、APScheduler MemoryJobStore 和稳定拓扑执行，不把 cron/DAG 写入 AgentLoop。
-- 区分官方系统邮箱通知本人和用户OAuth授权的个人邮箱发送，复用现有RBAC、ToolProvider、Hook、Activity和Audit。
+- 区分官方系统邮箱通知本人和用户 SMTP 授权码连接的个人邮箱发送，复用现有 RBAC、ToolProvider、Hook、Activity 和 Audit。
 
 依赖顺序：
 
@@ -1939,9 +1939,9 @@ Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费
 5. APScheduler 3.11.x单实例调度、重启重建、misfire、coalesce和运行额度。
 6. Vue Flow画布、属性面板、字段映射、运行历史和实时事件。
 7. 已验证本人邮箱的官方通知。
-8. 用户级ExternalConnection、AES-GCM、Microsoft/Gmail OAuth、个人SMTP授权码和三类邮件Provider。
+8. 用户级 ExternalConnection、AES-GCM、个人 SMTP 授权码和 SMTP 邮件 Provider。
 
-明确边界：任意代码、Shell/exec、循环、子工作流、分布式队列和完整Agent节点不属于该特色应用；当前固定为单Gateway、单scheduler。当前方案以 `docs_design/2026-08-10-visual-workflow-scheduler-design.md` 为准。
+明确边界：任意代码、Shell/exec、循环、子工作流、分布式队列和完整Agent节点不属于该特色应用；当前固定为单Gateway、单scheduler。当前事实以 `docs_design/zhice-agent-part20-visual-workflow-scheduler-design.md` 为准，原方案记录为 `docs_design/2026-08-10-visual-workflow-scheduler-design.md`。
 
 
 ## 18. 应该坚持的设计原则
@@ -2298,7 +2298,7 @@ Part 18 正式 Skill Runtime、Skill 管理与服务器 Ops
   -> 本地进程 supervisor、本地 Docker sidecar、私有 OpsUrl 与安全 recreate（已实现）
 ```
 
-Part 15 已稳定上下文工程，Part 16 已完成 Vue Web 产品面，Part 17 已完成可靠性、诊断和私有镜像发布基线，Part 18 已完成正式 Skill Runtime、source 管理、多运行形态 restricted Ops、服务器部署与宿主机权威配置链。Milestone 19 智能旅行规划代码、本地自动验证和 Fake MCP Web 全链已进入当前基线；真实外部服务 smoke 仍按显式凭据与登录态单列，不伪写成已验收。下一依赖顺序是 Milestone 20 拖拽工作流、定时调度与用户连接全部目标；在其代码落地前不能写成当前能力。
+Part 15 已稳定上下文工程，Part 16 已完成 Vue Web 产品面，Part 17 已完成可靠性、诊断和私有镜像发布基线，Part 18 已完成正式 Skill Runtime、source 管理、多运行形态 restricted Ops、服务器部署与宿主机权威配置链。Milestone 19 智能旅行规划与 Milestone 20 拖拽工作流的代码和默认自动验证均已进入当前基线；真实旅行服务、个人 SMTP 与外部写操作 smoke 仍按显式凭据、测试账号和登录态单列，不伪写成已验收。
 
 这样做的好处是：
 

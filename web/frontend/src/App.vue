@@ -23,7 +23,7 @@ watch(() => auth.user?.id, (id) => {
   ui.load(id || "pre-auth");
   if (id) void travel.initialize(id);
   else travel.resetForIdentity();
-  if (!id && ["/admin", "/travel"].includes(router.currentRoute.value.path)) void router.replace("/");
+  if (!id && (["/admin", "/travel"].includes(router.currentRoute.value.path) || router.currentRoute.value.path.startsWith("/workflows") || router.currentRoute.value.path.startsWith("/connections/email/"))) void router.replace("/");
 });
 </script>
 

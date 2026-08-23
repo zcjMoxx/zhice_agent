@@ -149,6 +149,40 @@ travel:
   max_evidence_items: 40
   max_plan_bytes: 524288
 
+workflows:
+  enabled: true
+  engine: native
+  max_workflows_per_user: 20
+  max_active_schedules_per_user: 10
+  max_nodes_per_workflow: 30
+  max_edges_per_workflow: 60
+  max_global_workers: 4
+  max_daily_runs_per_user: 100
+  max_daily_official_emails_per_user: 10
+  max_daily_personal_emails_per_user: 20
+  default_timezone: Asia/Shanghai
+  default_misfire_grace_seconds: 900
+  allowed_query_tools:
+    - mcp__open-meteo__geocode_place
+    - mcp__open-meteo__get_forecast
+    - mcp__open-meteo__get_historical_weather
+    - mcp__amap-maps__maps_text_search
+    - mcp__amap-maps__maps_search_detail
+    - mcp__tavily__tavily_search
+    - mcp__12306__get-tickets
+    - mcp__xhs-readonly__search_notes
+    - mcp__xhs-readonly__get_note_detail
+  allowed_action_tools: []
+
+official_email:
+  enabled: false
+  provider: smtp
+  host: "${ZHICE_SMTP_HOST}"
+  port: 587
+  username: "${ZHICE_SMTP_USERNAME}"
+  password: "${ZHICE_SMTP_PASSWORD}"
+  from_address: "${ZHICE_SMTP_FROM}"
+
 logging: {}
 
 # Non-secret projection of the independently protected Ops terminal.

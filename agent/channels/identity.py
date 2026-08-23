@@ -31,6 +31,15 @@ class ExternalIdentityBinding:
     linked_at: str = ""
 
 
+@dataclass(frozen=True)
+class ExternalDeliveryTarget:
+    """Server-only external destination; never serialize this through REST."""
+
+    channel: str
+    account_key: str
+    external_user_id: str
+
+
 class ExternalIdentityService:
     """Map platform identities to internal users without auto-registration."""
 
@@ -129,6 +138,21 @@ class ExternalIdentityService:
                 linked_at=str(row["linked_at"]),
             )
             for row in self.store.list_external_identities_for_user(str(actor.user_id))
+        )
+
+    def delivery_target(
+        self, *, user_id: str, channel: str
+    ) -> ExternalDeliveryTarget | None:
+        row = self.store.get_active_external_identity_for_user(
+            user_id=user_id,
+            channel=channel,
+        )
+        if row is None:
+            return None
+        return ExternalDeliveryTarget(
+            channel=str(row["channel"]),
+            account_key=str(row["external_tenant_id"]),
+            external_user_id=str(row["external_user_id"]),
         )
 
     def unlink(self, actor: ActorContext, binding_id: str) -> bool:

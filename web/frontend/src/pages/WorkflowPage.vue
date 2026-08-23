@@ -1,0 +1,1053 @@
+<script setup lang="ts">
+import { Background } from "@vue-flow/background";
+import { Controls } from "@vue-flow/controls";
+import { MiniMap } from "@vue-flow/minimap";
+import { BaseEdge, EdgeLabelRenderer, Handle, PanOnScrollMode, Position, VueFlow, getBezierPath, useVueFlow, type Connection, type OnConnectStartParams } from "@vue-flow/core";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CirclePlay, History, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Redo2, RefreshCw, Rocket, Save, Trash2, Undo2, WandSparkles, X } from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+
+import { ApiError, api } from "@/api/client";
+import type { WorkflowCapabilities, WorkflowDefinitionV1, WorkflowEmailConnection, WorkflowNodeType, WorkflowSummary, WorkflowToolCatalogItem } from "@/api/types";
+import DateTimePicker from "@/components/DateTimePicker.vue";
+import QuickPreferences from "@/components/QuickPreferences.vue";
+import { errorMessage } from "@/stores/chat";
+import { defaultDefinition, useWorkflowStore } from "@/stores/workflows";
+import { useUiStore } from "@/stores/ui";
+import { uiText } from "@/i18n";
+import { autoLayoutWorkflow, canAddNodeType, cloneSnapshot, cloneWorkflowJson, directPredecessorId, graphInputReference, insertNodeOnEdge, upstreamVariables, withGraphBoundInputs, workflowConnectionIssue, type EditorSnapshot, type WorkflowConnectionIssue } from "@/utils/workflow-editor";
+import { workflowErrorLabel, workflowNodeTypeLabel, workflowRunStatusLabel, workflowStatusLabel, workflowTimeLabel, workflowToolHelp, workflowToolInputFields, workflowToolName, workflowToolProvider, workflowToolResultSummary, workflowTriggerLabel, workflowVersionLabel } from "@/utils/workflow-presentation";
+import { instantiateWorkflowTemplate, workflowStarterTemplates, type WorkflowStarterTemplate } from "@/utils/workflow-templates";
+
+const router = useRouter();
+const route = useRoute();
+const store = useWorkflowStore();
+const ui = useUiStore();
+const { fitView, getViewport, screenToFlowCoordinate, setViewport } = useVueFlow();
+// Vue's v-model needs a mutable heterogeneous config bag for node inspectors.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+interface CanvasNode { id: string; type: string; label: string; position: { x: number; y: number }; data: { config: Record<string, any> } }
+interface CanvasEdge { id: string; source: string; target: string; sourceHandle?: string | null; targetHandle?: string | null }
+interface ConfigurationIssue { message: string; nodeId?: string }
+const nodes = ref<CanvasNode[]>([]);
+const edges = ref<CanvasEdge[]>([]);
+const selectedId = ref("");
+const selectedEdgeId = ref("");
+const inspectorOpen = ref(false);
+const failure = ref("");
+const actionConsent = ref(false);
+const busy = ref("");
+const workflowTools = ref<WorkflowToolCatalogItem[]>([]);
+const emailConnections = ref<WorkflowEmailConnection[]>([]);
+const workflowCapabilities = ref<WorkflowCapabilities>({});
+const connectionsFailure = ref("");
+const toolsLoading = ref(false);
+const toolTestResult = ref("");
+const toolTestSummary = ref("");
+const undoStack = ref<EditorSnapshot[]>([]);
+const redoStack = ref<EditorSnapshot[]>([]);
+const sidebarCollapsed = ref(false);
+const editorView = ref<"canvas" | "runs">("canvas");
+const addMenu = ref<{ x: number; y: number; sourceId?: string; sourceHandle?: string; edgeId?: string; flowPosition: { x: number; y: number } } | null>(null);
+const pendingConnection = ref<{ nodeId?: string; handleId: string | null } | null>(null);
+const explicitConnection = ref<{ sourceId: string; sourceHandle: string } | null>(null);
+const connectionFeedback = ref("");
+const copiedNode = ref<CanvasNode | null>(null);
+const savedCanvasSignature = ref("");
+const workflowCanvas = ref<HTMLElement | null>(null);
+const inspectorBubbleStyle = ref<Record<string, string>>({});
+const inspectorBubblePlacement = ref<"right" | "left" | "bottom">("right");
+let nodeSequence = 0;
+let savedBaselineTimer: ReturnType<typeof setTimeout> | undefined;
+let inspectorBubbleFrame: number | undefined;
+const workflowId = computed(() => typeof route.params.workflowId === "string" ? route.params.workflowId : "");
+const isEditorRoute = computed(() => Boolean(workflowId.value));
+
+const corePalette: Array<{ type: WorkflowNodeType; zh: string; en: string }> = [
+  { type: "mcp_query", zh: "获取信息", en: "Get information" },
+  { type: "llm_transform", zh: "智能处理", en: "Process with AI" },
+  { type: "condition", zh: "条件分支", en: "Condition" },
+  { type: "template", zh: "发送结果", en: "Send result" },
+];
+const palette = computed<Array<{ type: WorkflowNodeType; zh: string; en: string }>>(() => [
+  ...corePalette,
+  ...(workflowTools.value.some((tool) => tool.kind === "action") ? [{ type: "mcp_action" as WorkflowNodeType, zh: "执行操作", en: "Take action" }] : []),
+]);
+const renderNodeTypes: WorkflowNodeType[] = ["schedule_trigger", "mcp_query", "mcp_action", "llm_transform", "template", "condition", "official_notification", "personal_email", "qq_notification"];
+const outputNodeTypes = new Set<WorkflowNodeType>(["template", "official_notification", "personal_email", "qq_notification"]);
+const triggerPalette = { type: "schedule_trigger" as WorkflowNodeType, zh: "开始", en: "Start" };
+const selected = computed(() => nodes.value.find((node) => node.id === selectedId.value));
+const hasAction = computed(() => nodes.value.some((node) => ["mcp_action", "personal_email", "qq_notification"].includes(String(node.type))));
+const hasToolAction = computed(() => nodes.value.some((node) => node.type === "mcp_action"));
+const hasEmailAction = computed(() => nodes.value.some((node) => node.type === "personal_email"));
+const hasQqAction = computed(() => nodes.value.some((node) => node.type === "qq_notification"));
+const actionConsentLabel = computed(() => {
+  if (hasToolAction.value && (hasEmailAction.value || hasQqAction.value)) return tr("我确认允许按以上配置发送通知并执行外部操作", "I confirm the configured notifications and external actions");
+  if (hasEmailAction.value && hasQqAction.value) return tr("我确认允许按以上配置发送邮件和 QQ 通知", "I confirm the configured email and QQ notification");
+  if (hasQqAction.value) return tr("我确认允许将工作流结果发送到我已绑定的 QQ", "I confirm sending workflow results to my bound QQ");
+  if (hasEmailAction.value) return tr("我确认允许使用所选账号向上述收件人发送邮件", "I confirm sending this email");
+  return tr("我确认允许执行上面选择的外部操作", "I confirm this external action");
+});
+const selectedTool = computed(() => workflowTools.value.find((tool) => tool.name === selected.value?.data.config.tool_name));
+const selectedToolFields = computed(() => selectedTool.value ? workflowToolInputFields(selectedTool.value) : []);
+const selectedToolValid = computed(() => !!selectedTool.value && selectedTool.value.schema_hash === selected.value?.data.config.input_schema_hash);
+const visibleTools = computed(() => workflowTools.value.filter((tool) => tool.kind === (selected.value?.type === "mcp_action" ? "action" : "query")));
+const informationTaskDefinitions = [
+  { id: "weather", icon: "☀", zh: "查天气", en: "Weather", help: "输入一个城市、区县或地点" , tool: "mcp__open-meteo__get_forecast" },
+  { id: "train", icon: "🚆", zh: "查火车票", en: "Train tickets", help: "输入出发地、目的地和日期", tool: "mcp__12306__get-tickets" },
+  { id: "place", icon: "⌖", zh: "搜地点", en: "Places", help: "搜索景点、餐厅或具体地址", tool: "mcp__amap-maps__maps_text_search" },
+  { id: "web", icon: "◎", zh: "搜网页", en: "Web search", help: "搜索最新网页资料", tool: "mcp__tavily__tavily_search" },
+  { id: "xhs", icon: "小", zh: "搜小红书", en: "Xiaohongshu", help: "查攻略、评价和避坑经验", tool: "mcp__xhs-readonly__search_notes" },
+] as const;
+const informationTasks = computed(() => informationTaskDefinitions.map((task) => ({
+  ...task,
+  item: workflowTools.value.find((tool) => tool.kind === "query" && tool.name === task.tool),
+})).filter((task) => Boolean(task.item)));
+const configurationIssueItems = computed<ConfigurationIssue[]>(() => {
+  const issues: ConfigurationIssue[] = [];
+  const addIssue = (message: string, nodeId?: string) => issues.push({ message, nodeId });
+  if (nodes.value.length <= 1) addIssue(tr("至少添加一个处理步骤", "Add at least one processing step"));
+  for (const node of nodes.value.filter((item) => ["mcp_query", "mcp_action"].includes(item.type))) {
+    const name = String(node.data.config.tool_name || "");
+    const tool = workflowTools.value.find((item) => item.name === name);
+    if (!name || !tool) {
+      addIssue(tr(`“${node.label}”还没有选择要获取的信息`, `Choose what to get for “${node.label}”`), node.id);
+      continue;
+    }
+    if (tool.schema_hash !== node.data.config.input_schema_hash) {
+      addIssue(tr(`“${node.label}”的参数规则已更新，请重新选择工具`, `Tool schema changed for “${node.label}”; select it again`), node.id);
+      continue;
+    }
+    const args = typeof node.data.config.arguments === "object" && node.data.config.arguments !== null ? node.data.config.arguments as Record<string, unknown> : {};
+    const missing = workflowToolInputFields(tool).filter((field) => {
+      if (!field.required) return false;
+      if (field.key === "place_name" && args.latitude !== undefined && args.longitude !== undefined) return false;
+      return args[field.key] === undefined || args[field.key] === null || args[field.key] === "";
+    });
+    if (missing.length) addIssue(tr(`“${node.label}”还需填写：${missing.map((field) => field.label).join("、")}`, `Complete required fields for “${node.label}”`), node.id);
+  }
+  const trigger = nodes.value.find((item) => item.type === "schedule_trigger");
+  if (trigger && trigger.data.config.schedule_mode === "every" && Number(trigger.data.config.interval_amount || 0) < 1) addIssue(tr("请填写自动运行的间隔", "Choose an interval"), trigger.id);
+  if (trigger && ["daily", "weekly", "monthly"].includes(String(trigger.data.config.schedule_mode)) && !trigger.data.config.time_of_day) addIssue(tr("请选择自动运行的时间", "Choose a run time"), trigger.id);
+  if (trigger?.data.config.schedule_mode === "weekly" && trigger.data.config.weekday === undefined) addIssue(tr("请选择每周哪一天运行", "Choose a weekday"), trigger.id);
+  if (trigger?.data.config.schedule_mode === "monthly" && !trigger.data.config.day_of_month) addIssue(tr("请选择每月几号运行", "Choose a day of month"), trigger.id);
+  if (trigger?.data.config.schedule_mode === "once" && !trigger.data.config.run_at) addIssue(tr("请选择一次性运行时间", "Choose the one-time run date"), trigger.id);
+  const incoming = new Set(edges.value.map((edge) => edge.target));
+  for (const node of nodes.value.filter((item) => item.type !== "schedule_trigger")) {
+    if (!incoming.has(node.id)) addIssue(tr(`“${node.label}”还没有连接到前面的步骤`, `Connect “${node.label}” to a previous step`), node.id);
+    const config = node.data.config;
+    const directInput = graphInputReference(editorSnapshot.value, node.id);
+    if ((node.type === "llm_transform" || outputNodeTypes.has(node.type as WorkflowNodeType)) && incoming.has(node.id) && !directInput) addIssue(tr(`“${node.label}”只能连接一个上一步`, `Connect exactly one previous step to “${node.label}”`), node.id);
+    if (node.type === "llm_transform" && !config.instruction) addIssue(tr(`“${node.label}”的整理方式还不完整`, `Complete the task for “${node.label}”`), node.id);
+    if (node.type === "template" && !config.content && !directInput) addIssue(tr(`“${node.label}”需要连接一个上一步`, `Connect a previous step to “${node.label}”`), node.id);
+    if (node.type === "condition" && (!config.left || !config.operator || (config.operator !== "is_empty" && (config.right === "" || config.right === undefined)))) addIssue(tr(`“${node.label}”的判断条件还不完整`, `Complete the condition for “${node.label}”`), node.id);
+    if (node.type === "condition") {
+      const branches = new Set(edges.value.filter((edge) => edge.source === node.id).map((edge) => edge.sourceHandle));
+      if (!branches.has("true") || !branches.has("false")) addIssue(tr(`“${node.label}”需要分别连接“是”和“否”两个后续步骤`, `Connect both branches for “${node.label}”`), node.id);
+    }
+    if (node.type === "official_notification" && (!config.subject || (!config.content && !directInput))) addIssue(tr(`“${node.label}”请填写标题并连接上一步`, `Complete the subject and connect a previous step`), node.id);
+    if (node.type === "official_notification" && workflowCapabilities.value.official_notification?.available === false) addIssue(workflowErrorLabel(workflowCapabilities.value.official_notification.code), node.id);
+    if (node.type === "personal_email" && (!config.connection_id || !config.to || !config.subject || (!config.content && !directInput))) addIssue(tr(`“${node.label}”请选择发送账号、收件人并连接上一步`, `Complete email fields and connect a previous step`), node.id);
+    if (node.type === "qq_notification" && (!config.content && !directInput)) addIssue(tr(`“${node.label}”需要连接一个有结果的上一步`, `Connect a previous result to “${node.label}”`), node.id);
+    if (node.type === "qq_notification" && workflowCapabilities.value.qq_notification?.available !== true) addIssue(workflowErrorLabel(workflowCapabilities.value.qq_notification?.code || "WORKFLOW_QQ_CHANNEL_UNAVAILABLE"), node.id);
+  }
+  if (hasAction.value && !actionConsent.value) addIssue(tr("请确认允许按以上配置发送消息、邮件或执行外部操作", "Confirm the configured notifications or external actions"), nodes.value.find((node) => ["mcp_action", "personal_email", "qq_notification"].includes(node.type))?.id);
+  return issues;
+});
+const configurationIssues = computed(() => configurationIssueItems.value.map((issue) => issue.message));
+const incompleteNodeIds = computed(() => new Set(configurationIssueItems.value.map((issue) => issue.nodeId).filter((id): id is string => Boolean(id))));
+const selectedConfigurationIssues = computed(() => configurationIssueItems.value.filter((issue) => issue.nodeId === selectedId.value));
+const editorReady = computed(() => configurationIssues.value.length === 0);
+const editorSnapshot = computed<EditorSnapshot>(() => ({
+  nodes: nodes.value.map((node) => ({ id: node.id, type: node.type as WorkflowNodeType, title: node.label, position: { ...node.position }, config: cloneWorkflowJson(node.data.config) })),
+  edges: edges.value.map((edge) => ({
+    id: edge.id,
+    source_node_id: edge.source,
+    target_node_id: edge.target,
+    source_port: "output",
+    target_port: String(edge.targetHandle || "input"),
+    condition_branch: edge.sourceHandle === "true" || edge.sourceHandle === "false" ? edge.sourceHandle : undefined,
+  })),
+}));
+const graphBoundSnapshot = computed(() => withGraphBoundInputs(editorSnapshot.value));
+const connectionTargetIds = computed(() => {
+  const start = explicitConnection.value;
+  if (!start) return new Set<string>();
+  return new Set(nodes.value
+    .filter((node) => workflowConnectionIssue(editorSnapshot.value, start.sourceId, node.id, start.sourceHandle) === null)
+    .map((node) => node.id));
+});
+const variableOptions = computed(() => selected.value ? upstreamVariables(editorSnapshot.value, selected.value.id) : []);
+const selectedDirectInputLabel = computed(() => {
+  if (!selected.value) return "";
+  const sourceId = directPredecessorId(editorSnapshot.value, selected.value.id);
+  return nodes.value.find((node) => node.id === sourceId)?.label || "";
+});
+const activeEmailConnections = computed(() => emailConnections.value.filter((item) => item.status === "active"));
+const definition = computed<WorkflowDefinitionV1>(() => ({
+  schema_version: 1,
+  workflow_id: store.current?.workflow_id,
+  owner_user_id: store.current?.owner_user_id,
+  name: store.current?.name || "未命名工作流",
+  description: store.current?.description || "",
+  timezone: store.current?.timezone || "Asia/Shanghai",
+  version: store.current?.version || 1,
+  status: store.current?.status || "draft",
+  nodes: graphBoundSnapshot.value.nodes.map((node) => ({ ...node, config: node.type === "mcp_action" ? { ...node.config, published_consent_at: actionConsent.value ? String(node.config.published_consent_at || new Date().toISOString()) : "" } : node.type === "personal_email" || node.type === "qq_notification" ? { ...node.config, send_consent_at: actionConsent.value ? String(node.config.send_consent_at || new Date().toISOString()) : "" } : node.config })),
+  edges: editorSnapshot.value.edges,
+  required_permissions: requiredWorkflowPermissions(),
+  connection_ids: [...new Set(nodes.value.filter((node) => node.type === "personal_email").map((node) => String(node.data.config.connection_id || "")).filter(Boolean))],
+}));
+const currentCanvasSignature = computed(() => JSON.stringify({
+  name: store.current?.name || "",
+  description: store.current?.description || "",
+  timezone: store.current?.timezone || "Asia/Shanghai",
+  nodes: editorSnapshot.value.nodes,
+  edges: editorSnapshot.value.edges,
+  required_permissions: requiredWorkflowPermissions(),
+  connection_ids: definition.value.connection_ids,
+  action_consent: actionConsent.value,
+}));
+const hasUnsavedChanges = computed(() => Boolean(store.current && savedCanvasSignature.value && savedCanvasSignature.value !== currentCanvasSignature.value));
+const workflowChangeState = computed(() => {
+  if (hasUnsavedChanges.value) return { code: "unsaved", label: tr("未保存修改", "Unsaved changes") };
+  if (store.current?.has_unpublished_changes) return { code: "pending", label: tr("待发布", "Ready to publish") };
+  return null;
+});
+function markCurrentCanvasSaved() {
+  savedCanvasSignature.value = currentCanvasSignature.value;
+}
+
+function requiredWorkflowPermissions(): string[] {
+  const permissions = new Set(store.current?.required_permissions || ["workflow.use"]);
+  permissions.add("workflow.use");
+  if (nodes.value.some((node) => node.type === "schedule_trigger" && node.data.config.trigger_type !== "manual")) permissions.add("workflow.schedule");
+  if (nodes.value.some((node) => node.type === "official_notification")) permissions.add("workflow.notify.self");
+  if (nodes.value.some((node) => node.type === "qq_notification")) permissions.add("workflow.notify.self");
+  if (nodes.value.some((node) => node.type === "personal_email")) permissions.add("workflow.email.send");
+  return [...permissions];
+}
+
+function tr(zh: string, en: string) { return uiText(ui.language, zh, en); }
+function nodeMeta(type: string) {
+  const values: Record<string, { icon: string; category: string }> = {
+    schedule_trigger: { icon: "▶", category: tr("触发方式", "Trigger") }, mcp_query: { icon: "⌕", category: tr("信息", "Information") },
+    mcp_action: { icon: "↗", category: tr("操作", "Action") }, llm_transform: { icon: "✦", category: tr("处理", "AI") },
+    template: { icon: "→", category: tr("结果", "Result") }, condition: { icon: "◇", category: tr("判断", "Condition") },
+    official_notification: { icon: "→", category: tr("发送结果", "Result") }, personal_email: { icon: "→", category: tr("发送结果", "Result") }, qq_notification: { icon: "QQ", category: tr("发送结果", "Result") },
+  };
+  return values[type] || { icon: "·", category: type };
+}
+function paletteHelp(type: WorkflowNodeType): string {
+  const values: Partial<Record<WorkflowNodeType, [string, string]>> = {
+    mcp_query: ["天气、车票、地点、网页等", "Weather, trains, places, web and more"],
+    llm_transform: ["摘要、重点、润色或分类", "Summarize, extract, rewrite or classify"],
+    condition: ["根据结果走不同分支", "Choose a branch from a result"],
+    template: ["保留结果，或发到 QQ、通知邮箱和个人邮箱", "Keep, send to QQ, notification email, or personal email"],
+    mcp_action: ["执行已审核的外部操作", "Run a reviewed external action"],
+  };
+  const value = values[type];
+  return value ? tr(value[0], value[1]) : nodeMeta(type).category;
+}
+function nodeSummary(type: string, config: Record<string, unknown>): string {
+  if (type === "schedule_trigger") return workflowTriggerLabel(String(config.trigger_type || "manual"));
+  if (type === "mcp_query" || type === "mcp_action") {
+    const tool = workflowTools.value.find((item) => item.name === config.tool_name);
+    return tool ? workflowToolName(tool) : tr("请选择工具", "Select a tool");
+  }
+  if (type === "llm_transform") return ({ advice: "生成生活建议", summary: "生成摘要", key_points: "提取重点", rewrite: "润色改写", classify: "分类整理", custom: "自定义整理" } as Record<string, string>)[String(config.task || "")] || tr("请选择整理方式", "Choose a task");
+  if (type === "condition") return ({ eq: "等于", ne: "不等于", contains: "包含", gt: "大于", gte: "大于或等于", lt: "小于", lte: "小于或等于", is_empty: "为空" } as Record<string, string>)[String(config.operator || "")] || tr("配置判断条件", "Configure condition");
+  if (outputNodeTypes.has(type as WorkflowNodeType)) return type === "personal_email" ? tr("发送个人邮件", "Send personal email") : type === "qq_notification" ? tr("发送到我的 QQ", "Send to my QQ") : type === "official_notification" ? tr("发送通知", "Send notification") : tr("保留为工作流结果", "Keep as workflow result");
+  return tr("等待配置", "Not configured");
+}
+function labelFor(type: string) {
+  if (type === "schedule_trigger") return tr("开始", "Start");
+  if (outputNodeTypes.has(type as WorkflowNodeType)) return tr("发送结果", "Send result");
+  const found = palette.value.find((item) => item.type === type);
+  return found ? tr(found.zh, found.en) : tr("步骤", "Step");
+}
+function defaultConfig(type: WorkflowNodeType): Record<string, unknown> {
+  switch (type) {
+    case "schedule_trigger": return { trigger_type: "manual", schedule_mode: "manual" };
+    case "mcp_query": return { tool_name: "", input_schema_hash: "", arguments: {} };
+    case "mcp_action": return { tool_name: "", input_schema_hash: "", arguments: {}, published_consent_at: "" };
+    case "llm_transform": return { task: "summary", tone: "plain", output_length: "medium", advice_topics: ["umbrella", "clothing", "travel"], commute_mode: "general", temperature_preference: "normal", additional_instruction: "", instruction: "将上一步数据整理成普通用户可直接阅读的中文纯文本；不要输出 Markdown、JSON、内部字段名或代码；保留关键事实、日期、单位和必要建议", input: "" };
+    case "template": return { delivery_mode: "result", content: "", source_ref: "", template: "", variables: {} };
+    case "condition": return { left: "", operator: "contains", right: "" };
+    case "official_notification": return { delivery_mode: "notification", subject: "工作流通知", content: "", source_ref: "", body: "" };
+    case "personal_email": return { delivery_mode: "email", connection_id: "", to: "", subject: "工作流结果", content: "", source_ref: "", body: "" };
+    case "qq_notification": return { delivery_mode: "qq", content: "", source_ref: "", body: "", send_consent_at: "" };
+    default: return {};
+  }
+}
+function normalizeTriggerConfig(config: Record<string, unknown>): Record<string, unknown> {
+  if (config.schedule_mode) return config;
+  const type = String(config.trigger_type || "manual");
+  if (type === "manual") return { ...config, schedule_mode: "manual" };
+  if (type === "date") return { ...config, schedule_mode: "once" };
+  if (type === "interval") {
+    const unit = config.days ? "days" : config.hours ? "hours" : config.minutes ? "minutes" : "seconds";
+    return { ...config, schedule_mode: "every", interval_unit: unit, interval_amount: Number(config[unit] || 1) };
+  }
+  const parts = String(config.expression || "0 9 * * *").split(" ");
+  const time = `${String(parts[1] || "9").padStart(2, "0")}:${String(parts[0] || "0").padStart(2, "0")}`;
+  if (parts[2] !== "*") return { ...config, schedule_mode: "monthly", day_of_month: Number(parts[2]), time_of_day: time };
+  if (parts[4] !== "*") return { ...config, schedule_mode: "weekly", weekday: Number(parts[4]), time_of_day: time };
+  return { ...config, schedule_mode: "daily", time_of_day: time };
+}
+function normalizeNodeConfig(type: string, raw: Record<string, unknown>): Record<string, unknown> {
+  const config = { ...defaultConfig(type as WorkflowNodeType), ...raw };
+  if (type === "schedule_trigger") return normalizeTriggerConfig(config);
+  if (type === "llm_transform") {
+    if (!raw.task) config.task = "custom";
+    config.custom_instruction = raw.task ? String(raw.custom_instruction || "") : String(raw.instruction || "");
+  }
+  if (type === "template") {
+    const variables = typeof raw.variables === "object" && raw.variables ? raw.variables as Record<string, unknown> : {};
+    config.content = raw.content || (String(raw.template || "").includes("{{") ? "工作流结果：" : raw.template) || "工作流结果：";
+    config.source_ref = raw.source_ref || variables.result || variables.text || "";
+    syncTemplateConfig(config);
+  }
+  if (type === "official_notification" || type === "personal_email" || type === "qq_notification") {
+    config.delivery_mode = type === "personal_email" ? "email" : type === "qq_notification" ? "qq" : "notification";
+    config.content = raw.content || (!isResultReference(raw.body) ? raw.body : "") || "";
+    config.source_ref = raw.source_ref || (isResultReference(raw.body) ? raw.body : "") || "";
+    syncDeliveryConfig(config, type as WorkflowNodeType);
+  }
+  return config;
+}
+function normalizedNodeTitle(type: WorkflowNodeType, title?: string): string {
+  const legacy = new Set(["手动触发", "触发器", "外部工具查询", "外部工具操作", "智能整理", "内容模板", "条件判断", "官方通知", "个人邮件"]);
+  return title && !legacy.has(title) ? title : labelFor(type);
+}
+function hydrate() {
+  const source = store.current;
+  if (savedBaselineTimer) clearTimeout(savedBaselineTimer);
+  savedCanvasSignature.value = "";
+  if (!source) { nodes.value = []; edges.value = []; return; }
+  nodes.value = source.nodes.map((node) => ({ id: node.id, type: node.type, label: normalizedNodeTitle(node.type, node.title), position: node.position, data: { config: normalizeNodeConfig(node.type, node.config) } }));
+  edges.value = source.edges.map((edge) => ({ id: edge.id, source: edge.source_node_id, target: edge.target_node_id, sourceHandle: edge.condition_branch || edge.source_port, targetHandle: edge.target_port }));
+  undoStack.value = [];
+  redoStack.value = [];
+  addMenu.value = null;
+  selectedId.value = source.nodes[0]?.id || "";
+  selectedEdgeId.value = "";
+  actionConsent.value = source.nodes.some((node) => node.type === "mcp_action" ? Boolean(node.config.published_consent_at) : (node.type === "personal_email" || node.type === "qq_notification") && Boolean(node.config.send_consent_at));
+  void nextTick(async () => {
+    await nextTick();
+    if (source.nodes.length <= 1) void setViewport({ x: 110, y: 110, zoom: 0.72 });
+    else void fitView({ padding: 0.25, maxZoom: 0.9 });
+  });
+  savedBaselineTimer = setTimeout(markCurrentCanvasSaved, 500);
+}
+function updateInspectorBubblePosition() {
+  if (!inspectorOpen.value || !selectedId.value || !workflowCanvas.value) return;
+  const canvas = workflowCanvas.value;
+  const escapedId = window.CSS?.escape ? window.CSS.escape(selectedId.value) : selectedId.value.replace(/["\\]/g, "\\$&");
+  const nodeElement = canvas.querySelector<HTMLElement>(`.vue-flow__node[data-id="${escapedId}"]`);
+  if (!nodeElement) return;
+  const canvasRect = canvas.getBoundingClientRect();
+  const nodeRect = nodeElement.getBoundingClientRect();
+  const gap = 12;
+  const inset = 12;
+  const width = Math.max(240, Math.min(360, canvasRect.width - inset * 2));
+  const nodeLeft = nodeRect.left - canvasRect.left;
+  const nodeRight = nodeRect.right - canvasRect.left;
+  const nodeTop = nodeRect.top - canvasRect.top;
+  const nodeBottom = nodeRect.bottom - canvasRect.top;
+  let placement: "right" | "left" | "bottom" = "right";
+  let left = nodeRight + gap;
+  if (left + width > canvasRect.width - inset) {
+    placement = "left";
+    left = nodeLeft - width - gap;
+  }
+  if (left < inset) {
+    placement = "bottom";
+    left = nodeLeft + nodeRect.width / 2 - width / 2;
+  }
+  left = Math.min(Math.max(inset, left), Math.max(inset, canvasRect.width - width - inset));
+  const preferredTop = placement === "bottom" ? nodeBottom + gap : nodeTop - 18;
+  const top = Math.min(Math.max(inset, preferredTop), Math.max(inset, canvasRect.height - 170));
+  inspectorBubblePlacement.value = placement;
+  inspectorBubbleStyle.value = {
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(top)}px`,
+    width: `${Math.round(width)}px`,
+    maxHeight: `${Math.max(150, Math.round(canvasRect.height - top - inset))}px`,
+  };
+}
+function scheduleInspectorBubblePosition() {
+  if (inspectorBubbleFrame !== undefined) window.cancelAnimationFrame(inspectorBubbleFrame);
+  inspectorBubbleFrame = window.requestAnimationFrame(() => {
+    inspectorBubbleFrame = undefined;
+    updateInspectorBubblePosition();
+  });
+}
+watch(() => store.current?.workflow_id, hydrate);
+watch([selectedId, inspectorOpen], scheduleInspectorBubblePosition);
+watch(() => nodes.value.map((node) => `${node.id}:${node.position.x}:${node.position.y}`).join("|"), scheduleInspectorBubblePosition);
+watch(workflowId, async (id) => {
+  editorView.value = "canvas";
+  if (!id) {
+    if (store.current) store.close();
+    return;
+  }
+  if (store.current?.workflow_id === id) return;
+  await perform("open", () => store.open(id));
+});
+async function loadToolCatalog() {
+  toolsLoading.value = true;
+  try { workflowTools.value = (await api.workflowTools()).items || []; }
+  catch (error) { failure.value = errorMessage(error); workflowTools.value = []; }
+  finally { toolsLoading.value = false; }
+}
+async function loadEmailConnections() {
+  try {
+    const response = await api.workflowEmailConnections();
+    emailConnections.value = response.connections || [];
+    connectionsFailure.value = "";
+  } catch (error) {
+    emailConnections.value = [];
+    connectionsFailure.value = error instanceof ApiError ? workflowErrorLabel(error.code) : tr("暂时无法读取邮件账号", "Unable to load email accounts");
+  }
+}
+async function loadWorkflowCapabilities() {
+  try { workflowCapabilities.value = await api.workflowCapabilities(); }
+  catch { workflowCapabilities.value = {}; }
+}
+onMounted(async () => {
+  window.addEventListener("keydown", handleKeyboard);
+  window.addEventListener("resize", scheduleInspectorBubblePosition);
+  try {
+    await Promise.all([store.loadAll(), loadToolCatalog(), loadEmailConnections(), loadWorkflowCapabilities()]);
+    if (workflowId.value && store.current?.workflow_id !== workflowId.value) await store.open(workflowId.value);
+  } catch (error) { failure.value = errorMessage(error); }
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleKeyboard);
+  window.removeEventListener("resize", scheduleInspectorBubblePosition);
+  if (inspectorBubbleFrame !== undefined) window.cancelAnimationFrame(inspectorBubbleFrame);
+  if (savedBaselineTimer) clearTimeout(savedBaselineTimer);
+});
+
+const availableStarterTemplates = computed(() => workflowStarterTemplates.filter((template) => workflowTools.value.some((tool) => tool.name === template.requiredTool)));
+async function useTemplate(template: WorkflowStarterTemplate) {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
+  await createAndOpen(instantiateWorkflowTemplate(template, workflowTools.value, timezone, workflowCapabilities.value));
+}
+
+async function createAndOpen(workflowDefinition: WorkflowDefinitionV1 = defaultDefinition()) {
+  await perform("create", async () => {
+    if (store.current && hasUnsavedChanges.value) await saveCurrent();
+    await store.create(workflowDefinition);
+    if (store.current) await router.push({ name: "workflow-detail", params: { workflowId: store.current.workflow_id } });
+  });
+}
+
+async function openWorkflow(id: string) {
+  await perform("open", async () => {
+    if (store.current?.workflow_id !== id && hasUnsavedChanges.value) await saveCurrent();
+    await store.open(id);
+    await router.push({ name: "workflow-detail", params: { workflowId: id } });
+  });
+}
+
+function workflowSummaryMeta(item: WorkflowSummary): string {
+  const details = [workflowStatusLabel(item.status)];
+  if (item.next_run_at) details.push(`${tr("下次", "Next")} ${workflowTimeLabel(item.next_run_at)}`);
+  else if (item.has_unpublished_changes) details.push(tr("有修改待发布", "Changes to publish"));
+  else details.push(workflowVersionLabel(item.version));
+  return details.join(" · ");
+}
+
+async function deleteOverviewWorkflow(item: { workflow_id: string; name: string }) {
+  if (!window.confirm(tr(`确认删除“${item.name}”？运行历史也会删除。`, `Delete “${item.name}” and its run history?`))) return;
+  await perform("delete", async () => {
+    await api.deleteWorkflow(item.workflow_id);
+    if (store.current?.workflow_id === item.workflow_id) {
+      store.close();
+      await router.push({ name: "workflows" });
+    }
+    await store.loadAll();
+  });
+}
+
+async function perform(name: string, operation: () => Promise<void>) {
+  busy.value = name; failure.value = "";
+  try { await operation(); }
+  catch (error) { failure.value = error instanceof ApiError ? workflowErrorLabel(error.code) : errorMessage(error); }
+  finally { busy.value = ""; }
+}
+async function saveCurrent() {
+  await store.save(definition.value);
+  markCurrentCanvasSaved();
+}
+async function publishCurrent() {
+  await store.publish(definition.value);
+  markCurrentCanvasSaved();
+}
+async function runCurrent() {
+  await store.runNow(definition.value);
+  markCurrentCanvasSaved();
+  editorView.value = "runs";
+}
+function applySnapshot(snapshot: EditorSnapshot) {
+  nodes.value = snapshot.nodes.map((node) => ({ id: node.id, type: node.type, label: node.title || labelFor(node.type), position: { ...node.position }, data: { config: cloneWorkflowJson(node.config) } }));
+  edges.value = snapshot.edges.map((edge) => ({ id: edge.id, source: edge.source_node_id, target: edge.target_node_id, sourceHandle: edge.condition_branch || edge.source_port || "output", targetHandle: edge.target_port || "input" }));
+}
+function recordHistory() {
+  const snapshot = cloneSnapshot(editorSnapshot.value);
+  const last = undoStack.value.at(-1);
+  if (!last || JSON.stringify(last) !== JSON.stringify(snapshot)) undoStack.value.push(snapshot);
+  if (undoStack.value.length > 60) undoStack.value.shift();
+  redoStack.value = [];
+}
+function undo() {
+  const snapshot = undoStack.value.pop();
+  if (!snapshot) return;
+  redoStack.value.push(cloneSnapshot(editorSnapshot.value));
+  applySnapshot(snapshot);
+}
+function redo() {
+  const snapshot = redoStack.value.pop();
+  if (!snapshot) return;
+  undoStack.value.push(cloneSnapshot(editorSnapshot.value));
+  applySnapshot(snapshot);
+}
+function createCanvasNode(type: WorkflowNodeType, position?: { x: number; y: number }): CanvasNode {
+  nodeSequence += 1;
+  const id = `${type}-${Date.now()}-${nodeSequence}`;
+  return { id, type, label: labelFor(type), position: position || { x: 220 + nodeSequence * 54, y: 140 + (nodeSequence % 3) * 120 }, data: { config: defaultConfig(type) } };
+}
+function addNode(type: WorkflowNodeType, options: { position?: { x: number; y: number }; sourceId?: string; sourceHandle?: string; edgeId?: string } = {}) {
+  if (!canAddNodeType(type, editorSnapshot.value.nodes)) {
+    failure.value = tr("一个工作流只能有一个触发器", "A workflow can only have one trigger");
+    return;
+  }
+  recordHistory();
+  const node = createCanvasNode(type, options.position);
+  if (options.edgeId) {
+    const inserted = insertNodeOnEdge(editorSnapshot.value, options.edgeId, { id: node.id, type, title: node.label, position: node.position, config: node.data.config });
+    applySnapshot(inserted);
+  } else {
+    nodes.value.push(node);
+    const previous = options.sourceId ? nodes.value.find((item) => item.id === options.sourceId) : nodes.value.filter((item) => item.id !== node.id && item.type !== "schedule_trigger").at(-1) || nodes.value.find((item) => item.type === "schedule_trigger" && item.id !== node.id);
+    if (previous) {
+      const usedBranches = new Set(edges.value.filter((edge) => edge.source === previous.id).map((edge) => edge.sourceHandle));
+      const sourceHandle = options.sourceHandle || (previous.type === "condition" ? (!usedBranches.has("true") ? "true" : !usedBranches.has("false") ? "false" : "") : "output");
+      if (sourceHandle) edges.value.push({ id: `edge-${previous.id}-${node.id}`, source: previous.id, target: node.id, sourceHandle, targetHandle: "input" });
+    }
+  }
+  selectedId.value = node.id;
+  selectedEdgeId.value = "";
+  inspectorOpen.value = true;
+  addMenu.value = null;
+}
+function addOrSelectTrigger() {
+  const existing = nodes.value.find((node) => node.type === "schedule_trigger");
+  if (existing) { selectNode(existing.id); return; }
+  addNode("schedule_trigger");
+}
+function connectionIssueText(issue: WorkflowConnectionIssue): string {
+  const labels: Record<WorkflowConnectionIssue, [string, string]> = {
+    "missing-node": ["找不到要连接的步骤，请刷新后重试", "A connection endpoint is missing; refresh and try again"],
+    self: ["不能把步骤连接到自己", "A step cannot connect to itself"],
+    "target-trigger": ["“开始”只能放在流程最前面", "Start must remain at the beginning"],
+    duplicate: ["这两个步骤已经连接", "These steps are already connected"],
+    "invalid-branch": ["请先选择“是”或“否”分支", "Choose the Yes or No branch first"],
+    "branch-used": ["这个分支已经连接；如需更换，请先删除原连线", "This branch is already connected; delete it before replacing it"],
+    cycle: ["这样会让流程绕回前面的步骤，无法连接", "This connection would create a cycle"],
+  };
+  return tr(...labels[issue]);
+}
+function addValidatedConnection(sourceId: string, targetId: string, sourceHandle = "output", targetHandle = "input"): boolean {
+  const issue = workflowConnectionIssue(editorSnapshot.value, sourceId, targetId, sourceHandle);
+  if (issue) {
+    connectionFeedback.value = connectionIssueText(issue);
+    return false;
+  }
+  recordHistory();
+  edges.value.push({ id: `edge-${sourceId}-${targetId}-${Date.now()}`, source: sourceId, target: targetId, sourceHandle, targetHandle });
+  selectedEdgeId.value = "";
+  connectionFeedback.value = "";
+  return true;
+}
+function connect(connection: Connection) {
+  pendingConnection.value = null;
+  explicitConnection.value = null;
+  if (!connection.source || !connection.target) return;
+  addValidatedConnection(connection.source, connection.target, connection.sourceHandle || "output", connection.targetHandle || "input");
+}
+function beginExplicitConnection(sourceId: string, sourceHandle = "output") {
+  explicitConnection.value = { sourceId, sourceHandle };
+  pendingConnection.value = null;
+  selectedId.value = sourceId;
+  selectedEdgeId.value = "";
+  inspectorOpen.value = false;
+  addMenu.value = null;
+  connectionFeedback.value = "";
+}
+function finishExplicitConnection(targetId: string) {
+  const start = explicitConnection.value;
+  if (!start) return;
+  if (!addValidatedConnection(start.sourceId, targetId, start.sourceHandle)) return;
+  explicitConnection.value = null;
+  selectedId.value = targetId;
+  inspectorOpen.value = false;
+}
+function cancelExplicitConnection() {
+  explicitConnection.value = null;
+  connectionFeedback.value = "";
+}
+function handleNodeClick(nodeId: string) {
+  if (explicitConnection.value) finishExplicitConnection(nodeId);
+  else selectNode(nodeId);
+}
+function handleNodePointerDown(nodeId: string) {
+  if (!explicitConnection.value) selectNode(nodeId);
+}
+function isConnectionTarget(nodeId: string): boolean { return connectionTargetIds.value.has(nodeId); }
+function isConnectionBranchUsed(nodeId: string, branch: string): boolean {
+  return edges.value.some((edge) => edge.source === nodeId && edge.sourceHandle === branch);
+}
+function selectNode(nodeId: string) {
+  selectedId.value = nodeId;
+  selectedEdgeId.value = "";
+  inspectorOpen.value = true;
+}
+function focusConfigurationIssue(issue: ConfigurationIssue) {
+  if (!issue.nodeId) return;
+  selectNode(issue.nodeId);
+}
+function selectEdge(edgeId: string) {
+  cancelExplicitConnection();
+  selectedId.value = "";
+  selectedEdgeId.value = edgeId;
+  inspectorOpen.value = false;
+  addMenu.value = null;
+}
+function closeInspectorFromCanvas() {
+  cancelExplicitConnection();
+  inspectorOpen.value = false;
+  selectedEdgeId.value = "";
+  addMenu.value = null;
+}
+function deleteEdge(edgeId: string) {
+  if (!edges.value.some((edge) => edge.id === edgeId)) return;
+  recordHistory();
+  edges.value = edges.value.filter((edge) => edge.id !== edgeId);
+  if (selectedEdgeId.value === edgeId) selectedEdgeId.value = "";
+  addMenu.value = null;
+}
+function deleteSelected() {
+  if (selectedEdgeId.value) {
+    deleteEdge(selectedEdgeId.value);
+    return;
+  }
+  if (!selected.value || selected.value.type === "schedule_trigger") return;
+  recordHistory();
+  nodes.value = nodes.value.filter((node) => node.id !== selectedId.value);
+  edges.value = edges.value.filter((edge) => edge.source !== selectedId.value && edge.target !== selectedId.value);
+  selectedId.value = "";
+}
+function autoLayout() {
+  recordHistory();
+  applySnapshot(autoLayoutWorkflow(editorSnapshot.value));
+  void nextTick(() => fitView({ padding: 0.24, maxZoom: 0.9, duration: 260 }));
+}
+function panCanvas(deltaX: number, deltaY: number) {
+  const viewport = getViewport();
+  void setViewport({ x: viewport.x + deltaX, y: viewport.y + deltaY, zoom: viewport.zoom }, { duration: 160 });
+}
+function openEdgeMenu(edgeId: string, event: MouseEvent) {
+  const edge = edges.value.find((item) => item.id === edgeId);
+  if (!edge) return;
+  addMenu.value = { x: event.clientX, y: event.clientY, edgeId, flowPosition: screenToFlowCoordinate({ x: event.clientX, y: event.clientY }) };
+}
+function onConnectStart(params: OnConnectStartParams) {
+  cancelExplicitConnection();
+  pendingConnection.value = { nodeId: params.nodeId, handleId: params.handleId };
+}
+function onConnectEnd(event?: MouseEvent | TouchEvent) {
+  const start = pendingConnection.value;
+  pendingConnection.value = null;
+  if (!start?.nodeId || !event || !(event.target as HTMLElement | null)?.closest?.(".vue-flow__pane")) return;
+  const point = "changedTouches" in event ? event.changedTouches[0] : event;
+  addMenu.value = {
+    x: point.clientX,
+    y: point.clientY,
+    sourceId: start.nodeId,
+    sourceHandle: start.handleId || "output",
+    flowPosition: screenToFlowCoordinate({ x: point.clientX, y: point.clientY }),
+  };
+}
+function selectResult(field: string, event: Event) {
+  if (!selected.value) return;
+  selected.value.data.config[field] = (event.target as HTMLSelectElement).value;
+  if (selected.value.type === "template") syncTemplateConfig(selected.value.data.config);
+  if (outputNodeTypes.has(selected.value.type as WorkflowNodeType)) syncDeliveryConfig(selected.value.data.config, selected.value.type as WorkflowNodeType);
+}
+function isResultReference(value: unknown): boolean { return typeof value === "string" && value.startsWith("${nodes."); }
+function syncScheduleConfig() {
+  if (!selected.value || selected.value.type !== "schedule_trigger") return;
+  const config = selected.value.data.config;
+  const mode = String(config.schedule_mode || "manual");
+  delete config.seconds; delete config.minutes; delete config.hours; delete config.days; delete config.expression;
+  if (mode === "manual") config.trigger_type = "manual";
+  if (mode === "once") config.trigger_type = "date";
+  if (mode === "every") {
+    config.trigger_type = "interval";
+    const unit = ["minutes", "hours", "days"].includes(String(config.interval_unit)) ? String(config.interval_unit) : "hours";
+    config.interval_unit = unit;
+    config[unit] = Math.max(1, Number(config.interval_amount || 1));
+  }
+  if (["daily", "weekly", "monthly"].includes(mode)) {
+    config.trigger_type = "cron";
+    const [hour, minute] = String(config.time_of_day || "09:00").split(":").map(Number);
+    const day = mode === "monthly" ? Math.min(28, Math.max(1, Number(config.day_of_month || 1))) : "*";
+    const weekday = mode === "weekly" ? Math.min(6, Math.max(0, Number(config.weekday || 0))) : "*";
+    config.expression = `${minute || 0} ${hour || 0} ${day} * ${weekday}`;
+  }
+}
+function changeScheduleMode(event: Event) {
+  if (!selected.value) return;
+  selected.value.data.config.schedule_mode = (event.target as HTMLSelectElement).value;
+  if (!selected.value.data.config.interval_amount) selected.value.data.config.interval_amount = 1;
+  if (!selected.value.data.config.interval_unit) selected.value.data.config.interval_unit = "hours";
+  if (!selected.value.data.config.time_of_day) selected.value.data.config.time_of_day = "09:00";
+  if (selected.value.data.config.weekday === undefined) selected.value.data.config.weekday = 1;
+  if (!selected.value.data.config.day_of_month) selected.value.data.config.day_of_month = 1;
+  syncScheduleConfig();
+}
+function updateScheduleTime(value: string) {
+  if (!selected.value || selected.value.type !== "schedule_trigger") return;
+  selected.value.data.config.time_of_day = value;
+  syncScheduleConfig();
+}
+function updateSingleRunTime(value: string) {
+  if (!selected.value || selected.value.type !== "schedule_trigger") return;
+  selected.value.data.config.run_at = value;
+  syncScheduleConfig();
+}
+function syncTransformInstruction() {
+  if (!selected.value || selected.value.type !== "llm_transform") return;
+  const config = selected.value.data.config;
+  const tasks: Record<string, string> = { summary: "生成摘要", key_points: "提取关键事实并用要点列出", rewrite: "润色改写，保持原意", classify: "按主题分类整理" };
+  const tones: Record<string, string> = { plain: "使用清晰自然的中文", professional: "使用专业正式的中文", friendly: "使用亲切易懂的中文" };
+  const lengths: Record<string, string> = { short: "最多 3 行、90 个汉字", medium: "最多 5 行、180 个汉字", long: "最多 8 行、350 个汉字" };
+  if (config.task === "advice") {
+    const topicLabels: Record<string, string> = { umbrella: "是否需要带伞", clothing: "适合穿什么", travel: "是否适合出行以及需要避开的时段" };
+    const commuteLabels: Record<string, string> = { general: "一般出行", walk: "步行", bicycle: "骑行", transit: "公交或地铁", drive: "开车" };
+    const preferenceLabels: Record<string, string> = { cold: "比较怕冷", normal: "体感正常", hot: "比较怕热" };
+    const topics = (Array.isArray(config.advice_topics) ? config.advice_topics : []).map((item) => topicLabels[String(item)]).filter(Boolean).join("、") || "必要的生活提醒";
+    config.instruction = `${tones[String(config.tone || "friendly")]}，根据上一步事实写一条今天能直接看的提醒；第一行概括天气；只写${topics}中今天真正有用的内容；用户主要采用${commuteLabels[String(config.commute_mode || "general")]}，${preferenceLabels[String(config.temperature_preference || "normal")]}；只有存在雷雨、大风、高温、低温或明显温差时才提醒，不要逐项说明不存在的风险，不解释原因，不重复天气数据；${String(config.additional_instruction || "").trim()}；${lengths[String(config.output_length || "short")]}；输出普通中文纯文本，不使用 Markdown、JSON、内部字段名或代码`;
+    return;
+  }
+  config.instruction = config.task === "custom" ? String(config.custom_instruction || "") : `${tones[String(config.tone || "plain")]}，${tasks[String(config.task || "summary")]}；${lengths[String(config.output_length || "medium")]}；输出普通中文纯文本，不使用 Markdown、JSON、内部字段名或代码`;
+}
+function toggleAdviceTopic(topic: string, event: Event) {
+  if (!selected.value || selected.value.type !== "llm_transform") return;
+  const checked = (event.target as HTMLInputElement).checked;
+  const topics = new Set(Array.isArray(selected.value.data.config.advice_topics) ? selected.value.data.config.advice_topics.map(String) : []);
+  if (checked) topics.add(topic); else topics.delete(topic);
+  selected.value.data.config.advice_topics = [...topics];
+  syncTransformInstruction();
+}
+function syncTemplateConfig(config = selected.value?.data.config) {
+  if (!config) return;
+  config.template = config.source_ref ? `${String(config.content || "").trim()}\n{{result}}`.trim() : String(config.content || "");
+  config.variables = config.source_ref ? { result: config.source_ref } : {};
+}
+function syncDeliveryConfig(config = selected.value?.data.config, type = selected.value?.type as WorkflowNodeType | undefined) {
+  if (!config || !type) return;
+  if (type === "template") { syncTemplateConfig(config); return; }
+  config.body = config.source_ref || String(config.content || "");
+}
+function deliveryModeFor(type: string): "result" | "notification" | "email" | "qq" {
+  return type === "personal_email" ? "email" : type === "qq_notification" ? "qq" : type === "official_notification" ? "notification" : "result";
+}
+function isOutputNode(type: string): boolean { return outputNodeTypes.has(type as WorkflowNodeType); }
+function changeDeliveryMode(event: Event) {
+  if (!selected.value || !outputNodeTypes.has(selected.value.type as WorkflowNodeType)) return;
+  const mode = (event.target as HTMLSelectElement).value as "result" | "notification" | "email" | "qq";
+  const nextType: WorkflowNodeType = mode === "email" ? "personal_email" : mode === "qq" ? "qq_notification" : mode === "notification" ? "official_notification" : "template";
+  if (nextType === selected.value.type) return;
+  recordHistory();
+  const previous = selected.value.data.config;
+  const next = {
+    ...defaultConfig(nextType),
+    content: previous.content || (!isResultReference(previous.body) ? previous.body : "") || "",
+    source_ref: previous.source_ref || (isResultReference(previous.body) ? previous.body : "") || "",
+    subject: previous.subject || (nextType === "official_notification" ? "工作流通知" : "工作流结果"),
+    connection_id: previous.connection_id || "",
+    to: previous.to || "",
+  };
+  selected.value.type = nextType;
+  selected.value.label = tr("发送结果", "Send result");
+  selected.value.data.config = next;
+  syncDeliveryConfig(next, nextType);
+  if (nextType === "personal_email" || nextType === "qq_notification") actionConsent.value = false;
+}
+function openConnectionSettings() { ui.openSettings("connections"); }
+function copySelected() {
+  if (!selected.value || selected.value.type === "schedule_trigger") return;
+  copiedNode.value = cloneWorkflowJson(selected.value);
+}
+function pasteNode() {
+  if (!copiedNode.value) return;
+  recordHistory();
+  const copy = createCanvasNode(copiedNode.value.type as WorkflowNodeType, { x: copiedNode.value.position.x + 36, y: copiedNode.value.position.y + 36 });
+  copy.label = `${copiedNode.value.label} ${tr("副本", "copy")}`;
+  copy.data.config = cloneWorkflowJson(copiedNode.value.data.config);
+  nodes.value.push(copy);
+  selectedId.value = copy.id;
+}
+function handleKeyboard(event: KeyboardEvent) {
+  if (event.key === "Escape" && (explicitConnection.value || connectionFeedback.value)) {
+    event.preventDefault();
+    cancelExplicitConnection();
+    return;
+  }
+  const target = event.target as HTMLElement | null;
+  if (target?.matches("input, textarea, select") || target?.isContentEditable) return;
+  const command = event.ctrlKey || event.metaKey;
+  if (command && event.key.toLowerCase() === "z") { event.preventDefault(); if (event.shiftKey) redo(); else undo(); return; }
+  if (command && event.key.toLowerCase() === "y") { event.preventDefault(); redo(); return; }
+  if (command && event.key.toLowerCase() === "c") { event.preventDefault(); copySelected(); return; }
+  if (command && event.key.toLowerCase() === "v") { event.preventDefault(); pasteNode(); return; }
+  if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); deleteSelected(); }
+}
+function selectTool(event: Event) {
+  if (!selected.value) return;
+  const tool = workflowTools.value.find((item) => item.name === (event.target as HTMLSelectElement).value);
+  toolTestResult.value = "";
+  toolTestSummary.value = "";
+  selected.value.data.config.tool_name = tool?.name || "";
+  selected.value.data.config.input_schema_hash = tool?.schema_hash || "";
+  selected.value.data.config.arguments = {};
+}
+function selectInformationTask(tool: WorkflowToolCatalogItem | undefined) {
+  if (!selected.value || !tool) return;
+  toolTestResult.value = "";
+  toolTestSummary.value = "";
+  selected.value.data.config.tool_name = tool.name;
+  selected.value.data.config.input_schema_hash = tool.schema_hash;
+  selected.value.data.config.arguments = {};
+}
+function toolArgument(field: string): string | number | boolean {
+  const argumentsValue = selected.value?.data.config.arguments;
+  return typeof argumentsValue === "object" && argumentsValue !== null ? (argumentsValue as Record<string, string | number | boolean>)[field] ?? "" : "";
+}
+function runNodeLabel(nodeId: string, nodeType?: string): string {
+  return nodes.value.find((node) => node.id === nodeId)?.label || workflowNodeTypeLabel(nodeType);
+}
+function updateToolArgument(field: string, schema: Record<string, unknown>, event: Event) {
+  if (!selected.value) return;
+  const target = event.target as HTMLInputElement;
+  let value: string | number | boolean = target.value;
+  if ((schema.type === "number" || schema.type === "integer") && target.value !== "") value = Number(target.value);
+  if (schema.type === "boolean") value = target.checked;
+  const current = typeof selected.value.data.config.arguments === "object" && selected.value.data.config.arguments !== null ? selected.value.data.config.arguments as Record<string, unknown> : {};
+  const next = { ...current };
+  if (value === "" && schema.type !== "boolean") delete next[field];
+  else next[field] = value;
+  selected.value.data.config.arguments = next;
+}
+async function backToWorkflowHome() {
+  if (!store.current) return;
+  await perform("back", async () => {
+    if (hasUnsavedChanges.value) await saveCurrent();
+    store.close();
+    await router.push({ name: "workflows" });
+  });
+}
+async function returnToChat() {
+  await perform("back", async () => {
+    if (store.current && hasUnsavedChanges.value) await saveCurrent();
+    await router.push("/");
+  });
+}
+async function showRunHistory() {
+  editorView.value = "runs";
+  await perform("runs", () => store.loadRuns());
+}
+async function testSelectedTool() {
+  if (!selectedTool.value || selectedTool.value.kind !== "query" || !selected.value) return;
+  const argumentsValue = selected.value.data.config.arguments;
+  const args = typeof argumentsValue === "object" && argumentsValue !== null ? argumentsValue as Record<string, unknown> : {};
+  toolTestResult.value = "";
+  toolTestSummary.value = "";
+  await perform("tool-test", async () => {
+    const result = await api.testWorkflowTool(selectedTool.value!.name, args);
+    toolTestSummary.value = workflowToolResultSummary(result.output);
+    toolTestResult.value = JSON.stringify(result.output, null, 2);
+  });
+}
+</script>
+
+<template>
+  <main class="workflow-page workflow-product-page" :class="{ 'has-workflow': isEditorRoute, 'workflow-sidebar-collapsed': sidebarCollapsed }">
+    <header class="workflow-overview-topbar glass-panel">
+      <a class="brand-lockup compact" href="/" @click.prevent="returnToChat"><img :src="'/static/zhice-logo-a.png'" alt="" /><strong>ZhiCe Workflow</strong></a>
+      <nav><button type="button" @click="returnToChat"><ArrowLeft :size="16" />{{ tr('返回聊天', 'Back to chat') }}</button><QuickPreferences /></nav>
+    </header>
+    <div class="workflow-product-workspace">
+      <aside class="workflow-overview-sidebar" :class="{ collapsed: sidebarCollapsed }">
+        <button v-if="sidebarCollapsed" class="workflow-sidebar-expand icon-button" type="button" :aria-label="tr('展开我的工作流', 'Expand my workflows')" @click="sidebarCollapsed = false"><PanelLeftOpen :size="18" /></button>
+        <section v-else class="workflow-overview-saved">
+          <header><div><span class="eyebrow">{{ tr('我的工作流', 'MY WORKFLOWS') }}</span><h2>{{ tr('最近编辑', 'Recently edited') }}</h2></div><div class="workflow-saved-actions"><button class="icon-button" type="button" :aria-label="tr('刷新', 'Refresh')" @click="store.loadAll"><RefreshCw :size="16" /></button><button class="icon-button" type="button" :aria-label="tr('收起我的工作流', 'Collapse my workflows')" @click="sidebarCollapsed = true"><PanelLeftClose :size="16" /></button></div></header>
+          <button class="workflow-overview-new" type="button" :disabled="!!busy" @click="createAndOpen()"><Plus :size="16" />{{ tr('新建工作流', 'New workflow') }}</button>
+          <p v-if="store.loading && !store.items.length">{{ tr('正在读取…', 'Loading…') }}</p>
+          <p v-else-if="!store.items.length" class="workflow-overview-empty">{{ tr('还没有工作流草稿。', 'No workflow drafts yet.') }}</p>
+          <button v-for="item in store.items" :key="item.workflow_id" type="button" class="workflow-overview-row" :class="{ active: item.workflow_id === workflowId }" @click="openWorkflow(item.workflow_id)"><span><strong>{{ item.name }}</strong><small><em :data-status="item.status">{{ workflowStatusLabel(item.status) }}</em> · {{ workflowSummaryMeta(item).split(' · ').slice(1).join(' · ') }}</small></span><span role="button" tabindex="0" :aria-label="`${tr('删除', 'Delete')} ${item.name}`" @click.stop="deleteOverviewWorkflow(item)" @keydown.enter.stop="deleteOverviewWorkflow(item)"><Trash2 :size="15" /></span></button>
+        </section>
+      </aside>
+
+      <section v-if="!isEditorRoute" class="workflow-overview-results">
+        <div class="workflow-overview-scroll">
+          <header class="workflow-overview-intro"><span class="eyebrow">{{ tr('工作流', 'WORKFLOWS') }}</span><h1>{{ tr('让重复工作自动完成', 'Automate repeated work') }}</h1><p>{{ tr('从模板开始，或新建一个空白工作流。每个步骤都可以进入画布后自由调整。', 'Start from a template or create a blank workflow. Every step remains editable on the canvas.') }}</p></header>
+          <section class="workflow-overview-section"><header><div><span class="eyebrow">{{ tr('完整模板', 'COMPLETE TEMPLATES') }}</span><h2>{{ tr('选择一个已经搭好的流程', 'Choose a ready-made workflow') }}</h2></div><small>{{ tr('创建后直接在右侧画布填写和调整', 'Create it, then complete and edit it on the right') }}</small></header><div class="workflow-overview-grid"><button v-for="template in availableStarterTemplates" :key="template.id" class="workflow-overview-card workflow-template-card" @click="useTemplate(template)"><span class="template-icon">{{ template.icon }}</span><span class="template-node-count">{{ tr(`${template.nodes.length} 个节点已搭好`, `${template.nodes.length} nodes ready`) }}</span><strong>{{ template.title }}</strong><p>{{ template.description }}</p><small>{{ template.requirements }}</small><span class="template-link">{{ tr('使用这个模板', 'Use this template') }}</span></button></div><p v-if="!availableStarterTemplates.length" class="workflow-overview-empty">{{ tr('外部信息能力暂不可用，你仍可以创建只包含智能处理和条件判断的工作流。', 'External information is unavailable, but you can still create an AI and condition workflow.') }}</p></section>
+          <p v-if="failure" class="form-error" role="alert">{{ failure }}</p>
+        </div>
+      </section>
+
+      <section v-else-if="store.current" class="workflow-editor-results">
+        <header class="workflow-editor-toolbar">
+          <div class="workflow-brand"><input v-model="store.current.name" class="workflow-title-input" :aria-label="tr('工作流名称', 'Workflow name')" maxlength="120" /><span v-if="workflowChangeState" class="workflow-status" :data-status="workflowChangeState.code">{{ workflowChangeState.label }}</span></div>
+          <nav class="workflow-view-tabs"><button type="button" @click="backToWorkflowHome">{{ tr('模板', 'Templates') }}</button><button type="button" :class="{ active: editorView === 'canvas' }" @click="editorView = 'canvas'">{{ tr('流程画布', 'Canvas') }}</button><button type="button" :class="{ active: editorView === 'runs' }" @click="showRunHistory">{{ tr('执行记录', 'Runs') }}<span v-if="store.runs.length">{{ store.runs.length }}</span></button></nav>
+          <div class="workflow-editor-actions"><button :disabled="!!busy" @click="perform('save', saveCurrent)"><Save :size="16" />{{ busy === 'save' ? tr('保存中…', 'Saving…') : tr('保存', 'Save') }}</button><button :disabled="!!busy || !editorReady" :title="editorReady ? tr('自动保存并发布当前画布', 'Save and publish the current canvas') : configurationIssues.join('；')" @click="perform('publish', publishCurrent)"><Rocket :size="16" />{{ tr('发布', 'Publish') }}</button><button class="primary-button" :disabled="!!busy || !editorReady" :title="editorReady ? tr('自动保存并运行当前画布', 'Save and run the current canvas') : configurationIssues.join('；')" @click="perform('run', runCurrent)"><CirclePlay :size="16" />{{ tr('运行', 'Run') }}</button></div>
+        </header>
+
+        <section v-if="editorView === 'canvas'" class="workflow-body" :class="{ 'inspector-collapsed': !inspectorOpen }">
+      <aside class="workflow-palette workflow-node-bar" :aria-label="tr('添加流程步骤', 'Add workflow steps')">
+        <strong class="workflow-node-bar-label">{{ tr('添加步骤', 'Add step') }}</strong>
+        <button class="palette-node" :title="tr('选择什么时候运行', 'Choose when to run')" @click="addOrSelectTrigger"><span class="node-kind-icon">{{ nodeMeta(triggerPalette.type).icon }}</span><strong>{{ tr(triggerPalette.zh, triggerPalette.en) }}</strong></button>
+        <button v-for="item in palette" :key="item.type" class="palette-node" :title="paletteHelp(item.type)" @click="addNode(item.type)"><span class="node-kind-icon">{{ nodeMeta(item.type).icon }}</span><strong>{{ tr(item.zh, item.en) }}</strong></button>
+        <span class="tool-count" :data-loading="toolsLoading">{{ toolsLoading ? '…' : tr(`${informationTasks.length} 类信息可用`, `${informationTasks.length} information tasks`) }}</span>
+      </aside>
+
+      <section ref="workflowCanvas" class="workflow-canvas" :aria-label="tr('工作流画布', 'Workflow canvas')">
+        <aside class="workflow-readiness" :data-ready="editorReady"><strong>{{ editorReady ? tr('可以发布', 'Ready to publish') : tr(`还需完成 ${configurationIssues.length} 项`, `${configurationIssues.length} items remaining`) }}</strong><ul v-if="!editorReady"><li v-for="(issue, index) in configurationIssueItems" :key="`${issue.nodeId || 'workflow'}-${index}`"><button type="button" :disabled="!issue.nodeId" @click="focusConfigurationIssue(issue)">{{ issue.message }}</button></li></ul><small v-else>{{ tr('所有步骤的工具和必填参数都已配置', 'All tools and required fields are configured') }}</small></aside>
+        <div class="canvas-toolbar">
+          <button :disabled="!undoStack.length" :title="tr('撤销 Ctrl+Z', 'Undo Ctrl+Z')" @click="undo"><Undo2 :size="16" /></button>
+          <button :disabled="!redoStack.length" :title="tr('重做 Ctrl+Y', 'Redo Ctrl+Y')" @click="redo"><Redo2 :size="16" /></button>
+          <span />
+          <div class="canvas-pan-controls" :aria-label="tr('移动画布', 'Pan canvas')">
+            <button :title="tr('画布向左', 'Pan left')" @click="panCanvas(-120, 0)"><ArrowLeft :size="14" /></button>
+            <button :title="tr('画布向上', 'Pan up')" @click="panCanvas(0, -120)"><ArrowUp :size="14" /></button>
+            <button :title="tr('画布向下', 'Pan down')" @click="panCanvas(0, 120)"><ArrowDown :size="14" /></button>
+            <button :title="tr('画布向右', 'Pan right')" @click="panCanvas(120, 0)"><ArrowRight :size="14" /></button>
+          </div>
+          <span />
+          <button :title="tr('自动整理节点', 'Auto layout')" @click="autoLayout"><WandSparkles :size="16" />{{ tr('自动布局', 'Layout') }}</button>
+        </div>
+        <div class="canvas-interaction-hint">{{ tr('节点右侧可连接下一步 · 拖动空白网格移动 · Ctrl + 滚轮缩放', 'Connect from each node · Drag empty grid to pan · Ctrl + scroll to zoom') }}</div>
+        <div v-if="explicitConnection || connectionFeedback" class="workflow-connection-banner" :data-error="Boolean(connectionFeedback)" role="status">
+          <span><strong>{{ connectionFeedback || tr('请选择要连接的下一步', 'Choose the next step') }}</strong><small v-if="explicitConnection && !connectionFeedback">{{ tr('可连接的步骤已经高亮；点空白处或按 Esc 取消', 'Available steps are highlighted; click empty canvas or press Esc to cancel') }}</small></span>
+          <button type="button" @click="cancelExplicitConnection"><X :size="14" />{{ tr('取消', 'Cancel') }}</button>
+        </div>
+        <button v-if="!inspectorOpen" class="inspector-open-button" @click="inspectorOpen = true"><ArrowLeft :size="14" />{{ tr('节点详情', 'Node details') }}</button>
+        <VueFlow v-model:nodes="nodes" v-model:edges="edges" :min-zoom="0.25" :max-zoom="1.5" :default-viewport="{ x: 110, y: 110, zoom: 0.72 }" :pan-on-scroll="true" :pan-on-scroll-mode="PanOnScrollMode.Free" :pan-on-drag="[0, 1, 2]" :prevent-scrolling="true" :zoom-on-scroll="false" :zoom-on-pinch="true" :snap-to-grid="true" :snap-grid="[16, 16]" @connect="connect" @connect-start="onConnectStart" @connect-end="onConnectEnd" @move="scheduleInspectorBubblePosition" @node-drag="scheduleInspectorBubblePosition" @node-drag-start="recordHistory" @node-drag-stop="scheduleInspectorBubblePosition" @node-click="handleNodeClick($event.node.id)" @edge-click="selectEdge($event.edge.id)" @pane-click="closeInspectorFromCanvas">
+          <template #node-default="slotProps"><div class="workflow-node" :data-connection-source="explicitConnection?.sourceId === slotProps.id || undefined" :data-connection-target="explicitConnection ? isConnectionTarget(slotProps.id) : undefined" @pointerdown="handleNodePointerDown(slotProps.id)"><Handle type="target" :position="Position.Left" /><span class="workflow-node-icon">{{ nodeMeta(slotProps.type).icon }}</span><div class="workflow-node-copy"><small>{{ nodeMeta(slotProps.type).category }}</small><strong>{{ slotProps.label }}</strong><span>{{ nodeSummary(slotProps.type, slotProps.data?.config || {}) }}</span></div><button class="workflow-node-edit nodrag nopan" :title="tr('编辑这个节点', 'Edit this node')" @click.stop="selectNode(slotProps.id)"><Pencil :size="12" /></button><button class="workflow-node-connect nodrag nopan" type="button" @pointerdown.stop @click.stop="beginExplicitConnection(slotProps.id)">{{ tr('连接下一步', 'Connect next') }}<ArrowRight :size="11" /></button><Handle type="source" :position="Position.Right" /></div></template>
+          <template v-for="type in renderNodeTypes" :key="type" #[`node-${type}`]="slotProps"><div class="workflow-node" :data-node-type="type" :data-incomplete="incompleteNodeIds.has(slotProps.id)" :data-connection-source="explicitConnection?.sourceId === slotProps.id || undefined" :data-connection-target="explicitConnection ? isConnectionTarget(slotProps.id) : undefined" @pointerdown="handleNodePointerDown(slotProps.id)"><Handle v-if="type !== 'schedule_trigger'" id="input" type="target" :position="Position.Left" /><span v-if="incompleteNodeIds.has(slotProps.id)" class="node-config-status">{{ tr('待配置', 'Needs setup') }}</span><span class="workflow-node-icon">{{ nodeMeta(type).icon }}</span><div class="workflow-node-copy"><small>{{ nodeMeta(type).category }}</small><strong>{{ slotProps.label }}</strong><span>{{ nodeSummary(type, slotProps.data?.config || {}) }}</span></div><button class="workflow-node-edit nodrag nopan" :title="tr('编辑这个节点', 'Edit this node')" @click.stop="selectNode(slotProps.id)"><Pencil :size="12" /></button><div v-if="type === 'condition'" class="workflow-node-branch-actions nodrag nopan"><button type="button" :disabled="isConnectionBranchUsed(slotProps.id, 'true')" :title="isConnectionBranchUsed(slotProps.id, 'true') ? tr('“是”分支已经连接', 'Yes branch is connected') : tr('连接“是”分支', 'Connect Yes branch')" @pointerdown.stop @click.stop="beginExplicitConnection(slotProps.id, 'true')">{{ tr('连接 是', 'Connect Yes') }}</button><button type="button" :disabled="isConnectionBranchUsed(slotProps.id, 'false')" :title="isConnectionBranchUsed(slotProps.id, 'false') ? tr('“否”分支已经连接', 'No branch is connected') : tr('连接“否”分支', 'Connect No branch')" @pointerdown.stop @click.stop="beginExplicitConnection(slotProps.id, 'false')">{{ tr('连接 否', 'Connect No') }}</button></div><button v-else class="workflow-node-connect nodrag nopan" type="button" @pointerdown.stop @click.stop="beginExplicitConnection(slotProps.id)">{{ tr('连接下一步', 'Connect next') }}<ArrowRight :size="11" /></button><template v-if="type === 'condition'"><span class="condition-port condition-yes">{{ tr('是', 'YES') }}</span><Handle id="true" class="condition-handle condition-handle-yes" type="source" :position="Position.Right" /><span class="condition-port condition-no">{{ tr('否', 'NO') }}</span><Handle id="false" class="condition-handle condition-handle-no" type="source" :position="Position.Right" /></template><Handle v-else id="output" type="source" :position="Position.Right" /></div></template>
+          <template #edge-default="{ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition }">
+            <BaseEdge :id="id" :class="{ 'selected-workflow-edge': selectedEdgeId === id }" :path="getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[0]" />
+            <EdgeLabelRenderer><div class="edge-actions" :style="{ transform: `translate(-50%, -50%) translate(${getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[1]}px, ${getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[2]}px)` }"><button class="edge-add-button" :title="tr('在连线上插入节点', 'Insert node on edge')" @click.stop="openEdgeMenu(id, $event)"><Plus :size="13" /></button><button class="edge-delete-button" :title="tr('删除这条连线', 'Delete this connection')" @click.stop="deleteEdge(id)"><Trash2 :size="12" /></button></div></EdgeLabelRenderer>
+          </template>
+          <Background pattern-color="var(--line-strong)" :gap="20" /><MiniMap pannable zoomable /><Controls />
+        </VueFlow>
+        <div v-if="addMenu" class="quick-add-menu" :style="{ left: `${addMenu.x}px`, top: `${addMenu.y}px` }" @click.stop>
+          <header><div><span class="eyebrow">{{ tr('下一步', 'NEXT STEP') }}</span><strong>{{ tr('添加节点', 'Add node') }}</strong></div><button @click="addMenu = null"><X :size="15" /></button></header>
+          <button v-for="item in palette" :key="item.type" @click="addNode(item.type, { position: addMenu!.flowPosition, sourceId: addMenu!.sourceId, sourceHandle: addMenu!.sourceHandle, edgeId: addMenu!.edgeId })"><span class="node-kind-icon">{{ nodeMeta(item.type).icon }}</span><span><strong>{{ tr(item.zh, item.en) }}</strong><small>{{ paletteHelp(item.type) }}</small></span></button>
+        </div>
+      <div v-if="inspectorOpen && selected" class="workflow-node-bubble-shell" :data-placement="inspectorBubblePlacement" :style="inspectorBubbleStyle" @pointerdown.stop @wheel.stop>
+        <span class="workflow-node-bubble-arrow" />
+      <aside class="workflow-inspector workflow-node-bubble nodrag nopan nowheel" @focusin="recordHistory">
+        <template v-if="selected">
+          <header><div><span class="eyebrow">{{ tr('节点详情', 'NODE DETAILS') }}</span><h2>{{ selected.label }}</h2></div><div class="inspector-header-actions"><button class="icon-button" :title="tr('收起节点详情', 'Collapse node details')" @click="inspectorOpen = false"><X :size="16" /></button><button class="icon-button danger-text" :disabled="selected.type === 'schedule_trigger'" @click="deleteSelected"><Trash2 :size="17" /></button></div></header>
+          <section v-if="selectedConfigurationIssues.length" class="inspector-config-warning"><strong>{{ tr('这个节点还需要配置', 'This node needs setup') }}</strong><span v-for="issue in selectedConfigurationIssues" :key="issue.message">{{ issue.message }}</span></section>
+          <label>{{ tr('节点名称', 'Node label') }}<input v-model="selected.label" maxlength="80" /></label>
+          <template v-if="selected.type === 'schedule_trigger'">
+            <label>{{ tr('什么时候运行', 'When to run') }}<select :value="selected.data.config.schedule_mode" @change="changeScheduleMode"><option value="manual">{{ tr('只在我点击“立即运行”时', 'Only when I run it') }}</option><option value="every">{{ tr('每隔一段时间', 'Every interval') }}</option><option value="daily">{{ tr('每天固定时间', 'Every day') }}</option><option value="weekly">{{ tr('每周固定时间', 'Every week') }}</option><option value="monthly">{{ tr('每月固定时间', 'Every month') }}</option><option value="once">{{ tr('只执行一次', 'Run once') }}</option></select></label>
+            <div v-if="selected.data.config.schedule_mode === 'every'" class="workflow-inline-fields"><label>{{ tr('每隔', 'Every') }}<input v-model.number="selected.data.config.interval_amount" type="number" min="1" max="999" @change="syncScheduleConfig" /></label><label>{{ tr('时间单位', 'Unit') }}<select v-model="selected.data.config.interval_unit" @change="syncScheduleConfig"><option value="minutes">{{ tr('分钟', 'Minutes') }}</option><option value="hours">{{ tr('小时', 'Hours') }}</option><option value="days">{{ tr('天', 'Days') }}</option></select></label></div>
+            <DateTimePicker v-if="['daily', 'weekly', 'monthly'].includes(selected.data.config.schedule_mode)" :model-value="String(selected.data.config.time_of_day || '')" mode="time" :label="tr('几点运行', 'Run time')" :language="ui.language" @update:model-value="updateScheduleTime" />
+            <label v-if="selected.data.config.schedule_mode === 'weekly'">{{ tr('星期几', 'Weekday') }}<select v-model.number="selected.data.config.weekday" @change="syncScheduleConfig"><option :value="1">星期一</option><option :value="2">星期二</option><option :value="3">星期三</option><option :value="4">星期四</option><option :value="5">星期五</option><option :value="6">星期六</option><option :value="0">星期日</option></select></label>
+            <label v-if="selected.data.config.schedule_mode === 'monthly'">{{ tr('每月几号', 'Day of month') }}<input v-model.number="selected.data.config.day_of_month" type="number" min="1" max="28" @change="syncScheduleConfig" /><small>{{ tr('为避免短月份跳过，支持 1 至 28 号', 'Days 1-28 avoid skipped months') }}</small></label>
+            <DateTimePicker v-if="selected.data.config.schedule_mode === 'once'" :model-value="String(selected.data.config.run_at || '')" :label="tr('执行时间', 'Run at')" :language="ui.language" @update:model-value="updateSingleRunTime" />
+            <p class="workflow-field-help">{{ tr('系统会自动生成调度规则，你不需要填写定时表达式。', 'The schedule rule is generated automatically.') }}</p>
+          </template>
+          <template v-else-if="isOutputNode(selected.type)">
+            <label>{{ tr('结果怎么处理', 'Where should the result go') }}<select :value="deliveryModeFor(selected.type)" @change="changeDeliveryMode"><option value="result">{{ tr('保留在工作流运行结果中', 'Keep in workflow results') }}</option><option value="qq" :disabled="workflowCapabilities.qq_notification?.available !== true">{{ tr('发送到我的 QQ', 'Send to my QQ') }}</option><option value="notification" :disabled="workflowCapabilities.official_notification?.available === false">{{ tr('发送到我的通知邮箱', 'Send to my notification email') }}</option><option value="email" :disabled="!activeEmailConnections.length">{{ tr('使用我的个人邮箱发送', 'Send from my personal mailbox') }}</option></select></label>
+            <p v-if="deliveryModeFor(selected.type) === 'qq' && workflowCapabilities.qq_notification?.available === true" class="workflow-field-help">{{ tr('将发送到当前账号已经绑定的 QQ，不需要填写 QQ 号。QQ 平台接受请求后会记为执行成功。', 'Uses the QQ bound to this account; no QQ identifier is required.') }}</p>
+            <p v-else-if="deliveryModeFor(selected.type) === 'qq'" class="form-error">{{ workflowErrorLabel(workflowCapabilities.qq_notification?.code || 'WORKFLOW_QQ_CHANNEL_UNAVAILABLE') }} <button class="inline-settings-link" @click="openConnectionSettings">{{ tr('去连接', 'Connect') }}</button></p>
+            <p v-else-if="workflowCapabilities.qq_notification?.available !== true" class="workflow-field-help">{{ workflowErrorLabel(workflowCapabilities.qq_notification?.code || 'WORKFLOW_QQ_CHANNEL_UNAVAILABLE') }} <button class="inline-settings-link" @click="openConnectionSettings">{{ tr('去连接', 'Connect') }}</button></p>
+            <p v-if="deliveryModeFor(selected.type) === 'notification' && workflowCapabilities.official_notification?.available === false" class="form-error">{{ workflowErrorLabel(workflowCapabilities.official_notification.code) }}</p>
+            <p v-if="connectionsFailure" class="form-error">{{ connectionsFailure }}</p><p v-else-if="deliveryModeFor(selected.type) === 'result' && !activeEmailConnections.length" class="workflow-field-help">{{ tr('需要个人邮箱？请先在“连接与账号”中完成连接和测试。', 'Need personal email? Connect and test it under Connections & accounts first.') }} <button class="inline-settings-link" @click="openConnectionSettings">{{ tr('去连接', 'Connect') }}</button></p>
+            <label v-if="deliveryModeFor(selected.type) !== 'result' && deliveryModeFor(selected.type) !== 'qq'">{{ tr('标题', 'Subject') }}<input v-model="selected.data.config.subject" :placeholder="tr('例如：今日工作流结果', 'For example: Today’s workflow result')" /></label>
+            <template v-if="deliveryModeFor(selected.type) === 'email'">
+              <label>{{ tr('使用哪个发送账号', 'Sending account') }}<select v-model="selected.data.config.connection_id"><option value="">{{ activeEmailConnections.length ? tr('请选择发送账号', 'Choose an account') : tr('还没有可用的发送账号', 'No sending account available') }}</option><option v-for="connection in activeEmailConnections" :key="connection.id" :value="connection.id">{{ connection.account_display }}（SMTP）</option></select></label>
+              <label>{{ tr('收件人', 'Recipient') }}<input v-model="selected.data.config.to" type="email" placeholder="name@example.com" /></label>
+            </template>
+            <label>{{ tr('附加说明（可选）', 'Intro text (optional)') }}<textarea v-model="selected.data.config.content" rows="4" :placeholder="tr('例如：这是今天自动整理的结果', 'For example: Here is today’s automated result')" @input="syncDeliveryConfig()" /></label>
+            <p class="workflow-auto-input"><strong>{{ tr('自动使用上一步结果', 'Uses the previous step automatically') }}</strong><span>{{ selectedDirectInputLabel || tr('请先连接一个上一步', 'Connect a previous step') }}</span></p>
+            <p class="workflow-field-help">{{ tr('系统会发送连线直接接入的上一步结果，不需要选择内部变量。', 'The directly connected previous result is sent automatically.') }}</p>
+          </template>
+          <template v-else-if="selected.type === 'llm_transform'">
+            <p class="workflow-auto-input"><strong>{{ tr('自动整理为可读内容', 'Automatically creates readable content') }}</strong><span>{{ selectedDirectInputLabel ? tr(`使用“${selectedDirectInputLabel}”的结果`, `Uses “${selectedDirectInputLabel}”`) : tr('请先连接一个上一步', 'Connect a previous step') }}</span></p>
+            <p class="workflow-field-help">{{ tr('默认生成适合邮件和消息直接阅读的纯文本，去掉 Markdown、JSON、内部字段和代码形式，保留日期、数值、单位与关键建议。', 'Creates plain text for email and messages while removing Markdown, JSON, internal fields, and code.') }}</p>
+            <details class="workflow-optional-settings">
+              <summary>{{ tr('调整处理规则（可选）', 'Adjust processing rules (optional)') }}</summary>
+              <label>{{ tr('想得到什么', 'Task') }}<select v-model="selected.data.config.task" @change="syncTransformInstruction"><option value="advice">{{ tr('生成生活建议', 'Create practical advice') }}</option><option value="summary">{{ tr('生成摘要', 'Summarize') }}</option><option value="key_points">{{ tr('提取重点', 'Extract key points') }}</option><option value="rewrite">{{ tr('润色改写', 'Rewrite') }}</option><option value="classify">{{ tr('分类整理', 'Classify') }}</option><option value="custom">{{ tr('自定义要求', 'Custom') }}</option></select></label>
+              <section v-if="selected.data.config.task === 'advice'" class="advice-settings">
+                <span>{{ tr('需要哪些建议', 'Advice topics') }}</span>
+                <label><input type="checkbox" :checked="selected.data.config.advice_topics?.includes('umbrella')" @change="toggleAdviceTopic('umbrella', $event)" />{{ tr('带伞与天气风险', 'Umbrella and weather risks') }}</label>
+                <label><input type="checkbox" :checked="selected.data.config.advice_topics?.includes('clothing')" @change="toggleAdviceTopic('clothing', $event)" />{{ tr('穿衣建议', 'Clothing') }}</label>
+                <label><input type="checkbox" :checked="selected.data.config.advice_topics?.includes('travel')" @change="toggleAdviceTopic('travel', $event)" />{{ tr('出行建议', 'Travel') }}</label>
+                <div class="workflow-inline-fields"><label>{{ tr('主要出行方式', 'Travel mode') }}<select v-model="selected.data.config.commute_mode" @change="syncTransformInstruction"><option value="general">{{ tr('一般出行', 'General') }}</option><option value="walk">{{ tr('步行', 'Walking') }}</option><option value="bicycle">{{ tr('骑行', 'Cycling') }}</option><option value="transit">{{ tr('公交或地铁', 'Public transit') }}</option><option value="drive">{{ tr('开车', 'Driving') }}</option></select></label><label>{{ tr('体感偏好', 'Temperature preference') }}<select v-model="selected.data.config.temperature_preference" @change="syncTransformInstruction"><option value="cold">{{ tr('比较怕冷', 'Feels cold easily') }}</option><option value="normal">{{ tr('正常', 'Typical') }}</option><option value="hot">{{ tr('比较怕热', 'Feels hot easily') }}</option></select></label></div>
+                <label>{{ tr('补充要求（可选）', 'Additional needs (optional)') }}<textarea v-model="selected.data.config.additional_instruction" rows="3" :placeholder="tr('例如：需要接送孩子，重点提醒早晚天气', 'For example: focus on school drop-off times')" @input="syncTransformInstruction" /></label>
+              </section>
+              <div v-if="selected.data.config.task !== 'custom'" class="workflow-inline-fields"><label>{{ tr('表达风格', 'Tone') }}<select v-model="selected.data.config.tone" @change="syncTransformInstruction"><option value="plain">{{ tr('清晰自然', 'Clear') }}</option><option value="professional">{{ tr('专业正式', 'Professional') }}</option><option value="friendly">{{ tr('亲切易懂', 'Friendly') }}</option></select></label><label>{{ tr('结果长度', 'Length') }}<select v-model="selected.data.config.output_length" @change="syncTransformInstruction"><option value="short">{{ tr('简短', 'Short') }}</option><option value="medium">{{ tr('适中', 'Medium') }}</option><option value="long">{{ tr('详细', 'Detailed') }}</option></select></label></div>
+              <label v-else>{{ tr('具体要求', 'Custom instruction') }}<textarea v-model="selected.data.config.custom_instruction" rows="5" :placeholder="tr('例如：按城市分组，保留价格和来源', 'For example: group by city and keep prices and sources')" @input="syncTransformInstruction" /></label>
+            </details>
+          </template>
+          <template v-else-if="selected.type === 'condition'">
+            <label>{{ tr('判断哪个步骤的结果', 'Result to check') }}<select :value="selected.data.config.left" @change="selectResult('left', $event)"><option value="">{{ tr('请选择前面的步骤', 'Choose a previous step') }}</option><option v-for="option in variableOptions" :key="option.nodeId" :value="option.value">{{ option.label }}</option></select></label>
+            <label>{{ tr('判断方式', 'Operator') }}<select v-model="selected.data.config.operator"><option value="eq">{{ tr('等于', 'Equals') }}</option><option value="ne">{{ tr('不等于', 'Does not equal') }}</option><option value="contains">{{ tr('包含', 'Contains') }}</option><option value="is_empty">{{ tr('没有内容', 'Is empty') }}</option><option value="gt">{{ tr('大于', 'Greater than') }}</option><option value="gte">{{ tr('大于或等于', 'Greater than or equal') }}</option><option value="lt">{{ tr('小于', 'Less than') }}</option><option value="lte">{{ tr('小于或等于', 'Less than or equal') }}</option></select></label>
+            <label v-if="selected.data.config.operator !== 'is_empty'">{{ tr('要比较的内容', 'Compare with') }}<input v-model="selected.data.config.right" :placeholder="tr('输入文字或数字', 'Enter text or a number')" /></label>
+            <p class="workflow-field-help">{{ tr('条件成立走“是”分支，不成立走“否”分支。', 'True follows Yes; false follows No.') }}</p>
+          </template>
+          <template v-else-if="selected.type === 'mcp_query'">
+            <div class="tool-live-status" :data-ready="selectedToolValid"><span class="run-dot" />{{ selectedToolValid ? tr('当前账号可以使用，填写下面的信息即可', 'Available to this account; complete the fields below') : selectedTool ? tr('查询规则已更新，请重新选择并检查内容', 'The query rules changed; select it again and review') : tr('请选择你想获取的信息', 'Choose what information you want') }}</div>
+            <div class="information-task-grid"><button v-for="task in informationTasks" :key="task.id" :class="{ active: selected.data.config.tool_name === task.tool }" @click="selectInformationTask(task.item)"><span>{{ task.icon }}</span><strong>{{ tr(task.zh, task.en) }}</strong><small>{{ task.help }}</small></button></div>
+            <p v-if="!informationTasks.length" class="form-error">{{ tr('当前没有通过真实连接检查的信息能力。', 'No information capability passed the live connection check.') }}</p>
+            <section v-if="selectedTool" class="selected-tool-card"><header><span>{{ workflowToolProvider(selectedTool.name) }}</span><em>{{ selectedTool.kind === 'action' ? tr('会产生外部操作', 'External action') : tr('只读查询', 'Read-only query') }}</em></header><strong>{{ workflowToolName(selectedTool) }}</strong><p>{{ workflowToolHelp(selectedTool.name, selectedTool.description) }}</p></section>
+            <div v-if="selectedTool" class="schema-fields"><label v-for="field in selectedToolFields" :key="field.key"><span>{{ field.label }}</span><small v-if="field.required">{{ tr('必填', 'Required') }}</small><select v-if="field.options" :value="toolArgument(field.key)" @change="updateToolArgument(field.key, { type: 'string' }, $event)"><option value="">{{ tr('使用默认设置', 'Use default') }}</option><option v-for="option in field.options" :key="option.value" :value="option.value">{{ option.label }}</option></select><input v-else-if="field.type !== 'boolean'" :type="field.type" :min="field.min" :max="field.max" :placeholder="field.hint" :value="toolArgument(field.key)" @input="updateToolArgument(field.key, { type: field.type }, $event)" /><input v-else type="checkbox" :checked="Boolean(toolArgument(field.key))" @change="updateToolArgument(field.key, { type: 'boolean' }, $event)" /></label></div>
+            <button v-if="selectedTool?.kind === 'query'" class="tool-test-button" :disabled="busy === 'tool-test' || !selectedToolValid" @click="testSelectedTool"><CirclePlay :size="14" />{{ busy === 'tool-test' ? tr('测试中…', 'Testing…') : tr('测试查询结果', 'Test query') }}</button><section v-if="toolTestSummary" class="tool-test-summary"><strong>{{ tr('查询成功', 'Query succeeded') }}</strong><p>{{ toolTestSummary }}</p><details><summary>{{ tr('查看详细响应', 'View full response') }}</summary><pre class="tool-test-result">{{ toolTestResult }}</pre></details></section>
+          </template>
+          <template v-else-if="selected.type === 'mcp_action'">
+            <p class="workflow-field-help">{{ tr('这里只展示已经审核并且当前账号真实可用的操作。', 'Only reviewed actions available to this account are shown.') }}</p>
+            <label>{{ tr('选择要执行的操作', 'Choose an action') }}<select :value="selected.data.config.tool_name || ''" @change="selectTool"><option value="">{{ visibleTools.length ? tr('请选择操作', 'Choose an action') : tr('当前没有可用操作', 'No actions available') }}</option><option v-for="tool in visibleTools" :key="tool.name" :value="tool.name">{{ workflowToolName(tool) }}</option></select></label>
+            <section v-if="selectedTool" class="selected-tool-card"><strong>{{ workflowToolName(selectedTool) }}</strong><p>{{ workflowToolHelp(selectedTool.name, selectedTool.description) }}</p></section>
+            <div v-if="selectedTool" class="schema-fields"><label v-for="field in selectedToolFields" :key="field.key"><span>{{ field.label }}</span><small v-if="field.required">{{ tr('必填', 'Required') }}</small><input :type="field.type === 'number' ? 'number' : 'text'" :placeholder="field.hint" :value="toolArgument(field.key)" @input="updateToolArgument(field.key, { type: field.type }, $event)" /></label></div>
+          </template>
+          <p v-else>{{ tr('这个步骤暂时没有需要填写的内容。', 'This step has no editable fields.') }}</p>
+          <p>{{ tr('这里只会运行平台提供的安全步骤，不会执行自定义程序或访问本地文件。', 'Only reviewed platform steps can run; custom programs and local files are not accessible.') }}</p>
+        </template>
+        <p v-else>{{ tr('选择一个节点以编辑属性。', 'Select a node to edit its properties.') }}</p>
+        <label v-if="hasAction" class="workflow-consent"><input v-model="actionConsent" type="checkbox" />{{ actionConsentLabel }}</label>
+      </aside>
+      </div>
+      </section>
+    </section>
+
+        <section v-else class="workflow-timeline">
+      <header><div><History :size="16" /><strong>{{ tr('执行记录', 'Run history') }}</strong><span v-if="store.runs.length">{{ store.runs.length }}</span></div><button :disabled="!store.current || !!busy" @click="showRunHistory"><RefreshCw :size="15" />{{ tr('刷新', 'Refresh') }}</button></header>
+      <p v-if="configurationIssues.length" class="workflow-issues-summary" role="status">{{ tr(`发布前还需完成 ${configurationIssues.length} 项配置。`, `${configurationIssues.length} configuration items remain.`) }}</p><p v-if="failure" class="form-error" role="alert">{{ failure }}</p>
+      <div v-if="store.runs.length" class="workflow-run-layout"><div class="workflow-runs"><button v-for="run in store.runs" :key="run.run_id" :class="{ active: (store.runDetail?.id || store.runDetail?.run_id) === run.run_id }" @click="perform('run-detail', () => store.openRun(run.run_id))"><span class="run-dot" :data-status="run.status" /><strong>{{ workflowRunStatusLabel(run.status) }}</strong><span>{{ workflowTriggerLabel(run.trigger_type) }}</span><small>{{ workflowTimeLabel(run.started_at) }}</small></button></div><div v-if="store.runDetail" class="run-detail"><strong>{{ tr('执行记录', 'Execution steps') }}</strong><div v-for="node in store.runDetail.nodes || []" :key="`${node.node_id}-${node.attempt}`"><span class="run-dot" :data-status="node.status" /><b>{{ runNodeLabel(node.node_id, node.node_type) }}</b><small>{{ workflowRunStatusLabel(node.status) }} · {{ workflowTimeLabel(node.started_at) }}</small></div><p v-if="!(store.runDetail.nodes || []).length">{{ tr('本次运行还没有步骤记录。', 'No step records for this run yet.') }}</p></div></div>
+      <p v-else>{{ tr('尚无运行记录。发布后可以立即运行，也可以设置指定时间、固定间隔或周期定时。', 'No runs yet. Publish and run now, or choose a supported schedule.') }}</p>
+        </section>
+      </section>
+      <section v-else class="workflow-detail-loading" aria-live="polite"><span class="eyebrow">{{ tr('工作流编辑器', 'WORKFLOW EDITOR') }}</span><strong>{{ failure || tr('正在加载工作流…', 'Loading workflow…') }}</strong><button v-if="failure" @click="router.push({ name: 'workflows' })">{{ tr('返回工作流总览', 'Back to workflows') }}</button></section>
+    </div>
+  </main>
+</template>

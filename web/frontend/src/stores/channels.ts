@@ -50,8 +50,10 @@ export const useChannelStore = defineStore("channels", {
         if (weixin.status === "fulfilled") this.weixin = weixin.value;
         else {
           this.weixin = { status: "unavailable", linked_at: "" };
-          const message = weixin.reason instanceof Error ? weixin.reason.message : "微信状态读取失败";
-          this.error = [this.error, message].filter(Boolean).join("；");
+          if (!(weixin.reason instanceof ApiError && weixin.reason.code === "CHANNEL_WEIXIN_UNAVAILABLE")) {
+            const message = weixin.reason instanceof Error ? weixin.reason.message : "微信状态读取失败";
+            this.error = [this.error, message].filter(Boolean).join("；");
+          }
         }
       } finally {
         this.busy = false;

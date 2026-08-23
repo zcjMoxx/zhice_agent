@@ -1,5 +1,7 @@
 # 智策 Agent 拖拽工作流、定时调度与用户连接设计
 
+> 说明：该方案已进入当前代码基线；实现事实与运行边界以 `zhice-agent-part20-visual-workflow-scheduler-design.md` 为准，2026-08-19 的成熟编辑器交互移植见 `2026-08-19-visual-workflow-editor-interaction-design.md`，本文正文保留当时方案与验收设计。
+
 > 日期：2026-08-10
 >
 > 状态：方案已确认，尚未实现

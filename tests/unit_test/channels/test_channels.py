@@ -25,6 +25,7 @@ from agent.channels.limits import SlidingWindowRateLimiter
 from agent.channels.manager import ChannelManager
 from agent.channels.qq.adapter import QQChannelAdapter
 from agent.channels.qq.attachments import QQAttachmentError, _validate_public_http_url
+from agent.channels.qq.notification import QQNotificationProvider
 from agent.channels.qq.outbound import (
     QQOutboundButton,
     QQOutboundMessage,
@@ -1017,6 +1018,80 @@ def test_botpy_none_reply_is_unconfirmed_and_not_retried(caplog):
         for record in caplog.records
         if getattr(record, "event", "").startswith("channel.qq.send_")
     ] == ["channel.qq.send_start", "channel.qq.send_unconfirmed"]
+
+
+def test_botpy_proactive_text_uses_c2c_api_without_source_message_id(monkeypatch):
+    calls = []
+
+    class FakeAPI:
+        async def post_c2c_message(self, **kwargs):
+            calls.append(kwargs)
+            return {"id": "accepted-message"}
+
+    class FakeFuture:
+        def __init__(self, coroutine):
+            self.coroutine = coroutine
+
+        def result(self, *, timeout):
+            assert timeout == 15
+            return asyncio.run(self.coroutine)
+
+    loop = SimpleNamespace(is_running=lambda: True)
+    monkeypatch.setattr(
+        "agent.channels.qq.transport.asyncio.run_coroutine_threadsafe",
+        lambda coroutine, current_loop: FakeFuture(coroutine)
+        if current_loop is loop
+        else None,
+    )
+    transport = BotpyQQTransport(_Account())
+    transport._client = SimpleNamespace(
+        api=FakeAPI(),
+        loop=loop,
+        is_closed=lambda: False,
+    )
+    transport._thread = SimpleNamespace(is_alive=lambda: True)
+
+    assert transport.send_proactive_text("private-openid", "今日天气晴") == {
+        "id": "accepted-message"
+    }
+    assert calls == [
+        {"openid": "private-openid", "msg_type": 0, "content": "今日天气晴"}
+    ]
+    assert "msg_id" not in calls[0]
+
+
+def test_qq_notification_provider_uses_current_binding_and_returns_safe_result(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("owner", "Owner", "password-123")
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="private-openid",
+    )
+    transport = SimpleNamespace(calls=[])
+    transport.send_proactive_text = lambda target, content: transport.calls.append(
+        (target, content)
+    ) or {"id": "platform-message"}
+    adapter = SimpleNamespace(
+        account=_Account(),
+        transport=transport,
+        status=lambda: CapabilityStatus("qq.main", "available"),
+    )
+    provider = QQNotificationProvider(ExternalIdentityService(store))
+    provider.register_adapters((adapter,))
+    actor = store.actor_for_user(user.id, channel="workflow")
+
+    assert provider.capability(actor) == {
+        "available": True,
+        "bound": True,
+        "code": "",
+    }
+    assert provider.send_to_user(user_id=user.id, content="**今日建议**") == {
+        "status": "accepted",
+        "channel": "qq",
+    }
+    assert transport.calls == [("private-openid", "**今日建议**")]
 
 
 def test_botpy_group_markdown_fallback_keeps_trigger_reference():

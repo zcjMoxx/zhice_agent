@@ -13,6 +13,8 @@ from threading import Event, Lock
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+import yaml
+
 from agent.app.auth import AuthService, local_operator_actor
 from agent.applications.travel import (
     TravelApplicationService,
@@ -54,12 +56,17 @@ from agent.auth.store import SQLiteAuthStore
 from agent.auth.tool_policy import RbacToolExecutionPolicy
 from agent.auth.user_context import FilesystemUserContextResolver
 from agent.config import AppConfig, sync_managed_application_prompts
+from agent.connections.crypto import CredentialCipher, load_master_key
+from agent.connections.protocols import ConnectionError
+from agent.connections.runtime import ConnectionRuntime
+from agent.connections.store import SQLiteConnectionStore
 from agent.context.config import load_context_config
 from agent.context.startup import check_context_engineering_startup
 from agent.core.context import DEFAULT_CONTEXT_PROMPTS, ContextBuilder
 from agent.core.loop import AgentLoop, CancellationToken
 from agent.core.turns import new_turn_id
 from agent.hooks import create_hook_runtime
+from agent.integrations.email.official_smtp import OfficialSMTPEmailProvider
 from agent.llm.runtime import (
     create_configured_llm_provider,
     create_optional_aliased_llm_provider,
@@ -121,6 +128,15 @@ from agent.tools import (
     with_tool_discovery,
 )
 from agent.tools.registry import ToolRegistry
+from agent.workflows import (
+    WorkflowAuthorizationPolicy,
+    WorkflowExecutor,
+    WorkflowRuntime,
+    WorkflowScheduler,
+    WorkflowStore,
+)
+from agent.workflows.nodes import NodeHandlers
+from agent.workflows.tool_inputs import with_required_query_helpers
 
 DEFAULT_WEB_HISTORY_MESSAGES = 60
 TRAVEL_INTAKE_PHASE = "intake"
@@ -683,6 +699,8 @@ class WebRuntime:
     travel_requirement_extractor: TravelRequirementExtractor | None = None
     xhs_sidecar: LocalXhsSidecarSupervisor | None = None
     hotel_accounts: HotelAccountSupervisor | None = None
+    connection_runtime: ConnectionRuntime | None = None
+    workflow_runtime: WorkflowRuntime | None = None
 
     def __post_init__(self) -> None:
         self._active_turns: dict[tuple[str, str], ActiveTurn] = {}
@@ -3040,6 +3058,11 @@ class WebRuntime:
             self.xhs_sidecar.stop()
         if self.hotel_accounts is not None:
             self.hotel_accounts.stop()
+        if self.workflow_runtime is not None:
+            scheduler = getattr(self.workflow_runtime, "scheduler", None)
+            if scheduler is not None:
+                scheduler.shutdown()
+            self.workflow_runtime.executor.shutdown()
 
     def submit_mcp_interaction(
         self,
@@ -3159,6 +3182,16 @@ def _aggregate_qq_channel_status(
     )
 
 
+def _build_connection_runtime(config: AppConfig) -> ConnectionRuntime | None:
+    """Enable personal SMTP connections only when the encryption key is valid."""
+
+    try:
+        cipher = CredentialCipher(load_master_key())
+    except ConnectionError:
+        return None
+    return ConnectionRuntime(SQLiteConnectionStore(config.connections_db_path, cipher))
+
+
 def build_web_runtime(
     config: AppConfig,
     *,
@@ -3253,6 +3286,12 @@ def build_web_runtime(
         workspace_dir=config.workspace,
     )
     session_access = SessionAccessService(auth_store, user_contexts)
+    from agent.channels import ExternalIdentityService, load_channel_configuration
+    from agent.channels.qq import QQNotificationProvider
+
+    channel_config = load_channel_configuration(config.config_dir)
+    identity = ExternalIdentityService(auth_store)
+    qq_notification_provider = QQNotificationProvider(identity)
     travel_service = TravelApplicationService(travel_config, user_contexts)
     travel_requirement_extractor = (
         TravelRequirementExtractor(llm, prompt_loader) if travel_config.enabled else None
@@ -3300,6 +3339,167 @@ def build_web_runtime(
         audit_sink=audit_sink,
         hook_runtime=hook_runtime,
     )
+    connection_runtime = _build_connection_runtime(config)
+    official_email_provider = None
+    official_host = os.getenv("ZHICE_SMTP_HOST", "").strip()
+    official_username = os.getenv("ZHICE_SMTP_USERNAME", "").strip()
+    official_password = os.getenv("ZHICE_SMTP_PASSWORD", "")
+    official_from = os.getenv("ZHICE_SMTP_FROM", "").strip()
+    if official_host and official_username and official_password and official_from:
+        official_port = int(os.getenv("ZHICE_SMTP_PORT", "587"))
+        official_email_provider = OfficialSMTPEmailProvider(
+            host=official_host,
+            port=official_port,
+            security="tls" if official_port == 465 else "starttls",
+            username=official_username,
+            app_password=official_password,
+            from_address=official_from,
+        )
+    workflow_runtime = None
+    workflow_config: dict[str, Any] = {}
+    try:
+        config_payload = yaml.safe_load(config.mcp_config_path.read_text(encoding="utf-8")) or {}
+        workflow_config = dict(config_payload.get("workflows") or {})
+    except (OSError, ValueError, yaml.YAMLError):
+        workflow_config = {}
+    if bool(workflow_config.get("enabled", False)):
+        workflow_store = WorkflowStore(config.workflows_db_path)
+        workflow_policy = WorkflowAuthorizationPolicy(
+            query_tools=with_required_query_helpers(
+                {str(item) for item in workflow_config.get("allowed_query_tools", [])}
+            ),
+            action_tools=frozenset(str(item) for item in workflow_config.get("allowed_action_tools", [])),
+        )
+
+        def workflow_executor_for(actor: ActorContext) -> WorkflowExecutor:
+            user_context = user_contexts.resolve(str(actor.user_id))
+            workflow_tools = UserScopedToolProvider(
+                files_dir=user_context.files_dir,
+                shared_readonly_dir=user_context.shared_readonly_dir,
+                actor=actor,
+                skills=skill_loader.for_actor(actor),
+                skill_sync=skill_sync,
+                diagnostics=diagnostics,
+                system_diagnostics=system_diagnostics,
+                extra_tools=mcp_runtime.tools_for_actor(actor, user_context.files_dir),
+            )
+
+            def personal_email(**values: Any) -> Any:
+                if connection_runtime is None:
+                    raise RuntimeError("CONNECTION_CREDENTIAL_KEY_MISSING")
+                from agent.connections.protocols import EmailMessage
+
+                connection_id = str(values.pop("connection_id"))
+                values.pop("owner_user_id", None)
+                provider = connection_runtime.personal_email_provider(actor, connection_id)
+                raw_recipients = values.get("to") or values.get("recipients") or ()
+                recipients = (
+                    (raw_recipients,)
+                    if isinstance(raw_recipients, str)
+                    else tuple(raw_recipients)
+                )
+                return provider.send(EmailMessage(recipients, str(values.get("subject", "")), str(values.get("body") or values.get("text") or ""), values.get("html")))
+
+            def official_email(**values: Any) -> Any:
+                if official_email_provider is None:
+                    raise RuntimeError("OFFICIAL_EMAIL_NOT_CONFIGURED")
+                recipient = auth_store.notification_email(str(values.get("owner_user_id")))
+                if not recipient:
+                    raise RuntimeError("NOTIFICATION_EMAIL_NOT_VERIFIED")
+                from agent.connections.protocols import EmailMessage
+
+                return official_email_provider.send(EmailMessage((recipient,), str(values.get("subject", "")), str(values.get("body", ""))))
+
+            def qq_notification(**values: Any) -> Any:
+                return qq_notification_provider.send_to_user(
+                    user_id=str(values.get("owner_user_id") or ""),
+                    content=str(values.get("body") or values.get("text") or ""),
+                )
+
+            handlers = NodeHandlers(
+                actor=actor,
+                policy=workflow_policy,
+                tools=workflow_tools,
+                llm=llm,
+                official_email=official_email,
+                personal_email=personal_email,
+                qq_notification=qq_notification,
+            )
+            return WorkflowExecutor(
+                workflow_store,
+                handlers,
+                max_workers=int(workflow_config.get("max_global_workers", 4)),
+            )
+
+        baseline_executor = workflow_executor_for(operator)
+
+        def workflow_capabilities(actor: ActorContext) -> dict[str, Any]:
+            official_code = ""
+            if official_email_provider is None:
+                official_code = "OFFICIAL_EMAIL_NOT_CONFIGURED"
+            elif not auth_store.notification_email(str(actor.user_id)):
+                official_code = "NOTIFICATION_EMAIL_NOT_VERIFIED"
+            capability_executor = workflow_executor_for(actor)
+            try:
+                live_tool_names = {
+                    str(item.get("function", item).get("name", ""))
+                    for item in (capability_executor.handlers.tools.definitions() if capability_executor.handlers.tools else [])
+                }
+            finally:
+                capability_executor.shutdown()
+            live_actions = workflow_policy.action_tools.intersection(live_tool_names)
+            return {
+                "official_notification": {
+                    "available": not official_code,
+                    "code": official_code,
+                },
+                "personal_email": {
+                    "available": connection_runtime is not None,
+                    "code": "" if connection_runtime is not None else "CONNECTION_PROVIDER_UNSUPPORTED",
+                },
+                "qq_notification": qq_notification_provider.capability(actor),
+                "external_actions": {
+                    "available": bool(live_actions),
+                    "count": len(live_actions),
+                },
+            }
+
+        def validate_workflow_notification(
+            actor: ActorContext, channel: str
+        ) -> None:
+            if channel != "qq":
+                raise RuntimeError("WORKFLOW_NOTIFICATION_PROVIDER_UNSUPPORTED")
+            qq_notification_provider.validate(actor)
+
+        workflow_runtime = WorkflowRuntime(
+            workflow_store,
+            baseline_executor,
+            workflow_policy,
+            executor_factory=workflow_executor_for,
+            capability_provider=workflow_capabilities,
+            connection_validator=(
+                connection_runtime.validate_email_connection
+                if connection_runtime is not None
+                else None
+            ),
+            notification_validator=validate_workflow_notification,
+        )
+
+        def scheduled_workflow_run(workflow_id: str, scheduled_for: str) -> None:
+            definition = workflow_store.get_published(workflow_id)
+            if definition is None:
+                return
+            scheduled_actor = auth_store.actor_for_user(definition.owner_user_id, channel="workflow")
+            workflow_runtime.run(scheduled_actor, workflow_id)
+
+        scheduler = WorkflowScheduler(
+            workflow_store,
+            scheduled_workflow_run,
+            workspace=config.workspace,
+            max_workers=int(workflow_config.get("max_global_workers", 4)),
+        )
+        scheduler.start()
+        workflow_runtime.scheduler = scheduler
     runtime = WebRuntime(
         config=config,
         sessions=session_store,
@@ -3331,6 +3531,8 @@ def build_web_runtime(
         travel_requirement_extractor=travel_requirement_extractor,
         xhs_sidecar=xhs_sidecar,
         hotel_accounts=hotel_accounts,
+        connection_runtime=connection_runtime,
+        workflow_runtime=workflow_runtime,
         memory_extraction_enabled=memory_extraction_startup.enabled,
         mcp_runtime=mcp_runtime,
     )
@@ -3339,14 +3541,10 @@ def build_web_runtime(
         ChannelDedupService,
         ChannelManager,
         ChannelRuntimeAdapter,
-        ExternalIdentityService,
-        load_channel_configuration,
     )
     from agent.channels.qq import build_qq_adapters
     from agent.channels.weixin import build_weixin_adapter
 
-    channel_config = load_channel_configuration(config.config_dir)
-    identity = ExternalIdentityService(auth_store)
     conversations = ChannelConversationService(auth_store, session_access)
     dedup = ChannelDedupService(auth_store)
     channel_runtime = ChannelRuntimeAdapter(runtime, conversations)
@@ -3357,6 +3555,7 @@ def build_web_runtime(
         dedup,
         channel_runtime,
     )
+    qq_notification_provider.register_adapters(adapters)
     weixin_adapter, weixin_binding, weixin_status = build_weixin_adapter(
         channel_config.weixin,
         config.workspace,

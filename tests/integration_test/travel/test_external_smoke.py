@@ -9,6 +9,12 @@ import pytest
 from agent.mcp.runtime import McpRuntime
 from agent.protocols.auth import ActorContext
 from agent.protocols.mcp import McpServerSpec
+from agent.tools.registry import ToolRegistry
+from agent.workflows.authorization import WorkflowAuthorizationPolicy
+from agent.workflows.catalog import schema_hash
+from agent.workflows.nodes import NodeHandlers
+from agent.workflows.schemas import WorkflowNode
+from agent.workflows.tool_inputs import with_required_query_helpers
 
 pytestmark = pytest.mark.integration
 
@@ -65,6 +71,50 @@ def test_real_open_meteo_query_smoke(tmp_path):
         runtime.close()
 
 
+def test_real_workflow_weather_place_name_smoke(tmp_path):
+    _enabled("OPEN_METEO")
+    runtime = McpRuntime(
+        [McpServerSpec(server_id="open-meteo", transport="stdio", command=sys.executable, args=("-m", "integrations.open_meteo_mcp.server"), startup_timeout_seconds=20, connect_timeout_seconds=15, call_timeout_seconds=30)],
+        workspace=tmp_path,
+    )
+    try:
+        _assert_ready(runtime, "open-meteo")
+        tools = ToolRegistry(runtime.tools_for_actor(_actor(), tmp_path / "files"))
+        definition = next(
+            item["function"]
+            for item in tools.definitions()
+            if item["function"]["name"] == "mcp__open-meteo__get_forecast"
+        )
+        handlers = NodeHandlers(
+            actor=_actor(),
+            policy=WorkflowAuthorizationPolicy(
+                query_tools=with_required_query_helpers(
+                    {"mcp__open-meteo__get_forecast"}
+                )
+            ),
+            tools=tools,
+        )
+        output = handlers.execute(
+            WorkflowNode(
+                "weather",
+                "mcp_query",
+                config={
+                    "tool_name": definition["name"],
+                    "input_schema_hash": schema_hash(definition["parameters"]),
+                    "arguments": {"place_name": "上海", "forecast_days": 2},
+                },
+            ),
+            {},
+            {},
+            run_id="workflow-weather-smoke",
+        )
+        assert output["status"] == "success"
+        assert output["latitude"] is not None
+        assert output["longitude"] is not None
+    finally:
+        runtime.close()
+
+
 def test_real_xhs_login_search_detail_and_expired_cookie_smoke(tmp_path):
     _enabled("XHS", required=("XHS_READONLY_UPSTREAM_URL", "XHS_READONLY_COOKIE_DIR", "XHS_READONLY_COOKIE_FILE", "XHS_SMOKE_FEED_ID", "XHS_SMOKE_XSEC_TOKEN"))
     env = {key: os.environ[key] for key in ("XHS_READONLY_UPSTREAM_URL", "XHS_READONLY_COOKIE_DIR", "XHS_READONLY_COOKIE_FILE")}
@@ -111,4 +161,3 @@ def _assert_ready(runtime, server_id):
 
 def _actor():
     return ActorContext(actor_type="user", user_id="smoke-user", username="smoke", display_name="Smoke", role_keys=frozenset({"viewer"}), permission_keys=frozenset(), channel="web")
-

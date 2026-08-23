@@ -1085,6 +1085,30 @@ class SQLiteAuthStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_active_external_identity_for_user(
+        self, *, user_id: str, channel: str
+    ) -> dict[str, Any] | None:
+        """Return one server-only delivery identity for the named user and channel.
+
+        Unlike ``list_external_identities_for_user``, this method includes the
+        external tenant and user identifiers. It is intentionally used only by
+        internal channel providers and must not be returned by REST handlers.
+        """
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, user_id, channel, external_tenant_id, external_user_id,
+                       external_display_name, linked_at
+                FROM external_identities
+                WHERE user_id=? AND channel=? AND status='active'
+                ORDER BY linked_at DESC
+                LIMIT 1
+                """,
+                (user_id, channel),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def unlink_external_identity_for_user(self, *, identity_id: str, user_id: str) -> bool:
         """Disable one identity only when it belongs to the requesting user."""
 
@@ -2309,6 +2333,38 @@ class SQLiteAuthStore:
             (user_id,),
         ).fetchall()
         return tuple(str(row[0]) for row in rows)
+
+    def upsert_notification_email(self, user_id: str, address: str, *, verified: bool = False, is_default: bool = True) -> dict[str, Any]:
+        """Create or update one owner-scoped notification address."""
+
+        normalized = address.strip().lower()
+        if "@" not in normalized or len(normalized) > 320:
+            raise AuthStoreError("invalid notification email")
+        now = _utc_now()
+        with self._connect() as connection:
+            if is_default:
+                connection.execute("UPDATE user_notification_endpoints SET is_default=0 WHERE user_id=? AND type='email'", (user_id,))
+            endpoint_id = "notify-" + uuid.uuid4().hex
+            connection.execute(
+                """INSERT INTO user_notification_endpoints(id,user_id,type,address,verified_at,status,is_default,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,type,address) DO UPDATE SET
+                verified_at=excluded.verified_at,status=excluded.status,is_default=excluded.is_default,updated_at=excluded.updated_at""",
+                (endpoint_id, user_id, "email", normalized, now if verified else None, "active" if verified else "pending", int(is_default), now, now),
+            )
+            row = connection.execute("SELECT * FROM user_notification_endpoints WHERE user_id=? AND type='email' AND address=?", (user_id, normalized)).fetchone()
+        return dict(row)
+
+    def notification_email(self, user_id: str, *, verified_only: bool = True) -> str | None:
+        """Return the user's default active verified notification address."""
+
+        query = "SELECT address FROM user_notification_endpoints WHERE user_id=? AND status='active'"
+        values: list[Any] = [user_id]
+        if verified_only:
+            query += " AND verified_at IS NOT NULL"
+        query += " ORDER BY is_default DESC,updated_at DESC LIMIT 1"
+        with self._connect() as connection:
+            row = connection.execute(query, values).fetchone()
+        return str(row[0]) if row else None
 
     def _require_initialized(self) -> None:
         if not self.is_initialized():

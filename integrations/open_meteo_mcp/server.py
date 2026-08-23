@@ -11,6 +11,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 server = FastMCP("zhice-open-meteo-readonly")
+_HTTP_CLIENT = httpx.Client(trust_env=False)
 
 FORECAST_DAILY = (
     "weather_code,temperature_2m_max,temperature_2m_min,"
@@ -161,7 +162,7 @@ def _weather_result(payload: dict[str, Any], *, freshness: str, data_as_of: str)
 def _get_json(base_url: str, path: str, params: dict[str, Any]) -> dict[str, Any]:
     timeout = float(os.getenv("OPEN_METEO_TIMEOUT_SECONDS", "15"))
     try:
-        response = httpx.get(f"{base_url.rstrip('/')}{path}", params=params, timeout=timeout)
+        response = _HTTP_CLIENT.get(f"{base_url.rstrip('/')}{path}", params=params, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
     except (httpx.HTTPError, ValueError) as exc:

@@ -38,4 +38,8 @@ describe("Theme family tokens", () => {
     expect(appCss).toContain("button:not(:disabled):active");
     expect(appCss).toContain("cursor: not-allowed");
   });
+
+  it("keeps personal mailbox selects at the same touch-friendly height as inputs", () => {
+    expect(appCss).toContain(".smtp-connection-form input, .smtp-connection-form select { width: 100%; min-height: 45px;");
+  });
 });

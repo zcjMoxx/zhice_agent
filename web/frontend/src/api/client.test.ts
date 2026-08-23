@@ -22,4 +22,20 @@ describe("API client", () => {
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  it("sends workflow definitions directly and uses owner-scoped run routes", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ workflow_id: "wf-1", status: "draft" }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    await api.createWorkflow({
+      schema_version: 1,
+      name: "Daily summary",
+      description: "",
+      timezone: "Asia/Shanghai",
+      nodes: [{ id: "trigger", type: "schedule_trigger", position: { x: 0, y: 0 }, config: { trigger_type: "manual" } }],
+      edges: [],
+    });
+    const [, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(requestInit.body))).toMatchObject({ schema_version: 1, name: "Daily summary" });
+    expect(JSON.parse(String(requestInit.body))).not.toHaveProperty("definition");
+  });
 });

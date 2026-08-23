@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Ellipsis, MapPinned, MessageSquarePlus, PanelLeftClose, Search, Settings, SlidersHorizontal, UserRound, X } from "@lucide/vue";
+import { Ellipsis, MapPinned, MessageSquarePlus, PanelLeftClose, Search, Settings, SlidersHorizontal, UserRound, Workflow, X } from "@lucide/vue";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 
@@ -101,6 +101,7 @@ async function logout() { await auth.logout(); ui.accountMenuOpen = false; }
     <div class="sidebar-tools">
       <button class="new-chat" @click="sessions.startDraft()"><MessageSquarePlus :size="18" /><span>{{ tr('新对话', 'New chat') }}</span></button>
       <button class="new-chat travel-entry" @click="router.push('/travel')"><MapPinned :size="18" /><span>{{ tr('智能旅行规划', 'Travel planner') }}</span><b v-if="travel.unreadCompleted" class="travel-unread-badge" aria-label="1 条未查看的旅行计划">1</b></button>
+      <button class="new-chat" @click="router.push('/workflows')"><Workflow :size="18" /><span>{{ tr('自动化工作流', 'Workflows') }}</span></button>
       <label class="session-search"><Search :size="16" /><input v-model="sessions.search" :placeholder="tr('搜索 Session', 'Search Sessions')" /></label>
     </div>
     <div class="session-heading"><span>{{ tr('最近', 'Recent') }}</span><span>{{ sessions.filtered.length }}</span></div>

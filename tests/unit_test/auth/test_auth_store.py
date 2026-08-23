@@ -77,7 +77,7 @@ def test_init_owner_seeds_roles_permissions_and_authenticates(tmp_path):
     assert store.is_initialized() is True
 
 
-def test_viewer_has_no_extra_privileges(tmp_path):
+def test_viewer_has_only_personal_workflow_privileges(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     store.initialize_schema()
     viewer = store.create_user("alice", "Alice", "alice-password")
@@ -85,7 +85,16 @@ def test_viewer_has_no_extra_privileges(tmp_path):
     actor = store.actor_for_user(viewer.id, channel="web")
 
     assert actor.role_keys == frozenset({"viewer"})
-    assert actor.permission_keys == frozenset()
+    assert actor.permission_keys == frozenset(
+        {
+            "workflow.use",
+            "workflow.schedule",
+            "workflow.notify.self",
+            "workflow.email.send",
+        }
+    )
+    assert "workflow.external.action" not in actor.permission_keys
+    assert "workflow.social.publish" not in actor.permission_keys
 
 
 def test_admin_role_permissions_are_editable_but_owner_role_remains_protected(tmp_path):
@@ -290,7 +299,14 @@ def test_external_identity_resolves_to_internal_actor(tmp_path):
     assert actor.user_id == user.id
     assert actor.channel == "feishu"
     assert actor.role_keys == frozenset({"developer"})
-    assert actor.permission_keys == frozenset()
+    assert actor.permission_keys == frozenset(
+        {
+            "workflow.use",
+            "workflow.schedule",
+            "workflow.notify.self",
+            "workflow.email.send",
+        }
+    )
 
 
 def test_one_user_can_only_have_one_active_qq_identity(tmp_path):
@@ -323,6 +339,30 @@ def test_one_user_can_only_have_one_active_qq_identity(tmp_path):
         external_user_id="qq-second",
     )
     assert len(store.list_external_identities_for_user(user.id)) == 1
+
+
+def test_qq_delivery_identity_is_available_only_through_server_only_lookup(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("admin", "Admin", "password-123")
+    store.link_external_identity(
+        user_id=user.id,
+        channel="qq",
+        external_tenant_id="main",
+        external_user_id="sensitive-openid",
+        external_display_name="My QQ",
+    )
+
+    public_binding = store.list_external_identities_for_user(user.id)[0]
+    delivery_binding = store.get_active_external_identity_for_user(
+        user_id=user.id,
+        channel="qq",
+    )
+
+    assert "external_user_id" not in public_binding
+    assert "external_tenant_id" not in public_binding
+    assert delivery_binding is not None
+    assert delivery_binding["external_user_id"] == "sensitive-openid"
+    assert delivery_binding["external_tenant_id"] == "main"
 
 
 def test_schema_migration_keeps_newest_active_qq_identity(tmp_path):

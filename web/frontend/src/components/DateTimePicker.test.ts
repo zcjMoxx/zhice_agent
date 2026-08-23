@@ -38,4 +38,17 @@ describe("DateTimePicker", () => {
     expect(wrapper.text()).toContain("结束时间不能早于开始时间");
     expect(wrapper.get(".date-picker-actions .primary-button").attributes("disabled")).toBeDefined();
   });
+
+  it("reuses the picker styling for a time-only value", async () => {
+    const wrapper = mount(DateTimePicker, { props: { modelValue: "07:30", label: "几点运行", language: "zh-CN", mode: "time" } });
+
+    await wrapper.get(".date-picker-trigger").trigger("click");
+    expect(wrapper.text()).toContain("选择运行时间");
+    expect(wrapper.find(".date-picker-days").exists()).toBe(false);
+    await wrapper.get(".date-picker-time label:first-of-type select").setValue("8");
+    await wrapper.get(".date-picker-time label:last-of-type select").setValue("15");
+    await wrapper.findAll(".date-picker-actions button").find((button) => button.text() === "确定")!.trigger("click");
+
+    expect(wrapper.emitted("update:modelValue")?.[0]).toEqual(["08:15"]);
+  });
 });

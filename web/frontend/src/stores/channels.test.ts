@@ -49,6 +49,21 @@ describe("channel store", () => {
     expect(store.error).toContain("Weixin is unavailable");
   });
 
+  it("treats a disabled Weixin channel as availability state instead of a global error", async () => {
+    vi.mocked(api.bindings).mockResolvedValue({ bindings: [] });
+    vi.mocked(api.weixinStatus).mockRejectedValue(new ApiError(
+      503,
+      "CHANNEL_WEIXIN_UNAVAILABLE",
+      "Weixin channel is disabled or unavailable",
+    ));
+    const store = useChannelStore();
+
+    await store.refresh();
+
+    expect(store.weixin.status).toBe("unavailable");
+    expect(store.error).toBe("");
+  });
+
   it("polls real pending statuses and preserves the connected terminal state", async () => {
     vi.useFakeTimers();
     vi.mocked(api.startWeixin).mockResolvedValue(waitingAttempt);

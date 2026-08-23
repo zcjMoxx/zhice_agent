@@ -50,7 +50,7 @@ Tool capability selection 已从原可靠性路线提前进入当前基线。每
 - Part 15 完整 Session 上下文工程已进入当前代码基线，设计入口是 `docs_design/zhice-agent-part15-context-engineering-design.md`。本地第一实现不要求独立向量数据库服务：用户隔离 SQLite 保存 FTS5 文档、metadata 和 float32 embedding BLOB，Session 内用精确 cosine 与 RRF 混合排序；embedding 未配置时 health 诚实标记 degraded，但完整历史、历史查询、compaction 和 FTS 继续工作。
 - Part 16 Web 产品体验与 Vue 前端工程已实现并进入当前基线，当前活文档是 `docs_design/zhice-agent-part16-web-product-design.md`，完整方案记录见 `docs_design/2026-07-27-web-product-experience-and-vue-frontend-design.md`。Vue 3/Vite/TypeScript 源码位于 `web/frontend`，构建产物位于 `agent/web/static` 并随 Python wheel 发布；登录、聊天、Session、五栏设置、渠道连接和中文管理后台共用明暗曜石主题，同时保持现有 API、WebSocket、Session 与 RBAC 兼容。
 - Part 17 代码与测试已进入当前基线：Provider 错误分类/有限重试/deadline/cooldown/failover 证据、系统级诊断、MCP 动态可靠性、重启恢复和 `deploy/` 私有镜像部署链均已落地。当前活文档是 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案记录见 `docs_design/2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`；本地构建、隔离 smoke、阿里云 ACR 推送、腾讯云按 Digest 运行、Caddy HTTPS、公网健康、认证初始化和容器重启持久化均已真实验收。2026-08-04 又按 `docs_design/2026-08-04-private-registry-cloud-release-pipeline-design.md` 收敛为本地、已有镜像上云和源码完整上云三个入口；三条自动化入口均已使用本机 Git 忽略的私有配置完成真实端到端验收。
-- Milestone 19 智能旅行规划已完成代码落地：复用同一 AgentLoop，组合地图/天气/12306/网页/小红书只读 MCP、正式 `travel-planner` Skill、quick/deep 调研、`TravelPlanV1`、actor-scoped SQLite Store、`finalize_travel_plan`、Travel REST API 和 Vue 专属页面；当前活文档是 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`，原方案记录见 `docs_design/2026-08-10-intelligent-travel-planner-application-design.md`。默认测试使用 Fake MCP；真实高德、Tavily、12306、小红书登录态和高德 JS 地图 smoke 由显式环境变量与运行时凭据开启。Milestone 20 可视化工作流仍是已确认但尚未实现的下一项特色应用，见 `docs_design/2026-08-10-visual-workflow-scheduler-design.md`。
+- Milestone 19 智能旅行规划已完成代码落地：复用同一 AgentLoop，组合地图/天气/12306/网页/小红书只读 MCP、正式 `travel-planner` Skill、quick/deep 调研、`TravelPlanV1`、actor-scoped SQLite Store、Travel REST API 和 Vue 专属页面。Milestone 20 可视化工作流也已落地独立 Workflow Runtime、SQLite、APScheduler、固定 DAG 节点、用户连接、REST API 与成熟 Vue Flow 编辑器；页面包含真实 MCP Schema 表单与测试、条件分支端口、拖线补节点、连线插入、撤销/重做、自动布局、变量选择和节点运行时间线。个人邮箱固定使用用户自己的 SMTP 授权码，不接入 Gmail/Microsoft OAuth。当前活文档是 `docs_design/zhice-agent-part20-visual-workflow-scheduler-design.md`。
 - 按需 Tool 发现与动态 Capability Selection 已提前落地，设计记录见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md`；它是通用运行时能力，不归入 Part 13 的业务委派判断。
 
 Subagent运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`subagents`分区，仓库模板为`config/config.example.yml`。缺少分区时功能默认关闭；启用后可用裸`/subagent`查看当前模式和Profile。能力不可用时，CLI、本地操作者和Owner会看到真实原因与修复建议；普通Web用户只会看到能力暂时不可用并联系管理员，不暴露内部配置。
@@ -155,6 +155,12 @@ Skill source、MCP 和 Subagent 都是可选扩展：未配置时作为 disabled
 服务器私有镜像固定预装 `mcp-amap`、`12306-mcp@0.3.1` 和 RedNote 兼容的小红书 Linux 二进制。云端小红书运行在独立 `zhice-xhs-readonly` sidecar 中，与主容器共享只读/读写分离的 Cookie volume，只通过 `zhice-travel` Docker 网络访问，不发布宿主机或公网端口。完整操作见 `deploy/README.md` 的“旅行外部服务”章节。
 
 真实外部 smoke 由 `tests/integration_test/travel/test_external_smoke.py` 的分源环境变量显式开启。默认 `python -m pytest` 使用 Fake MCP，不访问真实网络。完整当前边界、错误码、TTL 和 smoke 条件见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。
+
+## 可视化工作流
+
+工作流页面按用户任务提供五类步骤：开始、获取信息、智能处理、条件分支和发送结果。定时规则由“每天 / 每周 / 每月 / 间隔 / 单次”表单生成；天气只填写地点，火车票只填写出发地、目的地和日期，普通界面不要求经纬度、站码、Cron、MCP 名称或 JSON。当前已验证的只读来源包括 Open-Meteo 天气、高德地点、Tavily 网页、12306 余票和小红书公开笔记；没有经过审核的写操作时，页面不会显示空的“执行操作”。
+
+个人邮箱统一在“设置 → 连接与账号”管理，只支持用户自己的 SMTP 授权码，不接入 Gmail/Microsoft OAuth。工作流定义只保存连接 ID，不保存账号授权码。启用个人邮箱连接前，管理员必须在运行态 `config/.env` 设置 `ZHICE_AGENT_CREDENTIAL_ENCRYPTION_KEY`；用户选择邮箱类型后只需填写邮箱地址和授权码，QQ/163/126 自动配置安全参数，其他或企业邮箱才需要填写管理员提供的服务器设置，发件地址自动使用邮箱地址。平台官方通知邮箱独立使用 `ZHICE_SMTP_HOST`、`ZHICE_SMTP_PORT`、`ZHICE_SMTP_USERNAME`、`ZHICE_SMTP_PASSWORD` 和 `ZHICE_SMTP_FROM`。完整变量和主密钥生成命令见 `config/.env.example`，真实发送只有在“测试发送”和实际收件均成功后才算验收完成。
 
 ## QQ 外部渠道
 

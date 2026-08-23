@@ -15,6 +15,7 @@
 - QQ 私聊普通 Agent 回复按标题、列表、引用、代码、链接和强调等结构选择 Markdown；群聊为保证引用显示统一使用文本，短句和超长内容也保持文本。
 - QQ 群聊和 CLI 复用中性 Markdown-to-plain renderer；QQ 分块使用唯一递增 `msg_seq`，群聊最多 5 块、单聊最多 4 块，超限明确提示。
 - QQ adapter 只调用 Channel runtime，不直接依赖 LLMProvider、ToolProvider 或 AgentLoop。
+- 工作流 QQ 通知只使用当前内部账号的 active QQ 绑定；公开绑定列表不返回 OpenID，Provider 返回值也不包含平台消息 ID。
 
 ## 正常路径
 
@@ -22,6 +23,7 @@
 - 同一外部 conversation 复用 Session，不同群用户隔离 Session。
 - `/new` 保留旧 Session 并切换 route。
 - QQ 私聊消息经 Fake transport 得到 runtime 最终回复。
+- QQ 主动通知调用 C2C API 且不携带来源 `msg_id`，仅在平台返回确认对象后记录为 accepted。
 - QQ 群聊回答使用普通文本引用触发者原消息，避免 Markdown 引用在真实客户端不展示以及多人连续提问时回答归属不清。
 - 普通未绑定提示附带自动发送 `/bind` 的“绑定”指令按钮。
 - QQ 账号显式 HTTPS `web_base_url` 能从配置加载；未配置时本地默认仍为 `http://127.0.0.1:10086`。QQ 私聊裸 `/bind` 使用显式占位公网账号返回移动优先的 `https://public.example.test/bind/qq?token=<token>` 页面链接和 URL 按钮；测试与公开文档不记录真实部署域名。
@@ -56,3 +58,4 @@
 - QQ 群 capability 不暴露个人模型、Session 和历史命令。
 - Keyboard payload 只在 QQ transport 组装，AgentLoop 和中性 Channel 协议不依赖 QQ SDK 类型。
 - 投递状态未知时不继续发送Markdown降级或重试同一`msg_id + msg_seq`，避免重复回复；未确认异常在Adapter边界终止传播。
+- 工作流主动通知同样不在超时或空响应后重试；日志只记录外部用户 ID 和响应消息 ID 的短哈希。

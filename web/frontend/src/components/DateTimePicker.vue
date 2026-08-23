@@ -4,7 +4,7 @@ import { computed, ref } from "vue";
 
 import type { UiLanguage } from "@/i18n";
 
-const props = withDefaults(defineProps<{ modelValue: string; label: string; language: UiLanguage; minValue?: string }>(), { minValue: "" });
+const props = withDefaults(defineProps<{ modelValue: string; label: string; language: UiLanguage; minValue?: string; mode?: "datetime" | "time" }>(), { minValue: "", mode: "datetime" });
 const emit = defineEmits<{ "update:modelValue": [value: string] }>();
 
 const open = ref(false);
@@ -16,6 +16,7 @@ const hour = ref(0);
 const minute = ref(0);
 
 const chinese = computed(() => props.language === "zh-CN");
+const timeOnly = computed(() => props.mode === "time");
 const monthTitle = computed(() => chinese.value
   ? `${viewYear.value} 年 ${viewMonth.value} 月`
   : new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(new Date(viewYear.value, viewMonth.value - 1, 1))
@@ -27,14 +28,24 @@ const days = computed(() => {
   const count = new Date(viewYear.value, viewMonth.value, 0).getDate();
   return [...Array<null>(leading).fill(null), ...Array.from({ length: count }, (_, index) => index + 1)];
 });
-const displayValue = computed(() => props.modelValue ? props.modelValue.replace("T", " ") : (chinese.value ? "请选择日期和时间" : "Select date and time"));
+const displayValue = computed(() => props.modelValue ? props.modelValue.replace("T", " ") : timeOnly.value ? (chinese.value ? "请选择时间" : "Select time") : (chinese.value ? "请选择日期和时间" : "Select date and time"));
 const selectedValue = computed(() => {
   const pad = (part: number) => String(part).padStart(2, "0");
+  if (timeOnly.value) return `${pad(hour.value)}:${pad(minute.value)}`;
   return `${viewYear.value}-${pad(viewMonth.value)}-${pad(selectedDay.value)}T${pad(hour.value)}:${pad(minute.value)}`;
 });
-const beforeMinimum = computed(() => Boolean(props.minValue && selectedValue.value < props.minValue));
+const beforeMinimum = computed(() => Boolean(!timeOnly.value && props.minValue && selectedValue.value < props.minValue));
 
 function show() {
+  if (timeOnly.value) {
+    const match = props.modelValue.match(/^(\d{1,2}):(\d{2})$/);
+    const now = new Date();
+    hour.value = match ? Math.min(23, Number(match[1])) : now.getHours();
+    minute.value = match ? Math.min(59, Number(match[2])) : now.getMinutes();
+    panel.value = "calendar";
+    open.value = true;
+    return;
+  }
   const initial = props.modelValue && (!props.minValue || props.modelValue >= props.minValue) ? props.modelValue : props.minValue;
   const parsed = initial ? new Date(initial) : new Date();
   const source = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
@@ -97,14 +108,15 @@ function monthBeforeMinimum(month: number): boolean {
   </label>
 
   <div v-if="open" class="modal-backdrop date-picker-backdrop" @click.self="open = false">
-    <section class="date-picker-dialog" role="dialog" aria-modal="true" :aria-label="chinese ? '选择日期和时间' : 'Select date and time'">
+    <section class="date-picker-dialog" :class="{ 'time-only': timeOnly }" role="dialog" aria-modal="true" :aria-label="timeOnly ? (chinese ? '选择时间' : 'Select time') : (chinese ? '选择日期和时间' : 'Select date and time')">
       <button class="date-picker-close" type="button" :aria-label="chinese ? '关闭' : 'Close'" @click="open = false"><X :size="19" /></button>
-      <header class="date-picker-header">
+      <header v-if="!timeOnly" class="date-picker-header">
         <button type="button" :aria-label="panel === 'calendar' ? (chinese ? '上个月' : 'Previous month') : (chinese ? '上一年' : 'Previous year')" @click="panel === 'calendar' ? moveMonth(-1) : viewYear--"><ChevronLeft :size="20" /></button>
         <button class="date-picker-title" type="button" @click="panel = panel === 'calendar' ? 'month' : 'calendar'">{{ panel === 'calendar' ? monthTitle : viewYear }}</button>
         <button type="button" :aria-label="panel === 'calendar' ? (chinese ? '下个月' : 'Next month') : (chinese ? '下一年' : 'Next year')" @click="panel === 'calendar' ? moveMonth(1) : viewYear++"><ChevronRight :size="20" /></button>
       </header>
-      <template v-if="panel === 'calendar'">
+      <header v-else class="time-picker-heading"><CalendarClock :size="20" /><div><strong>{{ chinese ? '选择运行时间' : 'Choose run time' }}</strong><small>{{ chinese ? '设置小时和分钟' : 'Set hour and minute' }}</small></div></header>
+      <template v-if="!timeOnly && panel === 'calendar'">
         <div class="date-picker-week"><span v-for="item in weekLabels" :key="item">{{ item }}</span></div>
         <div class="date-picker-days">
           <span v-for="(day, index) in days" :key="`${viewYear}-${viewMonth}-${index}`">
@@ -112,18 +124,18 @@ function monthBeforeMinimum(month: number): boolean {
           </span>
         </div>
       </template>
-      <div v-else class="date-picker-months">
+      <div v-else-if="!timeOnly" class="date-picker-months">
         <button v-for="(month, index) in monthLabels" :key="month" type="button" :class="{ active: viewMonth === index + 1 }" :disabled="monthBeforeMinimum(index + 1)" @click="chooseMonth(index + 1)">{{ month }}</button>
       </div>
-      <div v-if="panel === 'calendar'" class="date-picker-time">
+      <div v-if="timeOnly || panel === 'calendar'" class="date-picker-time">
         <CalendarClock :size="18" />
         <label><span>{{ chinese ? '时' : 'Hour' }}</span><select v-model.number="hour"><option v-for="item in 24" :key="item - 1" :value="item - 1">{{ String(item - 1).padStart(2, '0') }}</option></select></label>
         <b>:</b>
         <label><span>{{ chinese ? '分' : 'Minute' }}</span><select v-model.number="minute"><option v-for="item in 60" :key="item - 1" :value="item - 1">{{ String(item - 1).padStart(2, '0') }}</option></select></label>
       </div>
-      <p v-if="panel === 'calendar' && beforeMinimum" class="date-picker-error">{{ chinese ? '结束时间不能早于开始时间' : 'End time cannot be earlier than start time' }}</p>
+      <p v-if="!timeOnly && panel === 'calendar' && beforeMinimum" class="date-picker-error">{{ chinese ? '结束时间不能早于开始时间' : 'End time cannot be earlier than start time' }}</p>
       <div class="date-picker-actions">
-        <button type="button" @click="resetToCurrent">{{ chinese ? '清除' : 'Clear' }}</button>
+        <button type="button" @click="resetToCurrent">{{ chinese ? '现在' : 'Now' }}</button>
         <button class="primary-button" type="button" :disabled="beforeMinimum" @click="confirm">{{ chinese ? '确定' : 'Confirm' }}</button>
       </div>
     </section>

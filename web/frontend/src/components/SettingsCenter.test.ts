@@ -1,14 +1,17 @@
 import { createPinia, setActivePinia } from "pinia";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { nextTick } from "vue";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { api } from "@/api/client";
 import { useAuthStore } from "@/stores/auth";
 import { useChannelStore } from "@/stores/channels";
 import { useUiStore } from "@/stores/ui";
 import SettingsCenter from "./SettingsCenter.vue";
 
 describe("SettingsCenter", () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it("persists identity-scoped color mode and theme family independently", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -19,7 +22,7 @@ describe("SettingsCenter", () => {
     const wrapper = mount(SettingsCenter, { global: { plugins: [pinia] } });
 
     const navigation = wrapper.findAll(".settings-nav > button");
-    expect(navigation.map((item) => item.text())).toEqual(["常规", "个性化", "个人资料", "账号与安全", "渠道连接"]);
+    expect(navigation.map((item) => item.text())).toEqual(["常规", "个性化", "个人资料", "账号与安全", "连接与账号"]);
     expect(wrapper.findAll(".setting-row")[2].findAll("option").map((item) => item.text())).toEqual(["聊天", "新会话"]);
     await navigation[1].trigger("click");
     expect(wrapper.text()).not.toContain("聊天内容宽度");
@@ -85,7 +88,7 @@ describe("SettingsCenter", () => {
     const auth = useAuthStore();
     auth.user = { id: "u-channel", username: "alice", display_name: "Alice", status: "active", roles: ["viewer"], can_manage_admins: false };
     const ui = useUiStore();
-    ui.settingsSection = "channels";
+    ui.settingsSection = "connections";
     ui.language = "zh-CN";
     const channels = useChannelStore();
     vi.spyOn(channels, "refresh").mockResolvedValue();
@@ -100,6 +103,11 @@ describe("SettingsCenter", () => {
 
     const wrapper = mount(SettingsCenter, { global: { plugins: [pinia] } });
 
+    expect(wrapper.text()).toContain("个人邮箱");
+    expect(wrapper.text()).toContain("使用 SMTP 授权码连接");
+    expect(wrapper.text()).not.toContain("Gmail");
+    expect(wrapper.text()).not.toContain("Microsoft");
+    expect(wrapper.text()).not.toContain("系统未启用");
     expect(wrapper.text()).toContain("群聊：先 @机器人，再发送生成的 /bind 命令。私聊：直接发送该命令。");
     expect(wrapper.get(".weixin-qr").attributes("src")).toBe("data:image/png;base64,c2FmZQ==");
     expect(wrapper.text()).toContain("等待微信扫码");
@@ -110,13 +118,57 @@ describe("SettingsCenter", () => {
     expect(wrapper.text()).toContain("Waiting for Weixin scan");
   });
 
+  it("keeps known mailbox setup simple and derives the QQ SMTP request", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.user = { id: "u-email", username: "alice", display_name: "Alice", status: "active", roles: ["viewer"], can_manage_admins: false };
+    const ui = useUiStore();
+    ui.settingsSection = "connections";
+    const channels = useChannelStore();
+    vi.spyOn(channels, "refresh").mockResolvedValue();
+    vi.spyOn(api, "workflowCapabilities").mockResolvedValue({ personal_email: { available: true, code: "SMTP_READY" } });
+    vi.spyOn(api, "workflowEmailConnections").mockResolvedValue({ connections: [] });
+    const createConnection = vi.spyOn(api, "createSmtpEmailConnection").mockResolvedValue({
+      connection: { id: "email-1", provider: "smtp_personal", account_display: "849534549@qq.com", status: "active" },
+    });
+
+    const wrapper = mount(SettingsCenter, { global: { plugins: [pinia] } });
+    await flushPromises();
+    await wrapper.get(".email-provider-card button").trigger("click");
+
+    expect(wrapper.text()).toContain("邮箱类型");
+    expect(wrapper.text()).not.toContain("发件地址");
+    expect(wrapper.text()).not.toContain("SMTP 服务器");
+    expect(wrapper.find(".custom-smtp-settings").exists()).toBe(false);
+
+    await wrapper.get(".mailbox-provider-select").setValue("other");
+    expect(wrapper.text()).toContain("其他邮箱服务器设置");
+    expect(wrapper.text()).toContain("发信服务器");
+    await wrapper.get(".mailbox-provider-select").setValue("qq");
+    expect(wrapper.find(".custom-smtp-settings").exists()).toBe(false);
+
+    await wrapper.get('.smtp-connection-form input[type="email"]').setValue("849534549@qq.com");
+    await wrapper.get('.smtp-connection-form input[type="password"]').setValue("smtp-app-password");
+    await wrapper.get(".smtp-connection-form").trigger("submit");
+    await flushPromises();
+
+    expect(createConnection).toHaveBeenCalledWith({
+      host: "smtp.qq.com",
+      port: 465,
+      security: "tls",
+      username: "849534549@qq.com",
+      app_password: "smtp-app-password",
+    });
+  });
+
   it("renders a full-width-ready retry action for a pending QQ web binding", () => {
     const pinia = createPinia();
     setActivePinia(pinia);
     const auth = useAuthStore();
     auth.user = { id: "u-bind", username: "alice", display_name: "Alice", status: "active", roles: ["viewer"], can_manage_admins: false };
     const ui = useUiStore();
-    ui.settingsSection = "channels";
+    ui.settingsSection = "connections";
     const channels = useChannelStore();
     vi.spyOn(channels, "refresh").mockResolvedValue();
     channels.pendingQqToken = "bind-retry";

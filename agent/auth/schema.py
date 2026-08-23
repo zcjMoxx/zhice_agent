@@ -17,6 +17,14 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
     "skill.sync": ("Synchronize Skill sources", "skill"),
     "audit.read": ("Read audit events", "audit"),
     "audit.export": ("Export audit events", "audit"),
+    "workflow.use": ("Create and run personal workflows", "workflow"),
+    "workflow.schedule": ("Schedule personal workflows", "workflow"),
+    "workflow.notify.self": ("Send workflow notifications to self", "workflow"),
+    "workflow.email.send": ("Send email through personal connections", "workflow"),
+    "workflow.external.action": ("Run approved external workflow actions", "workflow"),
+    "workflow.social.publish": ("Publish through approved workflow tools", "workflow"),
+    "workflow.manage.any": ("Manage workflow metadata across users", "workflow"),
+    "workflow.settings.manage": ("Manage global workflow settings", "workflow"),
 }
 
 ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
@@ -30,10 +38,25 @@ ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
             "session.manage.any",
             "chat.stop.any",
             "turn.read.any",
+            "workflow.use",
+            "workflow.schedule",
+            "workflow.notify.self",
+            "workflow.email.send",
+            "workflow.manage.any",
         )
     ),
-    "developer": (),
-    "viewer": (),
+    "developer": (
+        "workflow.use",
+        "workflow.schedule",
+        "workflow.notify.self",
+        "workflow.email.send",
+    ),
+    "viewer": (
+        "workflow.use",
+        "workflow.schedule",
+        "workflow.notify.self",
+        "workflow.email.send",
+    ),
     "auditor": (
         "audit.read",
         "turn.read.any",
@@ -96,6 +119,23 @@ CREATE TABLE IF NOT EXISTS external_identities (
   metadata_json TEXT NOT NULL DEFAULT '{}',
   UNIQUE(channel, external_tenant_id, external_user_id)
 );
+
+CREATE TABLE IF NOT EXISTS user_notification_endpoints (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type TEXT NOT NULL CHECK (type IN ('email')),
+  address TEXT NOT NULL,
+  verified_at TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'active', 'revoked')),
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(user_id, type, address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_endpoints_user
+ON user_notification_endpoints(user_id, status, is_default);
 
 CREATE TABLE IF NOT EXISTS channel_accounts (
   id TEXT PRIMARY KEY,

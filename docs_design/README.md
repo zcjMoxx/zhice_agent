@@ -29,8 +29,15 @@
 - `zhice-agent-part17-reliability-diagnostics-deployment-design.md`：Part 17 已实现并关闭；Provider/MCP 可靠性、系统诊断、恢复边界、私有镜像与单机云发布基线。
 - `zhice-agent-part18-skill-runtime-and-server-ops-design.md`：Part 18 已实现并完成生产部署；正式 Skill Runtime、Skill source 状态/Web 管理与多运行形态 restricted Ops。三种运行形态已统一“监控面板 / 运维终端”双视图；服务器使用既有 Tunnel、loopback Caddy 长期签名 Cookie 与 `/terminal/` ttyd，云端配置采用宿主机权威副本与容器只读挂载。见 `2026-08-09-part18-multi-runtime-ops-correction-design.md`、`2026-08-10-part18-server-side-ops-auth-design.md`、`2026-08-10-part18-unified-ops-dual-view-design.md` 与 `2026-08-10-part18-persistent-ops-login-design.md`。
 - `zhice-agent-part19-intelligent-travel-planner-design.md`：Milestone 19 已完成代码与本地/Fake MCP 全链；旅行领域协议、正式 optimizer Skill、只读 MCP 适配、quick/deep、用户隔离 Store/API、RuntimeEvent 与 Vue 旅行页面基线。真实外部 smoke 继续按显式凭据单列。
+- `zhice-agent-part20-visual-workflow-scheduler-design.md`：Milestone 20 当前活文档；独立 Workflow Runtime、SQLite、APScheduler、固定节点、用户连接、REST API、RuntimeEvent 与 Vue Flow 页面基线。
+- `2026-08-19-visual-workflow-editor-interaction-design.md`：成熟编辑器交互移植记录；说明从本地 FlowGram/Java 参考工程吸收的节点注册、拖线补节点、连线插入、history、snap、自动布局、变量选择和执行分层，以及保持 Vue/Python 独立运行时的边界。
+- `2026-08-21-workflow-overview-detail-navigation-design.md`：工作流总览与独立详情路由设计；统一旅游规划应用壳、左侧工作流列表、右侧滚动内容区，并补齐拖动、滚轮和方向按钮三种画布移动方式。
+- `2026-08-21-workflow-user-facing-productization-design.md`：工作流用户化表现与产品体验设计；隐藏普通界面的内部 Tool/schema/runtime 标识，统一中文名称、字段和状态，新增显式工具选择、发布就绪提示及可访问的独立打开/删除操作。
+- `2026-08-21-workflow-friendly-tool-input-design.md`：工作流任务化工具输入设计；天气由地点自动解析坐标和动态日期，小红书使用中文搜索选项与完整笔记链接，并保留 MCP schema、allowlist 和真实执行校验。
+- `2026-08-22-workflow-product-completion-design.md`：工作流完整产品收口设计；以用户任务重组节点和配置，统一连接中心、查询来源、运行结果、错误提示、普通用户权限与真实外部能力验收边界。
+- `2026-08-22-workflow-smtp-only-email-design.md`：工作流个人邮箱 SMTP-only 收敛；删除 Gmail/Microsoft OAuth，只保留用户隔离、加密保存的个人 SMTP 授权码连接。
 
-Part 18 后进入特色应用阶段。Milestone 19 智能旅行规划已按 `2026-08-10-intelligent-travel-planner-application-design.md` 完成代码落地，当前事实以 Part 19 活文档为准；真实外部 smoke 不等于未实现功能，仍需显式凭据与服务登录态执行。Milestone 20 拖拽工作流、定时调度与用户连接仍只有已确认且尚未实现的日期方案 `2026-08-10-visual-workflow-scheduler-design.md`，不得写成当前代码能力。
+Part 18 后进入特色应用阶段。Milestone 19 智能旅行规划和 Milestone 20 拖拽工作流均已完成代码落地；当前事实分别以 Part 19、Part 20 活文档为准。真实外部 smoke 不等于未实现功能，仍需显式凭据、测试账号与服务登录态执行。
 
 第九部分用户、登录与权限执行边界已经落地：登录用户的账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 是基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。普通自助注册现由 `auth.sqlite3` 持久策略控制、默认关闭且只有 Owner 可修改，见 `2026-08-10-owner-registration-control-design.md`。基础能力收敛见 `2026-07-16-authenticated-user-baseline-capabilities-design.md`；当前自助诊断和 Runtime Activity / Security Audit 拆分见 `2026-07-16-self-diagnostics-activity-audit-separation-design.md`。
 
@@ -98,23 +105,27 @@ Part 17 运行可靠性、系统级诊断与私有镜像部署的代码、测试
 21. `zhice-agent-part19-intelligent-travel-planner-design.md`
 22. `2026-08-10-intelligent-travel-planner-application-design.md`
 23. `2026-08-10-visual-workflow-scheduler-design.md`
-24. `2026-08-10-owner-registration-control-design.md`
-25. `2026-08-10-part18-persistent-ops-login-design.md`
-26. `2026-08-10-part18-unified-ops-dual-view-design.md`
-27. `2026-08-09-part18-multi-runtime-ops-correction-design.md`
-28. `2026-08-09-part18-skill-runtime-and-server-ops-design.md`
-29. `2026-07-29-part17-runtime-reliability-diagnostics-deployment-design.md`
-30. `2026-07-27-web-product-experience-and-vue-frontend-design.md`
-31. `2026-07-26-full-session-context-engineering-design.md`
-32. `2026-07-24-weixin-clawbot-channel-design.md`
-33. `2026-07-23-qq-external-channel-boundary-design.md`
-34. `2026-07-21-subagent-runtime-boundary-design.md`
-35. `2026-07-20-hook-runtime-boundary-design.md`
-36. `2026-07-17-mcp-tool-runtime-boundary-design.md`
-37. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
+24. `2026-08-22-workflow-product-completion-design.md`
+25. `2026-08-22-workflow-smtp-only-email-design.md`
+26. `2026-08-10-owner-registration-control-design.md`
+27. `2026-08-10-part18-persistent-ops-login-design.md`
+28. `2026-08-10-part18-unified-ops-dual-view-design.md`
+29. `2026-08-09-part18-multi-runtime-ops-correction-design.md`
+30. `2026-08-09-part18-skill-runtime-and-server-ops-design.md`
+31. `2026-07-29-part17-runtime-reliability-diagnostics-deployment-design.md`
+32. `2026-07-27-web-product-experience-and-vue-frontend-design.md`
+33. `2026-07-26-full-session-context-engineering-design.md`
+34. `2026-07-24-weixin-clawbot-channel-design.md`
+35. `2026-07-23-qq-external-channel-boundary-design.md`
+36. `2026-07-21-subagent-runtime-boundary-design.md`
+37. `2026-07-20-hook-runtime-boundary-design.md`
+38. `2026-07-17-mcp-tool-runtime-boundary-design.md`
+39. 按需阅读其它日期设计记录，理解某次改动的背景和权衡。
 
 ## 日期设计记录清单
 
+- `2026-08-22-workflow-product-completion-design.md`
+- `2026-08-22-workflow-smtp-only-email-design.md`
 - `2026-08-10-intelligent-travel-planner-application-design.md`
 - `2026-08-10-visual-workflow-scheduler-design.md`
 - `2026-08-10-beijing-log-session-deletion-action-feedback-design.md`
@@ -244,3 +255,4 @@ docs_design/YYYY-MM-DD-{topic}-design.md
 ```markdown
 > 说明：这是一份历史实验记录。当前代码并不采用“每次启动都新建唯一会话”的行为，而是默认使用当天会话 `chat-YYYYMMDD`，并通过 `/new` 显式新建临时会话。
 ```
+工作流运行时现支持受限 Node-RED 兼容交换格式（`/api/workflows/{id}/node-red`）。该格式只接受智策审核过的节点，Node-RED 的 Function、exec、文件系统和任意 HTTP 节点会被拒绝；认证、所有权、SQLite 版本和运行事件仍由智策掌控。

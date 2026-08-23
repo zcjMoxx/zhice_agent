@@ -101,6 +101,8 @@ class QQTransport(Protocol):
 
     async def send_message(self, event, outbound: QQOutboundMessage) -> None: ...
 
+    def send_proactive_text(self, external_user_id: str, content: str) -> object: ...
+
 
 class BotpyQQTransport:
     """qq-botpy WebSocket transport isolated from the neutral adapter."""
@@ -243,6 +245,83 @@ class BotpyQQTransport:
                 )
         if last_error is not None:
             raise last_error
+
+    def send_proactive_text(self, external_user_id: str, content: str) -> object:
+        """Send one C2C text without a source msg_id and without retrying."""
+
+        client = self._client
+        thread = self._thread
+        if (
+            client is None
+            or thread is None
+            or not thread.is_alive()
+            or client.is_closed()
+            or not client.loop.is_running()
+        ):
+            raise RuntimeError("QQ proactive transport is unavailable")
+        fields = {
+            "account_key": self.account.key,
+            "external_user_id_hash": _safe_hash(external_user_id),
+            "content_chars": len(content),
+            "msg_type": 0,
+        }
+        log_event(qq_logger, logging.DEBUG, "channel.qq.proactive_send_start", **fields)
+        started = time.perf_counter()
+
+        async def send() -> object:
+            return await client.api.post_c2c_message(
+                openid=external_user_id,
+                msg_type=0,
+                content=content,
+            )
+
+        future = asyncio.run_coroutine_threadsafe(send(), client.loop)
+        try:
+            response = future.result(
+                timeout=max(1, int(getattr(self.account, "http_timeout_seconds", 15)))
+            )
+        except TimeoutError:
+            future.cancel()
+            log_event(
+                qq_logger,
+                logging.WARNING,
+                "channel.qq.proactive_send_unconfirmed",
+                **fields,
+                error_code="QQ_SEND_TIMEOUT",
+                duration_ms=_elapsed_ms(started),
+            )
+            raise
+        except Exception as exc:
+            log_event(
+                qq_logger,
+                logging.WARNING,
+                "channel.qq.proactive_send_failed",
+                **fields,
+                error_code=type(exc).__name__,
+                duration_ms=_elapsed_ms(started),
+            )
+            raise
+        if response is None:
+            log_event(
+                qq_logger,
+                logging.WARNING,
+                "channel.qq.proactive_send_unconfirmed",
+                **fields,
+                error_code="QQ_SEND_UNCONFIRMED",
+                duration_ms=_elapsed_ms(started),
+            )
+            raise QQSendUnconfirmedError(
+                "QQ SDK returned no acceptance confirmation; the message was not retried"
+            )
+        log_event(
+            qq_logger,
+            logging.INFO,
+            "channel.qq.proactive_send_accepted",
+            **fields,
+            response_message_id_hash=_safe_hash(_response_message_id(response)),
+            duration_ms=_elapsed_ms(started),
+        )
+        return response
 
     async def _reply(self, event, message, payload: dict[str, object]) -> object:
         fields = _send_log_fields(self.account.key, event, payload)
