@@ -137,6 +137,21 @@ CREATE TABLE IF NOT EXISTS user_notification_endpoints (
 CREATE INDEX IF NOT EXISTS idx_notification_endpoints_user
 ON user_notification_endpoints(user_id, status, is_default);
 
+CREATE TABLE IF NOT EXISTS notification_email_verifications (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  address TEXT NOT NULL,
+  code_salt TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_email_verifications_user
+ON notification_email_verifications(user_id, created_at);
+
 CREATE TABLE IF NOT EXISTS channel_accounts (
   id TEXT PRIMARY KEY,
   channel TEXT NOT NULL,
@@ -275,6 +290,14 @@ CREATE TABLE IF NOT EXISTS weixin_outbound_messages (
   updated_at TEXT NOT NULL,
   sent_at TEXT,
   UNIQUE(account_key, event_id, chunk_index)
+);
+
+CREATE TABLE IF NOT EXISTS weixin_delivery_contexts (
+  account_key TEXT NOT NULL,
+  peer TEXT NOT NULL,
+  context_token_ref TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(account_key, peer)
 );
 
 CREATE TABLE IF NOT EXISTS turn_runs (

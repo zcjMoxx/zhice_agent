@@ -22,7 +22,7 @@ from agent.workflows.store import WorkflowStore
 from agent.workflows.tool_inputs import with_required_query_helpers
 
 
-@pytest.mark.parametrize("operation", ["run_workflow", "pause_workflow", "resume_workflow", "delete_workflow"])
+@pytest.mark.parametrize("operation", ["run_workflow", "run_workflow_draft", "pause_workflow", "resume_workflow", "delete_workflow"])
 def test_missing_workflow_api_operations_return_stable_404(monkeypatch, operation):
     from agent.app.api import workflow_routes
     from agent.app.api.routes import ApiError
@@ -35,6 +35,9 @@ def test_missing_workflow_api_operations_return_stable_404(monkeypatch, operatio
         store = MissingStore()
 
         def run(self, *_args):
+            raise KeyError("WORKFLOW_NOT_FOUND")
+
+        def run_draft(self, *_args):
             raise KeyError("WORKFLOW_NOT_FOUND")
 
         def pause(self, *_args):
@@ -135,6 +138,28 @@ def test_store_publish_is_idempotent_and_owner_scoped(tmp_path: Path):
     assert store.list_definitions("user")[0].status == "active"
     assert store.get_draft("wf", owner_user_id="user").published_at == published.published_at
     assert store.publish(definition()).published_at == published.published_at
+
+
+def test_draft_trial_run_does_not_publish_or_replace_the_active_version(tmp_path: Path):
+    store = WorkflowStore(tmp_path / "draft-trial.sqlite3")
+    published_definition = store.save_draft(definition())
+    store.publish(published_definition)
+    edited = WorkflowDefinitionV1.from_dict(
+        {**published_definition.to_dict(), "name": "unpublished edit"}
+    )
+    saved_draft = store.save_draft(edited)
+    policy = WorkflowAuthorizationPolicy()
+    executor = WorkflowExecutor(store, NodeHandlers(actor=actor(), policy=policy))
+    runtime = WorkflowRuntime(store, executor, policy)
+
+    result = runtime.run_draft(actor(), saved_draft.workflow_id)
+
+    assert result["status"] == "partial"
+    assert store.workflow_state("wf", owner_user_id="user")["active_version"] == 1
+    assert store.get_published("wf", owner_user_id="user").name == "workflow"
+    assert store.get_draft("wf", owner_user_id="user").name == "unpublished edit"
+    assert store.get_run(result["run_id"], "user")["version"] == saved_draft.version
+    executor.shutdown()
     with pytest.raises(PermissionError):
         store.get_draft("wf", owner_user_id="other")
 
@@ -220,8 +245,72 @@ def test_executor_condition_skip_and_events(tmp_path: Path):
     output_node = next(node for node in run_detail["nodes"] if node["node_id"] == "yes")
     assert output_node["output_summary"] == '{"text": "yes"}'
     assert "safe_output_summary" not in output_node
+    assert run_detail["results"] == [
+        {
+            "node_id": "yes",
+            "node_type": "template",
+            "status": "succeeded",
+            "content_summary": '{"text": "yes"}',
+            "delivery_summary": "",
+            "error_code": None,
+        }
+    ]
     assert store.events_after(result["run_id"])[0]["type"] == "workflow.run.started"
     assert "hunter2" not in safe_summary({"password": "hunter2"})
+
+
+def test_run_detail_keeps_external_content_and_delivery_receipt(tmp_path: Path):
+    sent = []
+    workflow = WorkflowDefinitionV1(
+        "delivery-wf",
+        "user",
+        "delivery workflow",
+        (
+            WorkflowNode("trigger", "schedule_trigger"),
+            WorkflowNode("result", "template", config={"template": "今天带伞"}),
+            WorkflowNode(
+                "notify",
+                "official_notification",
+                config={"subject": "天气提醒", "content": "智策结果："},
+            ),
+        ),
+        (
+            WorkflowEdge("a", "trigger", target_node_id="result"),
+            WorkflowEdge("b", "result", target_node_id="notify"),
+        ),
+    )
+    store = WorkflowStore(tmp_path / "delivery-results.sqlite3")
+    store.save_draft(workflow)
+    executor = WorkflowExecutor(
+        store,
+        NodeHandlers(
+            actor=actor_with_notifications(),
+            policy=WorkflowAuthorizationPolicy(),
+            official_email=lambda **values: sent.append(values)
+            or {"status": "sent", "provider_message_id": "mail-1"},
+        ),
+    )
+
+    executed = executor.execute(workflow)
+    executor.shutdown()
+    detail = store.get_run(executed["run_id"], "user")
+
+    assert sent[0]["body"] == "智策结果：\n今天带伞"
+    assert detail["results"] == [
+        {
+            "node_id": "notify",
+            "node_type": "official_notification",
+            "status": "succeeded",
+            "content_summary": "智策结果：\n今天带伞",
+            "delivery_summary": (
+                '{"status": "sent", "provider_message_id": "mail-1"}'
+            ),
+            "error_code": None,
+        }
+    ]
+    notify_run = next(node for node in detail["nodes"] if node["node_id"] == "notify")
+    assert "智策结果" in notify_run["input_summary"]
+    assert "天气提醒" in notify_run["input_summary"]
 
 
 def test_all_user_facing_processing_handlers_are_reachable():
@@ -237,6 +326,7 @@ def test_all_user_facing_processing_handlers_are_reachable():
         official_email=lambda **values: sent.append(("official", values)) or {"status": "sent"},
         personal_email=lambda **values: sent.append(("personal", values)) or {"status": "sent"},
         qq_notification=lambda **values: sent.append(("qq", values)) or {"status": "accepted"},
+        weixin_notification=lambda **values: sent.append(("weixin", values)) or {"status": "sent", "channel": "weixin"},
     )
 
     assert handlers.execute(
@@ -285,10 +375,29 @@ def test_all_user_facing_processing_handlers_are_reachable():
         {},
         run_id="run",
     ) == {"status": "accepted"}
-    assert [kind for kind, _values in sent] == ["official", "personal", "qq"]
+    assert handlers.execute(
+        WorkflowNode(
+            "weixin",
+            "weixin_notification",
+            config={
+                "content": "**微信提醒**",
+                "source_ref": {"text": "- 带伞"},
+                "send_consent_at": "2026-08-24T00:00:00Z",
+            },
+        ),
+        {},
+        {},
+        run_id="workflow-run",
+    ) == {"status": "sent", "channel": "weixin"}
+    assert [kind for kind, _values in sent] == ["official", "personal", "qq", "weixin"]
     assert sent[0][1]["body"] == "天气提醒\n\n• 带伞\n• 穿薄外套"
     assert sent[1][1]["body"] == "最高 34.6℃，午后有 雷雨。"
     assert sent[2][1]["body"] == "今日建议\n• 带伞\n• 穿薄外套"
+    assert sent[3][1] == {
+        "owner_user_id": "user",
+        "body": "微信提醒\n• 带伞",
+        "delivery_key": "workflow-run:weixin",
+    }
 
 
 def test_send_result_composes_intro_and_upstream_output():
@@ -460,6 +569,57 @@ def test_publish_rechecks_current_qq_binding_and_consent(tmp_path: Path):
         {
             **item.to_dict(),
             "workflow_id": "qq-missing-consent",
+            "nodes": [
+                item.to_dict()["nodes"][0],
+                {**item.to_dict()["nodes"][1], "config": {}},
+            ],
+        }
+    )
+    store.save_draft(missing_consent)
+    with pytest.raises(PermissionError, match="WORKFLOW_TOOL_NEEDS_REVIEW"):
+        runtime.publish(actor_with_notifications(), missing_consent)
+    executor.shutdown()
+
+
+def test_publish_rechecks_current_weixin_context_and_consent(tmp_path: Path):
+    store = WorkflowStore(tmp_path / "weixin-publish.sqlite3")
+    item = WorkflowDefinitionV1(
+        "weixin-workflow",
+        "user",
+        "weixin notify",
+        (
+            WorkflowNode("trigger", "schedule_trigger"),
+            WorkflowNode(
+                "weixin",
+                "weixin_notification",
+                config={"send_consent_at": "2026-08-24T00:00:00Z"},
+            ),
+        ),
+        (WorkflowEdge("edge", "trigger", target_node_id="weixin"),),
+        required_permissions=("workflow.use", "workflow.notify.self"),
+    )
+    store.save_draft(item)
+    checked = []
+    policy = WorkflowAuthorizationPolicy()
+    executor = WorkflowExecutor(
+        store,
+        NodeHandlers(actor=actor_with_notifications(), policy=policy),
+    )
+    runtime = WorkflowRuntime(
+        store,
+        executor,
+        policy,
+        notification_validator=lambda current_actor, channel: checked.append(
+            (current_actor.user_id, channel)
+        ),
+    )
+
+    assert runtime.publish(actor_with_notifications(), item).status == "active"
+    assert checked == [("user", "weixin")]
+    missing_consent = WorkflowDefinitionV1.from_dict(
+        {
+            **item.to_dict(),
+            "workflow_id": "weixin-missing-consent",
             "nodes": [
                 item.to_dict()["nodes"][0],
                 {**item.to_dict()["nodes"][1], "config": {}},

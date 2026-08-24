@@ -77,6 +77,17 @@ describe("workflow editor helpers", () => {
       source_ref: "${nodes.summary.output}",
       body: "${nodes.summary.output}",
     });
+    const weixinResult = withGraphBoundInputs({
+      nodes: [
+        ...nodes,
+        { ...delivery, id: "weixin", type: "weixin_notification", config: {} },
+      ],
+      edges: [...edges, { id: "weixin-edge", source_node_id: "summary", target_node_id: "weixin" }],
+    });
+    expect(weixinResult.nodes.find((node) => node.id === "weixin")?.config).toMatchObject({
+      source_ref: "${nodes.summary.output}",
+      body: "${nodes.summary.output}",
+    });
   });
 
   it("allows only one schedule trigger", () => {

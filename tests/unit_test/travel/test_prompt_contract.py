@@ -91,13 +91,13 @@ def test_requirement_prompt_keeps_travel_assistant_scope_and_handoff_intents() -
     ):
         assert intent in prompt
     assert "不进行自由聊天" in prompt
-    assert "智策旅行助手" in prompt
+    assert "智策旅行顾问" in prompt
 
 
 def test_intake_prompt_requires_natural_reply_bounded_tools_and_no_early_research() -> None:
     prompt = (ROOT / "prompts" / "travel_intake.md").read_text(encoding="utf-8")
 
-    assert "智策旅行助手" in prompt
+    assert "智策旅行顾问" in prompt
     assert "update_travel_draft" in prompt
     assert "offer_main_chat_handoff" in prompt
     assert "confirm_and_start_travel_planning" in prompt
@@ -112,6 +112,8 @@ def test_intake_prompt_requires_natural_reply_bounded_tools_and_no_early_researc
     assert "禁止说“可以直接回复确认或开始执行，我就开始规划”" in prompt
     assert "确认前禁止输出 A/B/C" in prompt
     assert "不得抢跑生成无来源预方案" in prompt
+    assert "location_clarifications" in prompt
+    assert "地点唯一性也是开始规划的必要条件" in prompt
 
 
 def test_travel_prompts_require_concrete_stays_and_weather_provenance() -> None:
@@ -129,6 +131,8 @@ def test_travel_prompts_require_concrete_stays_and_weather_provenance() -> None:
         assert "TRAVEL_ROUTE_EVIDENCE_MISSING" in prompt
         assert "不少于 2 公里" in prompt
         assert "返程列车" in prompt
+
+    assert "澄清前禁止调用地图、天气、交通、酒店、网页或社区来源去猜地点" in planning
 
 
 def test_travel_prompts_require_parallel_research_and_targeted_finalization() -> None:

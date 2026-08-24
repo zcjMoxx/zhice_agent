@@ -12,11 +12,12 @@ const props = withDefaults(defineProps<{
   busy?: boolean;
   intakeBusy?: boolean;
   clarificationQuestions?: string[];
+  locationClarifications?: string[];
   restoredConversation?: TravelConversationMessage[];
   restoredDraft?: TravelRequirementDraft | null;
   handoffQuestion?: string;
   historyMode?: boolean;
-}>(), { clarificationQuestions: () => [], restoredConversation: () => [], restoredDraft: null, handoffQuestion: "" });
+}>(), { clarificationQuestions: () => [], locationClarifications: () => [], restoredConversation: () => [], restoredDraft: null, handoffQuestion: "" });
 
 const detailsOpen = ref(false);
 const detailsSource = ref<"manual" | "model">("manual");
@@ -63,8 +64,8 @@ const missingFields = computed(() => [
   !form.budgetLevel && "旅行基调",
   form.startDate && form.endDate && !durationDays.value && "有效日期范围",
 ].filter(Boolean) as string[]);
-const readyToGenerate = computed(() => missingFields.value.length === 0);
-const conversationReady = computed(() => hasDraft.value && readyToGenerate.value);
+const readyToGenerate = computed(() => missingFields.value.length === 0 && !props.locationClarifications.length);
+const conversationReady = computed(() => hasDraft.value && readyToGenerate.value && !props.locationClarifications.length);
 const tonePrerequisitesReady = computed(() => [
   form.origin.trim(),
   form.destinations.trim(),
@@ -294,13 +295,13 @@ function manualRequirementSummary() {
 <template>
   <form class="travel-form travel-composer" @submit.prevent="sendNaturalMessage">
     <header class="travel-composer-header">
-      <div><span class="eyebrow"><Sparkles :size="14" /> {{ historyMode ? '旅行需求' : '新建计划' }}</span><h2>{{ historyMode ? '生成这份计划时的需求问答' : '用一句话描述你的旅行' }}</h2><p>{{ historyMode ? '这段记录与当前计划一起保存。' : '信息不清楚时我会继续询问，确认后才开始规划。' }}</p></div>
+      <div><span class="eyebrow"><Sparkles :size="14" /> {{ historyMode ? '旅行需求' : '新建计划' }}</span><h2>{{ historyMode ? '生成这份计划时的需求问答' : '用一句话描述你的旅行' }}</h2><p>{{ historyMode ? '这段记录与当前计划一起保存。' : '与智策旅行顾问讨论需求，确认后开始正式规划。' }}</p></div>
       <button v-if="!historyMode" class="travel-supplement-button" type="button" :disabled="busy || intakeBusy" :aria-expanded="detailsOpen" @click="openManualDetails"><ListPlus :size="15" />补充数据</button>
     </header>
 
     <div v-if="conversation.length" class="travel-requirement-dialog" aria-live="polite">
       <div v-for="(message, index) in conversation" :key="index" :class="['travel-requirement-message', message.role]">
-        <span>{{ message.role === 'user' ? '你' : '旅行助手' }}</span>
+        <span v-if="message.role === 'assistant'">智策旅行顾问</span>
         <p v-if="message.role === 'user'" class="travel-requirement-bubble">{{ message.content }}</p>
         <MarkdownMessage v-else class="travel-requirement-bubble" :content="message.content" />
       </div>
@@ -339,7 +340,7 @@ function manualRequirementSummary() {
         <Send :size="18" />
       </button>
     </div>
-    <div v-if="intakeBusy" class="travel-extracting">旅行助手正在思考…</div>
+    <div v-if="intakeBusy" class="travel-extracting">智策旅行顾问正在思考…</div>
 
     <aside v-show="detailsOpen" class="travel-form-details" aria-label="旅行条件表单">
       <header><div><span class="eyebrow">生成前确认</span><h2>{{ detailsSource === 'manual' ? '手动填写旅行条件' : '检查旅行条件' }}</h2></div><button class="icon-button" type="button" aria-label="收起旅行条件" @click="detailsOpen = false"><X :size="17" /></button></header>

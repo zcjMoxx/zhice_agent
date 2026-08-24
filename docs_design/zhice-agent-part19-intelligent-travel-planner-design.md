@@ -74,7 +74,7 @@ agent/applications/travel/
 
 - `TravelRequestV1` 校验出发地、目的地、完整日期、总天数、人数、预算/显式预算档位路径、偏好、节奏和 quick/deep。
 - `EvidenceItemV1` 固定来源类型、HTTP(S) 原链接、发布时间、查询时间、数据时间、短摘录、facts、confidence、freshness 和 SHA-256。
-- URL 和 content hash 去重会重映射活动/路线 evidence id，不保存重复正文。
+- Evidence 只按包含 provider、标题、规范化 URL、摘要与 facts 的完整 content hash 去重并重映射引用；同一 provider 和入口 URL 下语义不同的 POI、酒店、路线证据分别保留，不因共享来源首页而错误合并。
 - `TravelPlanV1` 校验每日日期、活动不重叠、路线、跨区域交通、预算 lower/expected/upper、证据引用、来源数量、计划大小和 credential-like 字段。
 - 新计划的跨区域交通使用扁平字段保存线路、车次/航班、出发到达时间、时长、席别、单价、总价、来源和 evidence id；引用真实 12306 evidence 时这些字段必须齐全，未取得铁路结果时必须明确标为估算或不可用。
 - 住宿分别保存具体酒店、地址、入住退房日期、晚数、指定日期观察价与规划估算价；一般 `evidence_ids` 只证明酒店名称/地址/坐标，`price_source_evidence_ids` 只证明指定日期价格，规划估算不能引用景点或普通 POI 作为价格来源。
@@ -261,7 +261,7 @@ TRAVEL_PLAN_ACCESS_DENIED
 默认稳定测试覆盖：
 
 - request/evidence/plan 正常、异常和边界；
-- hash/URL 去重、非法 URL、Credential-like 字段和 freshness 混淆；
+- 完整 content hash 去重、同 provider/入口 URL 的不同语义证据保留、非法 URL、Credential-like 字段和 freshness 混淆；
 - optimizer 的预算、时间、开放时间、折返、跨城、强度、取消和输出上限；
 - optimizer 使用原始强度做门控，但公开候选强度固定在 0 到 10；Source Ledger 能解析超过旧 20KB 阈值的大型合法搜索结果；
 - Store owner 隔离、Session/Turn、删除和 finalizer owner 重写；

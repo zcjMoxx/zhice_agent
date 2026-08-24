@@ -1926,9 +1926,9 @@ Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费
 目标：
 
 - 所有正常登录用户都能创建、发布、立即运行、定时、暂停和查看本人的工作流。
-- 使用 Vue Flow 展示 Schedule、MCP Query、MCP Action、LLM Transform、Template、Condition、官方通知和个人邮件节点。
+- 使用 Vue Flow 展示 Schedule、MCP Query、MCP Action、LLM Transform、Template、Condition、官方通知、个人邮件、本人 QQ 和本人微信通知节点。
 - 使用独立 WorkflowRuntime、SQLite真值、APScheduler MemoryJobStore 和稳定拓扑执行，不把 cron/DAG 写入 AgentLoop。
-- 区分官方系统邮箱通知本人和用户 SMTP 授权码连接的个人邮箱发送，复用现有 RBAC、ToolProvider、Hook、Activity 和 Audit。
+- 用户只维护一个“我的邮箱”身份：官方系统邮箱向该已验证地址通知本人；用户可选配置 SMTP 授权码，用自己的邮箱向其他收件人代发，复用现有 RBAC、ToolProvider、Hook、Activity 和 Audit。
 
 依赖顺序：
 
@@ -1940,6 +1940,7 @@ Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费
 6. Vue Flow画布、属性面板、字段映射、运行历史和实时事件。
 7. 已验证本人邮箱的官方通知。
 8. 用户级 ExternalConnection、AES-GCM、个人 SMTP 授权码和 SMTP 邮件 Provider。
+9. Owner-scoped QQ/微信通知 Provider；微信复用最近一对一会话安全引用与持久化 Outbox，工作流不接受任意平台收件人。
 
 明确边界：任意代码、Shell/exec、循环、子工作流、分布式队列和完整Agent节点不属于该特色应用；当前固定为单Gateway、单scheduler。当前事实以 `docs_design/zhice-agent-part20-visual-workflow-scheduler-design.md` 为准，原方案记录为 `docs_design/2026-08-10-visual-workflow-scheduler-design.md`。
 

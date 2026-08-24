@@ -3,7 +3,7 @@ import { KeyRound, Link2, Mail, Monitor, Moon, Palette, Settings2, Sun, UserRoun
 import { computed, onMounted, ref } from "vue";
 
 import { ApiError, api } from "@/api/client";
-import type { WorkflowCapabilities, WorkflowEmailConnection } from "@/api/types";
+import type { NotificationEmail, WorkflowCapabilities, WorkflowEmailConnection } from "@/api/types";
 import { uiText, type UiLanguage } from "@/i18n";
 import { useAuthStore } from "@/stores/auth";
 import { isWeixinAttemptTerminal, useChannelStore } from "@/stores/channels";
@@ -45,6 +45,10 @@ const emailConnections = ref<WorkflowEmailConnection[]>([]);
 const emailCapabilities = ref<WorkflowCapabilities>({});
 const emailAction = ref("");
 const emailFeedback = ref("");
+const notificationEmail = ref<NotificationEmail>({ address: "", status: "missing", verified: false });
+const notificationAddress = ref("");
+const notificationCode = ref("");
+const notificationVerificationPending = ref(false);
 const showSmtpForm = ref(false);
 const smtp = ref<SmtpDraft>(initialSmtpDraft());
 const testRecipients = ref<Record<string, string>>({});
@@ -167,7 +171,7 @@ function detectMailboxProvider(): void {
 
 function connectionProviderLabel(provider: string): string {
   return provider === "smtp_personal"
-    ? tr("个人邮箱（SMTP）", "Personal email (SMTP)")
+    ? tr("SMTP 代发", "SMTP sender")
     : tr("不再支持的邮箱连接", "Unsupported email connection");
 }
 
@@ -186,6 +190,10 @@ function emailError(error: unknown): string {
     EMAIL_REJECTED: tr("邮箱服务器拒绝了连接或邮件，请检查账号和授权码。", "The email server rejected the connection or message."),
     EMAIL_OUTCOME_UNKNOWN: tr("邮件结果暂时无法确认，请先检查收件箱，不要立即重复发送。", "The email outcome is unknown. Check the inbox before retrying."),
     EMAIL_RECIPIENT_INVALID: tr("请输入正确的测试收件邮箱。", "Enter a valid test recipient."),
+    OFFICIAL_EMAIL_NOT_CONFIGURED: tr("系统还没有配置官方发信邮箱。", "Official email is not configured."),
+    NOTIFICATION_EMAIL_UNAVAILABLE: tr("系统暂时无法保存我的邮箱。", "My email storage is unavailable."),
+    NOTIFICATION_EMAIL_NOT_VERIFIED: tr("请先验证我的邮箱。", "Verify my email first."),
+    NOTIFICATION_EMAIL_CODE_INVALID: tr("验证码错误或已经过期，请重新获取。", "The code is invalid or expired. Request a new one."),
   };
   return labels[error.code] || tr("邮件连接操作失败，请检查配置后重试。", "The email connection action failed. Check the configuration and retry.");
 }
@@ -201,7 +209,50 @@ async function refreshConnections() {
     try { emailConnections.value = (await api.workflowEmailConnections()).connections || []; }
     catch (error) { failure.value = emailError(error); emailConnections.value = []; }
   }
+  try {
+    notificationEmail.value = (await api.notificationEmail()).email;
+    if (notificationEmail.value.address) notificationAddress.value = notificationEmail.value.address;
+  } catch (error) {
+    failure.value = emailError(error);
+    notificationEmail.value = { address: "", status: "missing", verified: false };
+  }
   await channels.refresh();
+}
+
+async function requestNotificationVerification() {
+  emailAction.value = "notification-request";
+  failure.value = ""; emailFeedback.value = "";
+  try {
+    await api.requestNotificationEmailVerification(notificationAddress.value.trim());
+    notificationVerificationPending.value = true;
+    notificationCode.value = "";
+    emailFeedback.value = tr("验证码已发送，请在 10 分钟内完成验证。", "Verification code sent. Complete verification within 10 minutes.");
+  } catch (error) { failure.value = emailError(error); }
+  finally { emailAction.value = ""; }
+}
+
+async function verifyNotificationAddress() {
+  emailAction.value = "notification-verify";
+  failure.value = ""; emailFeedback.value = "";
+  try {
+    notificationEmail.value = (await api.verifyNotificationEmail(
+      notificationAddress.value.trim(), notificationCode.value.trim(),
+    )).email;
+    notificationVerificationPending.value = false;
+    notificationCode.value = "";
+    emailFeedback.value = tr("我的邮箱已验证，可以接收官方通知。", "My email is verified and can receive official notifications.");
+  } catch (error) { failure.value = emailError(error); }
+  finally { emailAction.value = ""; }
+}
+
+async function testNotificationAddress() {
+  emailAction.value = "notification-test";
+  failure.value = ""; emailFeedback.value = "";
+  try {
+    await api.testNotificationEmail();
+    emailFeedback.value = tr("官方测试通知已被服务商接收，请到收件箱确认。", "The official test notification was accepted. Confirm it in your inbox.");
+  } catch (error) { failure.value = emailError(error); }
+  finally { emailAction.value = ""; }
 }
 
 async function saveSmtpConnection() {
@@ -291,17 +342,32 @@ async function deleteEmail(connection: WorkflowEmailConnection) {
         <section v-else class="setting-section channel-settings connection-settings">
           <div class="connection-intro">
             <span><Mail :size="20" /></span>
-            <div><strong>{{ tr('邮件账号', 'Email accounts') }}</strong><p>{{ tr('连接你自己的邮箱后，工作流才能用该账号发送结果。连接凭据只加密保存在你的账号下。', 'Connect your own mailbox before workflows can send results from it. Credentials are encrypted and isolated to your account.') }}</p></div>
+            <div><strong>{{ tr('我的邮箱', 'My email') }}</strong><p>{{ tr('这个邮箱用于接收智策官方通知；如需使用自己的邮箱向其他人发信，可以额外配置 SMTP 代发。', 'This address receives official ZhiCe notifications. Configure SMTP separately only when you want to send from your own mailbox.') }}</p></div>
           </div>
-          <p v-if="emailCapabilities.personal_email?.available === false" class="connection-unavailable">{{ tr('当前系统还没有启用安全的邮件连接存储。管理员需要先配置连接加密密钥，之后这里才会开放邮箱绑定。', 'Secure email connection storage is not enabled. An administrator must configure the connection encryption key first.') }}</p>
+          <section class="connected-email-list notification-email-card">
+            <article>
+              <div><span class="email-provider-mark">@</span><span><strong>{{ notificationEmail.verified ? notificationEmail.address : tr('尚未设置我的邮箱', 'My email is not set') }}</strong><small>{{ notificationEmail.verified ? tr('已验证 · 可接收官方通知', 'Verified · receives official notifications') : tr('验证后即可接收官方通知', 'Verify it to receive official notifications') }}</small></span></div>
+              <span class="connection-row-actions" v-if="notificationEmail.verified"><button :disabled="Boolean(emailAction)" @click="testNotificationAddress">{{ emailAction === 'notification-test' ? tr('发送中…', 'Sending…') : tr('发送测试通知', 'Send test notification') }}</button></span>
+            </article>
+            <form class="smtp-connection-form notification-email-form" @submit.prevent="requestNotificationVerification">
+              <label>{{ notificationEmail.verified ? tr('更换我的邮箱', 'Change my email') : tr('邮箱地址', 'Email address') }}<input v-model="notificationAddress" type="email" autocomplete="email" placeholder="name@example.com" required /></label>
+              <button class="primary-button" :disabled="Boolean(emailAction) || emailCapabilities.official_notification?.code === 'OFFICIAL_EMAIL_NOT_CONFIGURED'">{{ emailAction === 'notification-request' ? tr('发送中…', 'Sending…') : tr('发送验证码', 'Send verification code') }}</button>
+            </form>
+            <form v-if="notificationVerificationPending" class="smtp-connection-form notification-email-form" @submit.prevent="verifyNotificationAddress">
+              <label>{{ tr('邮箱验证码', 'Verification code') }}<input v-model="notificationCode" inputmode="numeric" maxlength="12" autocomplete="one-time-code" required /></label>
+              <button class="primary-button" :disabled="Boolean(emailAction)">{{ emailAction === 'notification-verify' ? tr('验证中…', 'Verifying…') : tr('完成验证', 'Verify email') }}</button>
+            </form>
+          </section>
+          <div class="connection-divider"><span>{{ tr('SMTP 代发（可选）', 'SMTP sender (optional)') }}</span></div>
+          <p v-if="emailCapabilities.personal_email?.available === false" class="connection-unavailable">{{ tr('当前系统还没有启用安全的邮件连接存储，因此暂时不能配置 SMTP 代发；这不影响接收官方通知。', 'Secure connection storage is unavailable, so SMTP sending cannot be configured. Official notifications are unaffected.') }}</p>
           <template v-else>
             <div class="email-provider-grid">
-              <article class="email-provider-card" data-enabled="true"><span class="email-provider-mark smtp">@</span><div><strong>{{ tr('个人邮箱', 'Personal email') }}</strong><small>{{ tr('使用 SMTP 授权码连接', 'Connect with an SMTP app password') }}</small></div><button :disabled="Boolean(emailAction)" @click="showSmtpForm = !showSmtpForm">{{ showSmtpForm ? tr('收起', 'Close') : tr('连接邮箱', 'Connect mailbox') }}</button></article>
+              <article class="email-provider-card" data-enabled="true"><span class="email-provider-mark smtp">@</span><div><strong>{{ tr('使用我的邮箱代发', 'Send from my mailbox') }}</strong><small>{{ tr('配置 SMTP 授权码后，工作流可以向其他收件人发信', 'Add an SMTP app password so workflows can email other recipients') }}</small></div><button :disabled="Boolean(emailAction)" @click="showSmtpForm = !showSmtpForm">{{ showSmtpForm ? tr('收起', 'Close') : tr('配置 SMTP', 'Configure SMTP') }}</button></article>
             </div>
             <form v-if="showSmtpForm" class="smtp-connection-form" @submit.prevent="saveSmtpConnection">
-              <header><div><strong>{{ tr('连接个人邮箱', 'Connect personal mailbox') }}</strong><small>{{ tr('选择邮箱类型，再填写邮箱地址和授权码，其余设置由系统自动完成。', 'Choose your mailbox type, then enter the address and app password. The remaining settings are automatic.') }}</small></div></header>
+              <header><div><strong>{{ tr('配置 SMTP 代发', 'Configure SMTP sender') }}</strong><small>{{ tr('选择邮箱类型，再填写邮箱地址和授权码；凭据只会加密保存在你的账号下。', 'Choose a mailbox type, address, and app password. Credentials remain encrypted under your account.') }}</small></div></header>
               <label>{{ tr('邮箱类型', 'Mailbox type') }}<select v-model="smtp.provider" class="mailbox-provider-select" @change="applyMailboxProvider"><option value="qq">QQ 邮箱</option><option value="163">网易 163 邮箱</option><option value="126">网易 126 邮箱</option><option value="other">{{ tr('其他或企业邮箱', 'Other or business mailbox') }}</option></select></label>
-              <label>{{ tr('邮箱地址', 'Email address') }}<input v-model="smtp.username" type="email" autocomplete="username" placeholder="name@example.com" required @blur="detectMailboxProvider" /><small>{{ tr('工作流会直接使用这个邮箱发送结果。', 'Workflows will send results directly from this mailbox.') }}</small></label>
+              <label>{{ tr('发件邮箱', 'Sender address') }}<input v-model="smtp.username" type="email" autocomplete="username" placeholder="name@example.com" required @blur="detectMailboxProvider" /><small>{{ tr('只用于 SMTP 代发；我的邮箱仍用于接收官方通知。', 'Used only for SMTP sending; My email still receives official notifications.') }}</small></label>
               <label>{{ tr('邮箱授权码', 'App password') }}<input v-model="smtp.app_password" type="password" autocomplete="new-password" required /><small>{{ authorizationHint }}</small></label>
               <section v-if="customMailbox" class="custom-smtp-settings">
                 <header><strong>{{ tr('其他邮箱服务器设置', 'Other mailbox server settings') }}</strong><small>{{ tr('以下三项请向邮箱服务商或企业管理员索取。', 'Ask your email provider or administrator for these three values.') }}</small></header>
@@ -311,16 +377,16 @@ async function deleteEmail(connection: WorkflowEmailConnection) {
               <button class="primary-button" :disabled="Boolean(emailAction)">{{ emailAction === 'smtp' ? tr('正在验证…', 'Verifying…') : tr('验证并连接', 'Verify and connect') }}</button>
             </form>
             <section v-if="emailConnections.length" class="connected-email-list">
-              <h3>{{ tr('已连接的邮件账号', 'Connected email accounts') }}</h3>
+              <h3>{{ tr('已配置的 SMTP 代发账号', 'Configured SMTP senders') }}</h3>
               <article v-for="connection in emailConnections" :key="connection.id">
                 <div><span class="email-provider-mark">{{ connectionProviderLabel(connection.provider).slice(0, 1) }}</span><span><strong>{{ connection.account_display }}</strong><small>{{ connectionProviderLabel(connection.provider) }} · {{ connectionStatusLabel(connection.status) }}</small></span></div>
                 <label>{{ tr('测试收件邮箱', 'Test recipient') }}<input v-model="testRecipients[connection.id]" type="email" :placeholder="connection.account_display" /></label>
                 <span class="connection-row-actions"><button :disabled="Boolean(emailAction) || connection.status !== 'active'" @click="testEmail(connection)">{{ emailAction === `test:${connection.id}` ? tr('发送中…', 'Sending…') : tr('发送测试', 'Send test') }}</button><button class="danger-text" :disabled="Boolean(emailAction)" @click="deleteEmail(connection)">{{ tr('删除', 'Delete') }}</button></span>
               </article>
             </section>
-            <p v-else class="muted">{{ tr('还没有连接邮件账号。连接后，工作流的“发送结果”中才会出现个人邮件。', 'No mailbox is connected. Personal email appears in Send result after a connection is ready.') }}</p>
-            <p v-if="emailFeedback" class="form-success">{{ emailFeedback }}</p>
+            <p v-else class="muted">{{ tr('未配置 SMTP 代发。你仍然可以正常接收官方通知。', 'SMTP sending is not configured. You can still receive official notifications.') }}</p>
           </template>
+          <p v-if="emailFeedback" class="form-success">{{ emailFeedback }}</p>
           <div class="connection-divider"><span>{{ tr('消息渠道', 'Messaging channels') }}</span></div>
           <p v-if="channels.error" class="form-error">{{ channels.error }}</p>
           <p v-if="channels.qqAuthorizationError" class="form-error">{{ channels.qqAuthorizationError }}</p>

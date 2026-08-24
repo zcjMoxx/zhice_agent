@@ -92,6 +92,9 @@ describe("SettingsCenter", () => {
     ui.language = "zh-CN";
     const channels = useChannelStore();
     vi.spyOn(channels, "refresh").mockResolvedValue();
+    vi.spyOn(api, "workflowCapabilities").mockResolvedValue({ official_notification: { available: true, code: "" }, personal_email: { available: true, code: "" } });
+    vi.spyOn(api, "workflowEmailConnections").mockResolvedValue({ connections: [] });
+    vi.spyOn(api, "notificationEmail").mockResolvedValue({ email: { address: "alice@example.com", status: "active", verified: true } });
     channels.weixin = { status: "unbound", linked_at: "" };
     channels.weixinAttempt = {
       attempt_id: "wxbind-1",
@@ -103,8 +106,8 @@ describe("SettingsCenter", () => {
 
     const wrapper = mount(SettingsCenter, { global: { plugins: [pinia] } });
 
-    expect(wrapper.text()).toContain("个人邮箱");
-    expect(wrapper.text()).toContain("使用 SMTP 授权码连接");
+    expect(wrapper.text()).toContain("我的邮箱");
+    expect(wrapper.text()).toContain("SMTP 代发（可选）");
     expect(wrapper.text()).not.toContain("Gmail");
     expect(wrapper.text()).not.toContain("Microsoft");
     expect(wrapper.text()).not.toContain("系统未启用");
@@ -129,6 +132,7 @@ describe("SettingsCenter", () => {
     vi.spyOn(channels, "refresh").mockResolvedValue();
     vi.spyOn(api, "workflowCapabilities").mockResolvedValue({ personal_email: { available: true, code: "SMTP_READY" } });
     vi.spyOn(api, "workflowEmailConnections").mockResolvedValue({ connections: [] });
+    vi.spyOn(api, "notificationEmail").mockResolvedValue({ email: { address: "849534549@qq.com", status: "active", verified: true } });
     const createConnection = vi.spyOn(api, "createSmtpEmailConnection").mockResolvedValue({
       connection: { id: "email-1", provider: "smtp_personal", account_display: "849534549@qq.com", status: "active" },
     });
@@ -148,9 +152,10 @@ describe("SettingsCenter", () => {
     await wrapper.get(".mailbox-provider-select").setValue("qq");
     expect(wrapper.find(".custom-smtp-settings").exists()).toBe(false);
 
-    await wrapper.get('.smtp-connection-form input[type="email"]').setValue("849534549@qq.com");
-    await wrapper.get('.smtp-connection-form input[type="password"]').setValue("smtp-app-password");
-    await wrapper.get(".smtp-connection-form").trigger("submit");
+    const smtpForm = wrapper.get(".smtp-connection-form:not(.notification-email-form)");
+    await smtpForm.get('input[type="email"]').setValue("849534549@qq.com");
+    await smtpForm.get('input[type="password"]').setValue("smtp-app-password");
+    await smtpForm.trigger("submit");
     await flushPromises();
 
     expect(createConnection).toHaveBeenCalledWith({
@@ -160,6 +165,39 @@ describe("SettingsCenter", () => {
       username: "849534549@qq.com",
       app_password: "smtp-app-password",
     });
+  });
+
+  it("verifies My email independently from optional SMTP sending", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.user = { id: "u-notify", username: "alice", display_name: "Alice", status: "active", roles: ["viewer"], can_manage_admins: false };
+    const ui = useUiStore();
+    ui.settingsSection = "connections";
+    const channels = useChannelStore();
+    vi.spyOn(channels, "refresh").mockResolvedValue();
+    vi.spyOn(api, "workflowCapabilities").mockResolvedValue({ official_notification: { available: false, code: "NOTIFICATION_EMAIL_NOT_VERIFIED" }, personal_email: { available: true, code: "" } });
+    vi.spyOn(api, "workflowEmailConnections").mockResolvedValue({ connections: [] });
+    vi.spyOn(api, "notificationEmail").mockResolvedValue({ email: { address: "", status: "missing", verified: false } });
+    const requestVerification = vi.spyOn(api, "requestNotificationEmailVerification").mockResolvedValue({ challenge_id: "challenge-1", address: "me@example.com", expires_at: "later" });
+    const verifyEmail = vi.spyOn(api, "verifyNotificationEmail").mockResolvedValue({ email: { address: "me@example.com", status: "active", verified: true } });
+
+    const wrapper = mount(SettingsCenter, { global: { plugins: [pinia] } });
+    await flushPromises();
+    const addressForm = wrapper.get(".notification-email-form");
+    await addressForm.get('input[type="email"]').setValue("me@example.com");
+    await addressForm.trigger("submit");
+    await flushPromises();
+
+    expect(requestVerification).toHaveBeenCalledWith("me@example.com");
+    const forms = wrapper.findAll(".notification-email-form");
+    await forms[1].get('input[autocomplete="one-time-code"]').setValue("12345678");
+    await forms[1].trigger("submit");
+    await flushPromises();
+
+    expect(verifyEmail).toHaveBeenCalledWith("me@example.com", "12345678");
+    expect(wrapper.text()).toContain("我的邮箱已验证");
+    expect(wrapper.text()).toContain("SMTP 代发（可选）");
   });
 
   it("renders a full-width-ready retry action for a pending QQ web binding", () => {

@@ -81,8 +81,10 @@ describe("workflow presentation", () => {
     expect(workflowTriggerLabel("manual")).toBe("手动触发");
     expect(workflowNodeTypeLabel("mcp_query")).toBe("获取信息");
     expect(workflowNodeTypeLabel("qq_notification")).toBe("发送结果");
+    expect(workflowNodeTypeLabel("weixin_notification")).toBe("发送结果");
     expect(workflowErrorLabel("WORKFLOW_GRAPH_CYCLE")).toContain("循环");
     expect(workflowErrorLabel("WORKFLOW_QQ_NOT_BOUND")).toContain("连接 QQ");
+    expect(workflowErrorLabel("WORKFLOW_WEIXIN_CONTEXT_REQUIRED")).toContain("微信里给智策发送一条消息");
     expect(workflowErrorLabel("WORKFLOW_DRAFT_CONFLICT")).toContain("保留当前画布");
     expect(workflowErrorLabel("UNKNOWN_INTERNAL_CODE")).not.toContain("UNKNOWN_INTERNAL_CODE");
     expect(workflowRunOutputLabel('{"text":"杭州今天有雨"}')).toBe("杭州今天有雨");

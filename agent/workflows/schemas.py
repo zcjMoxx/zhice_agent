@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-NODE_TYPES = frozenset({"schedule_trigger", "mcp_query", "mcp_action", "llm_transform", "template", "condition", "official_notification", "personal_email", "qq_notification"})
+NODE_TYPES = frozenset({"schedule_trigger", "mcp_query", "mcp_action", "llm_transform", "template", "condition", "official_notification", "personal_email", "qq_notification", "weixin_notification"})
 WORKFLOW_STATUSES = frozenset({"draft", "active", "paused", "paused_attention", "archived"})
 RUN_STATUSES = frozenset({"queued", "running", "succeeded", "failed", "cancelled", "partial"})
 

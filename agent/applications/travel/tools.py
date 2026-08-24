@@ -283,6 +283,15 @@ class UpdateTravelDraftTool(BaseTool):
                 "maxItems": len(_INTAKE_FIELDS),
                 "items": {"type": "string", "enum": list(_INTAKE_FIELDS)},
             },
+            "location_clarifications": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "string", "minLength": 1, "maxLength": 240},
+                "description": (
+                    "All unresolved questions needed to identify an origin or destination uniquely. "
+                    "Pass [] only after the user explicitly resolves every location ambiguity."
+                ),
+            },
         },
         "required": ["patch"],
         "additionalProperties": False,
@@ -304,12 +313,28 @@ class UpdateTravelDraftTool(BaseTool):
             return guard
         patch = args.get("patch") if isinstance(args, dict) else None
         clear_fields = args.get("clear_fields", []) if isinstance(args, dict) else []
+        raw_location_clarifications = (
+            args.get("location_clarifications") if isinstance(args, dict) else None
+        )
         if not isinstance(patch, dict) or set(patch) - set(_INTAKE_FIELDS):
             return _intake_error(self.name, "TRAVEL_DRAFT_INVALID", "Travel draft patch is invalid.")
         if not isinstance(clear_fields, list) or any(item not in _INTAKE_FIELDS for item in clear_fields):
             return _intake_error(self.name, "TRAVEL_DRAFT_INVALID", "Travel draft clear_fields is invalid.")
         if set(patch) & set(clear_fields):
             return _intake_error(self.name, "TRAVEL_DRAFT_INVALID", "A field cannot be updated and cleared together.")
+        if raw_location_clarifications is not None and (
+            not isinstance(raw_location_clarifications, list)
+            or len(raw_location_clarifications) > 4
+            or any(
+                not isinstance(item, str) or not item.strip() or len(item.strip()) > 240
+                for item in raw_location_clarifications
+            )
+        ):
+            return _intake_error(
+                self.name,
+                "TRAVEL_LOCATION_CLARIFICATION_INVALID",
+                "Travel location clarifications are invalid.",
+            )
         state = self.sessions.load(context.session_id)
         user_text = _intake_turn_user_text(state.messages, context.turn_id)
         patch = _ground_intake_patch(patch, user_text)
@@ -329,12 +354,24 @@ class UpdateTravelDraftTool(BaseTool):
         except (TravelApplicationError, TypeError, ValueError):
             return _intake_error(self.name, "TRAVEL_DRAFT_INVALID", "Travel draft patch did not pass validation.")
         missing = _intake_missing_fields(draft)
+        previous_location_clarifications = state.metadata.get(
+            "travel_location_clarifications", []
+        )
+        if not isinstance(previous_location_clarifications, list):
+            previous_location_clarifications = []
+        location_clarifications = (
+            [item.strip() for item in raw_location_clarifications]
+            if raw_location_clarifications is not None
+            else [str(item).strip() for item in previous_location_clarifications if str(item).strip()][:4]
+        )
+        ready = not missing and not location_clarifications
         changed_fields = sorted({*effective_patch, *clear_fields})
         metadata: dict[str, Any] = {
             "travel_phase": "intake",
             "travel_draft": draft,
             "travel_draft_version": TRAVEL_INTAKE_DRAFT_VERSION,
             "travel_intake_turn_ids": _intake_turn_ids(state.metadata, context.turn_id),
+            "travel_location_clarifications": location_clarifications,
         }
         if changed_fields:
             metadata["travel_handoff_question"] = ""
@@ -346,7 +383,8 @@ class UpdateTravelDraftTool(BaseTool):
         detail_data = {
             "draft": draft,
             "missing_fields": missing,
-            "ready": not missing,
+            "location_clarifications": location_clarifications,
+            "ready": ready,
             "changed_fields": changed_fields,
         }
         if context.runtime_events is not None:
@@ -357,7 +395,7 @@ class UpdateTravelDraftTool(BaseTool):
                 parent_event_id=context.tool_started_event_id,
                 display={"visibility": "internal"},
                 ui_metadata={"detail_type": "travel_intake_draft", "detail_data": detail_data},
-                metadata={"ready": not missing, "missing_count": len(missing)},
+                metadata={"ready": ready, "missing_count": len(missing), "location_clarification_count": len(location_clarifications)},
             )
         return ToolResult(
             output=json.dumps(
@@ -365,7 +403,7 @@ class UpdateTravelDraftTool(BaseTool):
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
-            metadata={"code": "OK", "tool_name": self.name, "ready": not missing},
+            metadata={"code": "OK", "tool_name": self.name, "ready": ready},
         )
 
 
@@ -490,6 +528,13 @@ class ConfirmAndStartTravelPlanningTool(BaseTool):
                 self.name,
                 "TRAVEL_REQUIREMENTS_INCOMPLETE",
                 "Travel requirements are incomplete.",
+            )
+        location_clarifications = state.metadata.get("travel_location_clarifications", [])
+        if isinstance(location_clarifications, list) and any(str(item).strip() for item in location_clarifications):
+            return _intake_error(
+                self.name,
+                "TRAVEL_LOCATION_CLARIFICATION_REQUIRED",
+                "Clarify the ambiguous origin or destination before formal planning.",
             )
         try:
             payload = self.confirm_planning(context.actor, context.session_id, dict(draft))

@@ -28,6 +28,7 @@ import type {
   WorkflowRun,
   WorkflowToolCatalogItem,
   WorkflowEmailConnection,
+  NotificationEmail,
 } from "./types";
 
 export class ApiError extends Error {
@@ -141,6 +142,10 @@ export const api = {
   workflowTools: () => request<{ items: WorkflowToolCatalogItem[] }>("/api/workflow-tools", { cache: "no-store" }),
   workflowCapabilities: () => request<WorkflowCapabilities>("/api/workflow-capabilities", { cache: "no-store" }),
   workflowEmailConnections: () => request<{ connections: WorkflowEmailConnection[] }>("/api/connections", { cache: "no-store" }),
+  notificationEmail: () => request<{ email: NotificationEmail }>("/api/connections/email/notification", { cache: "no-store" }),
+  requestNotificationEmailVerification: (address: string) => request<{ challenge_id: string; address: string; expires_at: string }>("/api/connections/email/notification/request-verification", json({ address })),
+  verifyNotificationEmail: (address: string, code: string) => request<{ email: NotificationEmail }>("/api/connections/email/notification/verify", json({ address, code })),
+  testNotificationEmail: () => request<{ status: string; provider_message_id?: string | null; message?: string }>("/api/connections/email/notification/test", json({})),
   createSmtpEmailConnection: (payload: { host: string; port: number; security: string; username: string; app_password: string }) => request<{ connection: WorkflowEmailConnection }>("/api/connections/email/smtp", json(payload)),
   testEmailConnection: (id: string, recipient: string) => request<{ status: string; provider_message_id?: string | null; message?: string }>(`/api/connections/${encodeURIComponent(id)}/test-email`, json({ recipient })),
   deleteEmailConnection: (id: string) => request<{ deleted: boolean }>(`/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" }),
@@ -152,6 +157,7 @@ export const api = {
   pauseWorkflow: (id: string) => request<{ status: string }>(`/api/workflows/${encodeURIComponent(id)}/pause`, { method: "POST" }),
   resumeWorkflow: (id: string) => request<{ status: string }>(`/api/workflows/${encodeURIComponent(id)}/resume`, { method: "POST" }),
   runWorkflow: (id: string) => request<WorkflowRun>(`/api/workflows/${encodeURIComponent(id)}/run`, { method: "POST" }),
+  runWorkflowDraft: (id: string) => request<WorkflowRun>(`/api/workflows/${encodeURIComponent(id)}/run-draft`, { method: "POST" }),
   workflowRuns: (id: string) => request<{ items: WorkflowRun[] }>(`/api/workflows/${encodeURIComponent(id)}/runs`, { cache: "no-store" }),
   workflowRun: (id: string) => request<WorkflowRun>(`/api/workflow-runs/${encodeURIComponent(id)}`, { cache: "no-store" }),
   cancelWorkflowRun: (id: string) => request<WorkflowRun>(`/api/workflow-runs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),

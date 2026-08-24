@@ -20,12 +20,12 @@ describe("TravelPlanForm", () => {
       props: {
         restoredConversation: [
           { role: "user", content: "你是谁" },
-          { role: "assistant", content: "我是智策旅行助手，主要帮你整理旅行条件和规划行程。" },
+          { role: "assistant", content: "我是智策旅行顾问，主要帮你整理旅行条件和规划行程。" },
         ],
       },
     });
 
-    expect(wrapper.text()).toContain("我是智策旅行助手，主要帮你整理旅行条件和规划行程。");
+    expect(wrapper.text()).toContain("我是智策旅行顾问，主要帮你整理旅行条件和规划行程。");
     expect(wrapper.text()).not.toContain("工作模式");
   });
 
@@ -63,6 +63,23 @@ describe("TravelPlanForm", () => {
     expect(String(emitted?.[0])).toContain("我已确认旅行条件：重庆出发，前往大理");
     expect(String(emitted?.[0])).not.toContain("finalize_travel_plan");
     expect(emitted?.[2]).toEqual(completeDraft());
+  });
+
+  it("keeps confirmation hidden while a location still needs disambiguation", () => {
+    const wrapper = mount(TravelPlanForm, {
+      props: {
+        restoredConversation: [
+          { role: "user", content: "重庆去大理" },
+          { role: "assistant", content: "你说的大理具体位于哪个省或市？" },
+        ],
+        restoredDraft: completeDraft(),
+        locationClarifications: ["你说的大理具体位于哪个省或市？"],
+      },
+    });
+
+    expect(wrapper.find(".travel-requirement-ready").exists()).toBe(false);
+    expect(wrapper.find(".travel-requirement-message.user > span").exists()).toBe(false);
+    expect(wrapper.get(".travel-requirement-message.assistant > span").text()).toBe("智策旅行顾问");
   });
 
   it("reveals the tone cards last and submits immediately after one selection", async () => {
@@ -155,7 +172,7 @@ describe("TravelPlanForm", () => {
     await textarea.setValue("我想去大理");
 
     expect(wrapper.get('[aria-label="发送旅行需求"]').attributes("disabled")).toBeDefined();
-    expect(wrapper.text()).toContain("旅行助手正在思考");
+    expect(wrapper.text()).toContain("智策旅行顾问正在思考");
     expect(wrapper.text()).toContain("正在交流");
   });
 

@@ -505,23 +505,18 @@ class TravelPlanV1:
 def deduplicate_evidence(
     items: Iterable[EvidenceItemV1],
 ) -> tuple[tuple[EvidenceItemV1, ...], dict[str, str]]:
-    """Deduplicate same URL/content while retaining an id remapping table."""
+    """Deduplicate identical content while retaining an id remapping table."""
 
     kept: list[EvidenceItemV1] = []
     aliases: dict[str, str] = {}
-    by_key: dict[tuple[str, str], EvidenceItemV1] = {}
     by_hash: dict[str, EvidenceItemV1] = {}
     for item in items:
-        url_key = normalized_source_url(item.source_url)
-        key = (item.provider.casefold(), url_key)
-        existing = by_hash.get(item.content_hash) or (by_key.get(key) if url_key else None)
+        existing = by_hash.get(item.content_hash)
         if existing is not None:
             aliases[item.evidence_id] = existing.evidence_id
             continue
         kept.append(item)
         by_hash[item.content_hash] = item
-        if url_key:
-            by_key[key] = item
     return tuple(kept), aliases
 
 

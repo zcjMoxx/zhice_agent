@@ -77,6 +77,55 @@ def test_init_owner_seeds_roles_permissions_and_authenticates(tmp_path):
     assert store.is_initialized() is True
 
 
+def test_notification_email_verification_is_salted_expiring_and_single_use(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("owner", "Owner", "password-123")
+
+    challenge = store.begin_notification_email_verification(
+        user.id, " Me@Example.com ", "12345678"
+    )
+
+    assert challenge["address"] == "me@example.com"
+    with sqlite3.connect(store.path) as connection:
+        row = connection.execute(
+            "SELECT code_salt,code_hash FROM notification_email_verifications"
+        ).fetchone()
+    assert row is not None
+    assert row[0] != "12345678"
+    assert row[1] != "12345678"
+    assert store.verify_notification_email(
+        user.id, "me@example.com", "00000000"
+    ) is False
+    assert store.verify_notification_email(
+        user.id, "me@example.com", "12345678"
+    ) is True
+    assert store.notification_email(user.id) == "me@example.com"
+    assert store.notification_email_status(user.id) == {
+        "address": "me@example.com",
+        "status": "active",
+        "verified": True,
+    }
+    assert store.verify_notification_email(
+        user.id, "me@example.com", "12345678"
+    ) is False
+
+
+def test_expired_notification_email_code_does_not_activate_address(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = store.initialize_owner("owner", "Owner", "password-123")
+    store.begin_notification_email_verification(
+        user.id,
+        "me@example.com",
+        "12345678",
+        ttl=timedelta(seconds=-1),
+    )
+
+    assert store.verify_notification_email(
+        user.id, "me@example.com", "12345678"
+    ) is False
+    assert store.notification_email(user.id) is None
+
+
 def test_viewer_has_only_personal_workflow_privileges(tmp_path):
     store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     store.initialize_schema()

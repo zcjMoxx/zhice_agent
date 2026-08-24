@@ -18,6 +18,7 @@ from agent.channels.dedup import ChannelDedupService
 from agent.channels.identity import ExternalIdentityService
 from agent.channels.weixin.adapter import WeixinClawAdapter
 from agent.channels.weixin.binding import WeixinBindingService
+from agent.channels.weixin.notification import WeixinNotificationProvider
 from agent.channels.weixin.outbound import render_chunks
 from agent.channels.weixin.sidecar import WeixinSidecarError, safe_weixin_error_code
 
@@ -280,6 +281,88 @@ def test_send_uses_stable_client_id_long_timeout_and_marks_outbox_sent(tmp_path)
     assert sends[0]["client_id"].startswith("zhice-weixin-")
     assert len(sends[0]["client_id"]) == len("zhice-weixin-") + 32
     assert store.list_pending_weixin_outbound("opaque-a") == []
+
+
+def test_workflow_notification_uses_latest_owner_context_and_is_idempotent(tmp_path):
+    adapter, _runtime, sidecar, store = _adapter(
+        tmp_path,
+        config=WeixinChannelConfig(enabled=True, text_chunk_limit=4),
+    )
+    adapter._state = "available"
+    account = store.get_channel_account(channel="weixin", account_key="opaque-a")
+    store.upsert_weixin_delivery_context(
+        account_key="opaque-a", peer="wx-a", context_token_ref="ctx-safe-ref"
+    )
+    provider = WeixinNotificationProvider(ExternalIdentityService(store))
+    provider.register_adapter(adapter)
+    actor = store.actor_for_user(str(account["owner_user_id"]), channel="workflow")
+
+    assert provider.capability(actor) == {"available": True, "bound": True, "code": ""}
+    first = provider.send_to_user(
+        user_id=actor.user_id, content="今日天气晴朗", delivery_key="run-1:notify"
+    )
+    second = provider.send_to_user(
+        user_id=actor.user_id, content="今日天气晴朗", delivery_key="run-1:notify"
+    )
+
+    assert first == second == {"status": "sent", "channel": "weixin", "chunks": "2"}
+    sends = [payload for kind, payload in sidecar.calls if kind == "message.send"]
+    assert [payload["text"] for payload in sends] == ["今日天气", "晴朗"]
+    assert len({payload["client_id"] for payload in sends}) == 2
+    assert all(payload["context_token_ref"] == "ctx-safe-ref" for payload in sends)
+    assert store.list_pending_weixin_outbound("opaque-a") == []
+
+
+def test_workflow_notification_requires_inbound_context_and_clears_invalid_reference(tmp_path):
+    sidecar = _FailingSendSidecar()
+    adapter, _runtime, _sidecar, store = _adapter(tmp_path, sidecar=sidecar)
+    adapter._state = "available"
+    account = store.get_channel_account(channel="weixin", account_key="opaque-a")
+    provider = WeixinNotificationProvider(ExternalIdentityService(store))
+    provider.register_adapter(adapter)
+    actor = store.actor_for_user(str(account["owner_user_id"]), channel="workflow")
+
+    assert provider.capability(actor)["code"] == "WORKFLOW_WEIXIN_CONTEXT_REQUIRED"
+    store.upsert_weixin_delivery_context(
+        account_key="opaque-a", peer="wx-a", context_token_ref="expired-safe-ref"
+    )
+    with pytest.raises(RuntimeError, match="WORKFLOW_WEIXIN_CONTEXT_REQUIRED"):
+        provider.send_to_user(
+            user_id=actor.user_id, content="测试消息", delivery_key="run-2:notify"
+        )
+    assert store.get_weixin_delivery_context(account_key="opaque-a", peer="wx-a") is None
+
+
+def test_delivery_context_refreshes_pending_outbox_and_unlink_cleans_it(tmp_path):
+    adapter, _runtime, _sidecar, store = _adapter(tmp_path)
+    store.enqueue_weixin_outbound(
+        delivery_id="zhice-weixin-0123456789abcdef0123456789abcdef",
+        account_key="opaque-a",
+        event_id="legacy-event",
+        peer="wx-a",
+        context_token_ref="old-safe-ref",
+        chunk_index=0,
+        text="pending",
+    )
+
+    store.upsert_weixin_delivery_context(
+        account_key="opaque-a", peer="wx-a", context_token_ref="new-safe-ref"
+    )
+
+    pending = store.list_pending_weixin_outbound("opaque-a")
+    assert pending[0]["context_token_ref"] == "new-safe-ref"
+    assert store.get_weixin_delivery_context(account_key="opaque-a", peer="wx-a") == {
+        "account_key": "opaque-a",
+        "peer": "wx-a",
+        "context_token_ref": "new-safe-ref",
+        "updated_at": store.get_weixin_delivery_context(account_key="opaque-a", peer="wx-a")["updated_at"],
+    }
+    actor = store.actor_for_user(
+        str(store.get_channel_account(channel="weixin", account_key="opaque-a")["owner_user_id"]),
+        channel="rest",
+    )
+    adapter.binding.unlink(actor)
+    assert store.get_weixin_delivery_context(account_key="opaque-a", peer="wx-a") is None
 
 
 def test_send_failure_reconnects_and_replays_without_rerunning_agent(tmp_path, monkeypatch):

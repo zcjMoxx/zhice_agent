@@ -67,6 +67,7 @@ export interface TravelDraftSnapshot {
   draft: TravelRequirementDraft | Record<string, never>;
   phase: "intake" | "planning";
   handoff_question: string;
+  location_clarifications?: string[];
 }
 
 export type TravelWorkStatus = "collecting" | "running" | "awaiting_candidate" | "failed" | "completed";
@@ -270,6 +271,7 @@ export interface RuntimeEventData {
       draft?: TravelRequirementDraft;
       missing_fields?: string[];
       changed_fields?: string[];
+      location_clarifications?: string[];
       ready?: boolean;
       question?: string;
       topic?: string;
@@ -284,7 +286,7 @@ export interface RuntimeEventData {
   parent_event_id?: string;
   tool_call_id?: string;
   tool_call_record_id?: string;
-  metadata?: { percent?: number; code?: string; skill_name?: string; plan_id?: string; tool_name?: string; question_count?: number; ready?: boolean; missing_count?: number; topic?: string };
+  metadata?: { percent?: number; code?: string; skill_name?: string; plan_id?: string; tool_name?: string; question_count?: number; ready?: boolean; missing_count?: number; location_clarification_count?: number; topic?: string };
 }
 
 export type TravelFreshness = "live" | "snapshot" | "historical" | "estimate" | "unknown";
@@ -519,7 +521,7 @@ export interface WsEnvelope {
   turn_id?: string;
 }
 
-export type WorkflowNodeType = "schedule_trigger" | "mcp_query" | "mcp_action" | "llm_transform" | "template" | "condition" | "official_notification" | "personal_email" | "qq_notification";
+export type WorkflowNodeType = "schedule_trigger" | "mcp_query" | "mcp_action" | "llm_transform" | "template" | "condition" | "official_notification" | "personal_email" | "qq_notification" | "weixin_notification";
 
 export interface WorkflowToolCatalogItem {
   name: string;
@@ -537,10 +539,17 @@ export interface WorkflowEmailConnection {
   status: string;
 }
 
+export interface NotificationEmail {
+  address: string;
+  status: "missing" | "pending" | "active" | "revoked" | string;
+  verified: boolean;
+}
+
 export interface WorkflowCapabilities {
   official_notification?: { available: boolean; code: string };
   personal_email?: { available: boolean; code: string };
   qq_notification?: { available: boolean; bound: boolean; code: string };
+  weixin_notification?: { available: boolean; bound: boolean; code: string };
   external_actions?: { available: boolean; count: number };
 }
 
@@ -610,6 +619,14 @@ export interface WorkflowRun {
   finished_at?: string | null;
   error_code?: string | null;
   node_runs?: Array<{ node_id: string; status: string; summary?: string }>;
+  results?: Array<{
+    node_id: string;
+    node_type: string;
+    status: string;
+    content_summary?: string;
+    delivery_summary?: string;
+    error_code?: string | null;
+  }>;
   nodes?: Array<{
     node_id: string;
     node_type: string;

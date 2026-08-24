@@ -56,6 +56,7 @@ export const useTravelStore = defineStore("travel", {
     conversationLoading: false,
     conversationError: "",
     activeDraft: null as TravelRequirementDraft | null,
+    locationClarifications: [] as string[],
     handoffQuestion: "",
     draftSaving: false,
     draftSavePromise: null as Promise<void> | null,
@@ -107,6 +108,7 @@ export const useTravelStore = defineStore("travel", {
       this.conversationLoading = false;
       this.conversationError = "";
       this.activeDraft = null;
+      this.locationClarifications = [];
       this.handoffQuestion = "";
       this.draftSaving = false;
       this.draftSavePromise = null;
@@ -136,6 +138,7 @@ export const useTravelStore = defineStore("travel", {
       this.conversation = [];
       this.conversationError = "";
       this.activeDraft = null;
+      this.locationClarifications = [];
       try {
         const plan = (await api.travelPlan(id)).plan;
         if (this.workspaceVersion !== workspaceVersion) return;
@@ -195,6 +198,7 @@ export const useTravelStore = defineStore("travel", {
       this.conversationLoading = false;
       this.conversationError = "";
       this.activeDraft = null;
+      this.locationClarifications = [];
       this.loadProgress("");
       this.handoffQuestion = "";
       window.history.replaceState({}, "", "/travel");
@@ -302,7 +306,7 @@ export const useTravelStore = defineStore("travel", {
         await webSocket.sendMessage(this.sessionId, text, models.current || "auto");
       } catch (error) {
         this.intakeBusy = false;
-        this.conversationError = error instanceof Error ? error.message : "旅行助手暂时无法回复";
+        this.conversationError = error instanceof Error ? error.message : "智策旅行顾问暂时无法回复";
       }
     },
     async generate(message: string, conversation: TravelConversationMessage[] = [], draft?: TravelRequirementDraft) {
@@ -405,10 +409,12 @@ export const useTravelStore = defineStore("travel", {
         this.activeDraft = Object.keys(snapshot.draft).length ? snapshot.draft as TravelRequirementDraft : null;
         this.phase = snapshot.phase || "intake";
         this.handoffQuestion = snapshot.handoff_question || "";
+        this.locationClarifications = snapshot.location_clarifications || [];
       } catch (error) {
         if (this.sessionId !== sessionId) return;
         this.conversation = [];
         this.activeDraft = null;
+        this.locationClarifications = [];
         this.conversationError = error instanceof Error ? error.message : "无法读取旅行草稿";
       } finally {
         if (this.sessionId === sessionId) this.conversationLoading = false;
@@ -450,6 +456,10 @@ export const useTravelStore = defineStore("travel", {
         if (eventName === "travel.intake_draft_updated") {
           const draft = event.ui_metadata?.detail_data?.draft;
           if (draft) this.activeDraft = { ...draft };
+          const locationClarifications = event.ui_metadata?.detail_data?.location_clarifications;
+          this.locationClarifications = Array.isArray(locationClarifications)
+            ? locationClarifications.filter((item) => typeof item === "string" && item.trim()).slice(0, 4)
+            : [];
           const changedFields = event.ui_metadata?.detail_data?.changed_fields;
           if (Array.isArray(changedFields) && changedFields.length) this.handoffQuestion = "";
           return;
@@ -467,6 +477,7 @@ export const useTravelStore = defineStore("travel", {
           this.error = "";
           this.conversationError = "";
           this.clarificationQuestions = [];
+          this.locationClarifications = [];
           this.candidateReview = null;
           this.progressItems = [{
             id: "requirements",
@@ -645,7 +656,7 @@ export const useTravelStore = defineStore("travel", {
       if (this.intakeBusy) {
         if (data.type === "error") {
           this.intakeBusy = false;
-          this.conversationError = data.error?.message || "旅行助手暂时无法回复";
+          this.conversationError = data.error?.message || "智策旅行顾问暂时无法回复";
         } else if (data.type === "done" || data.type === "stopped") {
           this.intakeBusy = false;
           const content = String(data.assistant?.content || "").trim();

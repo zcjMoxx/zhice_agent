@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
 import sqlite3
@@ -1008,6 +1009,10 @@ class SQLiteAuthStore:
                     "DELETE FROM weixin_outbound_messages WHERE account_key=?",
                     (str(row["account_key"]),),
                 )
+                connection.execute(
+                    "DELETE FROM weixin_delivery_contexts WHERE account_key=?",
+                    (str(row["account_key"]),),
+                )
             connection.execute(
                 """
                 DELETE FROM external_identities
@@ -1489,6 +1494,96 @@ class SQLiteAuthStore:
         if any(result[key] != value for key, value in expected.items()):
             raise AuthStoreError("Weixin outbound delivery id conflicts with persisted content")
         return result
+
+    def upsert_weixin_delivery_context(
+        self, *, account_key: str, peer: str, context_token_ref: str
+    ) -> dict[str, str]:
+        """Persist only the opaque Sidecar context reference for proactive delivery."""
+
+        normalized_account = str(account_key).strip()
+        normalized_peer = str(peer).strip()
+        normalized_ref = str(context_token_ref).strip()
+        if not normalized_account or not normalized_peer or not normalized_ref:
+            raise AuthStoreError("invalid Weixin delivery context")
+        now = _utc_now()
+        with self._connect() as connection:
+            account = connection.execute(
+                "SELECT 1 FROM channel_accounts WHERE channel='weixin' AND account_key=?",
+                (normalized_account,),
+            ).fetchone()
+            if account is None:
+                raise AuthStoreError("Weixin account is not bound")
+            connection.execute(
+                """
+                INSERT INTO weixin_delivery_contexts(
+                  account_key,peer,context_token_ref,updated_at
+                ) VALUES(?,?,?,?)
+                ON CONFLICT(account_key,peer) DO UPDATE SET
+                  context_token_ref=excluded.context_token_ref,
+                  updated_at=excluded.updated_at
+                """,
+                (normalized_account, normalized_peer, normalized_ref, now),
+            )
+            connection.execute(
+                """
+                UPDATE weixin_outbound_messages
+                SET context_token_ref=?,updated_at=?
+                WHERE account_key=? AND peer=? AND status='pending'
+                """,
+                (normalized_ref, now, normalized_account, normalized_peer),
+            )
+        return {
+            "account_key": normalized_account,
+            "peer": normalized_peer,
+            "context_token_ref": normalized_ref,
+            "updated_at": now,
+        }
+
+    def get_weixin_delivery_context(
+        self, *, account_key: str, peer: str
+    ) -> dict[str, str] | None:
+        """Return one server-only safe reference, backfilling from legacy Outbox rows."""
+
+        normalized_account = str(account_key).strip()
+        normalized_peer = str(peer).strip()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT account_key,peer,context_token_ref,updated_at
+                FROM weixin_delivery_contexts
+                WHERE account_key=? AND peer=?
+                """,
+                (normalized_account, normalized_peer),
+            ).fetchone()
+            if row is not None:
+                return dict(row)
+            legacy = connection.execute(
+                """
+                SELECT account_key,peer,context_token_ref,updated_at
+                FROM weixin_outbound_messages
+                WHERE account_key=? AND peer=? AND context_token_ref<>''
+                  AND status='sent' AND last_error_code=''
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (normalized_account, normalized_peer),
+            ).fetchone()
+        if legacy is None:
+            return None
+        return self.upsert_weixin_delivery_context(
+            account_key=normalized_account,
+            peer=normalized_peer,
+            context_token_ref=str(legacy["context_token_ref"]),
+        )
+
+    def delete_weixin_delivery_context(
+        self, *, account_key: str, peer: str
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM weixin_delivery_contexts WHERE account_key=? AND peer=?",
+                (str(account_key).strip(), str(peer).strip()),
+            )
+        return cursor.rowcount == 1
 
     def list_pending_weixin_outbound(
         self, account_key: str
@@ -2365,6 +2460,112 @@ class SQLiteAuthStore:
         with self._connect() as connection:
             row = connection.execute(query, values).fetchone()
         return str(row[0]) if row else None
+
+    def notification_email_status(self, user_id: str) -> dict[str, Any]:
+        """Return the current default mailbox identity without exposing challenges."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT address,status,verified_at,is_default,updated_at
+                FROM user_notification_endpoints
+                WHERE user_id=? AND type='email'
+                ORDER BY is_default DESC,updated_at DESC LIMIT 1""",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return {"address": "", "status": "missing", "verified": False}
+        return {
+            "address": str(row["address"]),
+            "status": str(row["status"]),
+            "verified": bool(row["verified_at"] and row["status"] == "active"),
+        }
+
+    def begin_notification_email_verification(
+        self,
+        user_id: str,
+        address: str,
+        code: str,
+        *,
+        ttl: timedelta = timedelta(minutes=10),
+    ) -> dict[str, str]:
+        """Persist one short-lived, salted verification challenge."""
+
+        normalized = address.strip().lower()
+        if "@" not in normalized or len(normalized) > 320:
+            raise AuthStoreError("invalid notification email")
+        challenge_id = "email-verify-" + uuid.uuid4().hex
+        salt = generate_token()
+        now = datetime.now(UTC)
+        expires_at = now + ttl
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE notification_email_verifications SET consumed_at=?
+                WHERE user_id=? AND consumed_at IS NULL""",
+                (now.isoformat(), user_id),
+            )
+            connection.execute(
+                """INSERT INTO notification_email_verifications(
+                id,user_id,address,code_salt,code_hash,attempts,created_at,expires_at,consumed_at
+                ) VALUES(?,?,?,?,?,0,?,?,NULL)""",
+                (
+                    challenge_id,
+                    user_id,
+                    normalized,
+                    salt,
+                    hash_token(f"{salt}:{code}"),
+                    now.isoformat(),
+                    expires_at.isoformat(),
+                ),
+            )
+        return {
+            "challenge_id": challenge_id,
+            "address": normalized,
+            "expires_at": expires_at.isoformat(),
+        }
+
+    def verify_notification_email(
+        self,
+        user_id: str,
+        address: str,
+        code: str,
+        *,
+        max_attempts: int = 5,
+    ) -> bool:
+        """Consume the latest matching challenge and activate the mailbox."""
+
+        normalized = address.strip().lower()
+        now = datetime.now(UTC)
+        verified = False
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM notification_email_verifications
+                WHERE user_id=? AND address=? AND consumed_at IS NULL
+                ORDER BY created_at DESC LIMIT 1""",
+                (user_id, normalized),
+            ).fetchone()
+            if row is None:
+                return False
+            attempts = int(row["attempts"])
+            expires_at = datetime.fromisoformat(str(row["expires_at"]))
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if attempts >= max_attempts or expires_at <= now:
+                connection.execute(
+                    "UPDATE notification_email_verifications SET consumed_at=? WHERE id=?",
+                    (now.isoformat(), str(row["id"])),
+                )
+                return False
+            expected = str(row["code_hash"])
+            actual = hash_token(f"{row['code_salt']}:{code.strip()}")
+            verified = hmac.compare_digest(expected, actual)
+            connection.execute(
+                """UPDATE notification_email_verifications
+                SET attempts=attempts+1, consumed_at=? WHERE id=?""",
+                (now.isoformat() if verified else None, str(row["id"])),
+            )
+        if verified:
+            self.upsert_notification_email(user_id, normalized, verified=True, is_default=True)
+        return verified
 
     def _require_initialized(self) -> None:
         if not self.is_initialized():

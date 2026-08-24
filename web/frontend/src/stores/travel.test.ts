@@ -912,7 +912,7 @@ describe("travel store", () => {
       handoff_question: "",
       messages: [
         { role: "user", content: "你是谁" },
-        { role: "assistant", content: "我是智策旅行助手，主要帮你规划行程。" },
+        { role: "assistant", content: "我是智策旅行顾问，主要帮你规划行程。" },
       ],
     });
     const travel = useTravelStore();
@@ -927,14 +927,14 @@ describe("travel store", () => {
       session_id: "travel-intake",
       data: {
         type: "done",
-        assistant: { role: "assistant", content: "我是智策旅行助手，主要帮你规划行程。" },
+        assistant: { role: "assistant", content: "我是智策旅行顾问，主要帮你规划行程。" },
       },
     });
 
     expect(travel.intakeBusy).toBe(false);
     expect(travel.conversation.at(-1)).toEqual({
       role: "assistant",
-      content: "我是智策旅行助手，主要帮你规划行程。",
+      content: "我是智策旅行顾问，主要帮你规划行程。",
     });
     await vi.waitFor(() => expect(api.travelDraft).toHaveBeenCalledWith("travel-intake"));
   });
@@ -1198,7 +1198,7 @@ describe("travel store", () => {
         type: "travel.intake_draft_updated",
         ui_metadata: {
           detail_type: "travel_intake_draft",
-          detail_data: { draft: sampleDraft(), missing_fields: [], ready: true },
+          detail_data: { draft: sampleDraft(), missing_fields: [], location_clarifications: ["请确认大理所在省份"], ready: false },
         },
       },
     });
@@ -1215,6 +1215,7 @@ describe("travel store", () => {
     });
 
     expect(travel.activeDraft).toEqual(sampleDraft());
+    expect(travel.locationClarifications).toEqual(["请确认大理所在省份"]);
     expect(travel.handoffQuestion).toBe("帮我写 Python");
   });
 

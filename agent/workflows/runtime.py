@@ -33,32 +33,7 @@ class WorkflowRuntime:
         return self.store.save_draft(definition, expected_version=expected_version)
 
     def publish(self, actor: ActorContext, definition: WorkflowDefinitionV1) -> WorkflowDefinitionV1:
-        self.policy.require_owner(actor, definition)
-        for permission in definition.required_permissions:
-            self.policy.require(actor, permission)
-        catalog = {item["name"]: item for item in self.tool_catalog(actor)}
-        for node in definition.nodes:
-            if node.type == "personal_email":
-                connection_id = str(node.config.get("connection_id") or "")
-                if not connection_id or self.connection_validator is None:
-                    raise RuntimeError("CONNECTION_PROVIDER_UNSUPPORTED")
-                self.connection_validator(actor, connection_id)
-            if node.type == "qq_notification":
-                if not node.config.get("send_consent_at"):
-                    raise PermissionError("WORKFLOW_TOOL_NEEDS_REVIEW")
-                self.policy.require(actor, "workflow.notify.self")
-                if self.notification_validator is None:
-                    raise RuntimeError("WORKFLOW_QQ_CHANNEL_UNAVAILABLE")
-                self.notification_validator(actor, "qq")
-            if node.type not in {"mcp_query", "mcp_action"}:
-                continue
-            name = str(node.config.get("tool_name", ""))
-            tool = catalog.get(name)
-            expected_kind = "action" if node.type == "mcp_action" else "query"
-            if tool is None or tool["kind"] != expected_kind:
-                raise RuntimeError("WORKFLOW_TOOL_NOT_ALLOWED")
-            if node.config.get("input_schema_hash") != tool["schema_hash"]:
-                raise RuntimeError("WORKFLOW_TOOL_NEEDS_REVIEW")
+        self._validate_draft_execution(actor, definition)
         published = self.store.publish(definition)
         trigger = next(node for node in published.nodes if node.type == "schedule_trigger")
         trigger_type = str(trigger.config.get("trigger_type", "manual"))
@@ -78,6 +53,40 @@ class WorkflowRuntime:
                 schedule = next(item for item in self.store.list_active_schedules() if item["workflow_id"] == published.workflow_id)
                 self.scheduler.register(schedule)
         return published
+
+    def _validate_draft_execution(self, actor: ActorContext, definition: WorkflowDefinitionV1) -> None:
+        self.policy.require_owner(actor, definition)
+        for permission in definition.required_permissions:
+            self.policy.require(actor, permission)
+        catalog = {item["name"]: item for item in self.tool_catalog(actor)}
+        for node in definition.nodes:
+            if node.type == "personal_email":
+                connection_id = str(node.config.get("connection_id") or "")
+                if not connection_id or self.connection_validator is None:
+                    raise RuntimeError("CONNECTION_PROVIDER_UNSUPPORTED")
+                self.connection_validator(actor, connection_id)
+            if node.type in {"qq_notification", "weixin_notification"}:
+                if not node.config.get("send_consent_at"):
+                    raise PermissionError("WORKFLOW_TOOL_NEEDS_REVIEW")
+                self.policy.require(actor, "workflow.notify.self")
+                if self.notification_validator is None:
+                    raise RuntimeError(
+                        "WORKFLOW_QQ_CHANNEL_UNAVAILABLE"
+                        if node.type == "qq_notification"
+                        else "WORKFLOW_WEIXIN_CHANNEL_UNAVAILABLE"
+                    )
+                self.notification_validator(
+                    actor, "qq" if node.type == "qq_notification" else "weixin"
+                )
+            if node.type not in {"mcp_query", "mcp_action"}:
+                continue
+            name = str(node.config.get("tool_name", ""))
+            tool = catalog.get(name)
+            expected_kind = "action" if node.type == "mcp_action" else "query"
+            if tool is None or tool["kind"] != expected_kind:
+                raise RuntimeError("WORKFLOW_TOOL_NOT_ALLOWED")
+            if node.config.get("input_schema_hash") != tool["schema_hash"]:
+                raise RuntimeError("WORKFLOW_TOOL_NEEDS_REVIEW")
 
     def pause(self, actor: ActorContext, workflow_id: str) -> None:
         definition = self.store.get_draft(workflow_id, owner_user_id=actor.user_id)
@@ -143,6 +152,20 @@ class WorkflowRuntime:
                     "available": True,
                 })
             return sorted(items, key=lambda item: (item["kind"], item["name"]))
+        finally:
+            if executor is not self.executor:
+                executor.shutdown()
+
+    def run_draft(self, actor: ActorContext, workflow_id: str) -> dict:
+        """Execute the latest saved draft once without publishing or changing activation state."""
+
+        definition = self.store.get_draft(workflow_id, owner_user_id=actor.user_id)
+        if definition is None:
+            raise KeyError("WORKFLOW_NOT_FOUND")
+        self._validate_draft_execution(actor, definition)
+        executor = self.executor_factory(actor) if self.executor_factory is not None else self.executor
+        try:
+            return executor.execute(definition)
         finally:
             if executor is not self.executor:
                 executor.shutdown()

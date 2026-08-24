@@ -332,7 +332,7 @@ def test_runtime_uses_same_llm_and_only_intake_tools_before_confirmation(tmp_pat
         "confirm_and_start_travel_planning",
     ]
     assert loop.llm_override is llm
-    assert "智策旅行助手接待规则" in loop.system_prompt_addendum
+    assert "智策旅行顾问接待规则" in loop.system_prompt_addendum
     assert "服务端当前旅行草稿" in loop.system_prompt_addendum
     assert '"origin":"重庆"' in loop.system_prompt_addendum
     assert "智能旅行规划规则" not in loop.system_prompt_addendum

@@ -48,12 +48,17 @@ def test_runtime_updates_collecting_draft_and_restores_structured_state(tmp_path
     result = runtime.persist_travel_conversation(
         _actor(), "travel-a", updated, draft=draft
     )
+    access.store.update_metadata(
+        "travel-a",
+        {"travel_location_clarifications": ["请确认大理具体位于哪个省或市。"]},
+    )
     restored = runtime.travel_draft(_actor(), "travel-a")
 
     assert result["status"] == "updated"
     assert restored["messages"] == updated
     assert restored["draft"]["origin"] == "重庆"
     assert restored["phase"] == "intake"
+    assert restored["location_clarifications"] == ["请确认大理具体位于哪个省或市。"]
     assert access.store.metadata["title"] == "重庆 → 大理"
 
 
@@ -77,6 +82,14 @@ def test_runtime_confirms_complete_draft_and_rejects_incomplete_state(tmp_path):
     with pytest.raises(TravelApplicationError) as captured:
         runtime.confirm_travel_planning(_actor(), "travel-b", incomplete)
     assert captured.value.code == "TRAVEL_REQUIREMENTS_INCOMPLETE"
+
+    access.store.update_metadata(
+        "travel-c",
+        {"travel_location_clarifications": ["请确认大理具体位于哪个省或市。"]},
+    )
+    with pytest.raises(TravelApplicationError) as ambiguous:
+        runtime.confirm_travel_planning(_actor(), "travel-c", _draft())
+    assert ambiguous.value.code == "TRAVEL_LOCATION_CLARIFICATION_REQUIRED"
 
 
 def test_candidate_stage_continuation_requires_fixed_three_lane_delegation(tmp_path):

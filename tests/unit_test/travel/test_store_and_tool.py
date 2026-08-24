@@ -1419,6 +1419,54 @@ def test_intake_tool_merges_validated_draft_and_emits_refresh_safe_state(tmp_pat
     assert events.items[-1][0] == "travel.intake_draft_updated"
 
 
+def test_intake_location_ambiguity_blocks_readiness_until_user_resolves_it(tmp_path):
+    resolver = FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path)
+    service = TravelApplicationService(TravelConfig(enabled=True), resolver)
+    sessions = JsonlSessionStore(tmp_path / "sessions")
+    sessions.update_metadata("travel-a", {"travel_phase": "intake"})
+    update, _handoff = service.intake_tools_for_actor(_actor("user-a"), sessions)
+
+    ambiguous = update.execute_with_context(
+        {
+            "patch": {
+                "origin": "重庆",
+                "destinations": ["大理"],
+                "start_date": "2026-10-01",
+                "end_date": "2026-10-03",
+                "traveller_count": 2,
+                "budget_level": "balanced",
+            },
+            "location_clarifications": ["你说的大理具体位于哪个省或市？"],
+        },
+        ToolExecutionContext(
+            actor=_actor("user-a"), session_id="travel-a", turn_id="turn-a", turn_index=1, channel="travel"
+        ),
+    )
+
+    ambiguous_payload = json.loads(ambiguous.output)
+    assert ambiguous_payload["ready"] is False
+    assert ambiguous_payload["missing_fields"] == []
+    assert ambiguous_payload["location_clarifications"] == ["你说的大理具体位于哪个省或市？"]
+    assert sessions.load("travel-a").metadata["travel_location_clarifications"] == [
+        "你说的大理具体位于哪个省或市？"
+    ]
+
+    resolved = update.execute_with_context(
+        {
+            "patch": {"destinations": ["云南省大理白族自治州"]},
+            "location_clarifications": [],
+        },
+        ToolExecutionContext(
+            actor=_actor("user-a"), session_id="travel-a", turn_id="turn-b", turn_index=2, channel="travel"
+        ),
+    )
+
+    resolved_payload = json.loads(resolved.output)
+    assert resolved_payload["ready"] is True
+    assert resolved_payload["draft"]["destinations"] == ["云南省大理白族自治州"]
+    assert sessions.load("travel-a").metadata["travel_location_clarifications"] == []
+
+
 def test_intake_tool_rejects_llm_defaults_not_grounded_in_current_user_turn(tmp_path):
     resolver = FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path)
     service = TravelApplicationService(TravelConfig(enabled=True), resolver)
@@ -1738,6 +1786,53 @@ def test_intake_confirmation_reuses_server_confirmation_and_emits_planning_event
     assert calls == [("user-a", "travel-a", draft)]
     assert sessions.load("travel-a").metadata["travel_phase"] == "planning"
     assert events.items[-1][0] == "travel.planning_confirmed"
+
+
+def test_intake_confirmation_rejects_unresolved_location_ambiguity(tmp_path):
+    resolver = FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path)
+    service = TravelApplicationService(TravelConfig(enabled=True), resolver)
+    sessions = JsonlSessionStore(tmp_path / "sessions")
+    draft = {
+        "intent": "travel_requirement",
+        "intent_topic": "",
+        "origin": "重庆",
+        "destinations": ["大理"],
+        "start_date": "2026-10-01",
+        "end_date": "2026-10-03",
+        "traveller_type": "",
+        "traveller_count": 2,
+        "budget_total_cny": None,
+        "budget_level": "balanced",
+        "transport_preferences": [],
+        "stay_preferences": [],
+        "interest_tags": [],
+        "pace": "",
+        "planning_mode": "",
+        "hard_constraints": [],
+    }
+    sessions.update_metadata(
+        "travel-a",
+        {
+            "travel_phase": "intake",
+            "travel_draft": draft,
+            "travel_location_clarifications": ["请确认这个大理位于哪个省。"],
+        },
+    )
+    calls = []
+    _update, _handoff, start = service.intake_tools_for_actor(
+        _actor("user-a"), sessions, confirm_planning=lambda *args: calls.append(args)
+    )
+
+    result = start.execute_with_context(
+        {},
+        ToolExecutionContext(
+            actor=_actor("user-a"), session_id="travel-a", turn_id="turn-confirm", turn_index=2, channel="travel"
+        ),
+    )
+
+    assert result.is_error
+    assert result.metadata["code"] == "TRAVEL_LOCATION_CLARIFICATION_REQUIRED"
+    assert calls == []
 
 
 def test_intake_tools_reject_calls_after_planning_confirmation(tmp_path):

@@ -11,6 +11,9 @@ from typing import Any, Iterator
 from agent.workflows.schemas import WorkflowDefinitionV1, WorkflowRun, utc_now
 
 _UNSET = object()
+_DELIVERY_NODE_TYPES = frozenset(
+    {"official_notification", "personal_email", "qq_notification", "weixin_notification"}
+)
 
 
 def _editable_signature(value: WorkflowDefinitionV1 | dict[str, Any]) -> str:
@@ -18,6 +21,65 @@ def _editable_signature(value: WorkflowDefinitionV1 | dict[str, Any]) -> str:
     for key in ("version", "status", "created_at", "updated_at", "published_at"):
         payload.pop(key, None)
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _summary_value(summary: str) -> Any:
+    try:
+        return json.loads(summary)
+    except (TypeError, json.JSONDecodeError):
+        return summary
+
+
+def _delivery_content_summary(input_summary: str) -> str:
+    value = _summary_value(input_summary)
+    if not isinstance(value, dict):
+        return input_summary
+    content = value.get("content")
+    if content not in (None, ""):
+        return json.dumps(content, ensure_ascii=False) if not isinstance(content, str) else content
+    source = value.get("source_ref")
+    if source in (None, ""):
+        return ""
+    return json.dumps(source, ensure_ascii=False) if not isinstance(source, str) else source
+
+
+def _run_results(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deliveries = [
+        node
+        for node in nodes
+        if node["node_type"] in _DELIVERY_NODE_TYPES and node["status"] != "skipped"
+    ]
+    if deliveries:
+        return [
+            {
+                "node_id": node["node_id"],
+                "node_type": node["node_type"],
+                "status": node["status"],
+                "content_summary": _delivery_content_summary(node.get("input_summary", "")),
+                "delivery_summary": node.get("output_summary", ""),
+                "error_code": node.get("error_code"),
+            }
+            for node in deliveries
+        ]
+    candidates = [
+        node
+        for node in nodes
+        if node["status"] == "succeeded" and node.get("output_summary")
+        and node["node_type"] not in {"schedule_trigger", "condition"}
+    ]
+    templates = [node for node in candidates if node["node_type"] == "template"]
+    selected = (templates or candidates)[-1:]  # A run without delivery has one final visible result.
+    return [
+        {
+            "node_id": node["node_id"],
+            "node_type": node["node_type"],
+            "status": node["status"],
+            "content_summary": node["output_summary"],
+            "delivery_summary": "",
+            "error_code": node.get("error_code"),
+        }
+        for node in selected
+    ]
 
 
 class WorkflowStore:
@@ -333,5 +395,6 @@ class WorkflowStore:
             node["input_summary"] = node.pop("safe_input_summary", "")
             node["output_summary"] = node.pop("safe_output_summary", "")
             result["nodes"].append(node)
+        result["results"] = _run_results(result["nodes"])
         result["events"] = self.events_after(run_id)
         return result

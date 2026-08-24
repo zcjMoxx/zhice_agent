@@ -43,10 +43,11 @@ def resolve_value(value: Any, outputs: dict[str, Any]) -> Any:
 
 
 class NodeHandlers:
-    def __init__(self, *, actor: ActorContext, policy: WorkflowAuthorizationPolicy, tools: ToolProvider | None = None, llm: LLMProvider | None = None, official_email: Callable[..., Any] | None = None, personal_email: Callable[..., Any] | None = None, qq_notification: Callable[..., Any] | None = None):
+    def __init__(self, *, actor: ActorContext, policy: WorkflowAuthorizationPolicy, tools: ToolProvider | None = None, llm: LLMProvider | None = None, official_email: Callable[..., Any] | None = None, personal_email: Callable[..., Any] | None = None, qq_notification: Callable[..., Any] | None = None, weixin_notification: Callable[..., Any] | None = None):
         self.actor, self.policy, self.tools, self.llm = actor, policy, tools, llm
         self.official_email, self.personal_email = official_email, personal_email
         self.qq_notification = qq_notification
+        self.weixin_notification = weixin_notification
 
     def execute(self, node: WorkflowNode, inputs: dict[str, Any], outputs: dict[str, Any], *, run_id: str) -> Any:
         resolved = resolve_value({**node.config, **inputs}, outputs)
@@ -183,7 +184,7 @@ class NodeHandlers:
         return self.official_email(
             owner_user_id=self.actor.user_id,
             subject=value.get("subject", ""),
-            body=_plain_delivery_message(value),
+            body=plain_delivery_message(value),
         )
 
     def _personal_email(
@@ -196,7 +197,7 @@ class NodeHandlers:
             raise RuntimeError("CONNECTION_PROVIDER_UNSUPPORTED")
         return self.personal_email(
             owner_user_id=self.actor.user_id,
-            **{**value, "body": _plain_delivery_message(value)},
+            **{**value, "body": plain_delivery_message(value)},
         )
 
     def _qq_notification(
@@ -209,7 +210,21 @@ class NodeHandlers:
             raise RuntimeError("WORKFLOW_QQ_CHANNEL_UNAVAILABLE")
         return self.qq_notification(
             owner_user_id=self.actor.user_id,
-            body=_plain_delivery_message(value),
+            body=plain_delivery_message(value),
+        )
+
+    def _weixin_notification(
+        self, node: WorkflowNode, value: dict[str, Any], run_id: str
+    ) -> Any:
+        if not node.config.get("send_consent_at"):
+            raise PermissionError("WORKFLOW_TOOL_NEEDS_REVIEW")
+        self.policy.require(self.actor, "workflow.notify.self")
+        if not self.weixin_notification:
+            raise RuntimeError("WORKFLOW_WEIXIN_CHANNEL_UNAVAILABLE")
+        return self.weixin_notification(
+            owner_user_id=self.actor.user_id,
+            body=plain_delivery_message(value),
+            delivery_key=f"{run_id}:{node.id}",
         )
 
 
@@ -257,7 +272,7 @@ def _composed_message(value: dict[str, Any]) -> str:
     return f"{content}\n{rendered}".strip()
 
 
-def _plain_delivery_message(value: dict[str, Any]) -> str:
+def plain_delivery_message(value: dict[str, Any]) -> str:
     """Render external text-channel content without Markdown syntax."""
 
     return markdown_to_plain_text(_composed_message(value)).strip()

@@ -173,6 +173,7 @@ const nodeTypes: Record<WorkflowNodeType, string> = {
   official_notification: "发送结果",
   personal_email: "发送结果",
   qq_notification: "发送结果",
+  weixin_notification: "发送结果",
 };
 
 const workflowErrors: Record<string, string> = {
@@ -205,8 +206,13 @@ const workflowErrors: Record<string, string> = {
   WORKFLOW_QQ_C2C_DISABLED: "当前 QQ 机器人没有开启私聊通知，请联系管理员",
   WORKFLOW_QQ_MESSAGE_EMPTY: "没有可发送的内容，请连接一个有结果的上一步",
   WORKFLOW_QQ_SEND_FAILED: "QQ 没有接受这次发送请求，请稍后再试",
+  WORKFLOW_WEIXIN_ACCOUNT_REQUIRED: "请先登录后再连接微信",
+  WORKFLOW_WEIXIN_NOT_BOUND: "还没有连接微信，请先用当前账号绑定微信",
+  WORKFLOW_WEIXIN_RECONNECT_REQUIRED: "微信连接已失效，请重新连接微信",
+  WORKFLOW_WEIXIN_CHANNEL_UNAVAILABLE: "微信通知服务暂时不可用，请稍后再试",
+  WORKFLOW_WEIXIN_CONTEXT_REQUIRED: "请先在微信里给智策发送一条消息，再回来发布或运行工作流",
   OFFICIAL_EMAIL_NOT_CONFIGURED: "系统还没有配置官方通知通道，请联系管理员",
-  NOTIFICATION_EMAIL_NOT_VERIFIED: "你的通知邮箱尚未验证，请先在账号设置中完成验证",
+  NOTIFICATION_EMAIL_NOT_VERIFIED: "我的邮箱尚未验证，请先在“连接与账号”中完成验证",
   CONNECTION_PROVIDER_UNSUPPORTED: "当前没有可用的个人邮件服务，请先绑定发送账号",
   CONNECTION_REAUTHORIZATION_REQUIRED: "邮件账号授权已失效，请重新绑定后再试",
   REQUEST_FAILED: "请求没有成功。请刷新后重试；若仍失败，请查看具体步骤提示",

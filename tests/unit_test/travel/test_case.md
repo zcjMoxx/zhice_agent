@@ -16,7 +16,7 @@
 - `TravelPlanV1`：每日活动、时间重叠、路线段、跨区域、预算区间、未知证据、Credential-like 字段、非法来源与计划大小；住宿既支持覆盖全程的备选卡，也支持按不同过夜区域连续分段，分段不得漏夜或重叠。
 - 证据化交通住宿：新交通对象保存车次、时间、席别、单价与总价；住宿对象区分指定日期观察价和规划估算价；`amap_transit` 路线必须保存线路号、上下车站和途经站。
 - 真实 E2E 硬守卫：同一 travel Session 的完全重复 MCP 参数不再次请求远端；铁路、天气、网页、社区、酒店和高德搜索/地理编码/路线分别有有界调用预算，不同 Session 可并发且互不影响；守卫结果不生成重复来源失败卡片。
-- 证据语义完整性：`amap_transit` 和“高德公交规划”等别名都必须保存线路与站点；住宿 `evidence_ids` 证明酒店地点，`price_source_evidence_ids` 只证明指定日期价格，规划估算拒绝引用景点或普通 POI 作为价格来源；真实 12306 evidence 被引用时强制车次、时刻、席别与价格齐全。
+- 证据语义完整性：`amap_transit` 和“高德公交规划”等别名都必须保存线路与站点；住宿 `evidence_ids` 证明酒店地点，`price_source_evidence_ids` 只证明指定日期价格，规划估算拒绝引用景点或普通 POI 作为价格来源；同一提供方和入口 URL 下语义不同的 POI、酒店及路线证据不得互相去重，内容完全相同且仅 UTM 参数不同的重复项仍需合并；真实 12306 evidence 被引用时强制车次、时刻、席别与价格齐全。
 - optimizer：正常选择、硬预算、每日时间、跨城路线、开放时间、活动重叠、明显折返、取消、错误结果与输出上限；内部原始强度继续执行门控，对外候选分数限制为 0 到 10。
 - Store/Tool：actor context 派生路径、owner 重写、Session/Turn 关联、列表、读取、删除、跨用户隔离和 `travel.plan_ready`；finalizer Tool schema 明确公开 request/evidence/day/activity/route/budget 嵌套字段白名单并拒绝 `mode`、`metadata`、`total_minutes` 等非协议字段。
 - Fake MCP：Open-Meteo 预报/历史标签与窗口边界；小红书只读 Catalog、Cookie volume guard、提示注入正文仅作为 untrusted content、英文筛选枚举到上游中文值映射、默认筛选 UI 绕过、`max_results` 强制截断、非 JSON 兼容和对外结构化输出上限；一个 Server schema 失败不抹掉其它来源 Catalog。
@@ -32,6 +32,7 @@
 - 自然语言确认：条件齐全后用户回复“确认 / 开始执行”时，接待 Agent 必须调用确认 Tool 复用同一服务端校验，并通过 `travel.planning_confirmed` 让前端进入生成态、让 WebSocket 同请求续跑正式规划。
 - 确认实时状态：接待草稿更新、主聊天交接和文字确认事件必须注册进统一 Runtime Event 协议并经 WebSocket 实时送达；补充消息处理中隐藏确认条，详情面板确认按钮禁用，避免与模型 Turn 并发确认。
 - 接待恢复：`travel_intake_turn_ids` 投影 AgentLoop 保存的 user/assistant 消息；刷新和已完成计划均通过 travel draft API 恢复自然回复，完成的接待 Turn 在统一任务列表中仍是 collecting，不误标为规划失败。
+- 地点歧义：接待模型将未能唯一定位的出发地/目的地问题写入 `travel_location_clarifications`；未澄清时 draft `ready=false`、刷新后继续阻塞，确认 Tool 返回 `TRAVEL_LOCATION_CLARIFICATION_REQUIRED`，只有用户明确补充上级行政区并清空问题后才可开始研究。
 - 手工入口：“补充数据”只打开表格且不调用需求提取 LLM；手工路径同样必须补齐关键字段并明确确认后才执行。
 - 旅行终态：普通文本回复不能作为完成；Gateway 在同一 travel Session 内最多自动续跑两次，只有 `travel.plan_ready`、结构化澄清、用户停止或稳定错误才能结束。
 - 结构化澄清：`request_travel_clarification` 一次返回全部用户问题，前端回到需求对话；Agent/Tool/MCP/Provider 自身问题不得伪装成用户信息不足。
@@ -53,7 +54,7 @@
 - 强制候选审核：旅行频道 finalizer 在无候选审核、待选择或候选不匹配时拒绝保存；只有至少两个候选已经展示且用户选择后才能完成。
 - 信息化地图与未知项：无 Key 时仍展示逐日地点、交通方式、距离和时长；有坐标时显示编号地点、真实路线或顺序参考线；来源失败技术原句在 UI 投影为原因和重查建议。
 - 按天地图：默认只绘制第 1 天，切换日期会清除旧覆盖物，只保留选中日期的地点、路径和文字路线。
-- 旅行助手边界：问候、身份、能力、目的地知识和条件修正由接待 Agent 直接生成自然回复；无关问题不回答实质内容，必须通过结构化 handoff event 携带原问题回主聊天，且不自动发送。
+- 智策旅行顾问边界：问候、身份、能力、目的地知识和条件修正由接待 Agent 直接生成自然回复；无关问题不回答实质内容，必须通过结构化 handoff event 携带原问题回主聊天，且不自动发送。
 - 交接持续性：无关问题的交接卡不会在下一条操作追问发送前消失；只有真实旅行字段变化或用户主动关闭才退出当前交接提示。
 - 能力隔离：接待阶段即使 Prompt 判断偏差也无法调用通用 Tool 或旅行外部来源；规划阶段不再看到接待 Tool，阶段切换后接待 Tool 自身也会拒绝执行。
 - 固定话术清理：TravelPlanForm 不再包含 greeting/identity/capability/help/unrelated 分支，不再调用提取 API；固定文本只保留异常兜底、按钮和表单校验提示。

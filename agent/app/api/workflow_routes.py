@@ -185,6 +185,20 @@ def run_workflow(workflow_id: str, request: Request) -> dict[str, Any]:
         raise _map_workflow_error(exc) from exc
 
 
+@router.post("/workflows/{workflow_id}/run-draft")
+def run_workflow_draft(workflow_id: str, request: Request) -> dict[str, Any]:
+    """Run the latest saved draft once without publishing it."""
+
+    try:
+        return _service(request).run_draft(
+            _actor(request, channel="workflow"), workflow_id
+        )
+    except KeyError as exc:
+        raise ApiError("WORKFLOW_NOT_FOUND", "Workflow not found.", status_code=404) from exc
+    except (PermissionError, RuntimeError, ValueError, TypeError, ConnectionError) as exc:
+        raise _map_workflow_error(exc) from exc
+
+
 @router.get("/workflows/{workflow_id}/runs")
 def list_workflow_runs(workflow_id: str, request: Request, limit: int = 100) -> dict[str, Any]:
     return {"items": _service(request).store.list_runs(workflow_id, _owner(request), limit)}

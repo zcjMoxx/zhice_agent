@@ -213,7 +213,7 @@ async function handoffToChat(question: string) {
 
       <main class="travel-results">
         <div ref="resultsScroll" class="travel-results-scroll">
-          <TravelPlanForm :busy="travel.generating || Boolean(travel.candidateReview)" :intake-busy="travel.intakeBusy" :clarification-questions="travel.clarificationQuestions" :restored-conversation="travel.conversation" :restored-draft="travel.activeDraft" :handoff-question="travel.handoffQuestion" :history-mode="Boolean(plan)" @intake-message="travel.sendIntake" @submit="travel.generate" @details-change="formInspectorOpen = $event" @handoff-chat="handoffToChat" @dismiss-handoff="travel.handoffQuestion = ''" />
+          <TravelPlanForm :busy="travel.generating || Boolean(travel.candidateReview)" :intake-busy="travel.intakeBusy" :clarification-questions="travel.clarificationQuestions" :location-clarifications="travel.locationClarifications" :restored-conversation="travel.conversation" :restored-draft="travel.activeDraft" :handoff-question="travel.handoffQuestion" :history-mode="Boolean(plan)" @intake-message="travel.sendIntake" @submit="travel.generate" @details-change="formInspectorOpen = $event" @handoff-chat="handoffToChat" @dismiss-handoff="travel.handoffQuestion = ''" />
           <p v-if="travel.conversationLoading" class="travel-conversation-inline-status">正在恢复需求问答…</p>
           <p v-else-if="travel.conversationError" class="travel-conversation-inline-status error">需求问答暂时无法恢复：{{ travel.conversationError }}。完整计划仍可正常查看。</p>
           <div ref="progressSection" class="travel-progress-anchor">

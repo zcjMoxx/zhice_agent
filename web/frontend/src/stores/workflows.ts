@@ -83,9 +83,9 @@ export const useWorkflowStore = defineStore("workflows", {
     },
     async runNow(definition: WorkflowDefinitionV1) {
       if (!this.current) return;
-      await this.publish(definition);
+      await this.save(definition);
       if (!this.current) return;
-      const run = await api.runWorkflow(this.current.workflow_id);
+      const run = await api.runWorkflowDraft(this.current.workflow_id);
       await this.loadRuns();
       await this.openRun(run.run_id);
     },
@@ -95,6 +95,13 @@ export const useWorkflowStore = defineStore("workflows", {
     },
     async openRun(runId: string) {
       this.runDetail = await api.workflowRun(runId);
+    },
+    async toggleRun(runId: string) {
+      if ((this.runDetail?.id || this.runDetail?.run_id) === runId) {
+        this.runDetail = null;
+        return;
+      }
+      await this.openRun(runId);
     },
     async remove() {
       if (!this.current) return;

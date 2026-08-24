@@ -541,6 +541,7 @@ class TravelDraftResponse(BaseModel):
     draft: dict[str, Any] = Field(default_factory=dict)
     phase: str = "intake"
     handoff_question: str = ""
+    location_clarifications: list[str] = Field(default_factory=list, max_length=4)
 
 
 class TravelPlanningConfirmationRequest(BaseModel):

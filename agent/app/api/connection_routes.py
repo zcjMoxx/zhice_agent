@@ -25,6 +25,14 @@ class TestEmailRequest(BaseModel):
     recipient: str = Field(min_length=3, max_length=320)
 
 
+class NotificationEmailRequest(BaseModel):
+    address: str = Field(min_length=3, max_length=320)
+
+
+class NotificationEmailVerificationRequest(NotificationEmailRequest):
+    code: str = Field(min_length=6, max_length=12)
+
+
 def _connections(request: Request):
     service = getattr(_runtime(request), "connection_runtime", None)
     if service is None:
@@ -34,7 +42,12 @@ def _connections(request: Request):
 
 def _map_error(exc: ConnectionError) -> ApiError:
     status = 404 if exc.code == "CONNECTION_NOT_FOUND" else 403 if exc.code == "CONNECTION_ACCESS_DENIED" else 400
-    if exc.code in {"CONNECTION_PROVIDER_UNSUPPORTED", "CONNECTION_CREDENTIAL_KEY_MISSING"}:
+    if exc.code in {
+        "CONNECTION_PROVIDER_UNSUPPORTED",
+        "CONNECTION_CREDENTIAL_KEY_MISSING",
+        "NOTIFICATION_EMAIL_UNAVAILABLE",
+        "OFFICIAL_EMAIL_NOT_CONFIGURED",
+    }:
         status = 503
     return ApiError(exc.code, str(exc), status_code=status)
 
@@ -53,6 +66,52 @@ def create_smtp_connection(body: SMTPConnectionRequest, request: Request) -> dic
     except ConnectionError as exc:
         raise _map_error(exc) from exc
     return {"connection": connection}
+
+
+@router.get("/email/notification")
+def get_notification_email(request: Request) -> dict[str, Any]:
+    actor = _actor(request, "workflow.notify.self", channel="rest")
+    try:
+        return {"email": _connections(request).notification_email(actor)}
+    except ConnectionError as exc:
+        raise _map_error(exc) from exc
+
+
+@router.post("/email/notification/request-verification")
+def request_notification_email_verification(
+    body: NotificationEmailRequest, request: Request
+) -> dict[str, Any]:
+    actor = _actor(request, "workflow.notify.self", channel="rest")
+    try:
+        return _connections(request).request_notification_email_verification(
+            actor, address=body.address
+        )
+    except ConnectionError as exc:
+        raise _map_error(exc) from exc
+
+
+@router.post("/email/notification/verify")
+def verify_notification_email(
+    body: NotificationEmailVerificationRequest, request: Request
+) -> dict[str, Any]:
+    actor = _actor(request, "workflow.notify.self", channel="rest")
+    try:
+        return {
+            "email": _connections(request).verify_notification_email(
+                actor, address=body.address, code=body.code
+            )
+        }
+    except ConnectionError as exc:
+        raise _map_error(exc) from exc
+
+
+@router.post("/email/notification/test")
+def test_notification_email(request: Request) -> dict[str, Any]:
+    actor = _actor(request, "workflow.notify.self", channel="rest")
+    try:
+        return _connections(request).send_notification_test(actor)
+    except ConnectionError as exc:
+        raise _map_error(exc) from exc
 
 
 @router.delete("/{connection_id}")

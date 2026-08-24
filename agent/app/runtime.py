@@ -700,6 +700,7 @@ class WebRuntime:
     xhs_sidecar: LocalXhsSidecarSupervisor | None = None
     hotel_accounts: HotelAccountSupervisor | None = None
     connection_runtime: ConnectionRuntime | None = None
+    official_email_provider: Any | None = None
     workflow_runtime: WorkflowRuntime | None = None
 
     def __post_init__(self) -> None:
@@ -1007,12 +1008,22 @@ class WebRuntime:
                     "travel_draft_version": TRAVEL_INTAKE_DRAFT_VERSION,
                 },
             )
+        raw_location_clarifications = state.metadata.get(
+            "travel_location_clarifications", []
+        )
+        if not isinstance(raw_location_clarifications, list):
+            raw_location_clarifications = []
         return {
             "session_id": session_id,
             "messages": messages[-20:],
             "draft": dict(draft) if isinstance(draft, dict) else {},
             "phase": self._travel_phase(actor, session_id, resolved=resolved),
             "handoff_question": str(state.metadata.get("travel_handoff_question") or ""),
+            "location_clarifications": [
+                str(item).strip()
+                for item in raw_location_clarifications
+                if str(item).strip()
+            ][:4],
         }
 
     def travel_progress_history(
@@ -1046,6 +1057,16 @@ class WebRuntime:
         """Validate the reviewed draft and atomically open formal planning capabilities."""
 
         resolved = self._resolve_travel_session(actor, session_id)
+        state = resolved.store.load(session_id)
+        location_clarifications = state.metadata.get("travel_location_clarifications", [])
+        if isinstance(location_clarifications, list) and any(
+            str(item).strip() for item in location_clarifications
+        ):
+            raise TravelApplicationError(
+                "TRAVEL_LOCATION_CLARIFICATION_REQUIRED",
+                "开始规划前请先确认同名地点具体位于哪个省或市。",
+                status_code=422,
+            )
         try:
             parsed = TravelRequirementDraft.from_dict(dict(draft))
         except (TravelApplicationError, TypeError, ValueError) as exc:
@@ -1071,7 +1092,7 @@ class WebRuntime:
             "travel_handoff_question": "",
             "travel_handoff_topic": "",
         }
-        title = _travel_draft_title(normalized, resolved.store.load(session_id).messages)
+        title = _travel_draft_title(normalized, state.messages)
         if title:
             metadata["title"] = title
         resolved.store.update_metadata(session_id, metadata)
@@ -3182,14 +3203,27 @@ def _aggregate_qq_channel_status(
     )
 
 
-def _build_connection_runtime(config: AppConfig) -> ConnectionRuntime | None:
-    """Enable personal SMTP connections only when the encryption key is valid."""
+def _build_connection_runtime(
+    config: AppConfig,
+    *,
+    auth_store: SQLiteAuthStore,
+    official_email_provider: Any | None,
+) -> ConnectionRuntime:
+    """Always expose My email; enable optional SMTP only with a valid key."""
 
     try:
         cipher = CredentialCipher(load_master_key())
     except ConnectionError:
-        return None
-    return ConnectionRuntime(SQLiteConnectionStore(config.connections_db_path, cipher))
+        return ConnectionRuntime(
+            None,
+            notification_store=auth_store,
+            official_email_provider=official_email_provider,
+        )
+    return ConnectionRuntime(
+        SQLiteConnectionStore(config.connections_db_path, cipher),
+        notification_store=auth_store,
+        official_email_provider=official_email_provider,
+    )
 
 
 def build_web_runtime(
@@ -3288,10 +3322,12 @@ def build_web_runtime(
     session_access = SessionAccessService(auth_store, user_contexts)
     from agent.channels import ExternalIdentityService, load_channel_configuration
     from agent.channels.qq import QQNotificationProvider
+    from agent.channels.weixin import WeixinNotificationProvider
 
     channel_config = load_channel_configuration(config.config_dir)
     identity = ExternalIdentityService(auth_store)
     qq_notification_provider = QQNotificationProvider(identity)
+    weixin_notification_provider = WeixinNotificationProvider(identity)
     travel_service = TravelApplicationService(travel_config, user_contexts)
     travel_requirement_extractor = (
         TravelRequirementExtractor(llm, prompt_loader) if travel_config.enabled else None
@@ -3339,7 +3375,6 @@ def build_web_runtime(
         audit_sink=audit_sink,
         hook_runtime=hook_runtime,
     )
-    connection_runtime = _build_connection_runtime(config)
     official_email_provider = None
     official_host = os.getenv("ZHICE_SMTP_HOST", "").strip()
     official_username = os.getenv("ZHICE_SMTP_USERNAME", "").strip()
@@ -3355,6 +3390,11 @@ def build_web_runtime(
             app_password=official_password,
             from_address=official_from,
         )
+    connection_runtime = _build_connection_runtime(
+        config,
+        auth_store=auth_store,
+        official_email_provider=official_email_provider,
+    )
     workflow_runtime = None
     workflow_config: dict[str, Any] = {}
     try:
@@ -3416,6 +3456,13 @@ def build_web_runtime(
                     content=str(values.get("body") or values.get("text") or ""),
                 )
 
+            def weixin_notification(**values: Any) -> Any:
+                return weixin_notification_provider.send_to_user(
+                    user_id=str(values.get("owner_user_id") or ""),
+                    content=str(values.get("body") or values.get("text") or ""),
+                    delivery_key=str(values.get("delivery_key") or ""),
+                )
+
             handlers = NodeHandlers(
                 actor=actor,
                 policy=workflow_policy,
@@ -3424,6 +3471,7 @@ def build_web_runtime(
                 official_email=official_email,
                 personal_email=personal_email,
                 qq_notification=qq_notification,
+                weixin_notification=weixin_notification,
             )
             return WorkflowExecutor(
                 workflow_store,
@@ -3434,6 +3482,8 @@ def build_web_runtime(
         baseline_executor = workflow_executor_for(operator)
 
         def workflow_capabilities(actor: ActorContext) -> dict[str, Any]:
+            if connection_runtime.smtp_available:
+                connection_runtime.list(actor)
             official_code = ""
             if official_email_provider is None:
                 official_code = "OFFICIAL_EMAIL_NOT_CONFIGURED"
@@ -3454,10 +3504,11 @@ def build_web_runtime(
                     "code": official_code,
                 },
                 "personal_email": {
-                    "available": connection_runtime is not None,
-                    "code": "" if connection_runtime is not None else "CONNECTION_PROVIDER_UNSUPPORTED",
+                    "available": connection_runtime.smtp_available,
+                    "code": "" if connection_runtime.smtp_available else "CONNECTION_CREDENTIAL_KEY_MISSING",
                 },
                 "qq_notification": qq_notification_provider.capability(actor),
+                "weixin_notification": weixin_notification_provider.capability(actor),
                 "external_actions": {
                     "available": bool(live_actions),
                     "count": len(live_actions),
@@ -3467,9 +3518,13 @@ def build_web_runtime(
         def validate_workflow_notification(
             actor: ActorContext, channel: str
         ) -> None:
-            if channel != "qq":
-                raise RuntimeError("WORKFLOW_NOTIFICATION_PROVIDER_UNSUPPORTED")
-            qq_notification_provider.validate(actor)
+            if channel == "qq":
+                qq_notification_provider.validate(actor)
+                return
+            if channel == "weixin":
+                weixin_notification_provider.validate(actor)
+                return
+            raise RuntimeError("WORKFLOW_NOTIFICATION_PROVIDER_UNSUPPORTED")
 
         workflow_runtime = WorkflowRuntime(
             workflow_store,
@@ -3477,11 +3532,7 @@ def build_web_runtime(
             workflow_policy,
             executor_factory=workflow_executor_for,
             capability_provider=workflow_capabilities,
-            connection_validator=(
-                connection_runtime.validate_email_connection
-                if connection_runtime is not None
-                else None
-            ),
+            connection_validator=(connection_runtime.validate_email_connection if connection_runtime.smtp_available else None),
             notification_validator=validate_workflow_notification,
         )
 
@@ -3532,6 +3583,7 @@ def build_web_runtime(
         xhs_sidecar=xhs_sidecar,
         hotel_accounts=hotel_accounts,
         connection_runtime=connection_runtime,
+        official_email_provider=official_email_provider,
         workflow_runtime=workflow_runtime,
         memory_extraction_enabled=memory_extraction_startup.enabled,
         mcp_runtime=mcp_runtime,
@@ -3564,6 +3616,7 @@ def build_web_runtime(
         dedup,
         channel_runtime,
     )
+    weixin_notification_provider.register_adapter(weixin_adapter)
     adapters_by_channel = {
         "qq": tuple(adapters),
         "weixin": ((weixin_adapter,) if weixin_adapter is not None else ()),

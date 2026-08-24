@@ -66,6 +66,18 @@ def test_deduplicates_tracking_urls_and_remaps_references():
     assert plan.data["days"][0]["activities"][0]["evidence_ids"] == ["ev-map"]
 
 
+def test_same_provider_landing_url_keeps_distinct_hotel_evidence():
+    raw = plan_payload()
+    raw["evidence"][0]["source_url"] = "https://ditu.amap.com/"
+    raw["evidence"][1]["source_url"] = "https://ditu.amap.com/"
+
+    plan = TravelPlanV1.from_dict(raw)
+
+    evidence_ids = {item["evidence_id"] for item in plan.data["evidence"]}
+    assert {"ev-map", "ev-hotel"} <= evidence_ids
+    assert plan.data["stay_recommendations"][0]["evidence_ids"] == ["ev-hotel"]
+
+
 def test_plan_rejects_overlap_unknown_evidence_illegal_sources_budget_and_size():
     cases = []
     overlap = plan_payload()

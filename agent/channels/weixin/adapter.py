@@ -141,6 +141,55 @@ class WeixinClawAdapter:
             details=details,
         )
 
+    def send_proactive_text(
+        self,
+        *,
+        account_key: str,
+        peer: str,
+        context_token_ref: str,
+        content: str,
+        delivery_key: str,
+    ) -> dict[str, str]:
+        """Send one owner-scoped workflow notification through the durable Outbox."""
+
+        account = self.identity.store.get_channel_account(
+            channel="weixin", account_key=account_key
+        )
+        if account is None or str(account["status"]) != "active":
+            raise RuntimeError("WORKFLOW_WEIXIN_RECONNECT_REQUIRED")
+        if str(account["external_user_id"]) != str(peer):
+            raise RuntimeError("WORKFLOW_WEIXIN_TARGET_INVALID")
+        if not self.status().available:
+            raise RuntimeError("WORKFLOW_WEIXIN_CHANNEL_UNAVAILABLE")
+        text = str(content or "").strip()
+        if not text:
+            raise RuntimeError("WORKFLOW_WEIXIN_MESSAGE_EMPTY")
+        event_id = "workflow-" + uuid.uuid5(
+            uuid.NAMESPACE_URL, f"{account_key}\0{delivery_key}"
+        ).hex
+        rows: list[dict[str, object]] = []
+        for chunk_index, chunk in enumerate(
+            render_chunks(text, self.config.text_chunk_limit)
+        ):
+            row = self.identity.store.enqueue_weixin_outbound(
+                delivery_id=_delivery_id(account_key, event_id, chunk_index),
+                account_key=account_key,
+                event_id=event_id,
+                peer=peer,
+                context_token_ref=context_token_ref,
+                chunk_index=chunk_index,
+                text=chunk,
+            )
+            rows.append(row)
+        for row in rows:
+            if str(row.get("status") or "") != "sent":
+                self._deliver_outbox_row(row, False)
+        return {
+            "status": "sent",
+            "channel": "weixin",
+            "chunks": str(len(rows)),
+        }
+
     def _on_frame(self, frame: dict[str, object]) -> None:
         frame_type = str(frame.get("type") or "")
         if frame_type.startswith("binding."):
@@ -242,6 +291,13 @@ class WeixinClawAdapter:
             )
             await self._ack(frame, "rejected")
             return
+        context_token_ref = str(event.safe_metadata.get("context_token_ref") or "")
+        if context_token_ref:
+            self.identity.store.upsert_weixin_delivery_context(
+                account_key=event.account_key,
+                peer=event.external_user_id,
+                context_token_ref=context_token_ref,
+            )
         if not self.dedup.claim("weixin", event.account_key, event.event_id, event.message_id):
             log_event(
                 weixin_logger,

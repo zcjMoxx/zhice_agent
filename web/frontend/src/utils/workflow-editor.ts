@@ -101,7 +101,7 @@ export function graphInputReference(snapshot: EditorSnapshot, nodeId: string): s
 
 export function withGraphBoundInputs(snapshot: EditorSnapshot): EditorSnapshot {
   const result = cloneSnapshot(snapshot);
-  const outputTypes = new Set<WorkflowNodeType>(["template", "official_notification", "personal_email", "qq_notification"]);
+  const outputTypes = new Set<WorkflowNodeType>(["template", "official_notification", "personal_email", "qq_notification", "weixin_notification"]);
   for (const node of result.nodes) {
     const reference = graphInputReference(result, node.id);
     if (node.type === "llm_transform") node.config.input = reference;

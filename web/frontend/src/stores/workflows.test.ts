@@ -10,6 +10,7 @@ vi.mock("@/api/client", () => ({
     saveWorkflowDraft: vi.fn(),
     publishWorkflow: vi.fn(),
     runWorkflow: vi.fn(),
+    runWorkflowDraft: vi.fn(),
     workflowRuns: vi.fn(),
     workflowRun: vi.fn(),
     workflow: vi.fn(),
@@ -23,7 +24,7 @@ describe("workflow store", () => {
     vi.mocked(api.workflows).mockResolvedValue({ items: [] });
   });
 
-  it("reloads persisted timestamps and opens the completed run after run now", async () => {
+  it("saves and runs the draft without publishing or changing the live version", async () => {
     const definition = {
       schema_version: 1 as const,
       workflow_id: "workflow-1",
@@ -44,13 +45,7 @@ describe("workflow store", () => {
       active_version: 1,
       has_unpublished_changes: true,
     });
-    vi.mocked(api.publishWorkflow).mockResolvedValue({
-      ...definition,
-      version: 2,
-      active_version: 2,
-      has_unpublished_changes: false,
-    });
-    vi.mocked(api.runWorkflow).mockResolvedValue({
+    vi.mocked(api.runWorkflowDraft).mockResolvedValue({
       run_id: "run-1",
       workflow_id: "workflow-1",
       status: "succeeded",
@@ -93,9 +88,12 @@ describe("workflow store", () => {
     await store.runNow(definition);
 
     expect(api.saveWorkflowDraft).toHaveBeenCalledWith("workflow-1", definition, 1);
-    expect(api.publishWorkflow).toHaveBeenCalledWith("workflow-1");
-    expect(vi.mocked(api.saveWorkflowDraft).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(api.publishWorkflow).mock.invocationCallOrder[0]);
-    expect(vi.mocked(api.publishWorkflow).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(api.runWorkflow).mock.invocationCallOrder[0]);
+    expect(api.publishWorkflow).not.toHaveBeenCalled();
+    expect(api.runWorkflow).not.toHaveBeenCalled();
+    expect(api.runWorkflowDraft).toHaveBeenCalledWith("workflow-1");
+    expect(vi.mocked(api.saveWorkflowDraft).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(api.runWorkflowDraft).mock.invocationCallOrder[0]);
+    expect(store.current?.active_version).toBe(1);
+    expect(store.current?.has_unpublished_changes).toBe(true);
     expect(api.workflowRuns).toHaveBeenCalledWith("workflow-1");
     expect(api.workflowRun).toHaveBeenCalledWith("run-1");
     expect(store.runs[0]?.started_at).toBe("2026-08-21T17:14:03Z");
@@ -136,5 +134,23 @@ describe("workflow store", () => {
       nodes: expect.arrayContaining([expect.objectContaining({ config: expect.objectContaining({ time_of_day: "21:56" }) })]),
     }), 2);
     expect(store.current?.version).toBe(3);
+  });
+
+  it("toggles the same run closed and switches directly to another run", async () => {
+    vi.mocked(api.workflowRun)
+      .mockResolvedValueOnce({ run_id: "run-1", workflow_id: "workflow-1", status: "succeeded" })
+      .mockResolvedValueOnce({ run_id: "run-2", workflow_id: "workflow-1", status: "failed" });
+    const store = useWorkflowStore();
+
+    await store.toggleRun("run-1");
+    expect(store.runDetail?.run_id).toBe("run-1");
+
+    await store.toggleRun("run-1");
+    expect(store.runDetail).toBeNull();
+    expect(api.workflowRun).toHaveBeenCalledTimes(1);
+
+    await store.toggleRun("run-2");
+    expect(store.runDetail?.run_id).toBe("run-2");
+    expect(api.workflowRun).toHaveBeenCalledTimes(2);
   });
 });

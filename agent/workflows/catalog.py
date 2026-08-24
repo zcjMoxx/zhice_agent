@@ -51,7 +51,7 @@ def validate_definition(definition: WorkflowDefinitionV1, *, max_nodes: int = 30
             raise WorkflowValidationError("WORKFLOW_SCHEMA_INVALID", "branch is only valid on condition edges")
         outgoing[edge.source_node_id].append(edge.target_node_id)
         incoming[edge.target_node_id] += 1
-    action_types = {"mcp_query", "mcp_action", "llm_transform", "template", "condition", "official_notification", "personal_email", "qq_notification"}
+    action_types = {"mcp_query", "mcp_action", "llm_transform", "template", "condition", "official_notification", "personal_email", "qq_notification", "weixin_notification"}
     if any(node.type in action_types and incoming[node.id] == 0 for node in definition.nodes):
         raise WorkflowValidationError("WORKFLOW_SCHEMA_INVALID", "isolated action node")
     for node in definition.nodes:

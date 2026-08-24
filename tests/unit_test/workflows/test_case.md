@@ -13,5 +13,7 @@
 - `test_executor_uses_direct_graph_input_instead_of_stale_delivery_reference`: verifies intelligent processing and delivery consume their unique direct predecessor output, so an old saved source reference cannot send raw provider JSON after a node is inserted.
 - `test_all_user_facing_processing_handlers_are_reachable`: verifies official email, personal email, and owner QQ delivery convert Markdown emphasis and lists into readable plain text before invoking providers.
 - `test_publish_rechecks_current_qq_binding_and_consent`: verifies QQ delivery cannot publish without explicit consent and revalidates the current owner's live QQ notification capability.
+- `test_publish_rechecks_current_weixin_context_and_consent`: verifies Weixin delivery cannot publish without explicit consent and revalidates the current Owner binding, live channel, and inbound delivery context.
 - `test_qq_timeout_is_outcome_unknown_and_is_not_retried`: verifies an unconfirmed QQ send is recorded as an unknown external outcome and is attempted only once.
-- Node-RED round-trip coverage includes the fixed `qq_notification` node and still rejects arbitrary external nodes.
+- `test_run_detail_keeps_external_content_and_delivery_receipt`: verifies every external delivery keeps a bounded, safe copy of the actual sent content and exposes it together with the provider receipt in run history.
+- Node-RED round-trip coverage includes the fixed `weixin_notification` node and still rejects arbitrary external nodes.

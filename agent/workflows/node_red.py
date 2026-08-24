@@ -15,6 +15,7 @@ _TYPE_TO_KIND = {
     "template": "zhice-template", "condition": "zhice-condition",
     "official_notification": "zhice-official-notification", "personal_email": "zhice-personal-email",
     "qq_notification": "zhice-qq-notification",
+    "weixin_notification": "zhice-weixin-notification",
 }
 _KIND_TO_TYPE = {value: key for key, value in _TYPE_TO_KIND.items()}
 

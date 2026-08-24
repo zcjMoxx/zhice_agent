@@ -10,7 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from agent.workflows.catalog import validate_definition
-from agent.workflows.nodes import NodeHandlers
+from agent.workflows.nodes import NodeHandlers, plain_delivery_message, resolve_value
 from agent.workflows.schemas import WorkflowDefinitionV1, WorkflowRun
 from agent.workflows.store import WorkflowStore
 
@@ -55,6 +55,7 @@ class WorkflowExecutor:
             predecessors[edge.target_node_id].append(edge)
         outputs: dict[str, Any] = {}
         statuses: dict[str, str] = {}
+        input_summaries: dict[str, str] = {}
         try:
             for node_id in order:
                 node = nodes[node_id]
@@ -81,11 +82,19 @@ class WorkflowExecutor:
                     source_output = outputs.get(direct_edges[0].source_node_id)
                     if node.type == "llm_transform":
                         inputs["input"] = source_output
-                    if node.type in {"official_notification", "personal_email", "qq_notification"} or (
+                    if node.type in {"official_notification", "personal_email", "qq_notification", "weixin_notification"} or (
                         node.type == "template"
                         and ("content" in node.config or "source_ref" in node.config)
                     ):
                         inputs["source_ref"] = source_output
+                resolved_inputs = resolve_value({**node.config, **inputs}, outputs)
+                recorded_inputs: Any = resolved_inputs
+                if node.type in {"official_notification", "personal_email", "qq_notification", "weixin_notification"}:
+                    recorded_inputs = {
+                        **resolved_inputs,
+                        "content": plain_delivery_message(resolved_inputs),
+                    }
+                input_summaries[node.id] = safe_summary(recorded_inputs)
                 attempts = node.retry_policy.max_attempts if node.type == "mcp_query" else 1
                 for attempt in range(1, attempts + 1):
                     future = self.pool.submit(self.handlers.execute, node, inputs, outputs, run_id=run_id)
@@ -93,12 +102,12 @@ class WorkflowExecutor:
                         result = future.result(timeout=node.timeout_seconds)
                         outputs[node.id] = result
                         statuses[node.id] = "succeeded"
-                        self.store.record_node_run(run_id, node.id, node.type, "succeeded", attempt=attempt, input_summary=safe_summary(inputs), output_summary=safe_summary(result))
+                        self.store.record_node_run(run_id, node.id, node.type, "succeeded", attempt=attempt, input_summary=input_summaries[node.id], output_summary=safe_summary(result))
                         self.store.append_event(run_id, "workflow.node.completed", {"node_id": node.id})
                         break
                     except TimeoutError as exc:
                         future.cancel()
-                        code = "WORKFLOW_ACTION_OUTCOME_UNKNOWN" if node.type in {"mcp_action", "official_notification", "personal_email", "qq_notification"} else "WORKFLOW_NODE_TIMEOUT"
+                        code = "WORKFLOW_ACTION_OUTCOME_UNKNOWN" if node.type in {"mcp_action", "official_notification", "personal_email", "qq_notification", "weixin_notification"} else "WORKFLOW_NODE_TIMEOUT"
                         raise RuntimeError(code) from exc
                     except Exception:
                         if attempt >= attempts:
@@ -117,7 +126,7 @@ class WorkflowExecutor:
             if current:
                 node = nodes[current]
                 statuses[current] = "failed"
-                self.store.record_node_run(run_id, current, node.type, "failed", error_code=code)
+                self.store.record_node_run(run_id, current, node.type, "failed", input_summary=input_summaries.get(current, ""), error_code=code)
                 self.store.append_event(run_id, "workflow.node.failed", {"node_id": current, "error_code": code})
             self.store.update_run(run_id, "failed", error_code=code)
             self.store.append_event(run_id, "workflow.run.failed", {"error_code": code})

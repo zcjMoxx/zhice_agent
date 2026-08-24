@@ -27,11 +27,13 @@
 .travel-error-recovery { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .travel-error-recovery .primary-button { flex: 0 0 auto; min-height: 36px; }
 .travel-requirement-dialog { display: grid; gap: 9px; padding: 2px 0; }
-.travel-requirement-message { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: start; gap: 9px; }
-.travel-requirement-message > span { padding-top: 7px; color: var(--muted); font-size: 10px; font-weight: 700; text-align: right; }
+.travel-requirement-message { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 7px; }
+.travel-requirement-message > span { color: var(--muted); font-size: 10px; font-weight: 700; text-align: left; }
 .travel-requirement-message > .travel-requirement-bubble { width: fit-content; max-width: min(760px, 90%); margin: 0; padding: 8px 11px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); color: var(--text); font-size: 12px; line-height: 1.55; }
 .travel-requirement-message > p.travel-requirement-bubble { white-space: pre-line; }
 .travel-requirement-message.user > .travel-requirement-bubble { justify-self: end; border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); background: color-mix(in srgb, var(--accent) 9%, var(--surface)); }
+.travel-requirement-message.user { justify-items: end; }
+.travel-requirement-message.assistant > .travel-requirement-bubble { width: min(950px, 100%); max-width: 100%; box-sizing: border-box; }
 .travel-requirement-ready { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-left: 67px; padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--success) 35%, var(--line)); border-radius: 11px; background: color-mix(in srgb, var(--success) 8%, var(--surface)); color: var(--text-soft); font-size: 11px; }
 .travel-requirement-ready > svg { color: var(--success); }
 .travel-requirement-ready > span { margin-right: auto; font-weight: 650; }
