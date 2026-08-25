@@ -108,6 +108,7 @@ FastAPI 继续显式提供三个 SPA 入口。Vue Router 负责页面选择，AP
 - `cli_legacy` 只作为内部兼容来源值，界面统一显示为 `CLI`；QQ 私聊、微信、CLI 和 Web 可继续，只有 QQ 群 Session 在 Web 中显示为只读来源并允许派生。
 - 删除继续二次确认；微信/QQ Session 删除会明确说明路由重置语义，按钮显示执行中，失败在弹窗内可见且允许重试。
 - 保留模型选择、Runtime 状态、停止 Turn、Tool confirmation、MCP elicitation 和外部渠道只读 Session。
+- SessionStore 与历史 API 保留 `assistant(tool_calls)` 和 `tool` 的完整上下文真值；ChatPage 恢复历史时只投影非空用户消息和不带 Tool Call 的最终 Assistant 文本。微信、QQ、CLI 与 Web Session 因此共享同一用户可见口径，原始 ToolResult 不作为聊天气泡展示。
 - 主滚动视口占满聊天区域，消息正文独立限宽，输入区作为正常底部行放置；页面本身不产生横向滚动。
 - 当前标签页按用户和 Session 保存阅读位置。只有接近底部或刚发送消息时跟随新内容，刷新和向上阅读历史不会被强制拉到最新。
 - Session 列表在剩余高度内独立滚动，左下角账号入口始终可见。

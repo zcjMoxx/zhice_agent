@@ -4,6 +4,14 @@ import { api } from "@/api/client";
 import type { ChatMessage, SessionSummary } from "@/api/types";
 import { webSocket } from "@/websocket/client";
 
+export function visibleChatMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((message) => {
+    if (!message.content.trim()) return false;
+    if (message.role === "user") return true;
+    return message.role === "assistant" && !message.tool_calls?.length;
+  });
+}
+
 export const useSessionStore = defineStore("sessions", {
   state: () => ({
     items: [] as SessionSummary[],
@@ -29,7 +37,7 @@ export const useSessionStore = defineStore("sessions", {
     async open(id: string) {
       const state = await api.session(id);
       this.activeId = id;
-      this.messages = state.messages;
+      this.messages = visibleChatMessages(state.messages);
       this.metadata = state.metadata;
     },
     async create() {

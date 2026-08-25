@@ -15,6 +15,39 @@ import ChatPage from "./ChatPage.vue";
 describe("ChatPage", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
+  it("hides persisted tool calls, tool results, and empty messages from chat history", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.user = { id: "reader", username: "reader", display_name: "Reader", status: "active", roles: ["viewer"], can_manage_admins: false };
+    vi.spyOn(api, "sessions").mockResolvedValue({
+      sessions: [{ session_id: "weixin-history", title: "微信天气", preview: "明天天气", updated_at: "", message_count: 4, channel: "weixin", conversation_type: "private", continuation_mode: "writable" }],
+    });
+    vi.spyOn(api, "session").mockResolvedValue({
+      session_id: "weixin-history",
+      messages: [
+        { role: "user", content: "帮我查明天天气" },
+        { role: "assistant", content: "", tool_calls: [{ id: "call-discovery" }] },
+        { role: "tool", content: "{\"status\":\"activated\"}", tool_call_id: "call-discovery" },
+        { role: "assistant", content: "明天晴，最高 30℃。" },
+      ],
+      metadata: {},
+    });
+    vi.spyOn(api, "models").mockResolvedValue({ endpoint: "local", current_model: "demo", models: ["demo"] });
+    vi.spyOn(webSocket, "subscribe").mockReturnValue(() => undefined);
+    vi.spyOn(webSocket, "connect").mockResolvedValue({} as WebSocket);
+
+    const wrapper = mount(ChatPage, { global: { plugins: [pinia] } });
+    await vi.waitFor(() => expect(api.session).toHaveBeenCalledWith("weixin-history"));
+    await vi.waitFor(() => expect(wrapper.findAll(".message")).toHaveLength(2));
+
+    expect(wrapper.text()).toContain("帮我查明天天气");
+    expect(wrapper.text()).toContain("明天晴，最高 30℃。");
+    expect(wrapper.text()).not.toContain("activated");
+    expect(useSessionStore().messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    wrapper.unmount();
+  });
+
   it("restores the session reading position and does not pull history readers to the latest message", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);

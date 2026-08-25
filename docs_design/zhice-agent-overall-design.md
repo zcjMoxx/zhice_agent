@@ -501,6 +501,7 @@ class Tool(Protocol):
 - `ToolRegistry.definitions()` 返回 `list[dict[str, Any]]`，也就是 OpenAI-compatible schema。
 - LLM-facing Provider 由 Turn-scoped `DiscoverableToolProvider` 包装：首次 definitions 只有 `discover_tools`，发现后才动态增加已激活业务 schema。
 - Catalog 在 actor/Profile 过滤之后生成，未激活 Tool dispatch 返回 `TOOL_NOT_ACTIVATED`。
+- Catalog 的自然语言查询按名称与描述 feature overlap 排序；只有查询显式包含完整 Tool name 时才获得名称奖励，普通短词作为较长名称子串不能压过描述语义更准确的 Tool。天气 Tool 的 forecast 与 historical 描述分别使用实时预报和历史气候语义，并同时覆盖中英文常用查询。
 - 如果后续要支持更多模型供应商差异，再把中性 `ToolDefinition` 抽出来，让 provider adapter 负责格式转换。
 - 风险分类、执行决策和确认结果由 `ToolExecutionDecision`、`ToolExecutionPolicy` 与 `ToolConfirmationBroker` 表达，不把安全语义塞进 OpenAI-compatible schema。
 

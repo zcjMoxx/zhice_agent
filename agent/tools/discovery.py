@@ -238,7 +238,7 @@ def _match_score(query: str, query_features: Counter[str], name: str, descriptio
     target = _features(text)
     overlap = sum(weight for feature, weight in query_features.items() if feature in target)
     normalized_name = name.casefold()
-    if normalized_name in query.casefold() or query.casefold() in normalized_name:
+    if normalized_name in query.casefold():
         overlap += 4.0
     return overlap
 

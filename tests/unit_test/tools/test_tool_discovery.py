@@ -5,6 +5,7 @@ import json
 from agent.protocols.auth import ActorContext
 from agent.protocols.tool import ToolExecutionContext, ToolResult
 from agent.tools.discovery import DiscoverableToolProvider
+from integrations.open_meteo_mcp.server import get_forecast, get_historical_weather
 
 
 class _Provider:
@@ -63,6 +64,37 @@ def test_discovery_activates_only_matching_schemas_for_next_step():
     assert payload["status"] == "activated"
     assert payload["activated"][0]["name"] == "read_file"
     assert _names(provider.definitions()) == ["discover_tools", "read_file"]
+
+
+def test_weather_discovery_prefers_live_forecast_and_keeps_history_distinct():
+    class _WeatherProvider(_Provider):
+        def definitions(self):
+            return [
+                _definition("mcp__open-meteo__get_forecast", get_forecast.__doc__ or ""),
+                _definition(
+                    "mcp__open-meteo__get_historical_weather",
+                    get_historical_weather.__doc__ or "",
+                ),
+            ]
+
+    for query in ("weather", "weather forecast", "current tomorrow weather", "明天天气预报"):
+        provider = DiscoverableToolProvider(_WeatherProvider())
+        result = provider.execute(
+            "discover_tools",
+            {"query": query, "max_results": 1},
+        )
+        payload = json.loads(result.output)
+        assert [item["name"] for item in payload["activated"]] == [
+            "mcp__open-meteo__get_forecast"
+        ]
+
+    historical = DiscoverableToolProvider(_WeatherProvider()).execute(
+        "discover_tools",
+        {"query": "historical climate archive 历史天气", "max_results": 1},
+    )
+    assert [item["name"] for item in json.loads(historical.output)["activated"]] == [
+        "mcp__open-meteo__get_historical_weather"
+    ]
 
 
 def test_unactivated_tool_cannot_bypass_discovery():

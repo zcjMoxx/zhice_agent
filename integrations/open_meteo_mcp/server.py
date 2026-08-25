@@ -72,7 +72,7 @@ def get_forecast(
     end_date: str,
     timezone: str = "auto",
 ) -> dict[str, Any]:
-    """Get an official Open-Meteo forecast only inside its sixteen-day window."""
+    """Get live current or future weather forecasts for today or tomorrow within sixteen days. 实时天气、当前天气、明天天气、天气预报。"""
 
     lat = _coordinate(latitude, "latitude", -90, 90)
     lon = _coordinate(longitude, "longitude", -180, 180)
@@ -112,7 +112,7 @@ def get_historical_weather(
     end_date: str,
     timezone: str = "auto",
 ) -> dict[str, Any]:
-    """Get official historical weather for climate reference, never label it forecast."""
+    """Get past archived weather observations for historical climate reference. 历史天气、气候参考。"""
 
     lat = _coordinate(latitude, "latitude", -90, 90)
     lon = _coordinate(longitude, "longitude", -180, 180)

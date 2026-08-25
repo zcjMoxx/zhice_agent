@@ -13,6 +13,7 @@
 - 下一次 definitions 只增加已激活 schema；未激活 Tool dispatch 返回 `TOOL_NOT_ACTIVATED`。
 - 多次发现可累积激活，contextual dispatch 仍保留可信 actor/session/turn 上下文。
 - 初始化或动态发现后若已激活当前全部有效 Tool，则隐藏无意义的 `discover_tools`，只保留可直接调用的业务或错误 facade。
+- 通用短词不会仅因是较长 Tool name 的子串而获得完整名称奖励；天气 Catalog 对实时/预报与历史/气候查询保持语义分离，中英文“明天天气”都优先激活 forecast。
 
 ### 用例 1: ToolRegistry 定义生成
 
