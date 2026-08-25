@@ -9,7 +9,9 @@ import type {
   MonitorSnapshot,
   OperationsTerminal,
   PublicUser,
+  PublicSiteConfig,
   RegistrationPolicy,
+  UsernameAvailability,
   Role,
   SessionSummary,
   SystemDiagnosticsSnapshot,
@@ -75,10 +77,12 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
 const json = (body: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(body) });
 
 export const api = {
+  site: () => request<PublicSiteConfig>("/api/site", { cache: "no-store" }),
   me: () => request<AuthMe>("/api/auth/me"),
   login: (username: string, password: string) => request<{ status: string; user: PublicUser }>("/api/auth/login", json({ username, password })),
   register: (username: string, password: string) => request<{ status: string; user: PublicUser }>("/api/auth/register", json({ username, password })),
   registrationPolicy: () => request<RegistrationPolicy>("/api/auth/registration-policy", { cache: "no-store" }),
+  usernameAvailability: (username: string) => request<UsernameAvailability>(`/api/auth/username-availability?username=${encodeURIComponent(username)}`, { cache: "no-store" }),
   bootstrap: (setupToken: string, password: string) => request<{ status: string; user: PublicUser }>("/api/auth/bootstrap", json({ setup_token: setupToken, password })),
   logout: () => request<{ status: string }>("/api/auth/logout", { method: "POST" }),
   updateProfile: (displayName: string) => request<AuthMe>("/api/auth/profile", { method: "PATCH", body: JSON.stringify({ display_name: displayName }) }),

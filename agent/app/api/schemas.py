@@ -132,6 +132,26 @@ class RegistrationPolicyResponse(BaseModel):
     registration_enabled: bool
 
 
+class UsernameAvailabilityResponse(BaseModel):
+    """Anonymous-safe username availability result."""
+
+    available: bool
+
+
+class PublicSecurityRecordResponse(BaseModel):
+    """Anonymous-safe public-security filing metadata."""
+
+    code: str
+    label: str
+    url: str
+
+
+class PublicSiteConfigResponse(BaseModel):
+    """Host-scoped public site metadata."""
+
+    public_security_record: PublicSecurityRecordResponse | None = None
+
+
 class RegistrationPolicyUpdateRequest(BaseModel):
     """Owner-only registration policy mutation."""
 

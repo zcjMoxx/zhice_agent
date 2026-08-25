@@ -63,7 +63,7 @@ if (($expectedEnvKeys -join "`n") -ne ($privateEnvKeys -join "`n")) {
 $modelsPath = Join-Path $privateRoot "models.json"
 $null = Get-Content -Raw -LiteralPath $modelsPath | ConvertFrom-Json
 $privateConfigText = Get-Content -Raw -LiteralPath (Join-Path $privateRoot "config.yml")
-foreach ($section in @("workflows", "official_email")) {
+foreach ($section in @("site", "workflows", "official_email")) {
     if ($privateConfigText -notmatch "(?m)^$([regex]::Escape($section)):\s*$") {
         throw "deploy/private/config.yml is missing required section: $section"
     }

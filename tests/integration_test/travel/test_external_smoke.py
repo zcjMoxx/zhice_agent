@@ -118,8 +118,6 @@ def test_real_workflow_weather_place_name_smoke(tmp_path):
 def test_real_xhs_login_search_detail_and_expired_cookie_smoke(tmp_path):
     _enabled("XHS", required=("XHS_READONLY_UPSTREAM_URL", "XHS_READONLY_COOKIE_DIR", "XHS_READONLY_COOKIE_FILE", "XHS_SMOKE_FEED_ID", "XHS_SMOKE_XSEC_TOKEN"))
     env = {key: os.environ[key] for key in ("XHS_READONLY_UPSTREAM_URL", "XHS_READONLY_COOKIE_DIR", "XHS_READONLY_COOKIE_FILE")}
-    if os.getenv("XHS_READONLY_UPSTREAM_AUTHORIZATION"):
-        env["XHS_READONLY_UPSTREAM_AUTHORIZATION"] = os.environ["XHS_READONLY_UPSTREAM_AUTHORIZATION"]
     runtime = McpRuntime(
         [McpServerSpec(server_id="xhs-readonly", transport="stdio", command=sys.executable, args=("-m", "integrations.xhs_readonly_mcp.server"), env=env, startup_timeout_seconds=30, connect_timeout_seconds=30, call_timeout_seconds=60)],
         workspace=tmp_path,

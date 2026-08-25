@@ -49,6 +49,37 @@ def test_gateway_serves_static_index(tmp_path):
     assert "Chat UI" in response.text
 
 
+def test_public_site_config_is_anonymous_and_scoped_to_exact_host(tmp_path):
+    config = _config(tmp_path)
+    config.config_dir.mkdir(parents=True)
+    config.config_dir.joinpath("config.yml").write_text(
+        """schema_version: 1
+site:
+  public_security_record:
+    enabled: true
+    code: "00000000000000"
+    label: 测试公安备案00000000000000号
+    allowed_hosts: [site.example.test]
+""",
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(config=config, runtime=_FakeRuntime(), static_dir=tmp_path))
+
+    allowed = client.get("/api/site", headers={"host": "site.example.test"})
+    hidden = client.get("/api/site", headers={"host": "clone.example.test"})
+
+    assert allowed.status_code == 200
+    assert allowed.json() == {
+        "public_security_record": {
+            "code": "00000000000000",
+            "label": "测试公安备案00000000000000号",
+            "url": "https://beian.mps.gov.cn/#/query/webSearch?code=00000000000000",
+        }
+    }
+    assert hidden.status_code == 200
+    assert hidden.json() == {"public_security_record": None}
+
+
 def test_gateway_serves_dedicated_qq_binding_spa_route(tmp_path):
     static_dir = tmp_path / "static"
     static_dir.mkdir()

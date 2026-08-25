@@ -20,6 +20,10 @@ export interface AuthMe {
   permissions: string[];
 }
 
+export interface UsernameAvailability {
+  available: boolean;
+}
+
 export interface SessionSummary {
   session_id: string;
   preview: string;
@@ -84,6 +88,16 @@ export interface TravelWorkItem {
 
 export interface RegistrationPolicy {
   registration_enabled: boolean;
+}
+
+export interface PublicSecurityRecord {
+  code: string;
+  label: string;
+  url: string;
+}
+
+export interface PublicSiteConfig {
+  public_security_record: PublicSecurityRecord | null;
 }
 
 export interface SkillSummary {

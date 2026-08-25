@@ -1,0 +1,2 @@
+import{d as o,m as r,u as n,C as s,o as a}from"./index-BTOlWFJg.js";import{_ as p}from"./AuthLayout.vue_vue_type_script_setup_true_lang-CrIB22Gm.js";import"./QuickPreferences.vue_vue_type_script_setup_true_lang-Cs8qJ1Se.js";import"./sparkles-BN3M_GvJ.js";import"./arrow-right-D7hic3zM.js";const k=o({__name:"OwnerSetupPage",setup(m){const t=s();return(u,e)=>(a(),r(p,{setup:"",onAuthenticated:e[0]||(e[0]=i=>n(t).replace("/"))}))}});export{k as default};
+//# sourceMappingURL=OwnerSetupPage-DeuAyV8s.js.map

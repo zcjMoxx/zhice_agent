@@ -30,6 +30,7 @@ from agent.app.logging import (
     terminal_color_override,
 )
 from agent.app.runtime import WebRuntime, build_web_runtime
+from agent.app.site_config import load_site_config
 from agent.config import AppConfig
 from agent.console import console
 from agent.log_paths import BEIJING_TIMEZONE, daily_trace_path
@@ -230,6 +231,7 @@ def create_app(
     app.state.config = config
     app.state.runtime = runtime
     app.state.auth_service = getattr(runtime, "auth", None)
+    app.state.site_config = load_site_config(config.config_dir)
 
     @app.middleware("http")
     async def attach_request_id(request, call_next):
@@ -240,6 +242,8 @@ def create_app(
             "/api/auth/login",
             "/api/auth/register",
             "/api/auth/registration-policy",
+            "/api/auth/username-availability",
+            "/api/site",
             "/api/health",
         }
         if protected_api and auth_service is not None:

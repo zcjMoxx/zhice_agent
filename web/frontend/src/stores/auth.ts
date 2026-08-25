@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 
 import { api, ApiError, onAuthorizationFailure } from "@/api/client";
-import type { PublicUser } from "@/api/types";
+import type { PublicSecurityRecord, PublicUser } from "@/api/types";
 
 export const useAuthStore = defineStore("auth", {
   state: () => ({
@@ -10,6 +10,7 @@ export const useAuthStore = defineStore("auth", {
     initialized: false,
     registrationEnabled: false,
     registrationPolicyLoaded: false,
+    publicSecurityRecord: null as PublicSecurityRecord | null,
     loading: false,
     error: "",
   }),
@@ -22,6 +23,14 @@ export const useAuthStore = defineStore("auth", {
     },
   },
   actions: {
+    async fetchPublicSiteConfig() {
+      try {
+        const site = await api.site();
+        this.publicSecurityRecord = site.public_security_record;
+      } catch {
+        this.publicSecurityRecord = null;
+      }
+    },
     async fetchRegistrationPolicy() {
       try {
         const policy = await api.registrationPolicy();

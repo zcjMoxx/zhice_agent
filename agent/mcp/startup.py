@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent.logging_utils import log_event
-from agent.mcp.config import McpConfigError, load_mcp_server_specs
+from agent.mcp.config import McpConfigError, load_mcp_server_specs_isolated
 from agent.protocols.capability import CapabilityStatus
 from agent.protocols.mcp import McpServerSpec
 
@@ -29,7 +29,7 @@ def check_mcp_startup(config_dir: Path | str) -> McpStartupResult:
     if not path.exists():
         return _disabled("MCP_CONFIG_MISSING", "MCP is not configured for this workspace.")
     try:
-        specs = load_mcp_server_specs(path.parent)
+        loaded = load_mcp_server_specs_isolated(path.parent)
     except (McpConfigError, OSError) as exc:
         log_event(
             startup_logger,
@@ -50,16 +50,56 @@ def check_mcp_startup(config_dir: Path | str) -> McpStartupResult:
                 details={"config_file": path.name, "error_type": type(exc).__name__},
             ),
         )
-    if not specs:
+    if loaded.invalid_server_ids:
+        for server_id in loaded.invalid_server_ids:
+            log_event(
+                startup_logger,
+                logging.WARNING,
+                "mcp.server_config_invalid",
+                code="MCP_SERVER_CONFIG_INVALID",
+                server_id=server_id,
+            )
+        if loaded.specs:
+            return McpStartupResult(
+                specs=loaded.specs,
+                status=CapabilityStatus(
+                    name="mcp",
+                    state="degraded",
+                    code="MCP_CONFIG_PARTIAL",
+                    message="MCP is available with one or more invalid server configurations.",
+                    hint="Fix the invalid mcp.servers entries in config/config.yml, then restart.",
+                    details={
+                        "server_count": len(loaded.specs),
+                        "invalid_server_count": len(loaded.invalid_server_ids),
+                        "invalid_server_ids": list(loaded.invalid_server_ids),
+                    },
+                ),
+            )
+        return McpStartupResult(
+            specs=(),
+            status=CapabilityStatus(
+                name="mcp",
+                state="unavailable",
+                code="MCP_CONFIG_INVALID",
+                message="All configured MCP servers are invalid.",
+                hint="Fix the mcp.servers entries in config/config.yml, then restart.",
+                details={
+                    "config_file": path.name,
+                    "invalid_server_count": len(loaded.invalid_server_ids),
+                    "invalid_server_ids": list(loaded.invalid_server_ids),
+                },
+            ),
+        )
+    if not loaded.specs:
         return _disabled("MCP_DISABLED", "MCP has no configured servers.")
     return McpStartupResult(
-        specs=specs,
+        specs=loaded.specs,
         status=CapabilityStatus(
             name="mcp",
             state="available",
             code="MCP_AVAILABLE",
-            message=f"MCP is configured with {len(specs)} server(s).",
-            details={"server_count": len(specs)},
+            message=f"MCP is configured with {len(loaded.specs)} server(s).",
+            details={"server_count": len(loaded.specs)},
         ),
     )
 

@@ -14,7 +14,7 @@
 - 验证管理端 MCP 状态接口只聚合 Server/Catalog/调用/重连安全字段，并沿用 `skill.sources.read` 权限，不暴露配置和凭据。
 - 验证 artifact 使用有界流式导入、有界预览和仅作用于 actor MCP 目录的保留策略。
 - 验证无配置时 Runtime 保持禁用，不启动线程、不记录启停日志，也不影响内置 Tool。
-- 验证startup checker将缺失/空分区标记为disabled，将非法分区、placeholder和安全配置标记为unavailable，并返回空specs；旧`mcp.json`不再读取。
+- 验证startup checker将缺失/空分区标记为disabled；MCP根结构错误或全部server非法时标记为unavailable；单个server非法时标记为degraded并保留其它合法spec；旧`mcp.json`不再读取。
 
 ## 关键检查点
 
@@ -29,6 +29,7 @@
 - 单 Server refresh/reconnect 失败不清空其它 Server Catalog，也不影响本地 Tool。
 - 取消只匹配指定 Server/用户的活动调用，不重放未知远端结果。
 - startup warning 不记录 credential、环境变量名、原始配置错误或绝对路径。
+- `${VAR}`继续要求非空，`${VAR:-}`允许可选空值；`gateway --check`对degraded或unavailable MCP配置返回失败。
 
 ## 执行分层
 

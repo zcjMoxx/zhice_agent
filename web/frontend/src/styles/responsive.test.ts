@@ -84,4 +84,23 @@ describe("responsive layout contracts", () => {
     expect(css).toContain(".admin-main button, .admin-main select, .admin-main input:not([type=\"checkbox\"]):not([type=\"radio\"]) { min-height: 40px;");
     expect(readSource("components/SessionSidebar.vue")).toContain('if (window.matchMedia?.("(max-width: 720px)").matches) ui.sidebarCollapsed = true;');
   });
+
+  it("keeps mobile registration inside one dynamic viewport", () => {
+    const css = readStyle("app");
+    expect(css).toContain(".auth-page { display: grid; height: 100dvh;");
+    expect(css).toContain("place-items: center;");
+    expect(css).toContain("overflow: hidden; overscroll-behavior: none;");
+    expect(css).toContain(".auth-surface { display: flex; width: min(510px, 100%); max-height: 100%;");
+    expect(css).toContain(".auth-surface .public-security-record { position: static; width: 100%;");
+    expect(css).toContain("border-top: 1px solid var(--line);");
+    expect(css).toContain(".auth-surface .public-security-record a { min-height: 30px; padding: 0; border: 0;");
+    expect(css).toContain(".auth-slider.is-register { margin-top: 0;");
+    expect(css).toContain(".auth-slider.is-register .auth-brand-copy { display: none;");
+    expect(css).toContain("@media (max-width: 460px) and (max-height: 650px)");
+    expect(css).toContain(".auth-slider.is-register .auth-brand-panel { display: none;");
+    expect(css).toContain(".auth-slider:not(.is-register) .auth-brand-panel { min-height: 120px;");
+    expect(css).toContain(".auth-slider.is-setup .auth-brand-copy { display: none;");
+    expect(css).toContain(".auth-submit { min-height: 48px;");
+    expect(css).toContain(".mobile-mode-switch { min-height: 44px;");
+  });
 });

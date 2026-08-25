@@ -178,7 +178,7 @@ for number, raw in enumerate(env.read_text(encoding="utf-8").splitlines(), 1):
 config = yaml.safe_load(cfg.read_text(encoding="utf-8"))
 if not isinstance(config, dict) or config.get("schema_version") != 1:
     raise SystemExit("invalid config.yml schema")
-for section in ("context", "skills", "subagents", "channels", "hooks", "mcp", "logging"):
+for section in ("site", "context", "skills", "subagents", "channels", "hooks", "mcp", "logging"):
     if section in config and not isinstance(config[section], dict):
         raise SystemExit(f"invalid config.yml {section} section")
 model_config = json.loads(models.read_text(encoding="utf-8"))

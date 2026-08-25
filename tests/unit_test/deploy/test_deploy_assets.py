@@ -93,6 +93,9 @@ def test_deploy_readme_uses_current_workspace_config_and_marks_legacy_env() -> N
     assert "`.env` 不包含 `ZHICE_AGENT_WORKSPACE" in readme
     assert "普通 `zcagent init` 已默认" in readme
     assert "`--write-env` 仅作为兼容参数" in readme
+    assert "deploy/private/config.yml" in readme
+    assert "allowed_hosts" in readme
+    assert "第三方部署不会默认展示" in readme
     for deprecated in (
         "default_mode",
         "max_search_results",
@@ -634,6 +637,8 @@ def test_cloud_deploy_replaces_private_runtime_with_backup_and_rollback() -> Non
     assert "SyncFromWorkspace" not in readme
     assert not (DEPLOY / "scripts" / "sync-private-config.ps1").exists()
     assert "Copy-Item \"$env:USERPROFILE\\.zhice\\config" not in readme
+    assert 'for section in ("site", "context", "skills"' in script
+    assert "匿名 `/api/site`" in readme
     rollback_body = script.split("rollback() {", 1)[1].split("\n}", 1)[0]
     assert rollback_body.index("rollback_runtime_config") < rollback_body.index(
         'docker start "$CONTAINER_NAME"'

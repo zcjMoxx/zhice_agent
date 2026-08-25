@@ -25,6 +25,7 @@
 - 公开 Docker、Compose、说明和运维脚本齐全。
 - `config/.env.example` 是唯一公开 runtime env 模板，`deploy/` 不维护第二份 `.env.example`；私有镜像构建在调用Docker前只比较字段名，要求`deploy/private/.env`与公共模板字段全集及顺序完全一致，并拒绝重复、缺失或额外字段，避免SMTP、XHS等能力单边漂移且不输出真实值。
 - `private/.env`、`private/config.yml`、`private/models.json` 三个镜像私有文件以及本机云目标 `private/cloud-target.json` 被目录级 Git ignore 覆盖；公开 `private/cloud-target.example.json` 的 registry、SSH 主机、SSH 用户、SSH 密码、运维脚本目录和公网地址全部使用中文占位，未替换时流水线明确拒绝。
+- 公安备案真实编号、文案和允许域名只存在于private runtime `config.yml`；完整云发布通过正式公网host请求匿名`/api/site`，要求14位编号、文案包含编号且URL固定指向公安备案官方查询页，缺失或host不匹配属于核心烟测失败并触发既有回滚。
 - Deploy README 优先从当前 `${workspace}/config/` 复制三个私有文件到 `deploy/private/`，给出默认 Windows `.zhice` 路径，将项目 `config/.env` 标为 legacy migration，并要求任一来源的 `deploy/private/.env` 删除 `ZHICE_AGENT_WORKSPACE`；`ZHICE_AGENT_SKILL_REPO` 缺失时自动使用 `/app/skill_repo`，默认 source 不携带虚假远端地址。
 - Dockerfile 从仓库构建 Python、Vue、Prompt、Skill、微信 sidecar和固定版本旅行 MCP，只从 `deploy/` 复制三个私有文件；RedNote 兼容小红书二进制锁定上游提交并应用可审计 patch。
 - Playwright Chromium 的安装与 `/opt/zhice` 权限收敛必须位于同一镜像层；微信 sidecar 和小红书跨 stage 产物使用 `COPY --chown`，末尾运行目录初始化不得再次递归触碰这些大型路径，避免 Docker copy-up 重复浏览器内容。
@@ -47,6 +48,8 @@
 - `deploy/pipelines/build-and-deploy-cloud.ps1` 从当前源码 build、smoke 后调用共享云端发布，不调用本地 Compose；两个云端 CMD 都是指向同名 `pipelines/` 编排的双击薄入口。
 - 两个云端入口共享不可跳过的核心部署验收，并只允许通过 `-SkipExternalSmoke` 跳过告警型外部集成检查；开关经 PowerShell、Paramiko helper 到远端 `deploy.sh` 使用固定 `0/1` 传递。
 - `deployment_smoke.py` 使用固定低权限账号经真实 HTTPS API 覆盖工作流创建、读取、草稿更新、发布、执行、结果历史和删除；核心失败保留原错误并触发容器/runtime 回滚，外部高德、Tavily、12306、小红书、LLM、SMTP 检查相互独立并只记录 `warning/skipped`。
+- 12306 外部烟测使用当前 MCP schema 的 `fromStation/toStation` 车站代码与 ISO 次日日期，不再发送旧版中文站名字段。
+- 小红书只读烟测对单次瞬时超时进行一次有界重试，恢复时记录 `passed_after_retry`，连续失败仍保留非回滚告警。
 - 脱敏部署报告原子写入固定服务器目录；只有成功发布才清理历史，并分别保留最近 5 份 runtime 备份与 30 份报告。
 - 核心验收和部署规格写入成功后，只按当前不可变引用推导出的 ZhiCe-Agent 仓库清理旧镜像；始终保留当前与最近一个版本，不调用全局 image/system/volume prune，仍被容器引用的镜像由 Docker 拒绝删除并仅记录告警。
 - `pipelines/invoke-cloud-release.ps1` 从 Paramiko helper 取得脱敏后的公开目标，固定镜像名、生成时间戳与 Git 短提交号标签，校验 `linux/amd64`、Docker、Python/Paramiko，精确取得 Digest，同步固定六个 shell 脚本，远端部署后验证公网 HTTPS `/health`。

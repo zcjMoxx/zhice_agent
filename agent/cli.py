@@ -16,6 +16,7 @@ from agent.app.auth import local_operator_actor
 from agent.app.gateway import format_gateway_check, run_gateway
 from agent.app.instance_lock import WorkspaceGatewayLockError
 from agent.app.logging import GatewayLogOptions
+from agent.app.site_config import SiteConfigurationError, load_site_config
 from agent.auth.activity import SqliteRuntimeActivitySink
 from agent.auth.audit import SqliteAuditSink
 from agent.auth.confirmation import ConsoleConfirmationBroker
@@ -309,7 +310,7 @@ def _run_chat(argv: Sequence[str]) -> int:
     if subagent_runtime.status.state == "unavailable":
         print(console.warning(_format_cli_subagent_unavailable(subagent_runtime.status)))
     mcp_startup = check_mcp_startup(config.config_dir)
-    if mcp_startup.status.state == "unavailable":
+    if mcp_startup.status.state in {"unavailable", "degraded"}:
         print(console.warning(_format_cli_capability_status(mcp_startup.status)))
     if subagent_runtime.config.enabled:
         context_builder.extra_system_prompts = ("subagent_orchestration",)
@@ -695,6 +696,15 @@ def _run_gateway(argv: Sequence[str]) -> int:
     config = load_config(args.workspace)
     if args.check:
         if not _ensure_runtime_dirs(config):
+            return 1
+        try:
+            load_site_config(config.config_dir)
+        except SiteConfigurationError:
+            print(console.error("Site configuration is invalid. Check config/config.yml."))
+            return 1
+        mcp_startup = check_mcp_startup(config.config_dir)
+        if mcp_startup.status.state in {"unavailable", "degraded"}:
+            print(console.error(_format_cli_capability_status(mcp_startup.status)))
             return 1
         print(format_gateway_check(config, host=args.host, port=args.port))
         return 0

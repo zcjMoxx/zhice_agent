@@ -2,6 +2,13 @@
 # ${...} 均为环境变量占位，不得在本文件写入真实 Secret。
 # QQ web_base_url 默认适合本地；云部署必须改为真实公网 HTTPS 地址。
 schema_version: 1
+site:
+  public_security_record:
+    enabled: false
+    code: 请填写公安备案编号
+    label: 请填写公安备案展示文案
+    allowed_hosts:
+      - 请填写允许展示的域名
 context:
   full_history:
     enabled: true
@@ -182,7 +189,6 @@ mcp:
         XHS_READONLY_HTTP_HOST_ALLOWLIST: ${XHS_READONLY_HTTP_HOST_ALLOWLIST}
         XHS_READONLY_COOKIE_DIR: ${XHS_READONLY_COOKIE_DIR}
         XHS_READONLY_COOKIE_FILE: ${XHS_READONLY_COOKIE_FILE}
-        XHS_READONLY_UPSTREAM_AUTHORIZATION: ${XHS_READONLY_UPSTREAM_AUTHORIZATION}
         XHS_READONLY_TIMEOUT_SECONDS: "120"
       startup_timeout_seconds: 30
       connect_timeout_seconds: 30

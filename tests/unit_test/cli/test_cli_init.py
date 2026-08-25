@@ -181,6 +181,65 @@ def test_cli_gateway_check_uses_configured_workspace(tmp_path, capsys, monkeypat
     assert str(tmp_path.resolve()) in output
 
 
+def test_cli_gateway_check_rejects_partial_mcp_configuration(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("ZHICE_OPS_MODE", "local_docker")
+    _write_config_section(
+        tmp_path / "config",
+        "mcp",
+        {
+            "servers": {
+                "valid": {"command": "python"},
+                "invalid": {"command": "python", "cwd": "../outside"},
+            }
+        },
+    )
+
+    result = main(["gateway", "--check"])
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "MCP_CONFIG_PARTIAL" in output
+    assert '"invalid_server_ids": [' in output
+    assert "outside" not in output
+    assert "ZhiCe-Agent gateway check ok" not in output
+
+
+def test_cli_gateway_check_rejects_invalid_site_configuration(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    _clear_zhice_env(monkeypatch)
+    monkeypatch.setenv("ZHICE_AGENT_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("ZHICE_OPS_MODE", "local_docker")
+    _write_config_section(
+        tmp_path / "config",
+        "site",
+        {
+            "public_security_record": {
+                "enabled": True,
+                "code": "invalid",
+                "label": "private-value-must-not-leak",
+                "allowed_hosts": ["example.test"],
+            }
+        },
+    )
+
+    result = main(["gateway", "--check"])
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "Site configuration is invalid" in output
+    assert "private-value-must-not-leak" not in output
+    assert "ZhiCe-Agent gateway check ok" not in output
+
+
 def test_cli_gateway_passes_log_options(tmp_path, capsys, monkeypatch):
     """Gateway log flags should be passed as split gateway log options."""
 

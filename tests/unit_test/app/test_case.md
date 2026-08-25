@@ -9,6 +9,7 @@
 ## 用例覆盖
 
 - `/health` 和 `/api/health` 返回基础状态、当前模型、auth 初始化状态和安全的可选 capability 状态；Subagent unavailable 不改变 overall `status=ok`，且不暴露 workspace/session 路径。
+- 匿名`GET /api/site`只在请求host精确匹配private runtime allowlist时返回公安备案编号、展示文案和固定官方查询URL；关闭或host不匹配时返回null，不泄露allowlist。Site配置启用时严格校验14位编号、文案包含编号和无scheme/port/path的精确host；`gateway --check`对非法配置失败且不回显private值。
 - QQ 账号级 Adapter 状态在 Runtime 内聚合成唯一 `channel.qq`；公共 health 和管理监控不暴露 `qq.main` 等内部账号 key，混合多账号状态降级为渠道级状态。
 - 聊天 Web 不渲染或主动请求 capability 启动横幅；health 状态保留给诊断、系统监控和自动化检查。
 - Gateway/CLI缺少`config.yml.skills`时按未启用的可选扩展静默处理；分区存在但非法时只记录一次结构化`skills.runtime_unavailable` WARNING，包含稳定code且不泄露绝对路径。
@@ -116,6 +117,7 @@
 - “MCP 与 Skills”将协议服务和外部账号分区：MCP 监控只统计真实 Server；小红书连接、Catalog、调用与服务重启留在 MCP 卡，扫码/Cookie 登录移入仅 Owner 可见的“外部平台账号”。非 Owner API 返回 403，响应和审计不包含 Cookie、路径、PID 或原始工具输出。
 - 携程只进入“外部平台账号”，不进入 MCP 网格、Server 数或 Catalog；与小红书账号卡双列等高。账号 API 使用 `/api/admin/external-platforms/ctrip/*` 并返回 `platform_id=ctrip`；保存接口将密码写入 Git 忽略的 runtime `config/.env` 并立即启动登录助手，Linux/Docker/云平台也可使用外部 Secret 注入；状态、删除与重登响应只返回脱敏账号提示和稳定码，非 Owner 403，审计使用 `external_platform_account` 且不记录账号或密码。
 - 小红书登录检查兼容 MCP structured content 与 text content 形成的连续 JSON 文档；真实 success/OK 结果缓存为 authenticated，页面刷新不再误判为 unavailable。
+- 匿名账号可用性接口只返回布尔值；已存在账号按大小写等价判断，非法格式同样返回不可用且不泄露账号资料。
 
 ## Part 18B Skill 与 Ops Web 投影覆盖
 

@@ -160,15 +160,11 @@ async def _call_upstream(candidates: tuple[str, ...], args: dict[str, Any]) -> d
         url = _upstream_url()
     except ValueError:
         return _error("TRAVEL_SOURCE_UNAVAILABLE", "Xiaohongshu read-only upstream is not configured.")
-    headers = {}
-    authorization = os.getenv("XHS_READONLY_UPSTREAM_AUTHORIZATION", "").strip()
-    if authorization:
-        headers["Authorization"] = authorization
     timeout = _env_float("XHS_READONLY_TIMEOUT_SECONDS", 30.0, 1.0, 120.0)
     try:
         async with AsyncExitStack() as stack:
             client = await stack.enter_async_context(
-                httpx.AsyncClient(headers=headers, timeout=timeout, trust_env=False)
+                httpx.AsyncClient(timeout=timeout, trust_env=False)
             )
             read_stream, write_stream, _ = await stack.enter_async_context(
                 streamable_http_client(url, http_client=client)

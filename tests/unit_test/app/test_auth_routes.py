@@ -290,6 +290,22 @@ def test_public_registration_rejects_duplicate_username(tmp_path):
     assert len(store.list_users()) == 2
 
 
+def test_public_username_availability_is_anonymous_and_returns_only_boolean(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    store.initialize_owner("owner", "Owner", "password-123")
+    store.create_user("alice", "Existing Alice", "alice-password")
+    client = _client(tmp_path, _AuthRuntime(AuthService(store)))
+
+    available = client.get("/api/auth/username-availability", params={"username": "new-user"})
+    occupied = client.get("/api/auth/username-availability", params={"username": "ALICE"})
+    invalid = client.get("/api/auth/username-availability", params={"username": "bad account"})
+
+    assert available.status_code == 200
+    assert available.json() == {"available": True}
+    assert occupied.json() == {"available": False}
+    assert invalid.json() == {"available": False}
+
+
 @pytest.mark.parametrize(
     "payload",
     [

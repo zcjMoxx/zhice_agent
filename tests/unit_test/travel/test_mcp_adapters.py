@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -315,6 +316,13 @@ def test_xhs_upstream_http_requires_explicit_container_host_allowlist(monkeypatc
     monkeypatch.setenv("XHS_READONLY_HTTP_HOST_ALLOWLIST", "zhice-xhs-readonly")
 
     assert xhs._upstream_url() == "http://zhice-xhs-readonly:18060/mcp"
+
+
+def test_xhs_upstream_authentication_uses_cookie_only():
+    source = inspect.getsource(xhs._call_upstream)
+
+    assert "XHS_READONLY_UPSTREAM_AUTHORIZATION" not in source
+    assert 'headers["Authorization"]' not in source
 
 
 def test_xhs_exception_group_maps_offline_and_timeout_without_leaking_details():

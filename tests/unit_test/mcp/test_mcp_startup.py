@@ -47,6 +47,30 @@ def test_valid_mcp_config_is_available(tmp_path):
     assert result.status.details == {"server_count": 1}
 
 
+def test_invalid_server_degrades_only_that_server(tmp_path, caplog):
+    config_dir = tmp_path / "config"
+    _write_mcp(
+        config_dir,
+        {
+            "valid": {"command": "python"},
+            "invalid": {"command": "python", "cwd": "../outside"},
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="zcagent.agent.mcp"):
+        result = check_mcp_startup(config_dir)
+
+    assert [spec.server_id for spec in result.specs] == ["valid"]
+    assert result.status.state == "degraded"
+    assert result.status.code == "MCP_CONFIG_PARTIAL"
+    assert result.status.details == {
+        "server_count": 1,
+        "invalid_server_count": 1,
+        "invalid_server_ids": ["invalid"],
+    }
+    assert "mcp.server_config_invalid" in caplog.text
+
+
 def test_invalid_mcp_config_disables_only_mcp_and_logs_safe_warning(tmp_path, caplog):
     config_dir = tmp_path / "config"
     secret = "super-secret-token"

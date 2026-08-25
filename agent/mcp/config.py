@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -11,7 +12,7 @@ from urllib.parse import urlparse
 from agent.protocols.mcp import McpOAuthSpec, McpProxyMode, McpServerSpec
 from agent.runtime_config import load_runtime_section
 
-_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-)?\}")
 _SERVER_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ROOT_FIELDS = {"mcpServers"}
 _SERVER_FIELDS = {
@@ -46,8 +47,40 @@ class McpConfigError(RuntimeError):
     code = "MCP_CONFIG_INVALID"
 
 
+@dataclass(frozen=True)
+class McpConfigLoadResult:
+    """Valid MCP specs plus safely identified invalid server entries."""
+
+    specs: tuple[McpServerSpec, ...]
+    invalid_server_ids: tuple[str, ...]
+
+
 def load_mcp_server_specs(config_dir: Path | str) -> tuple[McpServerSpec, ...]:
     """Load config.yml mcp.servers; a missing section disables MCP."""
+
+    servers = _load_server_mapping(config_dir)
+    return tuple(_parse_server(str(server_id), value) for server_id, value in servers.items())
+
+
+def load_mcp_server_specs_isolated(config_dir: Path | str) -> McpConfigLoadResult:
+    """Load valid servers while isolating failures in individual entries."""
+
+    servers = _load_server_mapping(config_dir)
+    specs: list[McpServerSpec] = []
+    invalid_server_ids: list[str] = []
+    for server_id, value in servers.items():
+        normalized_id = str(server_id)
+        try:
+            specs.append(_parse_server(normalized_id, value))
+        except McpConfigError:
+            invalid_server_ids.append(
+                normalized_id if _SERVER_ID_RE.fullmatch(normalized_id) else "<invalid>"
+            )
+    return McpConfigLoadResult(tuple(specs), tuple(invalid_server_ids))
+
+
+def _load_server_mapping(config_dir: Path | str) -> dict[Any, Any]:
+    """Validate the MCP root and return its server mapping."""
 
     path = Path(config_dir) / "config.yml"
     try:
@@ -57,7 +90,7 @@ def load_mcp_server_specs(config_dir: Path | str) -> tuple[McpServerSpec, ...]:
     if not isinstance(section, dict):
         raise McpConfigError("MCP config root must be an object")
     if not section:
-        return ()
+        return {}
     raw = {"mcpServers": section.get("servers", {})}
     _reject_unknown(raw, _ROOT_FIELDS, "root")
     servers = raw.get("mcpServers")
@@ -65,7 +98,7 @@ def load_mcp_server_specs(config_dir: Path | str) -> tuple[McpServerSpec, ...]:
         raise McpConfigError("mcpServers must be an object")
     if len(servers) > 16:
         raise McpConfigError("mcpServers exceeds max_servers=16")
-    return tuple(_parse_server(str(server_id), value) for server_id, value in servers.items())
+    return servers
 
 
 def _parse_server(server_id: str, raw: Any) -> McpServerSpec:
@@ -160,6 +193,8 @@ def _expand(value: str, field: str) -> str:
     def replace(match: re.Match[str]) -> str:
         env_name = match.group(1)
         env_value = os.getenv(env_name)
+        if match.group(2) == ":-" and not env_value:
+            return ""
         if env_value is None or env_value == "":
             raise McpConfigError(f"Missing environment variable {env_name!r} for {field}")
         return env_value

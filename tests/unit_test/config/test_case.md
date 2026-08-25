@@ -72,8 +72,8 @@ Part 9 额外检查 `state/auth.sqlite3`、`contexts/users` 和 `contexts/shared
 ### Case 10: 本地、Private与公共示例字段合同
 
 - 输入：读取仓库`config/.env.example`、`models.example.json`与`config.example.yml`，并在私有镜像构建前对照`deploy/private/.env`。
-- 预期：29个环境字段名称和顺序唯一且稳定，公共示例值全部为空；Private缺字段、多字段、重复字段或顺序漂移都会在构建Docker镜像前失败。
-- 检查点：SMTP、XHS、部署烟测、凭据加密、地图前端和代理字段齐全；模型示例引用`ZHICE_LLM_DEEPSEEK_API_KEY`；YAML完整展示XHS六个运行字段、SMTP五个字段和工作流查询/动作allowlist；中文说明不包含真实Secret。
+- 预期：28个环境字段名称和顺序唯一且稳定；公共示例仅为XHS HTTP host allowlist提供安全的`127.0.0.1`默认值，其余字段为空；Private缺字段、多字段、重复字段或顺序漂移都会在构建Docker镜像前失败。
+- 检查点：SMTP、XHS、部署烟测、凭据加密、地图前端和代理字段齐全；模型示例引用`ZHICE_LLM_DEEPSEEK_API_KEY`；YAML完整展示XHS五个运行字段、SMTP五个字段和工作流查询/动作allowlist；本地XHS allowlist使用回环地址，云端使用容器DNS；XHS上游身份只使用Cookie，不保留Authorization字段；中文说明不包含真实Secret。
 # 2026-08-16 代码协议 Prompt 同步与模型角色
 
 - Gateway 构建前刷新与代码/schema 强绑定的旅行及核心协议 Prompt，避免旧 workspace 副本使工具发现、Skill 执行、旅行意图和摘要规则失效。

@@ -82,6 +82,41 @@ class FakeWorkflowClient:
         raise AssertionError((method, path, payload))
 
 
+class FakeSiteClient:
+    def __init__(self, record: object) -> None:
+        self.record = record
+
+    def request(self, method: str, path: str) -> tuple[int, dict[str, Any]]:
+        assert (method, path) == ("GET", "/api/site")
+        return 200, {"public_security_record": self.record}
+
+
+def test_public_site_acceptance_requires_valid_official_record() -> None:
+    smoke.verify_public_site(
+        FakeSiteClient(
+            {
+                "code": "00000000000000",
+                "label": "测试公安备案00000000000000号",
+                "url": "https://beian.mps.gov.cn/#/query/webSearch?code=00000000000000",
+            }
+        )
+    )
+
+    with pytest.raises(smoke.SmokeError, match="not available"):
+        smoke.verify_public_site(FakeSiteClient(None))
+
+    with pytest.raises(smoke.SmokeError, match="URL is invalid"):
+        smoke.verify_public_site(
+            FakeSiteClient(
+                {
+                    "code": "00000000000000",
+                    "label": "测试公安备案00000000000000号",
+                    "url": "https://example.test/copied",
+                }
+            )
+        )
+
+
 def test_core_acceptance_covers_crud_publish_run_history_and_cleanup() -> None:
     client = FakeWorkflowClient()
 
@@ -124,9 +159,11 @@ def test_core_acceptance_treats_cleanup_failure_as_core_failure() -> None:
 
 def test_external_checks_are_independent_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[str] = []
+    arguments_by_tool: dict[str, dict[str, Any]] = {}
 
-    def fake_tool(_client: object, name: str, _args: dict[str, Any], _timeout: float) -> None:
+    def fake_tool(_client: object, name: str, args: dict[str, Any], _timeout: float) -> None:
         called.append(name)
+        arguments_by_tool[name] = args
         if "tavily" in name:
             raise TimeoutError("upstream timeout")
 
@@ -155,6 +192,13 @@ def test_external_checks_are_independent_warnings(monkeypatch: pytest.MonkeyPatc
     assert next(item for item in results if item["name"] == "tavily")["status"] == "warning"
     assert next(item for item in results if item["name"] == "smtp")["status"] == "skipped"
     assert "llm" in called
+    assert arguments_by_tool["mcp__12306__get-tickets"] == {
+        "date": arguments_by_tool["mcp__12306__get-tickets"]["date"],
+        "fromStation": "VNP",
+        "toStation": "TIP",
+        "trainFilterFlags": "G",
+    }
+    assert len(arguments_by_tool["mcp__12306__get-tickets"]["date"]) == 10
 
 
 def test_external_checks_skip_unconfigured_optional_integrations(
@@ -178,6 +222,21 @@ def test_external_checks_skip_unconfigured_optional_integrations(
         "smtp",
     }
     assert called == ["mcp__12306__get-tickets", "llm"]
+
+
+def test_bounded_external_retry_reports_recovery_and_preserves_failure() -> None:
+    attempts = 0
+
+    def flaky() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("transient upstream timeout")
+
+    assert smoke.retry_external(flaky) == "passed_after_retry"
+    assert attempts == 2
+    with pytest.raises(TimeoutError, match="persistent"):
+        smoke.retry_external(lambda: (_ for _ in ()).throw(TimeoutError("persistent")))
 
 
 def test_llm_external_check_reports_cleanup_failure() -> None:

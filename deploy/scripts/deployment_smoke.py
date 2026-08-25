@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import smtplib
 import ssl
 import time
@@ -136,6 +137,25 @@ def definition(name: str, marker: str, *, llm: bool = False) -> dict[str, Any]:
     }
 
 
+def verify_public_site(client: ApiClient) -> None:
+    """Require the host-scoped public-security record on the release URL."""
+
+    _, payload = client.request("GET", "/api/site")
+    record = payload.get("public_security_record")
+    if not isinstance(record, dict):
+        raise SmokeError("public security record is not available for the release host")
+    code = str(record.get("code") or "")
+    label = str(record.get("label") or "")
+    url = str(record.get("url") or "")
+    if not re.fullmatch(r"[0-9]{14}", code):
+        raise SmokeError("public security record code is invalid")
+    if code not in label:
+        raise SmokeError("public security record label does not contain its code")
+    expected_url = f"https://beian.mps.gov.cn/#/query/webSearch?code={code}"
+    if url != expected_url:
+        raise SmokeError("public security record URL is invalid")
+
+
 def clean_definition(item: dict[str, Any], marker: str) -> dict[str, Any]:
     payload = definition(str(item["name"]), marker)
     payload.update(
@@ -232,6 +252,20 @@ def test_tool(client: ApiClient, name: str, arguments: dict[str, Any], timeout: 
         raise SmokeError(f"tool check did not succeed: {name}")
 
 
+def retry_external(check: Any, *, attempts: int = 2) -> str:
+    """Retry one bounded external check and preserve persistent failures."""
+
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            check()
+            return "passed" if attempt == 0 else "passed_after_retry"
+        except Exception as exc:
+            last_error = exc
+    assert last_error is not None
+    raise last_error
+
+
 def run_llm(client: ApiClient, release_id: str) -> None:
     workflow_id = ""
     original_error: Exception | None = None
@@ -316,18 +350,25 @@ def run_external(client: ApiClient, env: dict[str, str], release_id: str) -> lis
             lambda: test_tool(
                 client,
                 "mcp__12306__get-tickets",
-                {"date": tomorrow, "departure_name": "北京南", "arrival_name": "天津南"},
+                {
+                    "date": tomorrow,
+                    "fromStation": "VNP",
+                    "toStation": "TIP",
+                    "trainFilterFlags": "G",
+                },
                 20,
             ),
         ),
         (
             "xhs",
             bool(env.get("XHS_READONLY_UPSTREAM_URL", "").strip()),
-            lambda: test_tool(
-                client,
-                "mcp__xhs-readonly__search_notes",
-                {"keyword": "北京旅行", "max_results": 1},
-                30,
+            lambda: retry_external(
+                lambda: test_tool(
+                    client,
+                    "mcp__xhs-readonly__search_notes",
+                    {"keyword": "北京旅行", "max_results": 1},
+                    40,
+                )
             ),
         ),
         ("llm", True, lambda: run_llm(client, release_id)),
@@ -402,9 +443,13 @@ def main() -> int:
         if not username or not password:
             raise SmokeError("deployment smoke credentials are not configured")
         client = ApiClient(args.base_url)
+        verify_public_site(client)
         client.request("POST", "/api/auth/login", {"username": username, "password": password})
         steps, leaked_workflow = run_core(client, release_id)
-        steps.insert(0, {"name": "login", "status": "passed"})
+        steps[0:0] = [
+            {"name": "site", "status": "passed"},
+            {"name": "login", "status": "passed"},
+        ]
         report["core"] = {"status": "passed", "steps": steps}
         if leaked_workflow:
             report["core"]["cleanup_resource_id"] = leaked_workflow

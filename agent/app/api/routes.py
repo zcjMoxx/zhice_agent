@@ -46,6 +46,7 @@ from agent.app.api.schemas import (
     OperationsTerminalResponse,
     PasswordChangeRequest,
     ProfileUpdateRequest,
+    PublicSiteConfigResponse,
     PublicUserResponse,
     RegisterUserRequest,
     RegistrationPolicyResponse,
@@ -64,6 +65,7 @@ from agent.app.api.schemas import (
     SystemDiagnosticsResponse,
     ToolConfirmationResponse,
     ToolConfirmationsResponse,
+    UsernameAvailabilityResponse,
     WeixinBindingAttemptResponse,
     WeixinChannelStatusResponse,
     XhsReadonlyAdminStatusResponse,
@@ -86,6 +88,16 @@ from agent.runtime_config import RuntimeConfigurationError, load_operations_term
 
 router = APIRouter(prefix="/api")
 _SKILL_SOURCE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_PUBLIC_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,64}$")
+
+
+@router.get("/site", response_model=PublicSiteConfigResponse)
+def read_public_site_config(request: Request) -> PublicSiteConfigResponse:
+    """Return only site metadata allowed for the current request host."""
+
+    site_config = request.app.state.site_config
+    record = site_config.public_security_record.for_host(request.url.hostname)
+    return PublicSiteConfigResponse(public_security_record=record)
 
 
 class ApiError(Exception):
@@ -213,6 +225,22 @@ def read_public_registration_policy(request: Request) -> RegistrationPolicyRespo
     return RegistrationPolicyResponse(
         registration_enabled=auth.store.registration_enabled()
     )
+
+
+@router.get("/auth/username-availability", response_model=UsernameAvailabilityResponse)
+def read_username_availability(
+    username: str,
+    request: Request,
+) -> UsernameAvailabilityResponse:
+    """Return only whether a syntactically valid username is currently unused."""
+
+    auth = _auth_service(request, required=True)
+    normalized = str(username).strip()
+    available = bool(
+        _PUBLIC_USERNAME_RE.fullmatch(normalized)
+        and auth.store.get_user_by_username(normalized) is None
+    )
+    return UsernameAvailabilityResponse(available=available)
 
 
 @router.post("/auth/logout", response_model=AuthMutationResponse)

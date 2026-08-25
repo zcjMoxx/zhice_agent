@@ -7,17 +7,32 @@ import { useUiStore } from "@/stores/ui";
 import AuthLayout from "./AuthLayout.vue";
 
 describe("AuthLayout", () => {
+  const publicRecord = {
+    code: "00000000000000",
+    label: "测试公安备案00000000000000号",
+    url: "https://beian.mps.gov.cn/#/query/webSearch?code=00000000000000",
+  };
+
   beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
-      JSON.stringify({ registration_enabled: true }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    )));
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      const payload = url.endsWith("/api/site")
+        ? { public_security_record: publicRecord }
+        : url.includes("/api/auth/username-availability")
+          ? { available: true }
+          : { registration_enabled: true };
+      return Promise.resolve(new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    }));
   });
 
   function mountLayout(options: { setup?: boolean; language?: "zh-CN" | "en" } = {}) {
     const pinia = createPinia();
     setActivePinia(pinia);
     useAuthStore().registrationEnabled = true;
+    useAuthStore().publicSecurityRecord = publicRecord;
     useUiStore().language = options.language ?? "zh-CN";
     return mount(AuthLayout, {
       props: { setup: options.setup ?? false },
@@ -45,6 +60,9 @@ describe("AuthLayout", () => {
     expect(username.classes()).toContain("is-invalid");
     expect(wrapper.text()).toContain("仅支持字母、数字、点、下划线和连字符");
     await username.setValue("zhangsan");
+    expect(wrapper.text()).toContain("检查中");
+    await new Promise((resolve) => setTimeout(resolve, 320));
+    await flushPromises();
     expect(username.classes()).toContain("is-valid");
 
     await passwords[0].setValue("short");
@@ -55,6 +73,58 @@ describe("AuthLayout", () => {
     await passwords[1].setValue("password-123");
     expect(wrapper.text()).toContain("两次密码一致");
     expect(wrapper.get(".auth-submit").attributes("disabled")).toBeUndefined();
+  });
+
+  it("checks an occupied username before submit and does not expose internal codes", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      const payload = url.endsWith("/api/site")
+        ? { public_security_record: publicRecord }
+        : url.includes("/api/auth/username-availability")
+          ? { available: false }
+          : { registration_enabled: true };
+      return Promise.resolve(new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    }));
+    const wrapper = mountLayout();
+    await wrapper.get(".ghost-inverse").trigger("click");
+    const username = wrapper.get('input[autocomplete="username"]');
+
+    await username.setValue("owner");
+    expect(wrapper.text()).toContain("检查中");
+    await new Promise((resolve) => setTimeout(resolve, 320));
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("已存在");
+    expect(wrapper.text()).toContain("该账号已被使用，请换一个");
+    expect(username.classes()).toContain("is-invalid");
+    expect(wrapper.get(".auth-submit").attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).not.toContain("USER_USERNAME_ALREADY_EXISTS");
+  });
+
+  it("maps a registration race failure to friendly copy without its internal identifier", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/site")) return Promise.resolve(new Response(JSON.stringify({ public_security_record: publicRecord }), { status: 200, headers: { "Content-Type": "application/json" } }));
+      if (url.includes("/api/auth/username-availability")) return Promise.resolve(new Response(JSON.stringify({ available: true }), { status: 200, headers: { "Content-Type": "application/json" } }));
+      if (url.endsWith("/api/auth/register")) return Promise.resolve(new Response(JSON.stringify({ error: { status: 409, code: "USER_USERNAME_ALREADY_EXISTS", message: "username already exists", request_id: "req-test", details: {} } }), { status: 409, headers: { "Content-Type": "application/json" } }));
+      return Promise.resolve(new Response(JSON.stringify({ registration_enabled: true }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    }));
+    const wrapper = mountLayout();
+    await wrapper.get(".ghost-inverse").trigger("click");
+    await wrapper.get('input[autocomplete="username"]').setValue("new-user");
+    await new Promise((resolve) => setTimeout(resolve, 320));
+    await flushPromises();
+    const passwords = wrapper.findAll('input[autocomplete="new-password"]');
+    await passwords[0].setValue("password-123");
+    await passwords[1].setValue("password-123");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.get(".form-error").text()).toBe("该账号已存在，请换一个");
+    expect(wrapper.text()).not.toContain("USER_USERNAME_ALREADY_EXISTS");
   });
 
   it("keeps the login eye button out of the tab order", async () => {
@@ -100,6 +170,26 @@ describe("AuthLayout", () => {
     expect(mountLayout().text()).toContain("让每一次对话，都离完成更近一步。");
     expect(mountLayout().text()).toContain("登录你的 ZhiCe-Agent 账号");
     expect(mountLayout({ language: "en" }).text()).toContain("Pine Mist Dawn");
+  });
+
+  it("shows the public security filing at the bottom of every authentication flow", () => {
+    const wrapper = mountLayout();
+    const link = wrapper.get(".public-security-record a");
+
+    expect(wrapper.get(".auth-surface").find(".public-security-record").exists()).toBe(true);
+    expect(link.text()).toBe(publicRecord.label);
+    expect(link.attributes("href")).toBe(publicRecord.url);
+    expect(link.attributes("target")).toBe("_blank");
+    expect(link.attributes("rel")).toBe("noreferrer");
+    expect(link.get("img").attributes("src")).toBe("/static/beian-icon.png");
+  });
+
+  it("hides the public security filing when runtime site configuration is absent", async () => {
+    const wrapper = mountLayout();
+    useAuthStore().publicSecurityRecord = null;
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.find(".public-security-record").exists()).toBe(false);
   });
 
   it("uses the compact dedicated copy for QQ binding authentication", () => {

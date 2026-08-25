@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { ArrowRight, Eye, EyeOff, ShieldCheck, Sparkles } from "@lucide/vue";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { uiText } from "@/i18n";
 import QuickPreferences from "@/components/QuickPreferences.vue";
-import { errorMessage } from "@/stores/chat";
+import { api, ApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/auth";
 import { useUiStore } from "@/stores/ui";
 
@@ -22,15 +22,57 @@ const confirmationVisible = ref(false);
 const setupTokenVisible = ref(false);
 const busy = ref(false);
 const failure = ref("");
+const usernameAvailability = ref<"idle" | "checking" | "available" | "taken" | "unavailable">("idle");
+let usernameCheckTimer: ReturnType<typeof setTimeout> | undefined;
+let usernameCheckSequence = 0;
 function tr(chinese: string, english: string): string { return uiText(ui.language, chinese, english); }
 const registering = computed(() => mode.value === "register" && !props.setup);
 const usernameValid = computed(() => /^[A-Za-z0-9_.-]{3,64}$/.test(username.value));
+const usernameTaken = computed(() => usernameAvailability.value === "taken");
+const usernameChecking = computed(() => usernameAvailability.value === "checking");
+const usernameAccepted = computed(() => usernameValid.value && !usernameTaken.value && !usernameChecking.value);
 const passwordValid = computed(() => password.value.length >= 8 && password.value.length <= 1024);
 const confirmationValid = computed(() => confirmation.value.length > 0 && confirmation.value === password.value);
-const registrationValid = computed(() => usernameValid.value && passwordValid.value && confirmationValid.value);
-onMounted(() => { if (!props.setup) void auth.fetchRegistrationPolicy(); });
+const registrationValid = computed(() => usernameAccepted.value && passwordValid.value && confirmationValid.value);
+const usernameStatusLabel = computed(() => {
+  if (!username.value) return "";
+  if (!usernameValid.value) return tr("需调整", "Revise");
+  if (usernameAvailability.value === "checking") return tr("检查中", "Checking");
+  if (usernameAvailability.value === "taken") return tr("已存在", "Taken");
+  if (usernameAvailability.value === "available") return tr("可用", "Available");
+  return tr("待确认", "Not checked");
+});
+const usernameStatusClass = computed(() => {
+  if (!usernameValid.value || usernameTaken.value) return "is-invalid";
+  return usernameAvailability.value === "available" ? "is-valid" : "is-pending";
+});
+onMounted(() => {
+  void auth.fetchPublicSiteConfig();
+  if (!props.setup) void auth.fetchRegistrationPolicy();
+});
 watch(() => auth.registrationEnabled, (enabled) => {
   if (!enabled && mode.value === "register") switchMode("login");
+});
+watch([username, registering], ([currentUsername, isRegistering]) => {
+  if (usernameCheckTimer) clearTimeout(usernameCheckTimer);
+  const sequence = ++usernameCheckSequence;
+  usernameAvailability.value = "idle";
+  if (!isRegistering || !/^[A-Za-z0-9_.-]{3,64}$/.test(currentUsername)) return;
+  failure.value = "";
+  usernameAvailability.value = "checking";
+  usernameCheckTimer = setTimeout(async () => {
+    try {
+      const result = await api.usernameAvailability(currentUsername);
+      if (sequence !== usernameCheckSequence) return;
+      usernameAvailability.value = result.available ? "available" : "taken";
+    } catch {
+      if (sequence === usernameCheckSequence) usernameAvailability.value = "unavailable";
+    }
+  }, 300);
+});
+onBeforeUnmount(() => {
+  if (usernameCheckTimer) clearTimeout(usernameCheckTimer);
+  usernameCheckSequence += 1;
 });
 const panelTitle = computed(() => {
   if (props.setup) return tr("初始化系统所有者", "Initialize system owner");
@@ -42,6 +84,10 @@ async function submit() {
   failure.value = "";
   if (registering.value && !usernameValid.value) {
     failure.value = tr("请按提示修改账号", "Please revise the account as indicated");
+    return;
+  }
+  if (registering.value && usernameTaken.value) {
+    failure.value = tr("该账号已存在，请换一个", "This account already exists. Choose another one.");
     return;
   }
   if (registering.value && !passwordValid.value) {
@@ -58,8 +104,20 @@ async function submit() {
     else if (mode.value === "login") await auth.login(username.value, password.value);
     else await auth.register(username.value, password.value);
     emit("authenticated");
-  } catch (error) { failure.value = errorMessage(error); }
+  } catch (error) { failure.value = authFailureMessage(error); }
   finally { busy.value = false; }
+}
+
+function authFailureMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) return tr("操作失败，请稍后重试", "The operation failed. Please try again.");
+  const messages: Record<string, string> = {
+    USER_USERNAME_ALREADY_EXISTS: tr("该账号已存在，请换一个", "This account already exists. Choose another one."),
+    AUTH_INVALID_CREDENTIALS: tr("账号或密码错误", "Incorrect account or password"),
+    AUTH_ACCOUNT_DISABLED: tr("账号已停用，请联系管理员", "This account is disabled. Contact an administrator."),
+    AUTH_REGISTRATION_DISABLED: tr("当前暂未开放注册", "Registration is currently closed"),
+    REQUEST_VALIDATION_FAILED: tr("账号或密码不符合要求", "The account or password does not meet the requirements"),
+  };
+  return messages[error.code] ?? tr("操作失败，请稍后重试", "The operation failed. Please try again.");
 }
 
 function switchMode(next: "login" | "register") {
@@ -70,13 +128,15 @@ function switchMode(next: "login" | "register") {
   confirmationVisible.value = false;
   setupTokenVisible.value = false;
   failure.value = "";
+  usernameAvailability.value = "idle";
 }
 </script>
 
 <template>
   <main class="auth-page" :class="{ 'binding-auth-page': flow === 'qq-binding' }">
     <QuickPreferences class="auth-preferences-outside" />
-    <section class="auth-slider" :class="{ 'is-register': mode === 'register' && !setup, 'is-setup': setup, 'is-channel-binding': flow === 'qq-binding' }">
+    <div class="auth-surface">
+      <section class="auth-slider" :class="{ 'is-register': mode === 'register' && !setup, 'is-setup': setup, 'is-channel-binding': flow === 'qq-binding' }">
       <div class="auth-brand-panel">
         <QuickPreferences class="auth-preferences-inside" />
         <div class="brand-lockup"><img :src="'/static/zhice-logo-a.png'" alt="" /><strong>ZhiCe-Agent</strong></div>
@@ -96,9 +156,9 @@ function switchMode(next: "login" | "register") {
           <div><h2>{{ panelTitle }}</h2><p>{{ setup ? tr('Owner 账号固定为 owner', 'The Owner account is fixed as owner') : flow === 'qq-binding' ? tr('完成后会自动绑定，无需再进入设置。', 'QQ will connect automatically after authentication.') : mode === 'login' ? tr('登录你的 ZhiCe-Agent 账号', 'Sign in to your ZhiCe-Agent account') : tr('新账号默认拥有普通用户角色', 'New accounts receive the standard user role') }}</p></div>
         </div>
         <label v-if="!setup" class="validated-field">
-          <span>{{ tr('账号', 'Account') }}<em v-if="registering && username" :class="usernameValid ? 'is-valid' : 'is-invalid'">{{ usernameValid ? tr('可用', 'Valid') : tr('需调整', 'Revise') }}</em></span>
-          <input v-model="username" autocomplete="username" required :minlength="registering ? 3 : undefined" :maxlength="registering ? 64 : undefined" :pattern="registering ? '[A-Za-z0-9._-]{3,64}' : undefined" :class="{ 'is-valid': registering && usernameValid, 'is-invalid': registering && username && !usernameValid }" :aria-invalid="registering && username ? !usernameValid : undefined" />
-          <small v-if="registering" class="validation-bubble" :class="username && !usernameValid ? 'is-invalid' : ''">{{ tr('3–64 位，仅支持字母、数字、点、下划线和连字符', '3–64 characters: letters, numbers, dots, underscores, and hyphens') }}</small>
+          <span>{{ tr('账号', 'Account') }}<em v-if="registering && username" :class="usernameStatusClass">{{ usernameStatusLabel }}</em></span>
+          <input v-model="username" autocomplete="username" required :minlength="registering ? 3 : undefined" :maxlength="registering ? 64 : undefined" :pattern="registering ? '[A-Za-z0-9._-]{3,64}' : undefined" :class="{ 'is-valid': registering && usernameAvailability === 'available', 'is-invalid': registering && username && (!usernameValid || usernameTaken) }" :aria-invalid="registering && username ? (!usernameValid || usernameTaken) : undefined" />
+          <small v-if="registering" class="validation-bubble" :class="username && (!usernameValid || usernameTaken) ? 'is-invalid' : ''">{{ usernameTaken ? tr('该账号已被使用，请换一个', 'This account is already in use. Choose another one.') : tr('3–64 位，仅支持字母、数字、点、下划线和连字符', '3–64 characters: letters, numbers, dots, underscores, and hyphens') }}</small>
         </label>
         <label v-else><span>{{ tr('账号', 'Account') }}</span><input value="owner" disabled /></label>
         <label class="validated-field">
@@ -117,6 +177,13 @@ function switchMode(next: "login" | "register") {
         <button v-if="!setup && auth.registrationEnabled" class="mobile-mode-switch" type="button" @click="switchMode(mode === 'login' ? 'register' : 'login')"><span>{{ mode === 'login' ? tr('没有账号？', 'No account?') : tr('已有账号？', 'Already have an account?') }}</span><strong>{{ mode === 'login' ? tr('立即创建', 'Create one') : tr('返回登录', 'Sign in') }}</strong></button>
         <a v-if="setup" class="mobile-mode-switch" href="/">{{ tr('返回登录', 'Back to sign in') }}</a>
       </form>
-    </section>
+      </section>
+      <footer v-if="auth.publicSecurityRecord" class="public-security-record">
+        <a :href="auth.publicSecurityRecord.url" rel="noreferrer" target="_blank">
+          <img :src="'/static/beian-icon.png'" alt="" />
+          <span>{{ auth.publicSecurityRecord.label }}</span>
+        </a>
+      </footer>
+    </div>
   </main>
 </template>

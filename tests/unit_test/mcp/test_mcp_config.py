@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from agent.mcp.config import McpConfigError, load_mcp_server_specs
+from agent.mcp.config import (
+    McpConfigError,
+    load_mcp_server_specs,
+    load_mcp_server_specs_isolated,
+)
 
 
 def _write_mcp(config_dir, servers):
@@ -43,6 +47,43 @@ def test_loads_stdio_http_sse_and_env_credentials(tmp_path, monkeypatch):
     assert specs[1].proxy_mode == "direct"
     assert specs[2].proxy_mode == "environment"
     assert specs[0].cwd == "work"
+
+
+def test_optional_empty_environment_placeholder_expands_to_empty_string(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("OPTIONAL_MCP_ALLOWLIST", raising=False)
+    config_dir = tmp_path / "config"
+    _write_mcp(
+        config_dir,
+        {
+            "local": {
+                "command": "python",
+                "env": {"OPTIONAL_MCP_ALLOWLIST": "${OPTIONAL_MCP_ALLOWLIST:-}"},
+            }
+        },
+    )
+
+    specs = load_mcp_server_specs(config_dir)
+
+    assert specs[0].env["OPTIONAL_MCP_ALLOWLIST"] == ""
+
+
+def test_isolated_loader_keeps_valid_servers_when_one_entry_is_invalid(tmp_path):
+    config_dir = tmp_path / "config"
+    _write_mcp(
+        config_dir,
+        {
+            "valid": {"command": "python"},
+            "invalid": {"command": "python", "cwd": "../outside"},
+        },
+    )
+
+    loaded = load_mcp_server_specs_isolated(config_dir)
+
+    assert [spec.server_id for spec in loaded.specs] == ["valid"]
+    assert loaded.invalid_server_ids == ("invalid",)
 
 
 @pytest.mark.parametrize("cwd", ["../users", "C:/Users/example"])
