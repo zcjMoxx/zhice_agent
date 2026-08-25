@@ -27,7 +27,7 @@ const travelTone = computed(() => ({
   balanced: "舒适均衡",
   comfortable: "轻松品质",
 } as Record<string, string>)[travel.activeDraft?.budget_level || ""] || "未记录");
-const leftCollapsed = ref(false);
+const leftCollapsed = ref(typeof window !== "undefined" && window.innerWidth <= 760);
 const formInspectorOpen = ref(false);
 const progressSection = ref<HTMLElement | null>(null);
 const resultsScroll = ref<HTMLElement | null>(null);
@@ -57,6 +57,11 @@ async function removeWorkItem(item: import("@/api/types").TravelWorkItem) {
   const label = item.status === "completed" ? "这份旅行计划及其需求问答记录" : "这条未完成的旅行任务";
   if (!window.confirm(`确定删除${label}？`)) return;
   await travel.removeWorkItem(item);
+}
+
+async function openWorkItem(item: import("@/api/types").TravelWorkItem) {
+  await travel.openWorkItem(item);
+  if (window.matchMedia?.("(max-width: 760px)").matches) leftCollapsed.value = true;
 }
 
 async function chooseCandidate(candidateId: string) {
@@ -204,7 +209,7 @@ async function handoffToChat(question: string) {
           <button class="travel-new-button" type="button" :title="travel.intakeBusy ? '上一条回复会继续留在原计划中' : travel.generating ? '当前计划会继续在后台生成' : ''" @click="travel.startNew"><Plus :size="16" />新建旅行计划</button>
           <p v-if="travel.loading && !travel.workItems.length">正在读取…</p>
           <p v-else-if="!travel.workItems.length" class="travel-empty-copy">还没有旅行计划或草稿。</p>
-          <button v-for="item in travel.workItems" :key="item.session_id" :class="['travel-saved-row', { active: item.session_id === travel.sessionId || item.plan_id === travel.activeId }]" type="button" @click="travel.openWorkItem(item)">
+          <button v-for="item in travel.workItems" :key="item.session_id" :class="['travel-saved-row', { active: item.session_id === travel.sessionId || item.plan_id === travel.activeId }]" type="button" @click="openWorkItem(item)">
             <span><strong>{{ item.title }}</strong><small><em :data-status="item.status">{{ workStatusLabel(item.status) }}</em> · {{ item.updated_at.slice(0, 10) }}</small></span>
             <span role="button" tabindex="0" aria-label="删除旅行任务" @click.stop="removeWorkItem(item)" @keydown.enter.stop="removeWorkItem(item)"><Trash2 :size="15" /></span>
           </button>

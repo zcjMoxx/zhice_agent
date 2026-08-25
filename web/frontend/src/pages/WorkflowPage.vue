@@ -30,6 +30,7 @@ interface CanvasNode { id: string; type: string; label: string; position: { x: n
 interface CanvasEdge { id: string; source: string; target: string; sourceHandle?: string | null; targetHandle?: string | null }
 interface ConfigurationIssue { message: string; nodeId?: string }
 interface ClickConnectionStart { event?: MouseEvent; nodeId?: string; handleId: string | null }
+interface ClickConnectionSource { nodeId: string; handleId: string; label: string }
 type RunNode = NonNullable<WorkflowRun["nodes"]>[number];
 interface RunSummaryBlock { id: string; label: string; text: string }
 const RUN_SUMMARY_LIMIT = 500;
@@ -50,15 +51,18 @@ const toolTestResult = ref("");
 const toolTestSummary = ref("");
 const undoStack = ref<EditorSnapshot[]>([]);
 const redoStack = ref<EditorSnapshot[]>([]);
-const sidebarCollapsed = ref(false);
+const sidebarCollapsed = ref(typeof window !== "undefined" && window.innerWidth <= 760);
 const editorView = ref<"canvas" | "runs">("canvas");
 const expandedRunStep = ref("");
 const expandedRunSummaries = ref<Set<string>>(new Set());
 const copiedRunSummary = ref("");
 const addMenu = ref<{ x: number; y: number; edgeId: string; flowPosition: { x: number; y: number } } | null>(null);
 const connectionFeedback = ref("");
+const connectionToast = ref("");
 const clickConnectionActive = ref(false);
+const clickConnectionSource = ref<ClickConnectionSource | null>(null);
 const clickConnectionPreview = ref<{ fromX: number; fromY: number; toX: number; toY: number } | null>(null);
+const readinessOpen = ref(false);
 const copiedNode = ref<CanvasNode | null>(null);
 const savedCanvasSignature = ref("");
 const saveConfirmed = ref(false);
@@ -68,6 +72,7 @@ const inspectorBubblePlacement = ref<"right" | "left" | "bottom">("right");
 let nodeSequence = 0;
 let savedBaselineTimer: ReturnType<typeof setTimeout> | undefined;
 let saveConfirmationTimer: ReturnType<typeof setTimeout> | undefined;
+let connectionToastTimer: ReturnType<typeof setTimeout> | undefined;
 let inspectorBubbleFrame: number | undefined;
 const workflowId = computed(() => typeof route.params.workflowId === "string" ? route.params.workflowId : "");
 const isEditorRoute = computed(() => Boolean(workflowId.value));
@@ -350,6 +355,10 @@ function hydrate() {
   undoStack.value = [];
   redoStack.value = [];
   addMenu.value = null;
+  clickConnectionActive.value = false;
+  clickConnectionSource.value = null;
+  clickConnectionPreview.value = null;
+  readinessOpen.value = false;
   selectedId.value = source.nodes[0]?.id || "";
   selectedEdgeId.value = "";
   actionConsent.value = source.nodes.some((node) => node.type === "mcp_action" ? Boolean(node.config.published_consent_at) : ["personal_email", "qq_notification", "weixin_notification"].includes(node.type) && Boolean(node.config.send_consent_at));
@@ -454,6 +463,7 @@ onBeforeUnmount(() => {
   if (inspectorBubbleFrame !== undefined) window.cancelAnimationFrame(inspectorBubbleFrame);
   if (savedBaselineTimer) clearTimeout(savedBaselineTimer);
   if (saveConfirmationTimer) clearTimeout(saveConfirmationTimer);
+  if (connectionToastTimer) clearTimeout(connectionToastTimer);
 });
 
 const availableStarterTemplates = computed(() => workflowStarterTemplates.filter((template) => workflowTools.value.some((tool) => tool.name === template.requiredTool)));
@@ -467,6 +477,7 @@ async function createAndOpen(workflowDefinition: WorkflowDefinitionV1 = defaultD
     if (store.current && hasUnsavedChanges.value) await saveCurrent();
     await store.create(workflowDefinition);
     if (store.current) await router.push({ name: "workflow-detail", params: { workflowId: store.current.workflow_id } });
+    if (window.matchMedia?.("(max-width: 760px)").matches) sidebarCollapsed.value = true;
   });
 }
 
@@ -475,6 +486,7 @@ async function openWorkflow(id: string) {
     if (store.current?.workflow_id !== id && hasUnsavedChanges.value) await saveCurrent();
     await store.open(id);
     await router.push({ name: "workflow-detail", params: { workflowId: id } });
+    if (window.matchMedia?.("(max-width: 760px)").matches) sidebarCollapsed.value = true;
   });
 }
 
@@ -587,17 +599,26 @@ function connectionIssueText(issue: WorkflowConnectionIssue): string {
     "missing-node": ["找不到要连接的步骤，请刷新后重试", "A connection endpoint is missing; refresh and try again"],
     self: ["不能把步骤连接到自己", "A step cannot connect to itself"],
     "target-trigger": ["“开始”只能放在流程最前面", "Start must remain at the beginning"],
-    duplicate: ["这两个步骤已经连接", "These steps are already connected"],
+    duplicate: ["该路径已存在", "This path already exists"],
     "invalid-branch": ["请先选择“是”或“否”分支", "Choose the Yes or No branch first"],
     "branch-used": ["这个分支已经连接；如需更换，请先删除原连线", "This branch is already connected; delete it before replacing it"],
     cycle: ["这样会让流程绕回前面的步骤，无法连接", "This connection would create a cycle"],
   };
   return tr(...labels[issue]);
 }
+function showConnectionToast(message: string): void {
+  connectionToast.value = message;
+  if (connectionToastTimer) clearTimeout(connectionToastTimer);
+  connectionToastTimer = setTimeout(() => { connectionToast.value = ""; }, 1000);
+}
 function addValidatedConnection(sourceId: string, targetId: string, sourceHandle = "output", targetHandle = "input"): boolean {
+  if (targetHandle !== "input") {
+    showConnectionToast(tr("非法连接：只能连接到输入点", "Invalid connection: connect to an input port"));
+    return false;
+  }
   const issue = workflowConnectionIssue(editorSnapshot.value, sourceId, targetId, sourceHandle);
   if (issue) {
-    connectionFeedback.value = connectionIssueText(issue);
+    showConnectionToast(connectionIssueText(issue));
     return false;
   }
   recordHistory();
@@ -607,12 +628,21 @@ function addValidatedConnection(sourceId: string, targetId: string, sourceHandle
   return true;
 }
 function connect(connection: Connection) {
-  clickConnectionActive.value = false;
-  clickConnectionPreview.value = null;
   if (!connection.source || !connection.target) return;
   addValidatedConnection(connection.source, connection.target, connection.sourceHandle || "output", connection.targetHandle || "input");
+  cancelClickConnection();
 }
 function handleNodeClick(nodeId: string) {
+  if (clickConnectionActive.value && clickConnectionSource.value) {
+    completeTapConnection(nodeId);
+    return;
+  }
+  if (window.matchMedia?.("(max-width: 760px)").matches) {
+    selectedId.value = nodeId;
+    selectedEdgeId.value = "";
+    inspectorOpen.value = false;
+    return;
+  }
   selectNode(nodeId);
 }
 function selectNode(nodeId: string) {
@@ -622,6 +652,7 @@ function selectNode(nodeId: string) {
 }
 function focusConfigurationIssue(issue: ConfigurationIssue) {
   if (!issue.nodeId) return;
+  readinessOpen.value = false;
   selectNode(issue.nodeId);
 }
 function selectEdge(edgeId: string) {
@@ -631,14 +662,27 @@ function selectEdge(edgeId: string) {
   inspectorOpen.value = false;
   addMenu.value = null;
 }
-function closeInspectorFromCanvas(event?: MouseEvent | TouchEvent) {
-  endConnection(event, true);
-  clickConnectionActive.value = false;
-  clickConnectionPreview.value = null;
-  connectionFeedback.value = "";
+function closeInspectorFromCanvas() {
   inspectorOpen.value = false;
   selectedEdgeId.value = "";
   addMenu.value = null;
+}
+function handlePaneClick() {
+  if (clickConnectionActive.value) {
+    clickConnectionPreview.value = null;
+    return;
+  }
+  closeInspectorFromCanvas();
+  if (!clickConnectionActive.value) connectionFeedback.value = "";
+}
+function handleViewportMoveStart() {
+  inspectorOpen.value = false;
+  selectedEdgeId.value = "";
+  addMenu.value = null;
+}
+function handleCanvasGeometryChange() {
+  scheduleInspectorBubblePosition();
+  void nextTick(syncClickConnectionPreviewSource);
 }
 function deleteEdge(edgeId: string) {
   if (!edges.value.some((edge) => edge.id === edgeId)) return;
@@ -667,13 +711,50 @@ function panCanvas(deltaX: number, deltaY: number) {
   const viewport = getViewport();
   void setViewport({ x: viewport.x + deltaX, y: viewport.y + deltaY, zoom: viewport.zoom }, { duration: 160 });
 }
+function handleCanvasWheel(event: WheelEvent) {
+  if (event.ctrlKey || event.metaKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    const viewport = getViewport();
+    const canvasRect = workflowCanvas.value?.getBoundingClientRect();
+    if (!canvasRect || viewport.zoom <= 0) return;
+    const nextZoom = Math.min(1.5, Math.max(0.25, viewport.zoom * Math.exp(-event.deltaY * 0.002)));
+    const scale = nextZoom / viewport.zoom;
+    const pointerX = event.clientX - canvasRect.left;
+    const pointerY = event.clientY - canvasRect.top;
+    void setViewport({
+      x: pointerX - (pointerX - viewport.x) * scale,
+      y: pointerY - (pointerY - viewport.y) * scale,
+      zoom: nextZoom,
+    });
+    return;
+  }
+  if (!event.altKey) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const viewport = getViewport();
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  void setViewport({ x: viewport.x - delta, y: viewport.y, zoom: viewport.zoom });
+}
 function openEdgeMenu(edgeId: string, event: MouseEvent) {
   const edge = edges.value.find((item) => item.id === edgeId);
   if (!edge) return;
-  addMenu.value = { x: event.clientX, y: event.clientY, edgeId, flowPosition: screenToFlowCoordinate({ x: event.clientX, y: event.clientY }) };
+  const source = nodes.value.find((item) => item.id === edge.source);
+  const target = nodes.value.find((item) => item.id === edge.target);
+  const flowPosition = source && target
+    ? { x: (source.position.x + target.position.x) / 2 + 112, y: (source.position.y + target.position.y) / 2 + 34 }
+    : screenToFlowCoordinate({ x: event.clientX, y: event.clientY });
+  addMenu.value = { x: event.clientX, y: event.clientY, edgeId, flowPosition };
 }
 function startClickConnection(params: ClickConnectionStart) {
+  if (!params.nodeId) return;
+  const handleId = params.handleId || "output";
+  if (clickConnectionSource.value?.nodeId === params.nodeId && clickConnectionSource.value.handleId === handleId) {
+    cancelClickConnection(params.event);
+    return;
+  }
   clickConnectionActive.value = true;
+  clickConnectionSource.value = { nodeId: params.nodeId, handleId, label: nodes.value.find((node) => node.id === params.nodeId)?.label || tr("当前节点", "Current node") };
   connectionFeedback.value = "";
   inspectorOpen.value = false;
   const canvasRect = workflowCanvas.value?.getBoundingClientRect();
@@ -684,19 +765,79 @@ function startClickConnection(params: ClickConnectionStart) {
   const fromX = handleRect && canvasRect ? handleRect.left + handleRect.width / 2 - canvasRect.left : Number(point?.clientX || 0) - Number(canvasRect?.left || 0);
   const fromY = handleRect && canvasRect ? handleRect.top + handleRect.height / 2 - canvasRect.top : Number(point?.clientY || 0) - Number(canvasRect?.top || 0);
   clickConnectionPreview.value = { fromX, fromY, toX: fromX, toY: fromY };
+  syncClickConnectionPreviewSource();
 }
-function endClickConnection() {
+function startTapConnection(nodeId: string, handleId: string, event: MouseEvent) {
+  if (clickConnectionActive.value) {
+    showConnectionToast(tr("连接方向错误", "Invalid connection direction"));
+    cancelClickConnection();
+    return;
+  }
+  startClickConnection({ nodeId, handleId, event });
+}
+function completeTapConnection(nodeId: string) {
+  if (!clickConnectionSource.value) return;
+  const source = clickConnectionSource.value;
+  const connected = addValidatedConnection(source.nodeId, nodeId, source.handleId, "input");
+  if (connected) cancelClickConnection();
+  else if (connectionFeedback.value) cancelClickConnection(undefined, true);
+}
+function cancelClickConnection(event?: MouseEvent | TouchEvent, preserveFeedback = false) {
+  endConnection(event, true);
   clickConnectionActive.value = false;
+  clickConnectionSource.value = null;
   clickConnectionPreview.value = null;
+  if (!preserveFeedback) connectionFeedback.value = "";
+}
+function clickConnectionSourcePoint(): { x: number; y: number } | null {
+  const source = clickConnectionSource.value;
+  const canvas = workflowCanvas.value;
+  if (!source || !canvas) return null;
+  const canvasRect = canvas.getBoundingClientRect();
+  const sourceNode = Array.from(canvas.querySelectorAll<HTMLElement>(".vue-flow__node")).find((element) => element.dataset.id === source.nodeId || element.dataset.nodeId === source.nodeId);
+  if (!sourceNode) return null;
+  const sourceHandle = Array.from(sourceNode.querySelectorAll<HTMLElement>('.vue-flow__handle.source, .vue-flow__handle[data-handle-type="source"]')).find((element) => {
+    const handleId = element.dataset.handleid || element.dataset.handleId || element.getAttribute("data-handleid") || element.getAttribute("data-handle-id") || "output";
+    return handleId === source.handleId;
+  });
+  if (!sourceHandle) return null;
+  const handleRect = sourceHandle.getBoundingClientRect();
+  return { x: handleRect.left + handleRect.width / 2 - canvasRect.left, y: handleRect.top + handleRect.height / 2 - canvasRect.top };
+}
+function syncClickConnectionPreviewSource() {
+  if (!clickConnectionPreview.value) return;
+  const sourcePoint = clickConnectionSourcePoint();
+  if (!sourcePoint) return;
+  clickConnectionPreview.value = { ...clickConnectionPreview.value, fromX: sourcePoint.x, fromY: sourcePoint.y };
 }
 function trackClickConnectionPointer(event: PointerEvent) {
   if (!clickConnectionActive.value || !clickConnectionPreview.value || !workflowCanvas.value) return;
   const canvasRect = workflowCanvas.value.getBoundingClientRect();
+  const sourcePoint = clickConnectionSourcePoint();
   clickConnectionPreview.value = {
     ...clickConnectionPreview.value,
+    ...(sourcePoint ? { fromX: sourcePoint.x, fromY: sourcePoint.y } : {}),
     toX: event.clientX - canvasRect.left,
     toY: event.clientY - canvasRect.top,
   };
+}
+function isBlankCanvasEvent(event: MouseEvent): boolean {
+  const target = event.target;
+  if (!(target instanceof Element) || (!workflowCanvas.value?.contains(target) && !target.closest(".vue-flow__pane"))) return false;
+  if (target.closest(".vue-flow__node, .vue-flow__handle, .edge-actions, .canvas-toolbar, .workflow-connection-banner, .mobile-edge-actions, .mobile-edge-selector, input, select, textarea")) return false;
+  return true;
+}
+function handleCanvasContextMenu(event: MouseEvent) {
+  if (!clickConnectionActive.value || !isBlankCanvasEvent(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  cancelClickConnection(event);
+}
+function handleCanvasDoubleClick(event: MouseEvent) {
+  if (!clickConnectionActive.value || !isBlankCanvasEvent(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  cancelClickConnection(event);
 }
 function selectResult(field: string, event: Event) {
   if (!selected.value) return;
@@ -840,6 +981,11 @@ function pasteNode() {
   selectedId.value = copy.id;
 }
 function handleKeyboard(event: KeyboardEvent) {
+  if (event.key === "Escape" && clickConnectionActive.value) {
+    event.preventDefault();
+    cancelClickConnection();
+    return;
+  }
   if (event.key === "Escape" && connectionFeedback.value) {
     event.preventDefault();
     connectionFeedback.value = "";
@@ -1052,8 +1198,8 @@ async function testSelectedTool() {
         <span class="tool-count" :data-loading="toolsLoading">{{ toolsLoading ? '…' : tr(`${informationTasks.length} 类信息可用`, `${informationTasks.length} information tasks`) }}</span>
       </aside>
 
-      <section ref="workflowCanvas" class="workflow-canvas" :data-connection-active="clickConnectionActive || undefined" :aria-label="tr('工作流画布', 'Workflow canvas')" @pointermove="trackClickConnectionPointer">
-        <aside class="workflow-readiness" :data-ready="editorReady"><strong>{{ editorReady ? tr('可以发布', 'Ready to publish') : tr(`还需完成 ${configurationIssues.length} 项`, `${configurationIssues.length} items remaining`) }}</strong><ul v-if="!editorReady"><li v-for="(issue, index) in configurationIssueItems" :key="`${issue.nodeId || 'workflow'}-${index}`"><button type="button" :disabled="!issue.nodeId" @click="focusConfigurationIssue(issue)">{{ issue.message }}</button></li></ul><small v-else>{{ tr('所有步骤的工具和必填参数都已配置', 'All tools and required fields are configured') }}</small></aside>
+      <section ref="workflowCanvas" class="workflow-canvas" :data-connection-active="clickConnectionActive || undefined" :aria-label="tr('工作流画布', 'Workflow canvas')" @pointermove="trackClickConnectionPointer" @wheel.capture="handleCanvasWheel" @contextmenu.capture="handleCanvasContextMenu" @dblclick.capture="handleCanvasDoubleClick">
+        <aside class="workflow-readiness" :data-ready="editorReady" :data-open="readinessOpen || undefined"><header><strong>{{ editorReady ? tr('可以发布', 'Ready to publish') : tr(`还需完成 ${configurationIssues.length} 项`, `${configurationIssues.length} items remaining`) }}</strong><button class="workflow-readiness-close" type="button" :aria-label="tr('关闭配置问题', 'Close configuration issues')" @click="readinessOpen = false"><X :size="15" /></button></header><ul v-if="!editorReady"><li v-for="(issue, index) in configurationIssueItems" :key="`${issue.nodeId || 'workflow'}-${index}`"><button type="button" :disabled="!issue.nodeId" @click="focusConfigurationIssue(issue)">{{ issue.message }}</button></li></ul><small v-else>{{ tr('所有步骤的工具和必填参数都已配置', 'All tools and required fields are configured') }}</small></aside>
         <div class="canvas-toolbar">
           <button :disabled="!undoStack.length" :title="tr('撤销 Ctrl+Z', 'Undo Ctrl+Z')" @click="undo"><Undo2 :size="16" /></button>
           <button :disabled="!redoStack.length" :title="tr('重做 Ctrl+Y', 'Redo Ctrl+Y')" @click="redo"><Redo2 :size="16" /></button>
@@ -1065,26 +1211,36 @@ async function testSelectedTool() {
             <button :title="tr('画布向右', 'Pan right')" @click="panCanvas(120, 0)"><ArrowRight :size="14" /></button>
           </div>
           <span />
-          <button :title="tr('自动整理节点', 'Auto layout')" @click="autoLayout"><WandSparkles :size="16" />{{ tr('自动布局', 'Layout') }}</button>
+          <button class="canvas-layout-button" :title="tr('自动整理节点', 'Auto layout')" @click="autoLayout"><WandSparkles :size="16" />{{ tr('自动布局', 'Layout') }}</button>
+          <button v-if="clickConnectionActive" class="workflow-connection-status" type="button" :title="tr('取消当前连线', 'Cancel current connection')" @click="cancelClickConnection()">{{ tr('连接中 · 取消', 'Connecting · Cancel') }}</button>
+          <button v-else class="workflow-readiness-toggle" type="button" :data-ready="editorReady" :aria-expanded="readinessOpen" @click="readinessOpen = !readinessOpen">{{ editorReady ? tr('配置完成', 'Ready') : tr(`待配置 ${configurationIssues.length}`, `${configurationIssues.length} to configure`) }}</button>
         </div>
-        <div class="canvas-interaction-hint">{{ tr('悬停节点，从连接点拖到另一个节点 · 拖动空白网格移动 · Ctrl + 滚轮缩放', 'Hover a node and drag between connection points · Drag empty grid to pan · Ctrl + scroll to zoom') }}</div>
-        <div v-if="connectionFeedback" class="workflow-connection-banner" data-error="true" role="status">
-          <span><strong>{{ connectionFeedback }}</strong></span>
-          <button type="button" @click="connectionFeedback = ''"><X :size="14" />{{ tr('关闭', 'Close') }}</button>
+        <div class="canvas-interaction-hint"><span class="canvas-hint-desktop">{{ tr('拖动空白网格移动 · 滚轮平移 · Ctrl + 滚轮缩放 · Alt + 滚轮横移', 'Drag empty grid to pan · Scroll to pan · Ctrl + scroll to zoom · Alt + scroll to pan horizontally') }}</span><span class="canvas-hint-mobile">{{ tr('拖动空白处移动 · 双指缩放 · 点击连接点开始连线', 'Drag empty space to pan · Pinch to zoom · Tap a port to connect') }}</span></div>
+        <div v-if="clickConnectionActive" class="workflow-connection-banner" role="status">
+          <span><strong>{{ connectionFeedback || tr(`正在连接：${clickConnectionSource?.label || '当前节点'}`, `Connecting: ${clickConnectionSource?.label || 'current node'}`) }}</strong><small v-if="clickConnectionActive && !connectionFeedback">{{ tr('点击目标节点完成；拖动空白处移动连线终点，画布保持不动', 'Tap a target node to finish; drag on empty space to move the line endpoint while the canvas stays fixed') }}</small></span>
+          <button type="button" @click="clickConnectionActive ? cancelClickConnection() : connectionFeedback = ''"><X :size="14" />{{ clickConnectionActive ? tr('取消', 'Cancel') : tr('关闭', 'Close') }}</button>
         </div>
+        <div v-if="connectionToast" class="workflow-connection-toast" role="status" aria-live="polite">{{ connectionToast }}</div>
         <svg v-if="clickConnectionPreview" class="workflow-click-connection-preview" aria-hidden="true">
           <path :d="`M ${clickConnectionPreview.fromX} ${clickConnectionPreview.fromY} C ${clickConnectionPreview.fromX + 70} ${clickConnectionPreview.fromY}, ${clickConnectionPreview.toX - 70} ${clickConnectionPreview.toY}, ${clickConnectionPreview.toX} ${clickConnectionPreview.toY}`" />
           <circle :cx="clickConnectionPreview.toX" :cy="clickConnectionPreview.toY" r="4" />
         </svg>
-        <VueFlow v-model:nodes="nodes" v-model:edges="edges" :min-zoom="0.25" :max-zoom="1.5" :default-viewport="{ x: 110, y: 110, zoom: 0.72 }" :default-edge-options="{ markerEnd: MarkerType.ArrowClosed }" :pan-on-scroll="true" :pan-on-scroll-mode="PanOnScrollMode.Free" :pan-on-drag="[0, 1, 2]" :prevent-scrolling="true" :zoom-on-scroll="false" :zoom-on-pinch="true" :snap-to-grid="true" :snap-grid="[16, 16]" @connect="connect" @click-connect-start="startClickConnection" @click-connect-end="endClickConnection" @move="scheduleInspectorBubblePosition" @node-drag="scheduleInspectorBubblePosition" @node-drag-start="recordHistory" @node-drag-stop="scheduleInspectorBubblePosition" @node-click="handleNodeClick($event.node.id)" @edge-click="selectEdge($event.edge.id)" @pane-click="closeInspectorFromCanvas">
-          <template #node-default="slotProps"><div class="workflow-node"><Handle class="workflow-node-handle" type="target" :position="Position.Left" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop /><span class="workflow-node-icon">{{ nodeMeta(slotProps.type).icon }}</span><div class="workflow-node-copy"><small>{{ nodeMeta(slotProps.type).category }}</small><strong>{{ slotProps.label }}</strong><span>{{ nodeSummary(slotProps.type, slotProps.data?.config || {}) }}</span></div><button class="workflow-node-edit nodrag nopan" :title="tr('编辑这个节点', 'Edit this node')" @click.stop="selectNode(slotProps.id)"><Pencil :size="12" /></button><Handle class="workflow-node-handle" type="source" :position="Position.Right" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop /></div></template>
-          <template v-for="type in renderNodeTypes" :key="type" #[`node-${type}`]="slotProps"><div class="workflow-node" :data-node-type="type" :data-incomplete="incompleteNodeIds.has(slotProps.id)"><Handle v-if="type !== 'schedule_trigger'" id="input" class="workflow-node-handle" type="target" :position="Position.Left" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop /><span v-if="incompleteNodeIds.has(slotProps.id)" class="node-config-status">{{ tr('待配置', 'Needs setup') }}</span><span class="workflow-node-icon">{{ nodeMeta(type).icon }}</span><div class="workflow-node-copy"><small>{{ nodeMeta(type).category }}</small><strong>{{ slotProps.label }}</strong><span>{{ nodeSummary(type, slotProps.data?.config || {}) }}</span></div><button class="workflow-node-edit nodrag nopan" :title="tr('编辑这个节点', 'Edit this node')" @click.stop="selectNode(slotProps.id)"><Pencil :size="12" /></button><template v-if="type === 'condition'"><span class="condition-port condition-yes">{{ tr('是', 'YES') }}</span><Handle id="true" class="workflow-node-handle condition-handle condition-handle-yes" type="source" :position="Position.Right" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop /><span class="condition-port condition-no">{{ tr('否', 'NO') }}</span><Handle id="false" class="workflow-node-handle condition-handle condition-handle-no" type="source" :position="Position.Right" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop /></template><Handle v-else id="output" class="workflow-node-handle" type="source" :position="Position.Right" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop /></div></template>
+        <VueFlow v-model:nodes="nodes" v-model:edges="edges" :min-zoom="0.25" :max-zoom="1.5" :default-viewport="{ x: 110, y: 110, zoom: 0.72 }" :default-edge-options="{ markerEnd: MarkerType.ArrowClosed }" :pan-on-scroll="true" :pan-on-scroll-mode="PanOnScrollMode.Free" :pan-on-drag="!clickConnectionActive" :connect-on-click="false" :prevent-scrolling="true" :zoom-on-scroll="false" :zoom-on-pinch="true" :snap-to-grid="true" :snap-grid="[16, 16]" @connect="connect" @move-start="handleViewportMoveStart" @move="handleCanvasGeometryChange" @node-drag="handleCanvasGeometryChange" @node-drag-start="recordHistory" @node-drag-stop="handleCanvasGeometryChange" @node-click="handleNodeClick($event.node.id)" @edge-click="selectEdge($event.edge.id)" @pane-click="handlePaneClick">
+          <template #node-default="slotProps"><div class="workflow-node" :data-connection-source="clickConnectionSource?.nodeId === slotProps.id || undefined"><Handle class="workflow-node-handle" type="target" :position="Position.Left" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop="completeTapConnection(slotProps.id)" /><span class="workflow-node-icon">{{ nodeMeta(slotProps.type).icon }}</span><div class="workflow-node-copy"><small>{{ nodeMeta(slotProps.type).category }}</small><strong>{{ slotProps.label }}</strong><span>{{ nodeSummary(slotProps.type, slotProps.data?.config || {}) }}</span></div><button class="workflow-node-edit nodrag nopan" :title="tr('编辑这个节点', 'Edit this node')" @click.stop="selectNode(slotProps.id)"><Pencil :size="12" /></button><Handle class="workflow-node-handle" type="source" :position="Position.Right" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop="startTapConnection(slotProps.id, 'output', $event)" /></div></template>
+          <template v-for="type in renderNodeTypes" :key="type" #[`node-${type}`]="slotProps"><div class="workflow-node" :data-node-type="type" :data-incomplete="incompleteNodeIds.has(slotProps.id)" :data-connection-source="clickConnectionSource?.nodeId === slotProps.id || undefined"><Handle v-if="type !== 'schedule_trigger'" id="input" class="workflow-node-handle" type="target" :position="Position.Left" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop="completeTapConnection(slotProps.id)" /><span v-if="incompleteNodeIds.has(slotProps.id)" class="node-config-status">{{ tr('待配置', 'Needs setup') }}</span><span class="workflow-node-icon">{{ nodeMeta(type).icon }}</span><div class="workflow-node-copy"><small>{{ nodeMeta(type).category }}</small><strong>{{ slotProps.label }}</strong><span>{{ nodeSummary(type, slotProps.data?.config || {}) }}</span></div><button class="workflow-node-edit nodrag nopan" :title="tr('编辑这个节点', 'Edit this node')" @click.stop="selectNode(slotProps.id)"><Pencil :size="12" /></button><template v-if="type === 'condition'"><span class="condition-port condition-yes">{{ tr('是', 'YES') }}</span><Handle id="true" class="workflow-node-handle condition-handle condition-handle-yes" type="source" :position="Position.Right" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop="startTapConnection(slotProps.id, 'true', $event)" /><span class="condition-port condition-no">{{ tr('否', 'NO') }}</span><Handle id="false" class="workflow-node-handle condition-handle condition-handle-no" type="source" :position="Position.Right" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop="startTapConnection(slotProps.id, 'false', $event)" /></template><Handle v-else id="output" class="workflow-node-handle" type="source" :position="Position.Right" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop="startTapConnection(slotProps.id, 'output', $event)" /></div></template>
           <template #edge-default="{ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd }">
-            <BaseEdge :id="id" :class="{ 'selected-workflow-edge': selectedEdgeId === id }" :path="getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[0]" :marker-end="markerEnd" />
-            <EdgeLabelRenderer><div class="edge-actions" :style="{ transform: `translate(-50%, -50%) translate(${getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[1]}px, ${getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[2]}px)` }"><button class="edge-add-button" :title="tr('在连线上插入节点', 'Insert node on edge')" @click.stop="openEdgeMenu(id, $event)"><Plus :size="13" /></button><button class="edge-delete-button" :title="tr('删除这条连线', 'Delete this connection')" @click.stop="deleteEdge(id)"><Trash2 :size="12" /></button></div></EdgeLabelRenderer>
+            <BaseEdge :id="id" :class="{ 'selected-workflow-edge': selectedEdgeId === id }" :path="getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[0]" :marker-end="markerEnd" :interaction-width="56" />
+            <EdgeLabelRenderer>
+              <div class="edge-actions" :data-selected="selectedEdgeId === id || undefined" :style="{ transform: `translate(-50%, -50%) translate(${getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[1]}px, ${getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[2]}px)` }"><button class="edge-add-button" :title="tr('在连线上插入节点', 'Insert node on edge')" @click.stop="openEdgeMenu(id, $event)"><Plus :size="13" /></button><button class="edge-delete-button" :title="tr('删除这条连线', 'Delete this connection')" @click.stop="deleteEdge(id)"><Trash2 :size="12" /></button></div>
+              <button class="mobile-edge-selector" type="button" :data-selected="selectedEdgeId === id || undefined" :aria-label="tr('编辑这条连线', 'Edit this connection')" :title="tr('编辑连线', 'Edit connection')" :style="{ transform: `translate(-50%, -50%) translate(${getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[1]}px, ${getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition })[2]}px)` }" @click.stop="selectEdge(id)"><Pencil :size="14" /></button>
+            </EdgeLabelRenderer>
           </template>
           <Background pattern-color="var(--line-strong)" :gap="20" /><MiniMap pannable zoomable /><Controls />
         </VueFlow>
+        <div v-if="selectedEdgeId" class="mobile-edge-actions" role="toolbar" :aria-label="tr('连线操作', 'Connection actions')">
+          <button class="mobile-edge-insert" type="button" @click.stop="openEdgeMenu(selectedEdgeId, $event)"><Plus :size="17" />{{ tr('插入节点', 'Insert node') }}</button>
+          <button class="mobile-edge-delete" type="button" @click.stop="deleteEdge(selectedEdgeId)"><Trash2 :size="17" />{{ tr('删除连线', 'Delete connection') }}</button>
+        </div>
         <div v-if="addMenu" class="quick-add-menu" :style="{ left: `${addMenu.x}px`, top: `${addMenu.y}px` }" @click.stop>
           <header><div><span class="eyebrow">{{ tr('下一步', 'NEXT STEP') }}</span><strong>{{ tr('添加节点', 'Add node') }}</strong></div><button @click="addMenu = null"><X :size="15" /></button></header>
           <button v-for="item in palette" :key="item.type" @click="addNode(item.type, { position: addMenu!.flowPosition, edgeId: addMenu!.edgeId })"><span class="node-kind-icon">{{ nodeMeta(item.type).icon }}</span><span><strong>{{ tr(item.zh, item.en) }}</strong><small>{{ paletteHelp(item.type) }}</small></span></button>

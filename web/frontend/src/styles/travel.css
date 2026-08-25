@@ -221,16 +221,25 @@
   .travel-tone-picker > div { grid-template-columns: 1fr; }
   .travel-page { overflow: hidden; }
   .travel-topbar { position: sticky; top: 0; height: 56px; padding: 0 12px; }.travel-topbar nav > button { padding: 0 9px; }.travel-topbar nav > button svg { margin: 0; }.travel-topbar nav > button { font-size: 0; }.travel-topbar nav > button svg { width: 17px; height: 17px; }
-  .travel-workspace { grid-template-columns: 220px minmax(0, 1fr); height: calc(100dvh - 56px); }
-  .travel-left-collapsed .travel-workspace { grid-template-columns: 48px minmax(0, 1fr); }
-  .travel-sidebar { padding: 12px; }
+  .travel-workspace, .travel-left-collapsed .travel-workspace { grid-template-columns: minmax(0, 1fr); height: calc(100dvh - 56px); }
+  .travel-sidebar { position: fixed; z-index: 40; top: 56px; bottom: 0; left: 0; width: min(300px, calc(100vw - 52px)); padding: 12px; border-right: 1px solid var(--line); box-shadow: var(--shadow); transition: width .2s ease, padding .2s ease; }
+  .travel-sidebar.collapsed { width: 48px; padding: 8px 6px; border-right: 0; background: transparent; box-shadow: none; pointer-events: none; }
+  .travel-sidebar.collapsed .travel-sidebar-expand { min-width: 40px; min-height: 40px; background: var(--surface-raised); box-shadow: var(--shadow-soft); pointer-events: auto; }
   .travel-results-scroll { padding: 14px 12px 24px; }
   .travel-inspector-open .travel-results-scroll { padding-right: 12px; }
   .travel-form-details { top: 56px; width: min(360px, calc(100vw - 48px)); height: calc(100dvh - 56px); }
   .travel-form-grid { grid-template-columns: 1fr 1fr; }
   .travel-progress { overflow-x: auto; padding-right: 10px; padding-left: 10px; }.travel-progress-track { min-width: 520px; }
   .travel-card { padding: 17px 15px; border-radius: 15px; }
-  .travel-day { grid-template-columns: 1fr; gap: 15px; }.travel-day-heading { align-items: center; }.travel-route-list, .travel-day-notes { grid-column: 1; }.travel-route-list > div { grid-template-columns: 58px minmax(0, 1fr); }.travel-route-list small { grid-column: 2; text-align: left; }
+  .travel-composer-header, .travel-plan-hero, .travel-source-drawer > header { min-width: 0; }
+  .travel-composer-header { flex-wrap: wrap; }
+  .travel-composer-header > button { min-height: 40px; }
+  .travel-topbar nav > button, .travel-sidebar .icon-button, .travel-form-details .icon-button, .travel-source-drawer .icon-button { min-width: 40px; min-height: 40px; }
+  .travel-saved-row > [role="button"] { display: grid; min-width: 40px; min-height: 40px; place-items: center; }
+  .travel-source-list a { display: inline-flex; min-height: 40px; align-items: center; }
+  .travel-plan-hero > div, .travel-plan-actions { min-width: 0; max-width: 100%; }
+  .travel-plan-hero h1, .travel-card p, .travel-card li, .travel-source-list h3 { overflow-wrap: anywhere; }
+  .travel-day { grid-template-columns: minmax(0, 1fr); gap: 15px; }.travel-day-heading { align-items: center; }.travel-route-list, .travel-day-notes, .travel-transit-legs { grid-column: 1; min-width: 0; }.travel-route-list > div, .travel-transit-legs li { grid-template-columns: minmax(0, 1fr); align-items: start; }.travel-route-list small, .travel-transit-legs li small { grid-column: 1; text-align: left; }.travel-route-list strong, .travel-route-list span, .travel-transit-legs strong, .travel-transit-legs small { min-width: 0; overflow-wrap: anywhere; }
   .travel-budget-range { gap: 7px; }.travel-budget-range article { padding: 12px 9px; }.travel-budget-range strong { font-size: 16px; }
   .travel-map-canvas { height: 300px; }
 }
@@ -241,7 +250,10 @@
   .travel-plan-hero { padding: 23px 17px; }.travel-plan-hero h1 { font-size: 34px; }
   .travel-budget-range { grid-template-columns: 1fr; }
   .travel-source-drawer { padding: 18px 14px; }
-  .travel-form-details { width: calc(100vw - 48px); padding-right: 14px; padding-left: 14px; }
+  .travel-form-details { width: 100vw; max-width: 100vw; padding-right: 14px; padding-left: 14px; }
+  .travel-source-drawer { width: 100vw; max-width: 100vw; }
+  .travel-progress-result > header, .travel-source-meta { align-items: flex-start; flex-direction: column; }
+  .travel-source-meta small { margin-left: 0; }
 }
 .travel-progress-anchor {
   scroll-margin-top: 84px;

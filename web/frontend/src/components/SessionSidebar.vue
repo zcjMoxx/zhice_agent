@@ -67,7 +67,10 @@ onBeforeUnmount(() => {
 async function openSession(id: string) {
   openingId.value = id;
   failure.value = "";
-  try { await sessions.open(id); }
+  try {
+    await sessions.open(id);
+    if (window.matchMedia?.("(max-width: 720px)").matches) ui.sidebarCollapsed = true;
+  }
   catch (error) { failure.value = errorMessage(error); }
   finally { openingId.value = ""; }
 }

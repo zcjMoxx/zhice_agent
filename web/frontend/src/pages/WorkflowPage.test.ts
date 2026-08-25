@@ -12,6 +12,17 @@ import WorkflowPage from "./WorkflowPage.vue";
 
 interface StubNode { id: string; type: string; label: string; data: Record<string, unknown> }
 interface StubEdge { id: string; source: string; target: string; sourceHandle?: string }
+const domRect = (left: number, top: number, width: number, height: number): DOMRect => ({
+  x: left,
+  y: top,
+  left,
+  top,
+  width,
+  height,
+  right: left + width,
+  bottom: top + height,
+  toJSON: () => ({}),
+});
 
 const HandleStub = defineComponent({
   name: "WorkflowHandleStub",
@@ -37,8 +48,10 @@ const VueFlowStub = defineComponent({
     nodes: { type: Array as PropType<StubNode[]>, default: () => [] },
     edges: { type: Array as PropType<StubEdge[]>, default: () => [] },
     defaultEdgeOptions: { type: Object, default: () => ({}) },
+    panOnDrag: { type: [Boolean, Array] as PropType<boolean | number[]>, default: false },
+    connectOnClick: { type: Boolean, default: true },
   },
-  emits: ["pane-click", "node-click", "connect", "connect-start", "connect-end", "click-connect-start", "click-connect-end", "edge-click", "move", "node-drag", "node-drag-start", "node-drag-stop", "update:nodes", "update:edges"],
+  emits: ["pane-click", "node-click", "connect", "connect-start", "connect-end", "edge-click", "move-start", "move", "node-drag", "node-drag-start", "node-drag-stop", "update:nodes", "update:edges"],
   setup(props, { slots, emit }) {
     return () => h("div", { class: "test-flow" }, [
       h("button", { class: "test-empty-canvas vue-flow__pane", type: "button", onClick: (event: MouseEvent) => emit("pane-click", event) }, "canvas"),
@@ -279,28 +292,172 @@ describe("WorkflowPage canvas interactions", () => {
     wrapper.unmount();
   });
 
-  it("closes the node bubble when the empty canvas is clicked", async () => {
+  it("clears the preview when the empty canvas is tapped but keeps connection mode", async () => {
     const { wrapper } = await mountWorkflowPage();
     const flow = wrapper.findComponent(VueFlowStub);
+    const canvas = wrapper.get(".workflow-canvas");
+    const sourceHandle = wrapper.get('[data-node-id="trigger"] [data-handle-type="source"]');
+    vi.spyOn(canvas.element, "getBoundingClientRect").mockReturnValue(domRect(10, 20, 400, 300));
+    const sourceRect = vi.spyOn(sourceHandle.element, "getBoundingClientRect").mockReturnValue(domRect(100, 100, 40, 40));
 
     await wrapper.get('[data-node-id="trigger"]').trigger("click");
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".workflow-node-bubble-shell").exists()).toBe(true);
 
-    flow.vm.$emit("click-connect-start", { nodeId: "trigger", handleId: "output" });
+    await sourceHandle.trigger("click");
     await wrapper.vm.$nextTick();
     expect(wrapper.get(".workflow-canvas").attributes("data-connection-active")).toBe("true");
+    expect(flow.props("panOnDrag")).toBe(false);
+    expect(flow.props("connectOnClick")).toBe(false);
     expect(wrapper.find(".workflow-click-connection-preview").exists()).toBe(true);
 
     await wrapper.get(".workflow-canvas").trigger("pointermove", { clientX: 320, clientY: 210 });
     await wrapper.vm.$nextTick();
-    expect(wrapper.get(".workflow-click-connection-preview path").attributes("d")).toContain("320 210");
+    expect(wrapper.get(".workflow-click-connection-preview path").attributes("d")).toContain("M 110 100");
+    expect(wrapper.get(".workflow-click-connection-preview path").attributes("d")).toContain("310 190");
+
+    sourceRect.mockReturnValue(domRect(150, 80, 40, 40));
+    flow.vm.$emit("move");
+    await flushPromises();
+    expect(wrapper.get(".workflow-click-connection-preview path").attributes("d")).toContain("M 160 80");
 
     await wrapper.get(".test-empty-canvas").trigger("click");
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".workflow-node-bubble-shell").exists()).toBe(false);
-    expect(wrapper.get(".workflow-canvas").attributes("data-connection-active")).toBeUndefined();
+    expect(wrapper.get(".workflow-canvas").attributes("data-connection-active")).toBe("true");
     expect(wrapper.find(".workflow-click-connection-preview").exists()).toBe(false);
+
+    expect(flow.props("panOnDrag")).toBe(false);
+
+    await wrapper.get(".workflow-connection-status").trigger("click");
+
+    wrapper.unmount();
+  });
+
+  it("cancels click-to-connect from a blank-canvas right click or double click only", async () => {
+    const { wrapper } = await mountWorkflowPage();
+    const sourceHandle = wrapper.get('[data-node-id="trigger"] [data-handle-type="source"]');
+    const canvas = wrapper.get(".workflow-canvas");
+
+    await sourceHandle.trigger("click");
+    await wrapper.get('[data-node-id="trigger"]').trigger("contextmenu");
+    expect(canvas.attributes("data-connection-active")).toBe("true");
+
+    const contextMenu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    wrapper.get(".test-empty-canvas").element.dispatchEvent(contextMenu);
+    await wrapper.vm.$nextTick();
+    expect(contextMenu.defaultPrevented).toBe(true);
+    expect(canvas.attributes("data-connection-active")).toBeUndefined();
+
+    await sourceHandle.trigger("click");
+    const doubleClick = new MouseEvent("dblclick", { bubbles: true, cancelable: true });
+    wrapper.get(".test-empty-canvas").element.dispatchEvent(doubleClick);
+    await wrapper.vm.$nextTick();
+    expect(doubleClick.defaultPrevented).toBe(true);
+    expect(canvas.attributes("data-connection-active")).toBeUndefined();
+
+    await sourceHandle.trigger("click");
+    const containerDoubleClick = new MouseEvent("dblclick", { bubbles: true, cancelable: true });
+    canvas.element.dispatchEvent(containerDoubleClick);
+    await wrapper.vm.$nextTick();
+    expect(containerDoubleClick.defaultPrevented).toBe(true);
+    expect(canvas.attributes("data-connection-active")).toBeUndefined();
+
+    wrapper.unmount();
+  });
+
+  it("closes the node bubble when canvas panning starts", async () => {
+    const { wrapper } = await mountWorkflowPage();
+    const flow = wrapper.findComponent(VueFlowStub);
+    expect(flow.props("panOnDrag")).toBe(true);
+
+    await wrapper.get('[data-node-id="trigger"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".workflow-node-bubble-shell").exists()).toBe(true);
+
+    flow.vm.$emit("move-start");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".workflow-node-bubble-shell").exists()).toBe(false);
+
+    wrapper.unmount();
+  });
+
+  it("finishes a click-to-connect action by tapping the target node", async () => {
+    const { wrapper } = await mountWorkflowPage();
+    const flow = wrapper.findComponent(VueFlowStub);
+
+    await wrapper.get('[data-node-id="trigger"] [data-handle-type="source"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.get('[data-node-id="result"]').trigger("click");
+    await wrapper.vm.$nextTick();
+
+    expect(flow.props("edges")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "trigger", target: "result", sourceHandle: "output", targetHandle: "input" }),
+    ]));
+    expect(wrapper.get(".workflow-canvas").attributes("data-connection-active")).toBeUndefined();
+
+    wrapper.unmount();
+  });
+
+  it("opens configuration issues from the compact mobile status control", async () => {
+    const { wrapper } = await mountWorkflowPage();
+    const toggle = wrapper.get(".workflow-readiness-toggle");
+    expect(toggle.attributes("aria-expanded")).toBe("false");
+
+    await toggle.trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(toggle.attributes("aria-expanded")).toBe("true");
+    expect(wrapper.get(".workflow-readiness").attributes("data-open")).toBe("true");
+
+    await wrapper.get(".workflow-readiness-close").trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(toggle.attributes("aria-expanded")).toBe("false");
+
+    wrapper.unmount();
+  });
+
+  it("offers viewport-safe insert and delete actions for a selected edge", async () => {
+    const { wrapper } = await mountWorkflowPage();
+    const flow = wrapper.findComponent(VueFlowStub);
+
+    flow.vm.$emit("edge-click", { edge: { id: "trigger-query" } });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".mobile-edge-actions").exists()).toBe(true);
+
+    await wrapper.get(".mobile-edge-insert").trigger("click", { clientX: 180, clientY: 760 });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".quick-add-menu").exists()).toBe(true);
+
+    await wrapper.get(".quick-add-menu header > button").trigger("click");
+    await wrapper.get(".mobile-edge-delete").trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(flow.props("edges")).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: "trigger-query" })]));
+    expect(wrapper.find(".mobile-edge-actions").exists()).toBe(false);
+
+    wrapper.unmount();
+  });
+
+  it("captures Alt plus wheel for horizontal canvas panning on desktop", async () => {
+    const { wrapper } = await mountWorkflowPage();
+    const canvas = wrapper.get(".workflow-canvas");
+    const bubbledWheel = vi.fn();
+    const wheelParent = canvas.element.parentElement!;
+    wheelParent.addEventListener("wheel", bubbledWheel);
+    const altWheel = new WheelEvent("wheel", { altKey: true, deltaY: 120, bubbles: true, cancelable: true });
+    canvas.element.dispatchEvent(altWheel);
+    expect(altWheel.defaultPrevented).toBe(true);
+    expect(bubbledWheel).not.toHaveBeenCalled();
+
+    const ctrlWheel = new WheelEvent("wheel", { ctrlKey: true, clientX: 300, clientY: 220, deltaY: -120, bubbles: true, cancelable: true });
+    canvas.element.dispatchEvent(ctrlWheel);
+    expect(ctrlWheel.defaultPrevented).toBe(true);
+    expect(bubbledWheel).not.toHaveBeenCalled();
+
+    const ordinaryWheel = new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true });
+    canvas.element.dispatchEvent(ordinaryWheel);
+    expect(ordinaryWheel.defaultPrevented).toBe(false);
+    expect(bubbledWheel).toHaveBeenCalledTimes(1);
+    wheelParent.removeEventListener("wheel", bubbledWheel);
 
     wrapper.unmount();
   });
@@ -316,6 +473,7 @@ describe("WorkflowPage canvas interactions", () => {
     await wrapper.get('[data-node-id="trigger"] [data-handle-type="source"]').trigger("click");
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".workflow-node-bubble-shell").exists()).toBe(false);
+    expect(wrapper.get(".workflow-canvas").attributes("data-connection-active")).toBe("true");
 
     wrapper.unmount();
   });
