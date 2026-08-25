@@ -22,6 +22,44 @@ foreach ($name in $privateFiles) {
     }
 }
 
+function Get-DotEnvKeys {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $keys = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($rawLine in Get-Content -LiteralPath $Path) {
+        $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith("#")) { continue }
+        if ($line.StartsWith("export ")) { $line = $line.Substring(7).TrimStart() }
+        $match = [regex]::Match($line, '^([A-Za-z_][A-Za-z0-9_]*)=')
+        if (-not $match.Success) { continue }
+        $name = $match.Groups[1].Value
+        if (-not $seen.Add($name)) {
+            throw "Duplicate environment key in $Path`: $name"
+        }
+        $keys.Add($name)
+    }
+    return $keys.ToArray()
+}
+
+$publicEnvTemplatePath = Join-Path $repoRoot "config/.env.example"
+$expectedEnvKeys = @(Get-DotEnvKeys -Path $publicEnvTemplatePath)
+$privateEnvPath = Join-Path $privateRoot ".env"
+$privateEnvKeys = @(Get-DotEnvKeys -Path $privateEnvPath)
+if (($expectedEnvKeys -join "`n") -ne ($privateEnvKeys -join "`n")) {
+    $missing = @($expectedEnvKeys | Where-Object { $_ -notin $privateEnvKeys })
+    $unexpected = @($privateEnvKeys | Where-Object { $_ -notin $expectedEnvKeys })
+    if ($missing.Count -gt 0) {
+        throw "deploy/private/.env is missing fields from config/.env.example: $($missing -join ', ')"
+    }
+    if ($unexpected.Count -gt 0) {
+        throw "deploy/private/.env has fields absent from config/.env.example: $($unexpected -join ', ')"
+    }
+    throw "deploy/private/.env field order differs from config/.env.example"
+}
+
 $modelsPath = Join-Path $privateRoot "models.json"
 $null = Get-Content -Raw -LiteralPath $modelsPath | ConvertFrom-Json
 $privateConfigText = Get-Content -Raw -LiteralPath (Join-Path $privateRoot "config.yml")
@@ -30,7 +68,6 @@ foreach ($section in @("workflows", "official_email")) {
         throw "deploy/private/config.yml is missing required section: $section"
     }
 }
-$privateEnvPath = Join-Path $privateRoot ".env"
 foreach ($name in $privateFiles) {
     $text = Get-Content -Raw -LiteralPath (Join-Path $privateRoot $name)
     if ($text -match '(?i)(replace[-_ ]?me|change[-_ ]?me|your[-_ ][a-z0-9_]+|<[^>]+>)') {

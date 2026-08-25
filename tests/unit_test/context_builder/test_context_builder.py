@@ -7,6 +7,10 @@ import pytest
 from agent.message import Message
 from agent.prompt_loader import PromptLoader
 
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Fixed history count settings are deprecated:DeprecationWarning"
+)
+
 
 def test_build_includes_system_prompt_and_current_user_message(tmp_path):
     """ContextBuilder should combine prompts, runtime metadata, and user input."""

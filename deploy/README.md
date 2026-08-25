@@ -97,7 +97,7 @@ HOME=/home/zhice
 
 完整云发布还要求 `deploy/private/.env` 配置 `ZHICE_DEPLOY_SMOKE_USERNAME` 和 `ZHICE_DEPLOY_SMOKE_PASSWORD`。管理员必须提前创建同名低权限 viewer 账号；建议用户名固定为 `deployment-smoke`，密码使用独立强随机值，不得复用 Owner/Admin 凭据。新版本健康后，部署脚本经公网 HTTPS 创建、保存、读取、发布、执行并删除一个确定性临时工作流；核心验收失败会恢复旧容器和旧 runtime。
 
-高德、Tavily、12306、小红书、默认 LLM 和 SMTP 属于告警型外部验收，失败会写入报告但不回滚。两个云端 PowerShell 入口都可显式传入 `-SkipExternalSmoke`，核心工作流验收不可跳过。脱敏报告保存在 `/etc/zhice-agent/deployment-reports/`；成功后保留最近 5 份 runtime 备份和 30 份报告，失败部署不清理历史现场。
+高德、Tavily、12306、小红书、默认 LLM 和 SMTP 属于告警型外部验收，失败会写入报告但不回滚。两个云端 PowerShell 入口都可显式传入 `-SkipExternalSmoke`，核心工作流验收不可跳过。脱敏报告保存在 `/etc/zhice-agent/deployment-reports/`；成功后保留最近 5 份 runtime 备份、30 份报告，以及当前和最近一个 ZhiCe-Agent 镜像。镜像清理只匹配本次发布的固定仓库，不处理其他仓库、数据卷或构建缓存；失败部署不清理历史现场。
 
 ## 三个日常入口
 

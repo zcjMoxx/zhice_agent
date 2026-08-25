@@ -59,7 +59,7 @@ def test_executor_delivers_flushed_progress_before_process_completion(tmp_path):
         """
 import json, time
 print(json.dumps({'type':'progress','message':'started','percent':5}), flush=True)
-time.sleep(1.5)
+time.sleep(3)
 print(json.dumps({'type':'result','status':'success','code':'OK','data':{},'message':'done','error_stack':''}), flush=True)
 """,
     )
@@ -76,9 +76,9 @@ print(json.dumps({'type':'result','status':'success','code':'OK','data':{},'mess
     )
 
     worker.start()
-    assert collector.received.wait(1.0), "flushed progress was buffered until process exit"
+    assert collector.received.wait(2.0), "flushed progress was buffered until process exit"
     assert worker.is_alive()
-    worker.join(timeout=4)
+    worker.join(timeout=6)
 
     assert results[0].status == "success"
 

@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agent.skills.sync import SkillSourceSync, SkillSyncError
 
@@ -16,10 +17,12 @@ def test_default_config_uses_only_the_builtin_local_skill_source():
     template = (ROOT / "config" / "config.example.yml").read_text(
         encoding="utf-8"
     )
+    source = yaml.safe_load(template)["skills"]["sources"][0]
 
     assert 'local_dir: "${ZHICE_AGENT_SKILL_REPO}"' in template
     assert "https://example.com/skills.git" not in template
-    assert "git_url:" not in template
+    assert source["git_url"] is None
+    assert source["target"] == "master"
 
 
 def _write_skills_section(config_dir, body):

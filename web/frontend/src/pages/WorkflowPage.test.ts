@@ -1,3 +1,4 @@
+/* eslint-disable vue/one-component-per-file -- Vue Flow test stubs are one shared fixture. */
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";

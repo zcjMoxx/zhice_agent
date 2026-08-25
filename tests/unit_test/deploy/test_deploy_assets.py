@@ -210,6 +210,22 @@ def test_amap_browser_credentials_are_private_build_inputs() -> None:
     assert "Missing private environment key" in build_script
 
 
+def test_private_env_field_contract_is_checked_before_image_build() -> None:
+    build_script = (DEPLOY / "scripts" / "build-image.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function Get-DotEnvKeys" in build_script
+    assert 'Join-Path $repoRoot "config/.env.example"' in build_script
+    assert "Duplicate environment key" in build_script
+    assert "is missing fields from config/.env.example" in build_script
+    assert "has fields absent from config/.env.example" in build_script
+    assert "field order differs from config/.env.example" in build_script
+    assert build_script.index("function Get-DotEnvKeys") < build_script.index(
+        '$modelsPath = Join-Path $privateRoot "models.json"'
+    )
+
+
 def test_compose_persists_runtime_channel_and_xhs_state_only() -> None:
     compose = (DEPLOY / "docker-compose.yml").read_text(encoding="utf-8")
     mounts = {
@@ -586,6 +602,21 @@ def test_remote_operations_scripts_have_safe_maintenance_semantics() -> None:
     assert deploy.rindex("prune_success_history") < deploy.index(
         'docker rm "$PREVIOUS_NAME"'
     )
+    assert "RELEASE_IMAGE_RETENTION=2" in deploy
+    assert "prune_release_images()" in deploy
+    assert "repository=${IMAGE_REF%@sha256:*}" in deploy
+    assert "--format '{{.CreatedAt}}|{{.ID}}|{{.Digest}}|{{.Repository}}'" in deploy
+    assert "-v current_id=\"$current_id\"" in deploy
+    assert "skipped image retention" in deploy
+    assert "return 0" in deploy.split("prune_release_images()", 1)[1].split(
+        "validate_runtime_dir()", 1
+    )[0]
+    assert deploy.rindex('docker rm "$XHS_PREVIOUS_NAME"') < deploy.rindex(
+        "prune_release_images"
+    )
+    assert "docker image prune" not in deploy
+    assert "docker system prune" not in deploy
+    assert "docker volume prune" not in deploy
     assert "zhice-travel-data" in diagnose
 
 

@@ -1,5 +1,7 @@
+# 完整公共配置示例。复制为运行态 config.yml 后，按环境填写 config/.env。
+# ${...} 均为环境变量占位，不得在本文件写入真实 Secret。
+# QQ web_base_url 默认适合本地；云部署必须改为真实公网 HTTPS 地址。
 schema_version: 1
-
 context:
   full_history:
     enabled: true
@@ -13,12 +15,12 @@ context:
     post_compaction_max_ratio: 0.35
     min_recent_turns: 8
     background_enabled: true
-    background_trigger_budget_ratio: 0.80
+    background_trigger_budget_ratio: 0.8
   retrieval:
     enabled: true
     top_k: 6
     semantic_weight: 0.45
-    lexical_weight: 0.30
+    lexical_weight: 0.3
     entity_weight: 0.15
     anchor_weight: 0.08
     recency_weight: 0.02
@@ -37,6 +39,8 @@ skills:
     - name: zhice-official
       sync: true
       local_dir: "${ZHICE_AGENT_SKILL_REPO}"
+      git_url:
+      target: master
 
 subagents:
   enabled: true
@@ -47,34 +51,81 @@ subagents:
   max_batches_per_parent_turn: 1
   max_batch_result_chars: 32000
   profiles:
-    # Travel planning injects its five fixed read-only profiles only for a
-    # travel Turn. Keep ordinary chat profiles here; an explicit same-name
-    # profile can override a built-in travel profile when necessary.
     explorer:
-      description: Inspect workspace files and public read-only tools for a bounded research task.
-      tools: [read_file, list_dir, search_files]
-      initial_tools: [read_file, list_dir, search_files]
-      denied_tools: [delegate_tasks, write_file, apply_patch, exec]
+      description: Read, search, inspect Skills, and summarize.
+      tools:
+        - list_dir
+        - read_file
+        - grep
+        - load_skills
+        - memory_read
+      denied_tools:
+        - delegate_tasks
       allowed_skills: []
       preload_skills: []
       workspace_mode: shared_readonly
-      max_tool_iterations: 4
-      timeout_seconds: 90
-      max_result_chars: 8000
-      allow_model_invocation: true
+      model_role: fast
+      max_tool_iterations: 10
+      timeout_seconds: 180
+      max_result_chars: 12000
+    developer:
+      description:
+        Inspect code, use Skills, run commands, test, and prepare isolated
+        changes.
+      tools:
+        - list_dir
+        - read_file
+        - grep
+        - load_skills
+        - memory_read
+        - exec
+      denied_tools:
+        - delegate_tasks
+        - sync_skills
+      allowed_skills: []
+      preload_skills: []
+      workspace_mode: worktree
       model_role: inherit
+      max_tool_iterations: 20
+      timeout_seconds: 600
+      max_result_chars: 12000
+    operator:
+      description:
+        Use explicitly configured MCP or operational tools under inherited
+        permissions.
+      tools:
+        - list_dir
+        - read_file
+        - grep
+        - load_skills
+        - memory_read
+        - mcp__approved__*
+      denied_tools:
+        - delegate_tasks
+      allowed_skills: []
+      preload_skills: []
+      workspace_mode: shared_exclusive
+      model_role: inherit
+      max_tool_iterations: 15
+      timeout_seconds: 300
+      max_result_chars: 12000
 
 channels:
   qq:
-    enabled: false
+    enabled: true
     transport: websocket
-    # Each account may set http_timeout_seconds: 15 (allowed range: 1..60).
-    # Public deployments must explicitly set web_base_url for every enabled account.
-    # 需启用账号时请填写：web_base_url: "请填写可公网访问的服务地址"
-    # Keep accounts empty until real credentials and the real reachable URL are configured.
-    accounts: []
+    accounts:
+      - key: main
+        app_id: ${QQBOT_APP_ID}
+        app_secret: ${QQBOT_APP_SECRET}
+        web_base_url: http://127.0.0.1:10086
+        c2c_enabled: true
+        group_enabled: true
+        group_require_mention: true
+        max_parallel_conversations: 8
+        max_attachment_bytes: 20971520
   weixin:
-    enabled: false
+    enabled: true
     transport: sidecar_stdio
     node_path: node
     sidecar_entry: integrations/weixin_sidecar/dist/main.js
@@ -90,59 +141,54 @@ mcp:
   servers:
     open-meteo:
       command: python
-      args: [-m, integrations.open_meteo_mcp.server]
-      startup_timeout_seconds: 15
+      args:
+        - -m
+        - integrations.open_meteo_mcp.server
+      startup_timeout_seconds: 20
       connect_timeout_seconds: 15
       call_timeout_seconds: 30
-    # Enable after setting AMAP_MAPS_API_KEY in config/.env, then verify the
-    # current upstream Tool Catalog before production use.
-    # amap-maps:
-    #   command: mcp-amap
-    #   args: []
-    #   env:
-    #     AMAP_MAPS_API_KEY: "${AMAP_MAPS_API_KEY}"
-    # Enable Tavily only after confirming its current authentication contract.
-    # tavily:
-    #   url: https://mcp.tavily.com/mcp
-    #   transport: streamable_http
-    #   proxy_mode: direct
-    #   headers:
-    #     Authorization: "Bearer ${TAVILY_API_KEY}"
-    # Configure a reviewed query-only 12306 MCP command in the runtime file.
-    # Never describe this community source as an official booking service.
-    # 12306:
-    #   command: 12306-mcp
-    #   args: []
-    #   startup_timeout_seconds: 60
-    #   connect_timeout_seconds: 30
-    #   call_timeout_seconds: 30
-    # Enable the bundled catalog-level XHS adapter only with an isolated
-    # upstream service account, Cookie volume, and explicit environment values.
-    # xhs-readonly:
-    #   command: python
-    #   args: [-m, integrations.xhs_readonly_mcp.server]
-    #   env:
-    #     XHS_READONLY_UPSTREAM_URL: "${XHS_READONLY_UPSTREAM_URL}"
-    #     XHS_READONLY_COOKIE_DIR: "${XHS_READONLY_COOKIE_DIR}"
-    #     XHS_READONLY_COOKIE_FILE: "${XHS_READONLY_COOKIE_FILE}"
-    #     XHS_READONLY_HTTP_HOST_ALLOWLIST: "${XHS_READONLY_HTTP_HOST_ALLOWLIST}"
-    # For local process mode, a loopback XHS_READONLY_UPSTREAM_URL makes the
-    # Gateway supervise the fixed binary under integrations/xhs/bin. Docker
-    # and remote HTTPS upstreams remain independently managed sidecars.
-    # Travel planning exposes the bundled search_travel_hotels Tool directly after
-    # the Owner stores one Ctrip credential in the MCP administration page; no MCP
-    # server entry is required. The optional server below is only for standalone
-    # interoperability/smoke use and never exposes booking, payment, cancellation,
-    # credential, or generic browser tools.
-    # hotel-browser:
-    #   command: python
-    #   args: [-m, integrations.hotel_browser_mcp.server]
-    #   env:
-    #     ZHICE_AGENT_WORKSPACE: "${ZHICE_AGENT_WORKSPACE}"
-    #     HOTEL_BROWSER_CHANNEL: chrome
-    #     # When no runtime config/.env is mounted, explicitly forward deployment Secrets:
-    #     # ZHICE_CTRIP_USERNAME: "${ZHICE_CTRIP_USERNAME}"
-    #     # ZHICE_CTRIP_PASSWORD: "${ZHICE_CTRIP_PASSWORD}"
+    amap-maps:
+      command: npx
+      args:
+        - -y
+        - "@amap/amap-maps-mcp-server@0.0.8"
+      env:
+        AMAP_MAPS_API_KEY: ${AMAP_MAPS_API_KEY}
+      startup_timeout_seconds: 90
+      connect_timeout_seconds: 30
+      call_timeout_seconds: 60
+    tavily:
+      url: https://mcp.tavily.com/mcp
+      transport: streamable_http
+      proxy_mode:
+      headers:
+        Authorization: Bearer ${TAVILY_API_KEY}
+      startup_timeout_seconds: 30
+      connect_timeout_seconds: 30
+      call_timeout_seconds: 60
+    "12306":
+      command: 12306-mcp
+      args: []
+      startup_timeout_seconds: 90
+      connect_timeout_seconds: 30
+      call_timeout_seconds: 60
+    xhs-readonly:
+      command: python
+      args:
+        - -m
+        - integrations.xhs_readonly_mcp.server
+      env:
+        XHS_READONLY_UPSTREAM_URL: ${XHS_READONLY_UPSTREAM_URL}
+        XHS_READONLY_HTTP_HOST_ALLOWLIST: ${XHS_READONLY_HTTP_HOST_ALLOWLIST}
+        XHS_READONLY_COOKIE_DIR: ${XHS_READONLY_COOKIE_DIR}
+        XHS_READONLY_COOKIE_FILE: ${XHS_READONLY_COOKIE_FILE}
+        XHS_READONLY_UPSTREAM_AUTHORIZATION: ${XHS_READONLY_UPSTREAM_AUTHORIZATION}
+        XHS_READONLY_TIMEOUT_SECONDS: "120"
+      startup_timeout_seconds: 30
+      connect_timeout_seconds: 30
+      call_timeout_seconds: 120
+
+logging: {}
 
 travel:
   enabled: true
@@ -163,7 +209,6 @@ workflows:
   default_timezone: Asia/Shanghai
   default_misfire_grace_seconds: 900
   allowed_query_tools:
-    - mcp__open-meteo__geocode_place
     - mcp__open-meteo__get_forecast
     - mcp__open-meteo__get_historical_weather
     - mcp__amap-maps__maps_text_search
@@ -178,19 +223,7 @@ official_email:
   enabled: false
   provider: smtp
   host: "${ZHICE_SMTP_HOST}"
-  port: 587
+  port: ${ZHICE_SMTP_PORT}
   username: "${ZHICE_SMTP_USERNAME}"
   password: "${ZHICE_SMTP_PASSWORD}"
   from_address: "${ZHICE_SMTP_FROM}"
-
-logging: {}
-
-# Non-secret projection of the independently protected Ops terminal.
-# Production deployments must use an explicit HTTPS URL protected by
-# Cloudflare Tunnel + Access. The main Web never proxies terminal traffic.
-operations:
-  terminal:
-    enabled: false
-    # 启用后请填写受保护的 HTTPS 运维终端地址；本机调试可填写 loopback HTTP 地址。
-    url: ""
-    presentation: both

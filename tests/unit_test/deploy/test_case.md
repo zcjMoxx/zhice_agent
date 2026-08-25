@@ -23,7 +23,7 @@
 ## 用例覆盖
 
 - 公开 Docker、Compose、说明和运维脚本齐全。
-- `config/.env.example` 是唯一公开 runtime env 模板，`deploy/` 不维护第二份 `.env.example`。
+- `config/.env.example` 是唯一公开 runtime env 模板，`deploy/` 不维护第二份 `.env.example`；私有镜像构建在调用Docker前只比较字段名，要求`deploy/private/.env`与公共模板字段全集及顺序完全一致，并拒绝重复、缺失或额外字段，避免SMTP、XHS等能力单边漂移且不输出真实值。
 - `private/.env`、`private/config.yml`、`private/models.json` 三个镜像私有文件以及本机云目标 `private/cloud-target.json` 被目录级 Git ignore 覆盖；公开 `private/cloud-target.example.json` 的 registry、SSH 主机、SSH 用户、SSH 密码、运维脚本目录和公网地址全部使用中文占位，未替换时流水线明确拒绝。
 - Deploy README 优先从当前 `${workspace}/config/` 复制三个私有文件到 `deploy/private/`，给出默认 Windows `.zhice` 路径，将项目 `config/.env` 标为 legacy migration，并要求任一来源的 `deploy/private/.env` 删除 `ZHICE_AGENT_WORKSPACE`；`ZHICE_AGENT_SKILL_REPO` 缺失时自动使用 `/app/skill_repo`，默认 source 不携带虚假远端地址。
 - Dockerfile 从仓库构建 Python、Vue、Prompt、Skill、微信 sidecar和固定版本旅行 MCP，只从 `deploy/` 复制三个私有文件；RedNote 兼容小红书二进制锁定上游提交并应用可审计 patch。
@@ -48,6 +48,7 @@
 - 两个云端入口共享不可跳过的核心部署验收，并只允许通过 `-SkipExternalSmoke` 跳过告警型外部集成检查；开关经 PowerShell、Paramiko helper 到远端 `deploy.sh` 使用固定 `0/1` 传递。
 - `deployment_smoke.py` 使用固定低权限账号经真实 HTTPS API 覆盖工作流创建、读取、草稿更新、发布、执行、结果历史和删除；核心失败保留原错误并触发容器/runtime 回滚，外部高德、Tavily、12306、小红书、LLM、SMTP 检查相互独立并只记录 `warning/skipped`。
 - 脱敏部署报告原子写入固定服务器目录；只有成功发布才清理历史，并分别保留最近 5 份 runtime 备份与 30 份报告。
+- 核心验收和部署规格写入成功后，只按当前不可变引用推导出的 ZhiCe-Agent 仓库清理旧镜像；始终保留当前与最近一个版本，不调用全局 image/system/volume prune，仍被容器引用的镜像由 Docker 拒绝删除并仅记录告警。
 - `pipelines/invoke-cloud-release.ps1` 从 Paramiko helper 取得脱敏后的公开目标，固定镜像名、生成时间戳与 Git 短提交号标签，校验 `linux/amd64`、Docker、Python/Paramiko，精确取得 Digest，同步固定六个 shell 脚本，远端部署后验证公网 HTTPS `/health`。
 - `scripts/remote_ops.py` 自行读取私有 JSON 的 `SshPassword` 并强制要求 `RemoteOpsDir`；只加载 Windows `~/.ssh/known_hosts` 并使用 `RejectPolicy`，密码不进入参数、环境或输出，目录字段缺失时前置失败。
 - 六个脚本通过 SFTP 写入 versioned release，经 `sh -n` 后原子切换 `current`；`status` 对不存在容器友好并展示 image/status/health/created/restarts，`logs` 拒绝非正整数和超过上限的行数，root wrapper 对普通输出限制 128 KiB、follow 限制 4 KiB 单行与每秒 64 KiB 并回收进程组，`stop` 幂等，`restart` 明确检查固定容器并等待健康，`diagnose` 覆盖 Docker/容器/卷/磁盘/端口/本地与公网健康，`deploy` 失败恢复旧容器。

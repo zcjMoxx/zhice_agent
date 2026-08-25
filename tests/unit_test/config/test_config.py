@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agent.config import (
     InitConfigurationError,
@@ -25,6 +26,38 @@ from agent.protocols.llm import LLMConfigurationError
 from agent.runtime_config import (
     RuntimeConfigurationError,
     load_operations_terminal_config,
+)
+
+PUBLIC_RUNTIME_ENV_KEYS = (
+    "ZHICE_LLM_DEEPSEEK_API_KEY",
+    "ZHICE_EMBEDDING_API_KEY",
+    "ZHICE_AGENT_SETUP_TOKEN",
+    "ZHICE_DEPLOY_SMOKE_USERNAME",
+    "ZHICE_DEPLOY_SMOKE_PASSWORD",
+    "ZHICE_AGENT_SKILL_REPO",
+    "ZHICE_AGENT_CREDENTIAL_ENCRYPTION_KEY",
+    "QQBOT_APP_ID",
+    "QQBOT_APP_SECRET",
+    "AMAP_MAPS_API_KEY",
+    "TAVILY_API_KEY",
+    "XHS_READONLY_UPSTREAM_URL",
+    "XHS_READONLY_HTTP_HOST_ALLOWLIST",
+    "XHS_READONLY_COOKIE_DIR",
+    "XHS_READONLY_COOKIE_FILE",
+    "XHS_READONLY_UPSTREAM_AUTHORIZATION",
+    "VITE_AMAP_JS_API_KEY",
+    "VITE_AMAP_JS_SECURITY_CODE",
+    "ZHICE_CTRIP_USERNAME",
+    "ZHICE_CTRIP_PASSWORD",
+    "ZHICE_SMTP_HOST",
+    "ZHICE_SMTP_PORT",
+    "ZHICE_SMTP_USERNAME",
+    "ZHICE_SMTP_PASSWORD",
+    "ZHICE_SMTP_FROM",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
 )
 
 
@@ -130,15 +163,45 @@ def test_public_runtime_env_template_has_required_empty_keys_and_no_workspace_lo
         if line and not line.startswith("#") and "=" in line
     }
 
-    assert {
-        "ZHICE_LLM_OPENAI_API_KEY",
-        "ZHICE_EMBEDDING_API_KEY",
-        "ZHICE_AGENT_SETUP_TOKEN",
-        "QQBOT_APP_ID",
-        "QQBOT_APP_SECRET",
-    } <= assignments.keys()
+    assert tuple(assignments) == PUBLIC_RUNTIME_ENV_KEYS
     assert "ZHICE_AGENT_WORKSPACE" not in assignments
     assert set(assignments.values()) == {""}
+
+
+def test_public_models_and_runtime_config_examples_cover_current_integrations():
+    config_root = Path(__file__).resolve().parents[3] / "config"
+    models = json.loads((config_root / "models.example.json").read_text(encoding="utf-8"))
+    runtime = yaml.safe_load(
+        (config_root / "config.example.yml").read_text(encoding="utf-8")
+    )
+
+    assert models["chat"]["请填写端点名称"]["api_key"] == (
+        "${ZHICE_LLM_DEEPSEEK_API_KEY}"
+    )
+    assert "ZHICE_LLM_OPENAI_API_KEY" not in json.dumps(models)
+    assert runtime["schema_version"] == 1
+    xhs_env = runtime["mcp"]["servers"]["xhs-readonly"]["env"]
+    assert xhs_env == {
+        "XHS_READONLY_UPSTREAM_URL": "${XHS_READONLY_UPSTREAM_URL}",
+        "XHS_READONLY_HTTP_HOST_ALLOWLIST": "${XHS_READONLY_HTTP_HOST_ALLOWLIST}",
+        "XHS_READONLY_COOKIE_DIR": "${XHS_READONLY_COOKIE_DIR}",
+        "XHS_READONLY_COOKIE_FILE": "${XHS_READONLY_COOKIE_FILE}",
+        "XHS_READONLY_UPSTREAM_AUTHORIZATION": "${XHS_READONLY_UPSTREAM_AUTHORIZATION}",
+        "XHS_READONLY_TIMEOUT_SECONDS": "120",
+    }
+    assert runtime["official_email"] == {
+        "enabled": False,
+        "provider": "smtp",
+        "host": "${ZHICE_SMTP_HOST}",
+        "port": "${ZHICE_SMTP_PORT}",
+        "username": "${ZHICE_SMTP_USERNAME}",
+        "password": "${ZHICE_SMTP_PASSWORD}",
+        "from_address": "${ZHICE_SMTP_FROM}",
+    }
+    workflows = runtime["workflows"]
+    assert "mcp__xhs-readonly__search_notes" in workflows["allowed_query_tools"]
+    assert "mcp__xhs-readonly__get_note_detail" in workflows["allowed_query_tools"]
+    assert workflows["allowed_action_tools"] == []
 
 
 def _write_runtime_config(config_dir: Path, body: str) -> None:
@@ -471,7 +534,7 @@ def test_init_generates_standard_config_files_and_prompts(tmp_path, monkeypatch)
     assert env_path.read_bytes() == (
         Path(__file__).resolve().parents[3] / "config" / ".env.example"
     ).read_bytes()
-    assert "# 请填写：聊天模型与向量模型凭据" in env_path.read_text(encoding="utf-8")
+    assert "# 模型与向量凭据" in env_path.read_text(encoding="utf-8")
     assert "ZHICE_AGENT_WORKSPACE=" not in env_path.read_text(encoding="utf-8")
     assert not (config.config_dir / "llm_endpoints.json").exists()
     assert not (config.config_dir / "context.yml").exists()
@@ -528,7 +591,9 @@ def test_init_force_replaces_two_main_files(tmp_path, monkeypatch):
     assert (config.config_dir / "models.json").read_bytes() == (
         Path(__file__).resolve().parents[3] / "config" / "models.example.json"
     ).read_bytes()
-    assert (config.config_dir / "config.yml").read_text(encoding="utf-8").startswith("schema_version: 1")
+    assert yaml.safe_load(
+        (config.config_dir / "config.yml").read_text(encoding="utf-8")
+    )["schema_version"] == 1
     assert "EXISTING=1" not in (config.config_dir / ".env").read_text(encoding="utf-8")
 
 

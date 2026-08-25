@@ -22,6 +22,7 @@ XHS_SEED_DIR=$RUNTIME_PARENT/xhs
 XHS_SEED_FILE=$XHS_SEED_DIR/cookies.json
 RUNTIME_BACKUP_ROOT=$RUNTIME_PARENT/runtime-backups
 DEPLOYMENT_REPORT_ROOT=$RUNTIME_PARENT/deployment-reports
+RELEASE_IMAGE_RETENTION=2
 HAS_PREVIOUS=0
 XHS_HAS_PREVIOUS=0
 RUNTIME_SYNCED=0
@@ -106,6 +107,46 @@ prune_success_history() {
         esac
       done
   fi
+}
+
+prune_release_images() {
+  repository=${IMAGE_REF%@sha256:*}
+  if ! current_id=$(/usr/bin/docker image inspect --format '{{.Id}}' "$IMAGE_REF"); then
+    echo "Warning: unable to inspect the current release image; skipped image retention" >&2
+    return
+  fi
+  if ! release_images=$(
+    /usr/bin/docker image ls --no-trunc \
+      --format '{{.CreatedAt}}|{{.ID}}|{{.Digest}}|{{.Repository}}' |
+      awk -F '|' -v repository="$repository" '$4 == repository && $3 != "<none>"' |
+      sort -r
+  ); then
+    echo "Warning: unable to list release images; skipped image retention" >&2
+    return
+  fi
+  delete_refs=$(
+    printf '%s\n' "$release_images" |
+      awk -F '|' -v current_id="$current_id" -v limit="$RELEASE_IMAGE_RETENTION" '
+        BEGIN { retained = 1 }
+        !seen[$2]++ && $2 != current_id {
+          if (retained < limit) {
+            retained++
+          } else {
+            print $4 "@" $3
+          }
+        }
+      ' || true
+  )
+  if [ -z "$delete_refs" ]; then
+    return
+  fi
+  printf '%s\n' "$delete_refs" | while IFS= read -r image_ref; do
+    [ -n "$image_ref" ] || continue
+    if ! /usr/bin/docker image rm "$image_ref" >/dev/null 2>&1; then
+      echo "Warning: retained in-use release image $image_ref" >&2
+    fi
+  done
+  return 0
 }
 
 validate_runtime_dir() {
@@ -393,4 +434,5 @@ if ! (
 fi
 /usr/bin/docker rm "$PREVIOUS_NAME" >/dev/null 2>&1 || true
 /usr/bin/docker rm "$XHS_PREVIOUS_NAME" >/dev/null 2>&1 || true
+prune_release_images
 echo "Deployed $IMAGE_REF with host-authoritative read-only runtime configuration"

@@ -1331,9 +1331,12 @@ async function testSelectedTool() {
     </section>
 
         <section v-else class="workflow-timeline">
-      <header><div><History :size="16" /><strong>{{ tr('执行记录', 'Run history') }}</strong><span v-if="store.runs.length">{{ store.runs.length }}</span></div><button :disabled="!store.current || !!busy" @click="showRunHistory"><RefreshCw :size="15" />{{ tr('刷新', 'Refresh') }}</button></header>
+      <header>
+        <div><History :size="16" /><strong>{{ tr('执行记录', 'Run history') }}</strong><span v-if="store.runs.length">{{ store.runs.length }}</span></div><button :disabled="!store.current || !!busy" @click="showRunHistory"><RefreshCw :size="15" />{{ tr('刷新', 'Refresh') }}</button>
+      </header>
       <p v-if="configurationIssues.length" class="workflow-issues-summary" role="status">{{ tr(`发布前还需完成 ${configurationIssues.length} 项配置。`, `${configurationIssues.length} configuration items remain.`) }}</p><p v-if="failure" class="form-error" role="alert">{{ failure }}</p>
-      <div v-if="store.runs.length" class="workflow-run-layout"><div class="workflow-runs"><button v-for="run in store.runs" :key="run.run_id" :class="{ active: (store.runDetail?.id || store.runDetail?.run_id) === run.run_id }" @click="perform('run-detail', () => store.toggleRun(run.run_id))"><span class="run-dot" :data-status="run.status" /><strong>{{ workflowRunStatusLabel(run.status) }}</strong><span>{{ workflowTriggerLabel(run.trigger_type) }}</span><small>{{ workflowTimeLabel(run.started_at) }}</small></button></div><div v-if="store.runDetail" class="run-detail">
+      <div v-if="store.runs.length" class="workflow-run-layout">
+        <div class="workflow-runs"><button v-for="run in store.runs" :key="run.run_id" :class="{ active: (store.runDetail?.id || store.runDetail?.run_id) === run.run_id }" @click="perform('run-detail', () => store.toggleRun(run.run_id))"><span class="run-dot" :data-status="run.status" /><strong>{{ workflowRunStatusLabel(run.status) }}</strong><span>{{ workflowTriggerLabel(run.trigger_type) }}</span><small>{{ workflowTimeLabel(run.started_at) }}</small></button></div><div v-if="store.runDetail" class="run-detail">
         <section class="run-result-section">
           <header><strong>{{ tr('本次运行结果', 'Run result') }}</strong><small>{{ workflowRunStatusLabel(store.runDetail.status) }}</small></header>
           <article v-for="result in store.runDetail.results || []" :key="`${result.node_id}-${result.node_type}`" class="run-final-result">
@@ -1356,11 +1359,13 @@ async function testSelectedTool() {
           </article>
           <p v-if="!(store.runDetail.results || []).length" class="run-result-empty">{{ tr('本次运行尚未产生可展示的结果。', 'This run has not produced a visible result yet.') }}</p>
         </section>
-        <section class="run-steps-section"><strong>{{ tr('步骤详情', 'Execution steps') }}</strong>
+        <section class="run-steps-section">
+          <strong>{{ tr('步骤详情', 'Execution steps') }}</strong>
           <details v-for="node in store.runDetail.nodes || []" :key="runStepKey(node.node_id, node.attempt)" class="run-step-detail" :open="expandedRunStep === runStepKey(node.node_id, node.attempt)"><summary @click.prevent="toggleRunStep(node.node_id, node.attempt)"><span class="run-dot" :data-status="node.status" /><b>{{ runNodeLabel(node.node_id, node.node_type) }}</b><small>{{ workflowRunStatusLabel(node.status) }} · {{ workflowTimeLabel(node.started_at) }}</small></summary><div v-for="block in runStepSummaries(node)" :key="block.id" class="run-summary-block"><b>{{ block.label }}</b><pre>{{ runSummaryDisplay(block.text, runSummaryKey(runStepKey(node.node_id, node.attempt), block.id)) }}</pre><div class="run-summary-actions"><button v-if="runSummaryOmitted(block.text)" type="button" @click="toggleRunSummary(runSummaryKey(runStepKey(node.node_id, node.attempt), block.id))">{{ expandedRunSummaries.has(runSummaryKey(runStepKey(node.node_id, node.attempt), block.id)) ? tr('收起', 'Collapse') : tr(`展开全部（已省略 ${runSummaryOmitted(block.text)} 字）`, `Show all (${runSummaryOmitted(block.text)} omitted)`) }}</button><button type="button" @click="copyRunSummary(runSummaryKey(runStepKey(node.node_id, node.attempt), block.id), block.text)">{{ copiedRunSummary === runSummaryKey(runStepKey(node.node_id, node.attempt), block.id) ? tr('已复制', 'Copied') : tr('复制完整内容', 'Copy full content') }}</button></div></div><p v-if="node.error_code" class="run-error-copy">{{ workflowErrorLabel(node.error_code) }}</p></details>
           <p v-if="!(store.runDetail.nodes || []).length">{{ tr('本次运行还没有步骤记录。', 'No step records for this run yet.') }}</p>
         </section>
-      </div></div>
+        </div>
+      </div>
       <p v-else>{{ tr('尚无运行记录。发布后可以立即运行，也可以设置指定时间、固定间隔或周期定时。', 'No runs yet. Publish and run now, or choose a supported schedule.') }}</p>
         </section>
       </section>

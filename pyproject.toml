@@ -69,8 +69,8 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-cache_dir = ".tmp/pytest_cache"
-addopts = "-m 'not integration' -n 4"
+cache_dir = ".tmp/pytest-cache-v2"
+addopts = "-m 'not integration' -n 4 --basetemp=.tmp/pytest-runtime"
 markers = [
     "integration: starts real subprocesses or local protocol servers",
 ]

@@ -11,7 +11,7 @@
       "protocol": "openai",
       "provider": "",
       "base_url": "请填写模型服务地址",
-      "api_key": "${ZHICE_LLM_OPENAI_API_KEY}",
+      "api_key": "${ZHICE_LLM_DEEPSEEK_API_KEY}",
       "model": "请填写模型名称",
       "supported_models": ["请填写模型名称"],
       "context_window": 131072,

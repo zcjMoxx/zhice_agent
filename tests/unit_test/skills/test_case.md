@@ -57,7 +57,7 @@
 ### Case 9: 默认模板不包含虚假远端 Skill 地址
 
 - 输入：读取公开 `config/config.example.yml`。
-- 预期：默认 source 只配置 `${ZHICE_AGENT_SKILL_REPO}` 本地仓库，不附带 `example.com` 或其他虚假 `git_url`。
+- 预期：默认 source 使用 `${ZHICE_AGENT_SKILL_REPO}` 本地仓库，保留空`git_url`与`master`目标字段以对齐完整运行配置，但不附带 `example.com` 或其他虚假远端地址。
 - 检查点：本地默认 Skill source 仍可用；需要远端 source 时由用户显式填写真实地址。
 
 ### Case 10: 同步状态变化
