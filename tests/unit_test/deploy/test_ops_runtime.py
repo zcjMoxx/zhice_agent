@@ -309,7 +309,7 @@ def test_cloud_deploy_uses_fixed_container_and_read_only_host_config() -> None:
     assert "ZHICE_CONTAINER_NAME" not in deploy
     assert "RUNTIME_DIR=$RUNTIME_PARENT/runtime" in deploy
     assert deploy.count("readonly\"") == 4  # one validator mount plus three runtime mounts
-    assert "refusing mixed initialization" in deploy
+    assert "refusing replacement" in deploy
     assert "docker cp" in deploy
     assert "config.yml schema" in deploy
     assert "models.json schema" in deploy

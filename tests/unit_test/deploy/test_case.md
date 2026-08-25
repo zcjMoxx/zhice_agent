@@ -45,6 +45,9 @@
 - `deploy/build-and-deploy-local.cmd` 是 Windows 双击薄入口，只定位并调用同名 pipeline、保留退出码和暂停窗口，不复制 Docker 流程、不提升权限或修改系统 Execution Policy。
 - `deploy/pipelines/deploy-existing-image-to-cloud.ps1` 复用已经存在的 `zhice-agent:local`，不执行 build，默认不重复 smoke；只有显式 `-Smoke` 才调用隔离烟测，然后进入共享云端发布。
 - `deploy/pipelines/build-and-deploy-cloud.ps1` 从当前源码 build、smoke 后调用共享云端发布，不调用本地 Compose；两个云端 CMD 都是指向同名 `pipelines/` 编排的双击薄入口。
+- 两个云端入口共享不可跳过的核心部署验收，并只允许通过 `-SkipExternalSmoke` 跳过告警型外部集成检查；开关经 PowerShell、Paramiko helper 到远端 `deploy.sh` 使用固定 `0/1` 传递。
+- `deployment_smoke.py` 使用固定低权限账号经真实 HTTPS API 覆盖工作流创建、读取、草稿更新、发布、执行、结果历史和删除；核心失败保留原错误并触发容器/runtime 回滚，外部高德、Tavily、12306、小红书、LLM、SMTP 检查相互独立并只记录 `warning/skipped`。
+- 脱敏部署报告原子写入固定服务器目录；只有成功发布才清理历史，并分别保留最近 5 份 runtime 备份与 30 份报告。
 - `pipelines/invoke-cloud-release.ps1` 从 Paramiko helper 取得脱敏后的公开目标，固定镜像名、生成时间戳与 Git 短提交号标签，校验 `linux/amd64`、Docker、Python/Paramiko，精确取得 Digest，同步固定六个 shell 脚本，远端部署后验证公网 HTTPS `/health`。
 - `scripts/remote_ops.py` 自行读取私有 JSON 的 `SshPassword` 并强制要求 `RemoteOpsDir`；只加载 Windows `~/.ssh/known_hosts` 并使用 `RejectPolicy`，密码不进入参数、环境或输出，目录字段缺失时前置失败。
 - 六个脚本通过 SFTP 写入 versioned release，经 `sh -n` 后原子切换 `current`；`status` 对不存在容器友好并展示 image/status/health/created/restarts，`logs` 拒绝非正整数和超过上限的行数，root wrapper 对普通输出限制 128 KiB、follow 限制 4 KiB 单行与每秒 64 KiB 并回收进程组，`stop` 幂等，`restart` 明确检查固定容器并等待健康，`diagnose` 覆盖 Docker/容器/卷/磁盘/端口/本地与公网健康，`deploy` 失败恢复旧容器。

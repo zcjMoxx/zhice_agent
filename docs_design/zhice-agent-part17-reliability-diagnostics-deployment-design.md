@@ -158,7 +158,7 @@ default workspace=/home/zhice/.zhice
 /home/zhice/.zhice/config/channels/weixin/accounts
 ```
 
-Session、Memory、用户数据库、Context index、compaction、日志和测试缓存不得从本地烘入镜像。微信扫码生成的账号凭据只进入独立命名卷，不与完整 `config/` 混挂。Part 18 保留镜像内三份配置作为首次迁移/灾备基线，但云端权威副本已迁到 `/etc/zhice-agent/runtime/` 并逐文件只读 bind mount；后续新 Digest 默认保留宿主机配置。
+Session、Memory、用户数据库、Context index、compaction、日志和测试缓存不得从本地烘入镜像。微信扫码生成的账号凭据只进入独立命名卷，不与完整 `config/` 混挂。完整云发布以镜像内 `deploy/private` 三份配置为唯一来源，每次先备份并原子替换 `/etc/zhice-agent/runtime/`，再逐文件只读 bind mount；新容器、sidecar 或核心功能验收失败时同时恢复旧容器和旧 runtime。
 
 ## 10. 部署脚本
 
@@ -168,10 +168,10 @@ Session、Memory、用户数据库、Context index、compaction、日志和测�
 - `deploy/pipelines/deploy-existing-image-to-cloud.ps1`：复用操作者确认过的 `zhice-agent:local`，不执行 build，默认不重复 smoke，自动生成发布标签、推送私有 registry 并按 Digest 部署云端。
 - `deploy/pipelines/build-and-deploy-cloud.ps1`：从当前源码 build、隔离 smoke 后进入同一云端发布模块，不调用本地 Compose。
 - `deploy/private/cloud-target.json`：Git 忽略的本机目标配置；`SshPassword` 是其中唯一允许的明文部署 Secret，只依赖本机文件权限和 Git ignore 保护，Token、其他 Secret 与私钥仍禁止进入。Paramiko 从该文件读取 SSH/sudo 共用密码，加载 `%USERPROFILE%/.ssh/known_hosts` 并以 `RejectPolicy` 校验主机密钥；sudo 密码只经 PTY 的 stdin 传入并在输出中脱敏。公开 example 的待填写值直接使用中文。
-- `deploy/pipelines/invoke-cloud-release.ps1` 与 `deploy/scripts/remote_ops.py`：继续执行不可变 Digest、versioned release 和原子 `current`；Part 18 将同步清单扩展为含 `diagnose.sh` 的六脚本，并从固定公开 allowlist 安装 root-owned Ops 资产，不上传私有配置。
+- `deploy/pipelines/invoke-cloud-release.ps1` 与 `deploy/scripts/remote_ops.py`：继续执行不可变 Digest、versioned release 和原子 `current`，同步固定 shell/Python 部署资产，并从固定公开 allowlist 安装 root-owned Ops 资产，不另行上传私有配置。
 - `push-image.ps1`：推送到私有 registry 并输出 digest，不回显 Secret。
 - `run-local.ps1`：使用最终镜像完成 health、Web、配置加载和优雅退出烟测。
-- `deploy.sh`：云端按 digest 启动单实例，挂通用运行数据 volume 和独立微信账号凭据 volume；发布、回滚和重启均不删除凭据卷。
+- `deploy.sh`：云端按 digest 启动单实例，挂通用运行数据 volume 和独立微信账号凭据 volume；健康后执行不可跳过的真实 HTTPS 核心工作流验收，外部集成只告警；成功后保留最近 5 份 runtime 备份和 30 份脱敏报告，发布、回滚和重启均不删除凭据卷。
 - `stop.sh`：优雅停止。
 - `status.sh`：显示容器、版本、digest 和 health。
 - `logs.sh`：读取脱敏日志。

@@ -32,6 +32,7 @@ SCRIPT_NAMES = (
     "restart.sh",
     "diagnose.sh",
 )
+PYTHON_SCRIPT_NAMES = ("deployment_smoke.py",)
 OPS_FILES = (
     "install.sh",
     "ttyd-version.env",
@@ -149,6 +150,15 @@ def upload_release(
             sftp.put(str(local_path), temp_path)
             sftp.chmod(temp_path, 0o700)
             sftp.rename(temp_path, final_path)
+        for name in PYTHON_SCRIPT_NAMES:
+            local_path = scripts_dir / name
+            if local_path.is_symlink() or not local_path.is_file():
+                raise RemoteOpsError(f"Missing remote operations script: {local_path}")
+            temp_path = posixpath.join(release_dir, f".{name}.upload")
+            final_path = posixpath.join(release_dir, name)
+            sftp.put(str(local_path), temp_path)
+            sftp.chmod(temp_path, 0o700)
+            sftp.rename(temp_path, final_path)
         if ops_dir is not None:
             for relative_name in OPS_FILES:
                 local_path = ops_dir / relative_name
@@ -175,6 +185,9 @@ def upload_release(
 
     checks = " && ".join(
         f"sh -n {shlex.quote(posixpath.join(release_dir, name))}" for name in SCRIPT_NAMES
+    )
+    checks += " && python3 -m py_compile " + " ".join(
+        shlex.quote(posixpath.join(release_dir, name)) for name in PYTHON_SCRIPT_NAMES
     )
     if ops_dir is not None:
         checks += (
@@ -206,11 +219,13 @@ def sudo_deploy(
     port: int,
     public_url: str,
     ops_url: str,
+    skip_external_smoke: bool = False,
     timeout_seconds: float = 1200,
 ) -> tuple[str, str]:
     inner = (
         f"sh {shlex.quote(posixpath.join(current_dir, 'deploy.sh'))} "
-        f"{shlex.quote(digest)} {port} {shlex.quote(public_url)} {shlex.quote(ops_url)} && "
+        f"{shlex.quote(digest)} {port} {shlex.quote(public_url)} {shlex.quote(ops_url)} "
+        f"{'1' if skip_external_smoke else '0'} && "
         f"sh {shlex.quote(posixpath.join(current_dir, 'ops', 'install.sh'))} "
         f"{shlex.quote(public_url)} {shlex.quote(ops_url)} && "
         f"sh {shlex.quote(posixpath.join(current_dir, 'status.sh'))}"
@@ -312,6 +327,7 @@ def main() -> int:
     deploy_parser.add_argument("--release-id", required=True)
     deploy_parser.add_argument("--digest", required=True)
     deploy_parser.add_argument("--port", type=int, required=True)
+    deploy_parser.add_argument("--skip-external-smoke", action="store_true")
     args = parser.parse_args()
 
     password = ""
@@ -349,6 +365,7 @@ def main() -> int:
                 args.port,
                 public_url,
                 ops_url,
+                args.skip_external_smoke,
             )
             verified_health_url = verify_public_health(client, public_url)
         finally:

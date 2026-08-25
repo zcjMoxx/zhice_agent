@@ -6,6 +6,7 @@
 - `test_missing_workflow_api_operations_return_stable_404`: verifies run, pause, resume, and delete convert missing owner-scoped workflows into the stable `WORKFLOW_NOT_FOUND` 404 response boundary instead of leaking a server exception.
 - `test_scheduler_recovers_stale_windows_process_lock`: verifies a Windows scheduler start replaces a lock owned by a nonexistent PID without using `os.kill(pid, 0)` or failing with `WinError 87`.
 - `test_scheduler_recovers_reused_windows_process_id_lock`: verifies a legacy Windows lock is replaced when its live PID belongs to a process created after the lock file, covering OS PID reuse without terminating the unrelated process.
+- `test_scheduler_recovers_stale_same_pid_file_after_forced_container_exit`: verifies Linux uses a kernel-held file lock rather than trusting a persisted container PID, so a force-removed PID 1 container cannot block its rollback replacement.
 - `test_tool_inputs.py`: verifies user-facing place names are resolved through the allowlisted geocoder before weather calls, and Xiaohongshu note links are safely converted to detail arguments while rejecting non-HTTPS, foreign-domain, or incomplete links.
 - `test_store_publish_is_idempotent_and_owner_scoped`: verifies publishing the same unchanged version is safe to repeat while owner isolation remains enforced.
 - `test_editing_published_workflow_creates_next_draft_version`: verifies editing active v1 automatically creates draft v2, repeated saves stay on v2, and publishing v2 clears the pending-publish state.

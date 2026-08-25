@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$SourceImage,
     [string]$ReleaseTag = "",
-    [string]$ConfigPath = ""
+    [string]$ConfigPath = "",
+    [switch]$SkipExternalSmoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -182,7 +183,9 @@ if ($digest -notmatch ('^' + [regex]::Escape("${registry}/${imageName}") + '@sha
 Write-Output "[cloud 4/6] Uploading versioned remote operations scripts"
 $remoteScripts | ForEach-Object { Write-Verbose "Validated remote operations script: $_" }
 Write-Output "[cloud 5/6] Switching scripts atomically and deploying immutable image digest"
-& python $remoteOpsHelper --config $ConfigPath deploy --scripts-dir $scriptsRoot --ops-dir $opsRoot --release-id $ReleaseTag --digest $digest --port $port
+$remoteDeployArgs = @("--config", $ConfigPath, "deploy", "--scripts-dir", $scriptsRoot, "--ops-dir", $opsRoot, "--release-id", $ReleaseTag, "--digest", $digest, "--port", $port)
+if ($SkipExternalSmoke) { $remoteDeployArgs += "--skip-external-smoke" }
+& python $remoteOpsHelper @remoteDeployArgs
 if ($LASTEXITCODE -ne 0) { throw "Remote operations sync or cloud deployment failed" }
 
 Write-Output "[cloud 6/6] Verifying public HTTPS health"

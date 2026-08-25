@@ -20,13 +20,11 @@ deploy/private/models.json
 - 不要把 Session、Memory、数据库、渠道登录态、索引或日志复制到 `deploy/`。
 - 示例文件只能使用占位值；真实文件和构建出的镜像只能进入受控环境与私有 registry。
 
-默认 Windows workspace 的复制示例：
+本地 workspace 配置只用于人工差异审阅，不提供自动复制命令。请逐项把新增的键合并到 `deploy/private`，并保留 private 中的云端地址、云端 MCP 路径、QQ 公网地址和模型 Secret。重点检查：
 
-```powershell
-Copy-Item "$env:USERPROFILE\.zhice\config\.env" deploy\private\.env
-Copy-Item "$env:USERPROFILE\.zhice\config\config.yml" deploy\private\config.yml
-Copy-Item "$env:USERPROFILE\.zhice\config\models.json" deploy\private\models.json
-```
+- `config.yml` 不得带 Windows 本地路径或本地 MCP 地址；
+- `.env` 只补云端确实需要的变量，不覆盖云端 Secret；
+- `models.json` 只合并结构变化，保留云端模型凭据。
 
 对应路径是：
 
@@ -36,7 +34,7 @@ C:\Users\<user>\.zhice\config\config.yml
 C:\Users\<user>\.zhice\config\models.json
 ```
 
-只有尚未迁移的旧环境才从项目源码目录 `config/.env` 复制到 `deploy/private/.env`；这是 legacy migration，不是当前推荐布局。无论 `.env` 来自当前 workspace 还是旧项目目录，复制后都必须确认 `deploy/private/.env` 不包含 `ZHICE_AGENT_WORKSPACE`，避免把本机路径写入容器镜像。`ZHICE_AGENT_SKILL_REPO` 通常也不需要配置：缺失或为空时自动使用镜像内 `/app/skill_repo`；如需覆盖，只能填写容器内可访问的 source 仓库路径，不能填写 Windows 宿主机路径或 Git URL。默认 `config.yml` 只使用该本地 source，不配置假的远端 Git 地址。
+只有尚未迁移的旧环境才从项目源码目录 `config/.env` 复制到 `deploy/private/.env`；这是 legacy migration，不是当前推荐布局。复制或人工合并后必须检查：`.env` 不包含 `ZHICE_AGENT_WORKSPACE`，`config.yml` 不包含 Windows 本地路径，MCP 地址和 XHS 路径使用云端容器值。默认云发布只读取 `deploy/private`，不会隐式读取本地 workspace。
 
 复制后可确认忽略规则：
 
@@ -86,16 +84,20 @@ HOME=/home/zhice
 
 镜像不设置 `ZHICE_AGENT_WORKSPACE` 和 `ZHICE_AGENT_SKILL_REPO`；通用默认规则自然得到 `/home/zhice/.zhice`，Skill 同步器根据镜像内代码位置得到 `/app/skill_repo`。镜像声明 `contexts`、`state`、`travel`、`logs`、`extends` 运行数据 volume，其中 `zhice-travel-data` 专门持久化已保存的 TravelPlanV1；并为运行时扫码生成的微信账号凭据声明独立的 `config/channels/weixin/accounts` volume。一个 workspace 只允许一个 Gateway 容器写入。
 
-私有镜像里的 `.env`、`config.yml`、`models.json` 现在只作为云服务器首次迁移和灾难恢复基线。云端第一次执行 `deploy.sh` 时，会在不显示正文的前提下，从受控 Digest 临时容器复制并校验三份文件，再原子建立宿主机权威目录：
+私有镜像里的 `.env`、`config.yml`、`models.json` 是每次完整云发布的唯一配置来源。云端每次执行 `deploy.sh` 时，会在不显示正文的前提下，从受控 Digest 临时容器复制并校验三份文件，先把现有宿主机 runtime 备份到 `/etc/zhice-agent/runtime-backups/`，再原子替换：
 
 ```text
 /etc/zhice-agent/runtime/.env
 /etc/zhice-agent/runtime/config.yml
 /etc/zhice-agent/runtime/models.json
-/etc/zhice-agent/runtime/backups/
+/etc/zhice-agent/runtime-backups/
 ```
 
-后续 Digest 默认保留宿主机副本，三个文件分别以只读 bind mount 进入容器原路径。缺少任一文件、出现 symlink 或校验失败都会 fail closed，不会把不同镜像的配置混合初始化。本地 Windows Compose 仍使用镜像内私有基线，不强制依赖 Linux `/etc` 路径。
+三个文件分别以只读 bind mount 进入容器原路径。缺少任一文件、出现 symlink 或校验失败都会 fail closed；新容器或 sidecar 健康检查失败时，会同时恢复上一容器和上一份 runtime 配置。本地 Windows Compose 仍使用镜像内私有基线，不依赖 Linux `/etc` 路径。
+
+完整云发布还要求 `deploy/private/.env` 配置 `ZHICE_DEPLOY_SMOKE_USERNAME` 和 `ZHICE_DEPLOY_SMOKE_PASSWORD`。管理员必须提前创建同名低权限 viewer 账号；建议用户名固定为 `deployment-smoke`，密码使用独立强随机值，不得复用 Owner/Admin 凭据。新版本健康后，部署脚本经公网 HTTPS 创建、保存、读取、发布、执行并删除一个确定性临时工作流；核心验收失败会恢复旧容器和旧 runtime。
+
+高德、Tavily、12306、小红书、默认 LLM 和 SMTP 属于告警型外部验收，失败会写入报告但不回滚。两个云端 PowerShell 入口都可显式传入 `-SkipExternalSmoke`，核心工作流验收不可跳过。脱敏报告保存在 `/etc/zhice-agent/deployment-reports/`；成功后保留最近 5 份 runtime 备份和 30 份报告，失败部署不清理历史现场。
 
 ## 三个日常入口
 

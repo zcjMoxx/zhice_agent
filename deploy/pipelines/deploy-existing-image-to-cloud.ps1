@@ -3,7 +3,8 @@ param(
     [string]$Image = "zhice-agent:local",
     [string]$ReleaseTag = "",
     [string]$ConfigPath = "",
-    [switch]$Smoke
+    [switch]$Smoke,
+    [switch]$SkipExternalSmoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,4 +21,4 @@ if ($Smoke) {
 }
 
 Write-Output "[2/2] Publishing existing image to cloud"
-& $releaseScript -SourceImage $Image -ReleaseTag $ReleaseTag -ConfigPath $ConfigPath
+& $releaseScript -SourceImage $Image -ReleaseTag $ReleaseTag -ConfigPath $ConfigPath -SkipExternalSmoke:$SkipExternalSmoke

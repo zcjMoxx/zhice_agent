@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$ReleaseTag = "",
-    [string]$ConfigPath = ""
+    [string]$ConfigPath = "",
+    [switch]$SkipExternalSmoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,4 +24,4 @@ Write-Output "[2/3] Running isolated image smoke test on port $smokePort"
 & $smokeScript -Image $imageRef -Port $smokePort
 
 Write-Output "[3/3] Publishing verified image to cloud"
-& $releaseScript -SourceImage $imageRef -ReleaseTag $ReleaseTag -ConfigPath $ConfigPath
+& $releaseScript -SourceImage $imageRef -ReleaseTag $ReleaseTag -ConfigPath $ConfigPath -SkipExternalSmoke:$SkipExternalSmoke

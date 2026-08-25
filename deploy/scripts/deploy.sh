@@ -1,10 +1,12 @@
 #!/usr/bin/env sh
 set -eu
 
-IMAGE_REF="${1:?usage: deploy.sh registry/image@sha256:digest [host-port] public-url ops-url}"
+IMAGE_REF="${1:?usage: deploy.sh registry/image@sha256:digest [host-port] public-url ops-url [skip-external-smoke]}"
 HOST_PORT="${2:-10086}"
 PUBLIC_URL="${3:?public-url is required}"
 OPS_URL="${4:?ops-url is required}"
+SKIP_EXTERNAL_SMOKE="${5:-0}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CONTAINER_NAME=zhice-agent
 PREVIOUS_NAME=${CONTAINER_NAME}-previous
 XHS_CONTAINER_NAME=zhice-xhs-readonly
@@ -18,8 +20,13 @@ RUNTIME_PARENT=/etc/zhice-agent
 RUNTIME_DIR=$RUNTIME_PARENT/runtime
 XHS_SEED_DIR=$RUNTIME_PARENT/xhs
 XHS_SEED_FILE=$XHS_SEED_DIR/cookies.json
+RUNTIME_BACKUP_ROOT=$RUNTIME_PARENT/runtime-backups
+DEPLOYMENT_REPORT_ROOT=$RUNTIME_PARENT/deployment-reports
 HAS_PREVIOUS=0
 XHS_HAS_PREVIOUS=0
+RUNTIME_SYNCED=0
+RUNTIME_RESTORED=0
+RUNTIME_BACKUP_DIR=
 INIT_DIR=
 SEED_CONTAINER=
 XHS_SEED_CONTAINER=
@@ -41,11 +48,18 @@ cleanup_seed() {
 
 rollback() {
   /usr/bin/docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  clear_scheduler_lock
+  rollback_runtime_config
   if [ "$HAS_PREVIOUS" -eq 1 ] && /usr/bin/docker container inspect "$PREVIOUS_NAME" >/dev/null 2>&1; then
     /usr/bin/docker rename "$PREVIOUS_NAME" "$CONTAINER_NAME"
     /usr/bin/docker start "$CONTAINER_NAME" >/dev/null
     echo "Deployment failed; restored previous container" >&2
   fi
+}
+
+clear_scheduler_lock() {
+  /usr/bin/docker run --rm --entrypoint sh -v zhice-state:/state "$IMAGE_REF" \
+    -c 'rm -f -- /state/workflow-scheduler.lock' >/dev/null 2>&1 || true
 }
 
 rollback_xhs() {
@@ -54,6 +68,43 @@ rollback_xhs() {
     /usr/bin/docker rename "$XHS_PREVIOUS_NAME" "$XHS_CONTAINER_NAME"
     /usr/bin/docker start "$XHS_CONTAINER_NAME" >/dev/null
     echo "Xiaohongshu sidecar update failed; restored previous container" >&2
+  fi
+}
+
+rollback_runtime_config() {
+  if [ "$RUNTIME_SYNCED" -ne 1 ] || [ "$RUNTIME_RESTORED" -eq 1 ]; then
+    return
+  fi
+  if [ -n "$RUNTIME_BACKUP_DIR" ] && [ -d "$RUNTIME_BACKUP_DIR" ]; then
+    rm -rf -- "$RUNTIME_DIR"
+    mv "$RUNTIME_BACKUP_DIR" "$RUNTIME_DIR"
+    RUNTIME_RESTORED=1
+    echo "Deployment failed; restored previous runtime configuration" >&2
+  elif [ -d "$RUNTIME_DIR" ]; then
+    rm -rf -- "$RUNTIME_DIR"
+    RUNTIME_RESTORED=1
+    echo "Deployment failed; removed newly initialized runtime configuration" >&2
+  fi
+}
+
+prune_success_history() {
+  if [ -d "$RUNTIME_BACKUP_ROOT" ] && [ ! -L "$RUNTIME_BACKUP_ROOT" ]; then
+    find "$RUNTIME_BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -print | sort -r | sed -n '6,$p' |
+      while IFS= read -r path; do
+        case "$path" in
+          "$RUNTIME_BACKUP_ROOT"/[0-9]*-[0-9]*) rm -rf -- "$path" ;;
+          *) echo "Refusing unsafe runtime backup cleanup target" >&2 ;;
+        esac
+      done
+  fi
+  if [ -d "$DEPLOYMENT_REPORT_ROOT" ] && [ ! -L "$DEPLOYMENT_REPORT_ROOT" ]; then
+    find "$DEPLOYMENT_REPORT_ROOT" -mindepth 1 -maxdepth 1 -type f -name '*.json' -print | sort -r | sed -n '31,$p' |
+      while IFS= read -r path; do
+        case "$path" in
+          "$DEPLOYMENT_REPORT_ROOT"/[0-9]*-*.json) rm -f -- "$path" ;;
+          *) echo "Refusing unsafe deployment report cleanup target" >&2 ;;
+        esac
+      done
   fi
 }
 
@@ -97,19 +148,7 @@ if not isinstance(model_config.get("routing"), dict) or not isinstance(model_con
 ' >/dev/null
 }
 
-initialize_runtime_config() {
-  if [ -e "$RUNTIME_DIR" ]; then
-    [ ! -L "$RUNTIME_DIR" ] || { echo "Runtime config directory must not be a symlink" >&2; exit 1; }
-    for name in .env config.yml models.json; do
-      [ -f "$RUNTIME_DIR/$name" ] && [ ! -L "$RUNTIME_DIR/$name" ] || {
-        echo "Runtime config is incomplete; refusing mixed initialization" >&2
-        exit 1
-      }
-    done
-    validate_runtime_dir "$RUNTIME_DIR"
-    return
-  fi
-
+sync_runtime_config() {
   install -d -o root -g root -m 0700 "$RUNTIME_PARENT"
   INIT_DIR=$(mktemp -d "$RUNTIME_PARENT/.runtime-init.XXXXXX")
   SEED_CONTAINER="zhice-config-seed-$$"
@@ -123,12 +162,36 @@ initialize_runtime_config() {
 
   install -d -o root -g root -m 0700 "$INIT_DIR/backups"
   validate_runtime_dir "$INIT_DIR"
+
+  if [ -e "$RUNTIME_DIR" ]; then
+    [ ! -L "$RUNTIME_DIR" ] || { echo "Runtime config directory must not be a symlink" >&2; exit 1; }
+    for name in .env config.yml models.json; do
+      [ -f "$RUNTIME_DIR/$name" ] && [ ! -L "$RUNTIME_DIR/$name" ] || {
+        echo "Runtime config is incomplete; refusing replacement" >&2
+        exit 1
+      }
+    done
+    validate_runtime_dir "$RUNTIME_DIR"
+    install -d -o root -g root -m 0700 "$RUNTIME_BACKUP_ROOT"
+    RUNTIME_BACKUP_DIR="$RUNTIME_BACKUP_ROOT/$(date -u +%Y%m%d-%H%M%S)-$$"
+    mv "$RUNTIME_DIR" "$RUNTIME_BACKUP_DIR"
+  fi
   mv "$INIT_DIR" "$RUNTIME_DIR"
   INIT_DIR=
-  echo "Initialized host runtime configuration without displaying its contents"
+  RUNTIME_SYNCED=1
+  echo "Synchronized runtime configuration from the immutable image"
 }
 
-trap cleanup_seed EXIT HUP INT TERM
+on_exit() {
+  status=$?
+  cleanup_seed
+  if [ "$status" -ne 0 ]; then
+    rollback_runtime_config
+  fi
+  exit "$status"
+}
+
+trap on_exit EXIT HUP INT TERM
 
 case "$IMAGE_REF" in
   *@sha256:*) ;;
@@ -146,6 +209,10 @@ case "$OPS_URL" in
   https://*/*) echo "ops-url must be an HTTPS origin without a path" >&2; exit 2 ;;
   https://*) ;;
   *) echo "ops-url must be an HTTPS origin" >&2; exit 2 ;;
+esac
+case "$SKIP_EXTERNAL_SMOKE" in
+  0|1) ;;
+  *) echo "skip-external-smoke must be 0 or 1" >&2; exit 2 ;;
 esac
 if [ "$HOST_PORT" -gt 65535 ]; then
   echo "host-port must not exceed 65535" >&2
@@ -168,7 +235,7 @@ IMAGE_GID=${IMAGE_IDS#*:}
 case "$IMAGE_UID$IMAGE_GID" in
   *[!0-9]*) echo "Invalid image runtime uid/gid" >&2; exit 1 ;;
 esac
-initialize_runtime_config
+sync_runtime_config
 chown "$IMAGE_UID:$IMAGE_GID" \
   "$RUNTIME_DIR/.env" "$RUNTIME_DIR/config.yml" "$RUNTIME_DIR/models.json"
 chmod 0400 "$RUNTIME_DIR/.env" "$RUNTIME_DIR/config.yml" "$RUNTIME_DIR/models.json"
@@ -205,6 +272,7 @@ if /usr/bin/docker container inspect "$XHS_CONTAINER_NAME" >/dev/null 2>&1; then
   /usr/bin/docker stop --time 30 "$XHS_CONTAINER_NAME" >/dev/null
   if ! /usr/bin/docker rename "$XHS_CONTAINER_NAME" "$XHS_PREVIOUS_NAME"; then
     /usr/bin/docker start "$XHS_CONTAINER_NAME" >/dev/null 2>&1 || true
+    rollback_runtime_config
     exit 1
   fi
   XHS_HAS_PREVIOUS=1
@@ -221,6 +289,7 @@ if ! /usr/bin/docker run -d --name "$XHS_CONTAINER_NAME" --init --restart unless
   "$IMAGE_REF" -headless=true -port=:18060 >/dev/null; then
   echo "Xiaohongshu sidecar failed to start" >&2
   rollback_xhs
+  rollback_runtime_config
   exit 1
 fi
 attempt=0
@@ -230,6 +299,7 @@ until /usr/bin/docker exec "$XHS_CONTAINER_NAME" python -c \
   if [ "$attempt" -ge "$XHS_READINESS_ATTEMPTS" ]; then
     echo "Xiaohongshu sidecar failed readiness verification" >&2
     rollback_xhs
+    rollback_runtime_config
     exit 1
   fi
   sleep 2
@@ -240,6 +310,8 @@ if /usr/bin/docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
   /usr/bin/docker stop --time 30 "$CONTAINER_NAME" >/dev/null
   if ! /usr/bin/docker rename "$CONTAINER_NAME" "$PREVIOUS_NAME"; then
     /usr/bin/docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    rollback_xhs
+    rollback_runtime_config
     exit 1
   fi
   HAS_PREVIOUS=1
@@ -285,9 +357,40 @@ until [ "$(/usr/bin/docker inspect --format '{{.State.Health.Status}}' "$CONTAIN
   sleep 2
 done
 
+smoke_args=""
+if [ "$SKIP_EXTERNAL_SMOKE" -eq 1 ]; then
+  smoke_args="--skip-external"
+fi
+install -d -o root -g root -m 0700 "$DEPLOYMENT_REPORT_ROOT"
+if ! python3 "$SCRIPT_DIR/deployment_smoke.py" \
+  --base-url "$PUBLIC_URL" \
+  --runtime-env "$RUNTIME_DIR/.env" \
+  --report-dir "$DEPLOYMENT_REPORT_ROOT" \
+  --image-ref "$IMAGE_REF" \
+  --runtime-backup "$RUNTIME_BACKUP_DIR" \
+  $smoke_args; then
+  echo "Core cloud deployment acceptance failed" >&2
+  rollback
+  rollback_xhs
+  exit 1
+fi
+
+if ! prune_success_history; then
+  echo "Deployment history retention failed" >&2
+  rollback
+  rollback_xhs
+  exit 1
+fi
+if ! (
+  umask 077
+  printf '%s\n%s\n%s\n%s\n' "$IMAGE_REF" "$HOST_PORT" "$PUBLIC_URL" "$OPS_URL" > "$RUNTIME_PARENT/deployment.spec.tmp" &&
+    mv "$RUNTIME_PARENT/deployment.spec.tmp" "$RUNTIME_PARENT/deployment.spec"
+); then
+  echo "Deployment specification update failed" >&2
+  rollback
+  rollback_xhs
+  exit 1
+fi
 /usr/bin/docker rm "$PREVIOUS_NAME" >/dev/null 2>&1 || true
 /usr/bin/docker rm "$XHS_PREVIOUS_NAME" >/dev/null 2>&1 || true
-umask 077
-printf '%s\n%s\n%s\n%s\n' "$IMAGE_REF" "$HOST_PORT" "$PUBLIC_URL" "$OPS_URL" > "$RUNTIME_PARENT/deployment.spec.tmp"
-mv "$RUNTIME_PARENT/deployment.spec.tmp" "$RUNTIME_PARENT/deployment.spec"
 echo "Deployed $IMAGE_REF with host-authoritative read-only runtime configuration"

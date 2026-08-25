@@ -58,6 +58,23 @@ def test_scheduler_supports_date_interval_cron_and_restart_recovery(tmp_path: Pa
         recovered.shutdown()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX kernel lock regression")
+def test_scheduler_recovers_stale_same_pid_file_after_forced_container_exit(
+    tmp_path: Path,
+):
+    lock_path = tmp_path / "state" / "workflow-scheduler.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    scheduler = WorkflowScheduler(active_store(tmp_path), lambda *_: None, workspace=tmp_path)
+
+    scheduler.start()
+    try:
+        assert scheduler.ready
+        assert json.loads(lock_path.read_text(encoding="utf-8"))["pid"] == os.getpid()
+    finally:
+        scheduler.shutdown()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows process probing regression")
 def test_scheduler_recovers_stale_windows_process_lock(tmp_path: Path):
     lock_path = tmp_path / "state" / "workflow-scheduler.lock"

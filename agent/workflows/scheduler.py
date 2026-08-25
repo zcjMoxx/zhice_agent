@@ -31,6 +31,7 @@ class WorkflowScheduler:
         self.store, self.run_callback = store, run_callback
         self.lock_path = Path(workspace).resolve() / "state" / "workflow-scheduler.lock"
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_descriptor: int | None = None
         self._accepting = False
         self._scheduler = BackgroundScheduler(jobstores={"default": MemoryJobStore()}, executors={"default": ThreadPoolExecutor(max_workers=max(1, max_workers))}, timezone="UTC")
 
@@ -124,6 +125,26 @@ class WorkflowScheduler:
         with self._lock_guard:
             if resolved in self._held_locks:
                 raise RuntimeError("WORKFLOW_SCHEDULER_ALREADY_RUNNING")
+            if os.name != "nt":
+                import fcntl
+
+                descriptor = os.open(resolved, os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    os.close(descriptor)
+                    raise RuntimeError("WORKFLOW_SCHEDULER_ALREADY_RUNNING") from exc
+                try:
+                    os.ftruncate(descriptor, 0)
+                    os.write(descriptor, json.dumps({"pid": os.getpid()}).encode())
+                    os.fsync(descriptor)
+                except Exception:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    os.close(descriptor)
+                    raise
+                self._lock_descriptor = descriptor
+                self._held_locks.add(resolved)
+                return
             if resolved.exists():
                 try:
                     lock_payload = json.loads(resolved.read_text(encoding="utf-8"))
@@ -149,6 +170,16 @@ class WorkflowScheduler:
         resolved = self.lock_path.resolve()
         with self._lock_guard:
             self._held_locks.discard(resolved)
+            if os.name != "nt":
+                import fcntl
+
+                descriptor, self._lock_descriptor = self._lock_descriptor, None
+                if descriptor is not None:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    finally:
+                        os.close(descriptor)
+                return
             try:
                 if int(json.loads(resolved.read_text(encoding="utf-8")).get("pid", -1)) == os.getpid():
                     resolved.unlink(missing_ok=True)

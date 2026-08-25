@@ -128,6 +128,8 @@ def test_upload_release_uploads_six_scripts_validates_and_switches_atomically(
 ) -> None:
     for name in remote_ops.SCRIPT_NAMES:
         (tmp_path / name).write_text("#!/usr/bin/env sh\n", encoding="utf-8")
+    for name in remote_ops.PYTHON_SCRIPT_NAMES:
+        (tmp_path / name).write_text("print('ok')\n", encoding="utf-8")
     commands: list[str] = []
     monkeypatch.setattr(
         remote_ops,
@@ -141,14 +143,16 @@ def test_upload_release_uploads_six_scripts_validates_and_switches_atomically(
     )
 
     assert current == "/home/operator/zhice-ops/current"
-    assert len(client.sftp.puts) == len(remote_ops.SCRIPT_NAMES)
+    expected_scripts = set(remote_ops.SCRIPT_NAMES + remote_ops.PYTHON_SCRIPT_NAMES)
+    assert len(client.sftp.puts) == len(expected_scripts)
     assert {Path(local).name for local, _remote in client.sftp.puts} == set(
-        remote_ops.SCRIPT_NAMES
+        expected_scripts
     )
     assert all(mode == 0o700 for _remote, mode in client.sftp.chmods)
-    assert len(client.sftp.renames) == len(remote_ops.SCRIPT_NAMES)
+    assert len(client.sftp.renames) == len(expected_scripts)
     syntax_command = next(command for command in commands if "sh -n" in command)
     assert all(name in syntax_command for name in remote_ops.SCRIPT_NAMES)
+    assert "deployment_smoke.py" in syntax_command
     switch_command = next(command for command in commands if "mv -Tf" in command)
     assert "ln -sfn" in switch_command
     assert "/home/operator/zhice-ops/current" in switch_command
@@ -162,6 +166,8 @@ def test_upload_release_includes_fixed_public_ops_assets(
     scripts.mkdir()
     for name in remote_ops.SCRIPT_NAMES:
         (scripts / name).write_text("#!/usr/bin/env sh\n", encoding="utf-8")
+    for name in remote_ops.PYTHON_SCRIPT_NAMES:
+        (scripts / name).write_text("print('ok')\n", encoding="utf-8")
     for relative_name in remote_ops.OPS_FILES:
         path = ops / relative_name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -302,9 +308,27 @@ def test_sudo_deploy_sends_password_only_to_stdin_and_redacts_output() -> None:
     assert "ops/install.sh" in channel.command
     assert channel.command.index("deploy.sh") < channel.command.index("ops/install.sh")
     assert channel.command.index("ops/install.sh") < channel.command.index("status.sh")
+    assert " 0 &&" in channel.command
     assert password not in out
     assert "[REDACTED]" in out
     assert err == ""
+
+
+def test_sudo_deploy_can_skip_only_external_smoke() -> None:
+    channel = FakeChannel(b"ok\n")
+
+    remote_ops.sudo_deploy(
+        FakeDeployClient(channel),
+        "secret",
+        "/home/operator/zhice-ops/current",
+        "registry.example.test/team/zhice-agent@sha256:" + "b" * 64,
+        10086,
+        "https://agent.example.test",
+        "https://ops.example.test",
+        True,
+    )
+
+    assert " 1 &&" in channel.command
 
 
 def test_sudo_deploy_times_out_and_closes_channel() -> None:

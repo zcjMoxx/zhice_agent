@@ -35,6 +35,7 @@ def test_public_deploy_assets_are_complete() -> None:
         "scripts/diagnose.sh",
         "scripts/apply.sh",
         "scripts/remote_ops.py",
+        "scripts/deployment_smoke.py",
         "ops/install.sh",
         "ops/ttyd-version.env",
         "ops/bin/zhice-ops-shell",
@@ -89,7 +90,7 @@ def test_deploy_readme_uses_current_workspace_config_and_marks_legacy_env() -> N
     assert "${workspace}/config/models.json" in readme
     assert r"C:\Users\<user>\.zhice\config\.env" in readme
     assert "legacy migration" in readme
-    assert "deploy/private/.env` 不包含 `ZHICE_AGENT_WORKSPACE" in readme
+    assert "`.env` 不包含 `ZHICE_AGENT_WORKSPACE" in readme
     assert "普通 `zcagent init` 已默认" in readme
     assert "`--write-env` 仅作为兼容参数" in readme
     for deprecated in (
@@ -512,8 +513,9 @@ def test_shared_cloud_release_uses_paramiko_digest_and_https() -> None:
     assert '$ErrorActionPreference = "Continue"' in script
     assert "--help 2>&1" in script
     assert "Paramiko is unavailable" in script
-    assert "--config $ConfigPath deploy" in script
-    assert "--ops-dir $opsRoot" in script
+    assert '$remoteDeployArgs = @("--config", $ConfigPath, "deploy"' in script
+    assert '"--ops-dir", $opsRoot' in script
+    assert '"--skip-external-smoke"' in script
     assert "ssh @" not in script
     assert "scp @" not in script
     assert 'Invoke-RestMethod -UseBasicParsing -Uri "${publicUrl}/health"' in script
@@ -545,6 +547,7 @@ def test_remote_ops_helper_keeps_password_out_of_process_arguments() -> None:
     assert "sh -n" in helper
     assert "mv -Tf" in helper
     assert "def verify_public_health" in helper
+    assert 'PYTHON_SCRIPT_NAMES = ("deployment_smoke.py",)' in helper
     assert "curl --fail --silent --show-error --max-time 20 --" in helper
     assert helper.index("sudo_deploy(") < helper.index("verify_public_health(")
 
@@ -571,8 +574,39 @@ def test_remote_operations_scripts_have_safe_maintenance_semantics() -> None:
     assert "socket.create_connection(('127.0.0.1', 18060), 3)" in restart
     assert "rollback()" in deploy
     assert "restored previous container" in deploy
+    assert "clear_scheduler_lock" in deploy
+    assert '-v zhice-state:/state "$IMAGE_REF"' in deploy
+    assert "rm -f -- /state/workflow-scheduler.lock" in deploy
     assert "rollback\n  rollback_xhs" in deploy
+    assert "deployment_smoke.py" in deploy
+    assert deploy.index("deployment_smoke.py") < deploy.index('docker rm "$PREVIOUS_NAME"')
+    assert "prune_success_history" in deploy
+    assert "sed -n '6,$p'" in deploy
+    assert "sed -n '31,$p'" in deploy
+    assert deploy.rindex("prune_success_history") < deploy.index(
+        'docker rm "$PREVIOUS_NAME"'
+    )
     assert "zhice-travel-data" in diagnose
+
+
+def test_cloud_deploy_replaces_private_runtime_with_backup_and_rollback() -> None:
+    script = (DEPLOY / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    readme = (DEPLOY / "README.md").read_text(encoding="utf-8")
+    assert "RUNTIME_BACKUP_ROOT=$RUNTIME_PARENT/runtime-backups" in script
+    assert "sync_runtime_config()" in script
+    assert "rollback_runtime_config()" in script
+    assert 'trap on_exit EXIT HUP INT TERM' in script
+    assert 'mv "$RUNTIME_DIR" "$RUNTIME_BACKUP_DIR"' in script
+    assert 'echo "Synchronized runtime configuration from the immutable image"' in script
+    assert "/etc/zhice-agent/runtime-backups/" in readme
+    assert "sync-private-config.ps1" not in readme
+    assert "SyncFromWorkspace" not in readme
+    assert not (DEPLOY / "scripts" / "sync-private-config.ps1").exists()
+    assert "Copy-Item \"$env:USERPROFILE\\.zhice\\config" not in readme
+    rollback_body = script.split("rollback() {", 1)[1].split("\n}", 1)[0]
+    assert rollback_body.index("rollback_runtime_config") < rollback_body.index(
+        'docker start "$CONTAINER_NAME"'
+    )
 
 
 def test_remote_deploy_timeout_covers_xhs_first_browser_download() -> None:
