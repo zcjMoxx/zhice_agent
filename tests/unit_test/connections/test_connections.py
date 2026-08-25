@@ -190,6 +190,37 @@ def test_notification_email_verification_and_official_test_use_only_self(monkeyp
     assert sent[-1].recipients == ("me@example.com",)
 
 
+def test_notification_email_verification_rate_limit_is_structured(tmp_path) -> None:
+    auth_store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    user = auth_store.initialize_owner("owner", "Owner", "password-123")
+    sent: list[EmailMessage] = []
+
+    class OfficialProvider:
+        def send(self, message: EmailMessage) -> EmailSendResult:
+            sent.append(message)
+            return EmailSendResult("accepted")
+
+    runtime = ConnectionRuntime(
+        None,
+        notification_store=auth_store,
+        official_email_provider=OfficialProvider(),
+    )
+    actor = type("Actor", (), {"user_id": user.id})()
+
+    first = runtime.request_notification_email_verification(
+        actor, address="me@example.com"
+    )
+    with pytest.raises(ConnectionError) as exc_info:
+        runtime.request_notification_email_verification(
+            actor, address="other@example.com"
+        )
+
+    assert first["retry_after_seconds"] == 60
+    assert exc_info.value.code == "NOTIFICATION_EMAIL_VERIFICATION_RATE_LIMITED"
+    assert 1 <= exc_info.value.details["retry_after_seconds"] <= 60
+    assert len(sent) == 1
+
+
 def test_notification_email_remains_available_without_optional_smtp_store(tmp_path) -> None:
     auth_store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
     user = auth_store.initialize_owner("owner", "Owner", "password-123")

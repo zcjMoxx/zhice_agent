@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { KeyRound, Link2, Mail, Monitor, Moon, Palette, Settings2, Sun, UserRound, X } from "@lucide/vue";
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import { ApiError, api } from "@/api/client";
 import type { NotificationEmail, WorkflowCapabilities, WorkflowEmailConnection } from "@/api/types";
@@ -49,6 +49,7 @@ const notificationEmail = ref<NotificationEmail>({ address: "", status: "missing
 const notificationAddress = ref("");
 const notificationCode = ref("");
 const notificationVerificationPending = ref(false);
+const notificationResendSeconds = ref(0);
 const showSmtpForm = ref(false);
 const smtp = ref<SmtpDraft>(initialSmtpDraft());
 const testRecipients = ref<Record<string, string>>({});
@@ -112,10 +113,45 @@ const weixinAttemptLabel = computed(() => {
   const label = labels[statusValue];
   return label ? tr(label[0], label[1]) : statusValue;
 });
+const notificationRequestLabel = computed(() => {
+  if (emailAction.value === "notification-request") return tr("发送中…", "Sending…");
+  if (notificationResendSeconds.value > 0) {
+    return tr(
+      `${notificationResendSeconds.value} 秒后可重发`,
+      `Resend in ${notificationResendSeconds.value}s`,
+    );
+  }
+  return tr("发送验证码", "Send verification code");
+});
+
+let notificationResendTimer: ReturnType<typeof setInterval> | undefined;
+
+function startNotificationResendCountdown(seconds: unknown): void {
+  const normalized = Math.max(0, Math.ceil(Number(seconds) || 0));
+  if (notificationResendTimer) clearInterval(notificationResendTimer);
+  notificationResendSeconds.value = normalized;
+  if (!normalized) {
+    notificationResendTimer = undefined;
+    return;
+  }
+  notificationResendTimer = setInterval(() => {
+    if (notificationResendSeconds.value <= 1) {
+      notificationResendSeconds.value = 0;
+      if (notificationResendTimer) clearInterval(notificationResendTimer);
+      notificationResendTimer = undefined;
+      return;
+    }
+    notificationResendSeconds.value -= 1;
+  }, 1000);
+}
 
 onMounted(() => {
   if (ui.settingsSection === "channels") ui.settingsSection = "connections";
   if (ui.settingsSection === "connections") void refreshConnections();
+});
+
+onBeforeUnmount(() => {
+  if (notificationResendTimer) clearInterval(notificationResendTimer);
 });
 
 async function saveProfile() {
@@ -181,6 +217,16 @@ function connectionStatusLabel(value: string): string {
   return tr("暂不可用", "Unavailable");
 }
 
+function weixinStatusLabel(value: string): string {
+  if (["active", "connected", "bound"].includes(value)) return tr("已连接", "Connected");
+  if (value === "unbound") return tr("未连接", "Not connected");
+  if (value === "reconnect_required") return tr("需要重新连接", "Reconnect required");
+  if (value === "reconnecting") return tr("正在恢复连接", "Reconnecting");
+  if (value === "degraded") return tr("连接异常", "Connection issue");
+  if (value === "unknown") return tr("正在读取状态", "Loading status");
+  return tr("暂不可用", "Unavailable");
+}
+
 function emailError(error: unknown): string {
   if (!(error instanceof ApiError)) return errorMessage(error);
   const labels: Record<string, string> = {
@@ -194,6 +240,7 @@ function emailError(error: unknown): string {
     NOTIFICATION_EMAIL_UNAVAILABLE: tr("系统暂时无法保存我的邮箱。", "My email storage is unavailable."),
     NOTIFICATION_EMAIL_NOT_VERIFIED: tr("请先验证我的邮箱。", "Verify my email first."),
     NOTIFICATION_EMAIL_CODE_INVALID: tr("验证码错误或已经过期，请重新获取。", "The code is invalid or expired. Request a new one."),
+    NOTIFICATION_EMAIL_VERIFICATION_RATE_LIMITED: tr("验证码发送过于频繁，请等待倒计时结束。", "Verification requests are too frequent. Wait for the countdown."),
   };
   return labels[error.code] || tr("邮件连接操作失败，请检查配置后重试。", "The email connection action failed. Check the configuration and retry.");
 }
@@ -223,11 +270,17 @@ async function requestNotificationVerification() {
   emailAction.value = "notification-request";
   failure.value = ""; emailFeedback.value = "";
   try {
-    await api.requestNotificationEmailVerification(notificationAddress.value.trim());
+    const result = await api.requestNotificationEmailVerification(notificationAddress.value.trim());
+    startNotificationResendCountdown(result.retry_after_seconds);
     notificationVerificationPending.value = true;
     notificationCode.value = "";
     emailFeedback.value = tr("验证码已发送，请在 10 分钟内完成验证。", "Verification code sent. Complete verification within 10 minutes.");
-  } catch (error) { failure.value = emailError(error); }
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "NOTIFICATION_EMAIL_VERIFICATION_RATE_LIMITED") {
+      startNotificationResendCountdown(error.details.retry_after_seconds);
+    }
+    failure.value = emailError(error);
+  }
   finally { emailAction.value = ""; }
 }
 
@@ -351,7 +404,7 @@ async function deleteEmail(connection: WorkflowEmailConnection) {
             </article>
             <form class="smtp-connection-form notification-email-form" @submit.prevent="requestNotificationVerification">
               <label>{{ notificationEmail.verified ? tr('更换我的邮箱', 'Change my email') : tr('邮箱地址', 'Email address') }}<input v-model="notificationAddress" type="email" autocomplete="email" placeholder="name@example.com" required /></label>
-              <button class="primary-button" :disabled="Boolean(emailAction) || emailCapabilities.official_notification?.code === 'OFFICIAL_EMAIL_NOT_CONFIGURED'">{{ emailAction === 'notification-request' ? tr('发送中…', 'Sending…') : tr('发送验证码', 'Send verification code') }}</button>
+              <button class="primary-button" :disabled="Boolean(emailAction) || notificationResendSeconds > 0 || emailCapabilities.official_notification?.code === 'OFFICIAL_EMAIL_NOT_CONFIGURED'">{{ notificationRequestLabel }}</button>
             </form>
             <form v-if="notificationVerificationPending" class="smtp-connection-form notification-email-form" @submit.prevent="verifyNotificationAddress">
               <label>{{ tr('邮箱验证码', 'Verification code') }}<input v-model="notificationCode" inputmode="numeric" maxlength="12" autocomplete="one-time-code" required /></label>
@@ -402,7 +455,7 @@ async function deleteEmail(connection: WorkflowEmailConnection) {
             <div v-for="binding in qqBindings" :key="binding.binding_id" class="binding-row"><span>{{ binding.display_name || tr('QQ 身份', 'QQ identity') }}</span><button class="danger-text" :disabled="channels.busy" @click="channels.unlink(binding.binding_id)">{{ channels.busy ? tr('处理中…', 'Working…') : tr('解绑', 'Unlink') }}</button></div>
           </div>
           <div class="channel-card">
-            <div><span class="channel-icon weixin">微</span><span><strong>{{ tr('微信', 'Weixin') }}</strong><small>{{ channels.weixin.status }}</small></span></div>
+            <div><span class="channel-icon weixin">微</span><span><strong>{{ tr('微信', 'Weixin') }}</strong><small>{{ weixinStatusLabel(channels.weixin.status) }}</small></span></div>
             <img v-if="weixinQrSource" class="weixin-qr" :src="weixinQrSource" :alt="tr('微信绑定二维码', 'Weixin binding QR code')" />
             <p v-if="channels.weixinAttempt" :class="{ 'form-error': weixinAttemptTerminal && channels.weixinAttempt.status !== 'connected' && channels.weixinAttempt.status !== 'cancelled' }">{{ weixinAttemptLabel }}</p>
             <p v-if="channels.weixinAttempt?.error_code" class="form-error"><code>{{ channels.weixinAttempt.error_code }}</code></p>

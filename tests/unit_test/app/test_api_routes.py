@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from agent.app.gateway import create_app
 from agent.app.runtime import ChatTurnResult, ModelState
 from agent.config import AppConfig
+from agent.connections.protocols import ConnectionError
 from agent.message import Message
 from agent.protocols.llm import LLMConfigurationError, LLMProviderError
 from agent.protocols.session import SessionState, SessionSummary
@@ -119,6 +120,22 @@ def test_session_api_returns_messages(tmp_path):
     assert payload["messages"][2]["name"] == "list_dir"
 
 
+def test_notification_email_verification_rate_limit_maps_to_http_429(tmp_path):
+    runtime = _FakeRuntime(connection_runtime=_RateLimitedConnectionRuntime())
+    client = _client(tmp_path, runtime)
+
+    response = client.post(
+        "/api/connections/email/notification/request-verification",
+        json={"address": "me@example.com"},
+    )
+
+    _assert_error(
+        response,
+        429,
+        "NOTIFICATION_EMAIL_VERIFICATION_RATE_LIMITED",
+        "notification email verification was requested too recently",
+        details={"retry_after_seconds": 42},
+    )
 def test_chat_api_calls_runtime_and_returns_assistant_message(tmp_path):
     runtime = _FakeRuntime(chat_result="web reply")
     client = _client(tmp_path, runtime)
@@ -499,6 +516,7 @@ class _FakeRuntime:
     command_result: str | None = None
     stream_chunks: list[str] | None = None
     runtime_events: list[dict] | None = None
+    connection_runtime: object | None = None
 
     def __post_init__(self) -> None:
         self.chat_calls: list[tuple[str, str]] = []
@@ -604,6 +622,15 @@ class _FakeWeixinBinding:
             expires_at="2026-07-24T10:00:00+00:00",
             qr_data="data:image/png;base64,safe",
             error_code="",
+        )
+
+
+class _RateLimitedConnectionRuntime:
+    def request_notification_email_verification(self, actor, *, address: str):
+        raise ConnectionError(
+            "NOTIFICATION_EMAIL_VERIFICATION_RATE_LIMITED",
+            "notification email verification was requested too recently",
+            details={"retry_after_seconds": 42},
         )
 
 

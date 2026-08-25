@@ -15,12 +15,13 @@ describe("workflow starter templates", () => {
     const connected = new Set(definition.edges.flatMap((edge) => [edge.source_node_id, edge.target_node_id]));
 
     expect(definition.nodes).toHaveLength(4);
-    expect(types).toEqual(new Set(["schedule_trigger", "mcp_query", "llm_transform", "personal_email"]));
+    expect(types).toEqual(new Set(["schedule_trigger", "mcp_query", "llm_transform", "template"]));
     expect(connected).toEqual(new Set(definition.nodes.map((node) => node.id)));
     expect(definition.edges).toHaveLength(3);
     expect(definition.nodes.find((node) => node.type === "mcp_query")?.config.input_schema_hash).toBeTruthy();
     expect(definition.nodes.find((node) => node.type === "schedule_trigger")?.config.time_of_day).toBe("");
-    expect(definition.nodes.find((node) => node.type === "personal_email")?.config).toMatchObject({ connection_id: "", to: "" });
+    expect(definition.nodes.find((node) => node.type === "template")?.config).toMatchObject({ template: "{{result}}" });
+    expect(definition.required_permissions).toEqual(["workflow.use"]);
   });
 
   it("prepares weather advice as editable ordinary nodes", () => {
@@ -36,17 +37,16 @@ describe("workflow starter templates", () => {
     expect(String(advice.config.instruction)).toContain("不要逐项说明不存在的风险");
   });
 
-  it("uses the bound QQ as the simple default without exposing a destination id", () => {
+  it("keeps record-only delivery as the safe default even when QQ is available", () => {
     const weather = workflowStarterTemplates.find((item) => item.id === "weather")!;
     const definition = instantiateWorkflowTemplate(weather, tools, "Asia/Shanghai", {
       qq_notification: { available: true, bound: true, code: "" },
     });
     const delivery = definition.nodes.find((node) => node.id === "delivery")!;
 
-    expect(delivery.type).toBe("qq_notification");
-    expect(delivery.config.delivery_mode).toBe("qq");
-    expect(delivery.config).not.toHaveProperty("openid");
-    expect(delivery.config).not.toHaveProperty("account_key");
-    expect(definition.required_permissions).toEqual(["workflow.use", "workflow.notify.self"]);
+    expect(delivery.type).toBe("template");
+    expect(delivery.config.template).toBe("{{result}}");
+    expect(delivery.config.source_ref).toBe("${nodes.advice.output}");
+    expect(definition.required_permissions).toEqual(["workflow.use"]);
   });
 });

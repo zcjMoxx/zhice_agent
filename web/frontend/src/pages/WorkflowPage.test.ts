@@ -87,9 +87,10 @@ const workflow: WorkflowDetail = {
   edges: [{ id: "trigger-query", source_node_id: "trigger", target_node_id: "query", source_port: "output", target_port: "input" }],
 };
 
-async function mountWorkflowPage(capabilities: WorkflowCapabilities = {}) {
+async function mountWorkflowPage(capabilities: WorkflowCapabilities = {}, existingCurrent?: WorkflowDetail) {
     const pinia = createPinia();
     setActivePinia(pinia);
+    if (existingCurrent) useWorkflowStore().current = structuredClone(existingCurrent);
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
@@ -128,6 +129,38 @@ async function mountWorkflowPage(capabilities: WorkflowCapabilities = {}) {
 }
 
 describe("WorkflowPage canvas interactions", () => {
+  it("hydrates saved nodes immediately when returning with the same workflow still in the store", async () => {
+    const { wrapper } = await mountWorkflowPage({}, workflow);
+
+    expect(wrapper.findAll(".vue-flow__node")).toHaveLength(workflow.nodes.length);
+    expect(wrapper.text()).toContain("查天气");
+    expect(api.workflow).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("explains Weixin setup and refreshes its availability when the page regains focus", async () => {
+    const { wrapper } = await mountWorkflowPage({
+      weixin_notification: { available: false, bound: false, code: "WORKFLOW_WEIXIN_NOT_BOUND" },
+    });
+
+    await wrapper.get('[data-node-id="result"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.text()).toContain("先在“连接与账号”绑定微信，再到微信里给智策发送一条消息");
+    expect(wrapper.get('option[value="weixin"]').attributes("disabled")).toBeDefined();
+
+    vi.mocked(api.workflowCapabilities).mockResolvedValue({
+      weixin_notification: { available: true, bound: true, code: "" },
+    });
+    window.dispatchEvent(new Event("focus"));
+    await flushPromises();
+
+    expect(wrapper.get('option[value="weixin"]').attributes("disabled")).toBeUndefined();
+    expect(wrapper.text()).not.toContain("先在“连接与账号”绑定微信，再到微信里给智策发送一条消息");
+
+    wrapper.unmount();
+  });
+
   it("offers owner-bound Weixin delivery without asking for a Weixin identifier", async () => {
     const { wrapper } = await mountWorkflowPage({
       weixin_notification: { available: true, bound: true, code: "" },

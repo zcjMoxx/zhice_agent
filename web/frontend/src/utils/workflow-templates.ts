@@ -25,7 +25,7 @@ export const workflowStarterTemplates: WorkflowStarterTemplate[] = [
       { id: "trigger", type: "schedule_trigger", title: "定时运行", position: { x: 80, y: 180 }, config: { trigger_type: "cron", schedule_mode: "daily", time_of_day: "" } },
       { id: "weather", type: "mcp_query", title: "查询天气", position: { x: 360, y: 180 }, config: { tool_name: "mcp__open-meteo__get_forecast", input_schema_hash: "", arguments: { place_name: "", forecast_days: 1 } } },
       { id: "advice", type: "llm_transform", title: "生成今日建议", position: { x: 640, y: 180 }, config: { task: "advice", tone: "friendly", output_length: "short", advice_topics: ["umbrella", "clothing", "travel"], commute_mode: "general", temperature_preference: "normal", additional_instruction: "", instruction: weatherAdvice, input: "${nodes.weather.output}" } },
-      { id: "delivery", type: "personal_email", title: "发送结果", position: { x: 920, y: 180 }, config: { delivery_mode: "email", connection_id: "", to: "", subject: "今日天气与生活建议", content: "", source_ref: "${nodes.advice.output}", body: "${nodes.advice.output}" } },
+      { id: "delivery", type: "template", title: "发送结果", position: { x: 920, y: 180 }, config: { content: "", source_ref: "${nodes.advice.output}", template: "{{result}}", variables: { result: "${nodes.advice.output}" } } },
     ],
     edges: [
       { id: "weather-e1", source_node_id: "trigger", target_node_id: "weather" },
@@ -44,7 +44,7 @@ export const workflowStarterTemplates: WorkflowStarterTemplate[] = [
       { id: "trigger", type: "schedule_trigger", title: "定时运行", position: { x: 80, y: 180 }, config: { trigger_type: "cron", schedule_mode: "daily", time_of_day: "" } },
       { id: "query", type: "mcp_query", title: "搜索信息", position: { x: 360, y: 180 }, config: { tool_name: "mcp__tavily__tavily_search", input_schema_hash: "", arguments: { query: "" } } },
       { id: "summary", type: "llm_transform", title: "整理摘要", position: { x: 640, y: 180 }, config: { task: "summary", tone: "plain", output_length: "medium", instruction: "提炼重要信息和来源，输出清晰的中文纯文本，不使用 Markdown、JSON、内部字段名或代码", input: "${nodes.query.output}" } },
-      { id: "delivery", type: "personal_email", title: "发送结果", position: { x: 920, y: 180 }, config: { delivery_mode: "email", connection_id: "", to: "", subject: "每日信息摘要", content: "", source_ref: "${nodes.summary.output}", body: "${nodes.summary.output}" } },
+      { id: "delivery", type: "template", title: "发送结果", position: { x: 920, y: 180 }, config: { content: "", source_ref: "${nodes.summary.output}", template: "{{result}}", variables: { result: "${nodes.summary.output}" } } },
     ],
     edges: [
       { id: "digest-e1", source_node_id: "trigger", target_node_id: "query" },
@@ -55,26 +55,12 @@ export const workflowStarterTemplates: WorkflowStarterTemplate[] = [
 ];
 
 export function instantiateWorkflowTemplate(template: WorkflowStarterTemplate, tools: WorkflowToolCatalogItem[], timezone: string, capabilities: WorkflowCapabilities = {}): WorkflowDefinitionV1 {
-  const useQq = capabilities.qq_notification?.available === true;
+  void capabilities;
   const nodes = template.nodes.map((node) => {
     const config = structuredClone(node.config);
     if (node.type === "mcp_query" || node.type === "mcp_action") {
       const tool = tools.find((item) => item.name === config.tool_name);
       config.input_schema_hash = tool?.schema_hash || "";
-    }
-    if (node.id === "delivery" && useQq) {
-      return {
-        ...node,
-        type: "qq_notification" as const,
-        position: { ...node.position },
-        config: {
-          delivery_mode: "qq",
-          content: "",
-          source_ref: config.source_ref || "",
-          body: config.body || "",
-          send_consent_at: "",
-        },
-      };
     }
     return { ...node, position: { ...node.position }, config };
   });
@@ -85,7 +71,7 @@ export function instantiateWorkflowTemplate(template: WorkflowStarterTemplate, t
     timezone,
     nodes,
     edges: template.edges.map((edge) => ({ ...edge })),
-    required_permissions: ["workflow.use", useQq ? "workflow.notify.self" : "workflow.email.send"],
+    required_permissions: ["workflow.use"],
     connection_ids: [],
   };
 }

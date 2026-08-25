@@ -9,6 +9,7 @@ from agent.auth.store import (
     AuthSetupError,
     AuthStoreError,
     ExternalIdentityConflictError,
+    NotificationEmailVerificationRateLimitError,
     SQLiteAuthStore,
 )
 
@@ -124,6 +125,39 @@ def test_expired_notification_email_code_does_not_activate_address(tmp_path):
         user.id, "me@example.com", "12345678"
     ) is False
     assert store.notification_email(user.id) is None
+
+
+def test_notification_email_verification_enforces_per_user_resend_cooldown(tmp_path):
+    store = SQLiteAuthStore(tmp_path / "auth.sqlite3")
+    owner = store.initialize_owner("owner", "Owner", "password-123")
+    viewer = store.create_user("viewer", "Viewer", "password-456")
+
+    challenge = store.begin_notification_email_verification(
+        owner.id, "owner@example.com", "12345678"
+    )
+    assert challenge["retry_after_seconds"] == 60
+
+    with pytest.raises(NotificationEmailVerificationRateLimitError) as exc_info:
+        store.begin_notification_email_verification(
+            owner.id, "other@example.com", "87654321"
+        )
+    assert 1 <= exc_info.value.retry_after_seconds <= 60
+
+    other_user_challenge = store.begin_notification_email_verification(
+        viewer.id, "viewer@example.com", "11223344"
+    )
+    assert other_user_challenge["retry_after_seconds"] == 60
+
+    old_created_at = (datetime.now(UTC) - timedelta(seconds=61)).isoformat()
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE notification_email_verifications SET created_at=? WHERE user_id=?",
+            (old_created_at, owner.id),
+        )
+    retried = store.begin_notification_email_verification(
+        owner.id, "other@example.com", "87654321"
+    )
+    assert retried["address"] == "other@example.com"
 
 
 def test_viewer_has_only_personal_workflow_privileges(tmp_path):

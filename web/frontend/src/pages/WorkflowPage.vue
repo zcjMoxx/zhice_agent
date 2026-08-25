@@ -412,7 +412,7 @@ function scheduleInspectorBubblePosition() {
     updateInspectorBubblePosition();
   });
 }
-watch(() => store.current?.workflow_id, hydrate);
+watch(() => store.current?.workflow_id, hydrate, { immediate: true });
 watch(() => store.runDetail?.run_id || store.runDetail?.id || "", () => {
   expandedRunStep.value = "";
   expandedRunSummaries.value = new Set();
@@ -449,9 +449,18 @@ async function loadWorkflowCapabilities() {
   try { workflowCapabilities.value = await api.workflowCapabilities(); }
   catch { workflowCapabilities.value = {}; }
 }
+function handleWindowFocus() { void loadWorkflowCapabilities(); }
+function handleVisibilityChange() {
+  if (document.visibilityState === "visible") void loadWorkflowCapabilities();
+}
+watch(() => ui.settingsOpen, (open, previous) => {
+  if (previous && !open) void Promise.all([loadEmailConnections(), loadWorkflowCapabilities()]);
+});
 onMounted(async () => {
   window.addEventListener("keydown", handleKeyboard);
   window.addEventListener("resize", scheduleInspectorBubblePosition);
+  window.addEventListener("focus", handleWindowFocus);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   try {
     await Promise.all([store.loadAll(), loadToolCatalog(), loadEmailConnections(), loadWorkflowCapabilities()]);
     if (workflowId.value && store.current?.workflow_id !== workflowId.value) await store.open(workflowId.value);
@@ -460,6 +469,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleKeyboard);
   window.removeEventListener("resize", scheduleInspectorBubblePosition);
+  window.removeEventListener("focus", handleWindowFocus);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
   if (inspectorBubbleFrame !== undefined) window.cancelAnimationFrame(inspectorBubbleFrame);
   if (savedBaselineTimer) clearTimeout(savedBaselineTimer);
   if (saveConfirmationTimer) clearTimeout(saveConfirmationTimer);
@@ -1267,7 +1278,7 @@ async function testSelectedTool() {
             <label>{{ tr('结果去向', 'Result destination') }}<select :value="deliveryModeFor(selected.type)" @change="changeDeliveryMode"><option value="result">{{ tr('仅作记录', 'Record only') }}</option><option value="weixin" :disabled="workflowCapabilities.weixin_notification?.available !== true">{{ tr('微信通知', 'Weixin notification') }}</option><option value="qq" :disabled="workflowCapabilities.qq_notification?.available !== true">{{ tr('QQ 通知', 'QQ notification') }}</option><option value="notification" :disabled="workflowCapabilities.official_notification?.available === false">{{ tr('邮箱通知', 'Email notification') }}</option><option value="email" :disabled="!activeEmailConnections.length">{{ tr('SMTP 发送', 'Send via SMTP') }}</option></select></label>
             <p class="workflow-field-help">{{ tr('所有结果都会保存在执行记录中；选择通知方式后，还会发送到对应渠道。', 'Every result is saved in run history; notification modes also send it to the selected channel.') }}</p>
             <p v-if="deliveryModeFor(selected.type) === 'weixin' && workflowCapabilities.weixin_notification?.available === true" class="workflow-field-help">{{ tr('将发送到当前账号已经绑定的微信，不需要填写微信号。若很久没有与智策对话，请先在微信里发一条消息刷新会话。', 'Uses the Weixin bound to this account; no Weixin identifier is required.') }}</p>
-            <p v-else-if="deliveryModeFor(selected.type) === 'weixin'" class="form-error">{{ workflowErrorLabel(workflowCapabilities.weixin_notification?.code || 'WORKFLOW_WEIXIN_CHANNEL_UNAVAILABLE') }} <button class="inline-settings-link" @click="openConnectionSettings">{{ tr('去连接', 'Connect') }}</button></p>
+            <p v-if="workflowCapabilities.weixin_notification && workflowCapabilities.weixin_notification.available !== true" class="workflow-field-help workflow-channel-setup-hint">{{ tr('要使用微信通知，请先在“连接与账号”绑定微信，再到微信里给智策发送一条消息。完成后返回此页即可选择。', 'To use Weixin notifications, connect Weixin under Connections & accounts, then send ZhiCe one message in Weixin. Return here when finished.') }} <button class="inline-settings-link" @click="openConnectionSettings">{{ tr('去连接', 'Connect') }}</button></p>
             <p v-if="deliveryModeFor(selected.type) === 'qq' && workflowCapabilities.qq_notification?.available === true" class="workflow-field-help">{{ tr('将发送到当前账号已经绑定的 QQ，不需要填写 QQ 号。QQ 平台接受请求后会记为执行成功。', 'Uses the QQ bound to this account; no QQ identifier is required.') }}</p>
             <p v-else-if="deliveryModeFor(selected.type) === 'qq'" class="form-error">{{ workflowErrorLabel(workflowCapabilities.qq_notification?.code || 'WORKFLOW_QQ_CHANNEL_UNAVAILABLE') }} <button class="inline-settings-link" @click="openConnectionSettings">{{ tr('去连接', 'Connect') }}</button></p>
             <p v-else-if="workflowCapabilities.qq_notification?.available !== true" class="workflow-field-help">{{ workflowErrorLabel(workflowCapabilities.qq_notification?.code || 'WORKFLOW_QQ_CHANNEL_UNAVAILABLE') }} <button class="inline-settings-link" @click="openConnectionSettings">{{ tr('去连接', 'Connect') }}</button></p>

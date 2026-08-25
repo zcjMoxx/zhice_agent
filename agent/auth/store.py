@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import re
 import sqlite3
 import uuid
@@ -47,6 +48,14 @@ class AuthSetupError(RuntimeError):
 
 class AuthStoreError(RuntimeError):
     """Raised for invalid auth store mutations."""
+
+
+class NotificationEmailVerificationRateLimitError(AuthStoreError):
+    """Raised when a user requests another notification email too soon."""
+
+    def __init__(self, retry_after_seconds: int):
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__("notification email verification is rate limited")
 
 
 class ExternalIdentityConflictError(AuthStoreError):
@@ -2487,7 +2496,8 @@ class SQLiteAuthStore:
         code: str,
         *,
         ttl: timedelta = timedelta(minutes=10),
-    ) -> dict[str, str]:
+        cooldown: timedelta = timedelta(seconds=60),
+    ) -> dict[str, str | int]:
         """Persist one short-lived, salted verification challenge."""
 
         normalized = address.strip().lower()
@@ -2497,7 +2507,23 @@ class SQLiteAuthStore:
         salt = generate_token()
         now = datetime.now(UTC)
         expires_at = now + ttl
+        cooldown_seconds = max(0, math.ceil(cooldown.total_seconds()))
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            latest = connection.execute(
+                """SELECT created_at FROM notification_email_verifications
+                WHERE user_id=? ORDER BY created_at DESC LIMIT 1""",
+                (user_id,),
+            ).fetchone()
+            if latest is not None and cooldown_seconds:
+                created_at = datetime.fromisoformat(str(latest["created_at"]))
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=UTC)
+                remaining = cooldown.total_seconds() - (now - created_at).total_seconds()
+                if remaining > 0:
+                    raise NotificationEmailVerificationRateLimitError(
+                        min(cooldown_seconds, max(1, math.ceil(remaining)))
+                    )
             connection.execute(
                 """UPDATE notification_email_verifications SET consumed_at=?
                 WHERE user_id=? AND consumed_at IS NULL""",
@@ -2521,6 +2547,7 @@ class SQLiteAuthStore:
             "challenge_id": challenge_id,
             "address": normalized,
             "expires_at": expires_at.isoformat(),
+            "retry_after_seconds": cooldown_seconds,
         }
 
     def verify_notification_email(

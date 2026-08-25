@@ -3,14 +3,17 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "@/api/client";
+import { ApiError, api } from "@/api/client";
 import { useAuthStore } from "@/stores/auth";
 import { useChannelStore } from "@/stores/channels";
 import { useUiStore } from "@/stores/ui";
 import SettingsCenter from "./SettingsCenter.vue";
 
 describe("SettingsCenter", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it("persists identity-scoped color mode and theme family independently", async () => {
     const pinia = createPinia();
@@ -114,6 +117,12 @@ describe("SettingsCenter", () => {
     expect(wrapper.text()).toContain("群聊：先 @机器人，再发送生成的 /bind 命令。私聊：直接发送该命令。");
     expect(wrapper.get(".weixin-qr").attributes("src")).toBe("data:image/png;base64,c2FmZQ==");
     expect(wrapper.text()).toContain("等待微信扫码");
+    expect(wrapper.text()).toContain("未连接");
+
+    channels.weixin = { status: "active", linked_at: "now" };
+    await nextTick();
+    expect(wrapper.text()).toContain("已连接");
+    expect(wrapper.text()).not.toContain("active");
 
     ui.setLanguage("en", "u-channel");
     await nextTick();
@@ -168,6 +177,7 @@ describe("SettingsCenter", () => {
   });
 
   it("verifies My email independently from optional SMTP sending", async () => {
+    vi.useFakeTimers();
     const pinia = createPinia();
     setActivePinia(pinia);
     const auth = useAuthStore();
@@ -179,7 +189,7 @@ describe("SettingsCenter", () => {
     vi.spyOn(api, "workflowCapabilities").mockResolvedValue({ official_notification: { available: false, code: "NOTIFICATION_EMAIL_NOT_VERIFIED" }, personal_email: { available: true, code: "" } });
     vi.spyOn(api, "workflowEmailConnections").mockResolvedValue({ connections: [] });
     vi.spyOn(api, "notificationEmail").mockResolvedValue({ email: { address: "", status: "missing", verified: false } });
-    const requestVerification = vi.spyOn(api, "requestNotificationEmailVerification").mockResolvedValue({ challenge_id: "challenge-1", address: "me@example.com", expires_at: "later" });
+    const requestVerification = vi.spyOn(api, "requestNotificationEmailVerification").mockResolvedValue({ challenge_id: "challenge-1", address: "me@example.com", expires_at: "later", retry_after_seconds: 60 });
     const verifyEmail = vi.spyOn(api, "verifyNotificationEmail").mockResolvedValue({ email: { address: "me@example.com", status: "active", verified: true } });
 
     const wrapper = mount(SettingsCenter, { global: { plugins: [pinia] } });
@@ -190,6 +200,11 @@ describe("SettingsCenter", () => {
     await flushPromises();
 
     expect(requestVerification).toHaveBeenCalledWith("me@example.com");
+    expect(addressForm.get("button").text()).toBe("60 秒后可重发");
+    expect(addressForm.get("button").attributes("disabled")).toBeDefined();
+    vi.advanceTimersByTime(1000);
+    await nextTick();
+    expect(addressForm.get("button").text()).toBe("59 秒后可重发");
     const forms = wrapper.findAll(".notification-email-form");
     await forms[1].get('input[autocomplete="one-time-code"]').setValue("12345678");
     await forms[1].trigger("submit");
@@ -198,6 +213,37 @@ describe("SettingsCenter", () => {
     expect(verifyEmail).toHaveBeenCalledWith("me@example.com", "12345678");
     expect(wrapper.text()).toContain("我的邮箱已验证");
     expect(wrapper.text()).toContain("SMTP 代发（可选）");
+    wrapper.unmount();
+  });
+
+  it("restores the resend countdown from a server rate-limit response", async () => {
+    vi.useFakeTimers();
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.user = { id: "u-notify-limited", username: "alice", display_name: "Alice", status: "active", roles: ["viewer"], can_manage_admins: false };
+    const ui = useUiStore();
+    ui.settingsSection = "connections";
+    const channels = useChannelStore();
+    vi.spyOn(channels, "refresh").mockResolvedValue();
+    vi.spyOn(api, "workflowCapabilities").mockResolvedValue({ official_notification: { available: false, code: "NOTIFICATION_EMAIL_NOT_VERIFIED" }, personal_email: { available: true, code: "" } });
+    vi.spyOn(api, "workflowEmailConnections").mockResolvedValue({ connections: [] });
+    vi.spyOn(api, "notificationEmail").mockResolvedValue({ email: { address: "", status: "missing", verified: false } });
+    vi.spyOn(api, "requestNotificationEmailVerification").mockRejectedValue(
+      new ApiError(429, "NOTIFICATION_EMAIL_VERIFICATION_RATE_LIMITED", "rate limited", "req-1", { retry_after_seconds: 42 }),
+    );
+
+    const wrapper = mount(SettingsCenter, { global: { plugins: [pinia] } });
+    await flushPromises();
+    const addressForm = wrapper.get(".notification-email-form");
+    await addressForm.get('input[type="email"]').setValue("me@example.com");
+    await addressForm.trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("验证码发送过于频繁，请等待倒计时结束。");
+    expect(addressForm.get("button").text()).toBe("42 秒后可重发");
+    expect(addressForm.get("button").attributes("disabled")).toBeDefined();
+    wrapper.unmount();
   });
 
   it("renders a full-width-ready retry action for a pending QQ web binding", () => {

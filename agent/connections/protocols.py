@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -22,8 +22,15 @@ class ExternalConnection:
 class ConnectionError(RuntimeError):
     """Structured connection failure safe to map to an API response."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ):
         self.code = code
+        self.details = dict(details or {})
         super().__init__(message)
 
 

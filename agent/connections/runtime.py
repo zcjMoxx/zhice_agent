@@ -6,7 +6,11 @@ import secrets
 from dataclasses import asdict
 from typing import Any
 
-from agent.auth.store import AuthStoreError, SQLiteAuthStore
+from agent.auth.store import (
+    AuthStoreError,
+    NotificationEmailVerificationRateLimitError,
+    SQLiteAuthStore,
+)
 from agent.connections.protocols import ConnectionError, EmailMessage
 from agent.connections.store import SQLiteConnectionStore
 from agent.integrations.email.personal_smtp import PersonalSMTPEmailProvider
@@ -76,7 +80,7 @@ class ConnectionRuntime:
         actor: ActorContext,
         *,
         address: str,
-    ) -> dict[str, str]:
+    ) -> dict[str, str | int]:
         owner = self._owner(actor)
         normalized = address.strip().lower()
         if "@" not in normalized or len(normalized) > 320:
@@ -90,6 +94,12 @@ class ConnectionRuntime:
             challenge = self.notification_store.begin_notification_email_verification(
                 owner, normalized, code
             )
+        except NotificationEmailVerificationRateLimitError as exc:
+            raise ConnectionError(
+                "NOTIFICATION_EMAIL_VERIFICATION_RATE_LIMITED",
+                "notification email verification was requested too recently",
+                details={"retry_after_seconds": exc.retry_after_seconds},
+            ) from exc
         except AuthStoreError as exc:
             raise ConnectionError("EMAIL_RECIPIENT_INVALID", str(exc)) from exc
         self.official_email_provider.send(

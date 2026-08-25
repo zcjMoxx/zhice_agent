@@ -42,6 +42,8 @@ def _connections(request: Request):
 
 def _map_error(exc: ConnectionError) -> ApiError:
     status = 404 if exc.code == "CONNECTION_NOT_FOUND" else 403 if exc.code == "CONNECTION_ACCESS_DENIED" else 400
+    if exc.code == "NOTIFICATION_EMAIL_VERIFICATION_RATE_LIMITED":
+        status = 429
     if exc.code in {
         "CONNECTION_PROVIDER_UNSUPPORTED",
         "CONNECTION_CREDENTIAL_KEY_MISSING",
@@ -49,7 +51,7 @@ def _map_error(exc: ConnectionError) -> ApiError:
         "OFFICIAL_EMAIL_NOT_CONFIGURED",
     }:
         status = 503
-    return ApiError(exc.code, str(exc), status_code=status)
+    return ApiError(exc.code, str(exc), status_code=status, details=exc.details)
 
 
 @router.get("")
