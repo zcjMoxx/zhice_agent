@@ -10,13 +10,13 @@
 >
 > 参考规范：`AGENTS.md`
 >
-> 开发范围：Milestone 2 工具调用，先实现只读本地工具闭环
+> 当前状态：Milestone 2 工具调用与只读本地工具闭环已实现；后续 Capability Selection、确认、Hook 与审计在该协议上扩展。
 
 ---
 
-## 1. 第三部分要开发什么
+## 1. 第三部分当前交付
 
-第三部分建议开发“工具调用”能力，目标是让 ZhiCe-Agent 从“只能调用 LLM 聊天”的最小 Agent，升级为“能把可用工具声明给 LLM、识别模型返回的 tool calls、执行工具、回填工具结果、再让模型生成最终回答”的可扩展 AgentLoop。
+第三部分交付“工具调用”能力：AgentLoop 可以向 LLM 声明受控工具、识别 tool calls、执行并回填 ToolResult，再由模型生成最终回答。
 
 这一部分仍保持轻量，优先实现只读本地工具，不做任意命令执行，不做文件写入，不接 Skill。工具系统先把协议边界、注册表、安全路径、输出截断和 session 保存顺序立住，为后续 `exec` 工具和 SkillLoader 打地基。
 

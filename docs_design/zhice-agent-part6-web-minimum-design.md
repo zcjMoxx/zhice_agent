@@ -517,7 +517,7 @@ dependencies = [
 
 - FastAPI 只用于本地 HTTP API 和静态资源服务。
 - Uvicorn 只作为本地开发和单进程运行 server。
-- 暂不引入数据库、前端构建工具、后台任务框架或进程管理器。
+- Part 6 自身不引入数据库、前端构建工具、后台任务框架或进程管理器；后续 Part 9/16/20 已分别增加 SQLite 身份、Vue build 和独立工作流调度，均保持在 AgentLoop 之外。
 
 ---
 
@@ -535,9 +535,9 @@ dependencies = [
 
 ---
 
-## 10. 变更文件
+## 10. 当前实现文件
 
-预计新增：
+Part 6 Web/Gateway 边界当前主要由以下文件维护：
 
 ```text
 agent/app/__init__.py
@@ -552,15 +552,14 @@ agent/core/loop.py
 agent/core/context.py
 agent/core/turns.py
 agent/core/context_relevance.py
-web/static/index.html
-web/static/styles.css
-web/static/app.js
+web/frontend/
+agent/web/static/
 tests/unit_test/app/test_gateway.py
 tests/unit_test/app/test_api_routes.py
 tests/unit_test/app/test_case.md
 ```
 
-预计修改：
+共同入口与说明文件：
 
 ```text
 agent/cli.py
@@ -573,7 +572,7 @@ README.md
 
 - `agent/gateway.py`、`agent/loop.py` 和 `agent/context.py` 已删除，不再作为兼容导出层。
 - CLI 入口直接导入 `agent.app.gateway`；core 调用方直接使用 `agent.core.*`。
-- `README.md` 只补充最小启动方式，不写成长篇 Web 使用手册。
+- `README.md` 提供当前启动与使用入口；详细架构边界继续由活文档维护。
 
 ---
 
@@ -581,7 +580,7 @@ README.md
 
 ### 11.1 单元测试
 
-新增 `tests/unit_test/app/test_case.md`，至少覆盖：
+`tests/unit_test/app/test_case.md` 当前至少覆盖：
 
 1. `zcagent gateway --check` 行为保持不启动服务。
 2. `/health` 返回 workspace、config、sessions 基础信息。

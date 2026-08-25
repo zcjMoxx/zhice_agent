@@ -1,6 +1,6 @@
 # 智策 Agent 第十一部分详细设计文档：MCP Tool 接入
 
-> 状态：已实现并进入当前代码基线；Windows OS 级 stdio 读取隔离仍待硬化
+> 状态：已实现并进入当前代码基线；配置加载已按 Server 隔离错误，Windows OS 级 stdio 读取隔离仍待硬化
 >
 > 设计记录：`docs_design/2026-07-17-mcp-tool-runtime-boundary-design.md`
 
@@ -116,6 +116,9 @@ Runtime 管连接、发现、调用、Elicitation、重连和关闭；Catalog �
 - 仓库模板不保存真实 credential。
 - 运行态 credential 可以写直接值，也可以使用 `${ENV_VAR}`。
 - 缺少配置表示 MCP 未启用。
+- MCP 根结构错误或全部 Server 非法时 capability 为 unavailable；单个 Server 非法时 capability 为 degraded，同时保留其它合法 Server 的 spec 与启动能力。
+- 普通 `${ENV_VAR}` 必须展开为非空值；只有显式 `${ENV_VAR:-}` 才表示允许空字符串的可选字段。
+- `gateway --check` 对 degraded 或 unavailable MCP 配置返回失败，避免带部分错误配置进入部署；运行时普通 Gateway 仍按 capability 边界局部降级。
 - 配置在 CLI/Gateway 启动时加载，修改后重启生效。
 
 ### 6.2 迁移常见 MCP 配置

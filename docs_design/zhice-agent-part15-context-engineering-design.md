@@ -705,4 +705,4 @@ docs_design/zhice-agent-part7-turn-context-design.md
 - `python -m ruff check .`：通过。
 - Part 15 专项与 AgentLoop/ContextBuilder/Turn 直接回归：通过。
 - 显式串行 10,000 Turn 精确 cosine p95 用例：通过 `< 100ms` 断言。
-- `python -m pytest`：`732 passed, 1 skipped`；skip 为显式重型性能用例，已按上一条单独执行通过。
+- `python -m pytest`：执行当前全量回归；显式重型性能用例按测试标记单列执行，具体通过数以当次命令输出为准。

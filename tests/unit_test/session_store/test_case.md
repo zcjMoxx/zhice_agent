@@ -6,56 +6,56 @@
 
 ## 用例覆盖
 
-### Case 1: 读取不存在的 session
+### 用例 1: 读取不存在的 session
 
 - 输入：`load("default")`。
 - 预期：返回空消息列表。
 - 检查点：不创建额外文件，不抛异常。
 
-### Case 2: 追加后读取
+### 用例 2: 追加后读取
 
 - 输入：追加 user 和 assistant 消息。
 - 预期：再次读取时顺序保持一致。
 - 检查点：role、content、timestamp 都被保留。
 
-### Case 3: UTF-8 JSONL
+### 用例 3: UTF-8 JSONL
 
 - 输入：写入中文消息。
 - 预期：文件以 UTF-8 JSONL 保存，内容可读。
 - 检查点：JSON 记录包含 role、content、timestamp、name、tool_call_id、tool_calls、metadata。
 
-### Case 4: 非法 session_id
+### 用例 4: 非法 session_id
 
 - 输入：`../escape`、`bad/name`、`bad.name`、空字符串。
 - 预期：抛出 `InvalidSessionIdError`。
 - 检查点：session_id 不能逃出 sessions 目录。
 
-### Case 5: 兼容未知字段
+### 用例 5: 兼容未知字段
 
 - 输入：JSONL 记录中包含未来字段。
 - 预期：读取时忽略未知字段。
 - 检查点：已知消息字段和 timestamp 仍能恢复。
 
-### Case 6: 清空 session
+### 用例 6: 清空 session
 
 - 输入：先写入消息，再调用 `clear(session_id)`。
 - 预期：对应 JSONL 文件被删除。
 - 检查点：再次读取返回空 session。
 
-### Case 7: 列出 session
+### 用例 7: 列出 session
 
 - 输入：多个 session 文件。
 - 预期：返回按更新时间倒序排列的摘要。
 - 检查点：preview 优先来自第一条 user 消息，message_count 正确。
 
-## Part 7 Turn Coverage
+## 第 7 部分：回合覆盖
 
-- Write top-level `turn_id`, `turn_index`, and `parent_turn_id` for new JSONL records.
-- Restore turn fields only from top-level records.
-- Do not promote `metadata.turn_id` or other metadata turn fields into `Message` turn fields.
-- Ensure session listing remains based on preview, timestamp, and message count for new records.
+- 新 JSONL 记录在顶层写入 `turn_id`、`turn_index` 和 `parent_turn_id`。
+- 只从顶层记录恢复回合字段。
+- 不把 `metadata.turn_id` 或其它 metadata 回合字段提升为 `Message` 回合字段。
+- 确保新记录的 Session 列表仍基于预览、时间戳和消息数量生成。
 
-## Part 9 Session Model Preference Coverage
+## 第 9 部分：Session 模型偏好覆盖
 
 - Session 模型偏好保存在 sidecar metadata，并保留已有 title 等字段。
 - Subagent `auto/off` 与 one-shot 状态保存在同一 sidecar 的独立字段；原子消费 `once` 时只允许一个并发调用成功，reset 只清 one-shot 并保留 mode/title/model 字段。

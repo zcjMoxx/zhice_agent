@@ -1,6 +1,6 @@
 # Deploy 测试说明
 
-## Part 18 多运行形态 Ops 纠偏
+## 第 18 部分：多运行形态 Ops 纠偏
 
 - 本地 Compose 固定启动 `zhice-agent` 与独立 `zhice-agent-ops`，Ops 端口只绑定 `127.0.0.1`，主容器通过非敏感环境投影 `local_docker` endpoint。
 - 本地 sidecar 的 Docker API 请求只能包含固定 `zhice-agent`，浏览器不能提交容器名、Docker 参数或路径。

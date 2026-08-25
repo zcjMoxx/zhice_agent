@@ -17,7 +17,7 @@ ZhiCe-Agent 已经形成 CLI、Web、用户权限、Tool、Skill、Memory、MCP�
 
 > 保持一个小而清楚的 Agent 内核，让所有产品能力通过协议、运行时适配器、Tool 或 Skill 扩展。
 
-这份文档描述当前系统，而不是尚未落地的教学草案。已实现能力以真实代码和对应 Part 活文档为准；Part 17～18 的当前生产基线集中维护在第 15 节，实施路线集中维护在第 17 节。
+这份文档描述当前系统，而不是尚未落地的教学草案。已实现能力以真实代码和对应 Part 活文档为准；当前代码已完成到 Part 20，Part 17～18 的生产基线集中维护在第 15 节，完整实施记录集中维护在第 17 节。
 
 ---
 
@@ -282,7 +282,7 @@ ZhiCe-Agent（CLI + Web + QQ + 微信）：
 能用 /model 管理当前 Session 的 endpoint/model 偏好，
 能通过 `zcagent gateway` 启动本地 FastAPI gateway，
 能提供 REST/SSE 兼容 API、WebSocket 主聊天通道和静态 Web UI，
-能在 Web 端管理本人会话、模型、账号、渠道绑定和运行诊断，并让显式授权管理员查询确定性系统事故与跨组件脱敏时间线，
+能在 Web 端管理本人会话、模型、账号、渠道绑定和运行诊断，匿名注册页提供不泄露账号资料的用户名可用性检查，并让显式授权管理员查询确定性系统事故与跨组件脱敏时间线，
 能用稳定 `turn_id` / `turn_index` 串起一轮用户请求、WebSocket 事件和 JSONL 会话消息，
 能在预算内携带完整 Session 历史，并在长会话中组合确定性历史证据、结构化 compaction、混合检索旧 Turn 与最近连续 Turn，
 能用 SQLite FTS5/BM25、可选 embedding 精确 cosine、entity、anchor 和 recency 生成可解释 ContextPlan，
@@ -293,7 +293,7 @@ ZhiCe-Agent（CLI + Web + QQ + 微信）：
 能让 CLI 与 Owner 共用 workspace Memory、普通用户使用私有 Memory，
 能通过 memory_read 按需检索，通过用户对话授权后的 memory_write 修改长期 Memory，
 能在 Session 空闲后提取具有多 Turn 证据的高可信长期 Memory，
-能接入 stdio、Streamable HTTP 和 SSE MCP Server，归一化 Tool、elicitation、OAuth 与 artifact，并动态刷新 Catalog、重连 Server 和取消活动调用，
+能接入 stdio、Streamable HTTP 和 SSE MCP Server，逐 Server 隔离配置错误，归一化 Tool、elicitation、OAuth 与 artifact，并动态刷新 Catalog、重连 Server 和取消活动调用，
 能通过受限 pre/post Tool Hook 扩展策略和展示元数据，
 能通过 `delegate_tasks` 运行有界并行 child，并由父 Agent fan-in 归纳，
 能用 `/subagent` 管理当前 Session 的 auto/off/once 语义，
@@ -302,7 +302,9 @@ ZhiCe-Agent（CLI + Web + QQ + 微信）：
 能在 CLI、Web、QQ 和微信之间复用 Session、Memory、Tool、MCP、Hook、Subagent 与模型偏好语义，
 能在单 Gateway、单 worker、单 workspace writer 边界内恢复遗留 Turn 并从 Session 真值重建派生状态，
 能通过 `deploy/` 私有覆盖层、Dockerfile、compose 和运维脚本组装私有运行镜像，
-能通过 `zcagent init` 生成运行时文件。
+能通过 `zcagent init` 生成运行时文件，
+能在私有 host allowlist 命中时匿名展示受控公安备案信息，而不泄露 allowlist 或私有配置，
+能通过独立 WorkflowRuntime、SQLite、APScheduler 和固定 DAG 节点运行本人可视化工作流，并以已验证通知邮箱、个人 SMTP、本人 QQ 或本人微信显式投递结果。
 ```
 
 这就是当前代码基线。ZhiCe-Agent 已经不是聊天原型，而是具备身份、权限、长期 Memory、外部 Tool、运行扩展、子任务编排和多渠道接入的完整本地优先 Agent Runtime。
@@ -1359,6 +1361,8 @@ ${ZHICE_AGENT_WORKSPACE}/
 - `zcagent init` 完成提示必须区分核心与可选配置：LLM endpoint 是聊天前置条件；预算字段已有默认值；Skill source、MCP、Subagent 和 Hook 只在显式启用时配置。已有非法 endpoint 文件应提示直接编辑，普通 `init` 不会覆盖现有文件。
 - 普通 `zcagent init` 默认从唯一公开模板 `config/.env.example` 补齐 `${workspace}/config/.env`；已有 env 保留，`--force` 覆盖，`--write-env` 仅作为兼容参数且不再改变生成结果。
 - Channels、MCP、Subagents、Hooks、Context 和 Travel 都位于 workspace `config/config.yml` 的独立分区；分区缺失时按对应模块的安全默认或 disabled 处理。
+- MCP 根结构错误或全部 Server 非法时 unavailable；单个 Server 配置非法时 degraded 并保留其它合法 Server。`${VAR}` 要求非空，只有显式 `${VAR:-}` 才允许可选空值；`gateway --check` 对 degraded/unavailable 配置失败。
+- `site.public_security_record` 只在显式 private runtime 配置中启用，要求 14 位编号、展示文案包含编号和不带 scheme/port/path 的精确 host allowlist；匿名 `/api/site` 只在 Host 命中时返回固定官方查询 URL。
 - `models.json` 的 embedding route/endpoint 缺失时上下文 capability 标记为 degraded，但完整历史、确定性历史查询、compaction 和 FTS/BM25 继续工作。
 - QQ AppID/AppSecret、微信凭证和其它 Secret 从 `${workspace}/config/.env`、进程环境或部署平台 Secret 注入；配置文件只保存环境变量引用或非敏感字段。
 
@@ -1395,7 +1399,7 @@ Part 17 已在 Part 16 稳定前端产品面和 Part 15 上下文派生状态之
 
 部署层继续保持 `app -> core -> protocols`，core 不依赖容器、反向代理、向量数据库或平台 SDK。Part 17 的诊断数据接入 Part 16 已有管理页面，不建立第二套 Web。
 
-当前全量验证为 Python `986 passed, 2 skipped`、Ruff、前端 `56 passed`、lint/typecheck/build、deploy/Ops 专项 `123 passed`、Shell syntax 与 Python 静态编译全部通过。随后已完成本地 image build/run smoke、阿里云 ACR push、腾讯云按不可变 Digest deploy、Caddy HTTPS、公网健康、认证初始化、容器重启持久化和 Part 18 宿主机权威配置跨 Digest 应用验收。三入口发布自动化复用已验收链路，不把真实目标配置或凭证提交到仓库。
+当前基线持续执行全量 Python、Ruff、前端 test/lint/typecheck/build、deploy/Ops 静态检查、Shell syntax 与 Python 静态编译，不在活文档固化会随用例增长失真的通过数。生产链已完成本地 image build/run smoke、私有 registry push、按不可变 Digest 云端部署、Caddy HTTPS、公网健康、认证初始化、容器重启持久化和 Part 18 宿主机权威配置跨 Digest 应用验收。三入口发布自动化复用同一验收与回滚链，不把真实目标配置或凭据提交到仓库。
 
 ### 15.2 Part 18：正式 Skill Runtime、Skill 管理与独立服务器 Ops
 
@@ -1510,7 +1514,7 @@ python -m pytest
 
 ## 17. 实现路线图
 
-本节同时保留已完成 Milestone 的实现记录和尚未实现部分的依赖顺序。当前代码基线已完成到 Part 20；Milestone 19/20 的真实外部服务 smoke 仍按显式凭据和测试账号单列。
+本节维护已完成 Milestone 的实现记录和能力依赖顺序。当前代码基线已完成到 Part 20；Milestone 19/20 的真实外部服务 smoke 仍按显式凭据和测试账号单列。
 
 ### Milestone 0：项目骨架（已实现）
 
@@ -1941,6 +1945,9 @@ Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费
 7. 已验证本人邮箱的官方通知。
 8. 用户级 ExternalConnection、AES-GCM、个人 SMTP 授权码和 SMTP 邮件 Provider。
 9. Owner-scoped QQ/微信通知 Provider；微信复用最近一对一会话安全引用与持久化 Outbox，工作流不接受任意平台收件人。
+10. 草稿试运行不发布、版本冲突保留当前画布、模板安全默认只保留结果、受限 Node-RED 交换和响应式 Vue Flow 连接交互。
+11. 通知邮箱验证码的加盐摘要、过期/单次消费、60 秒重发冷却与前端倒计时；页面在焦点、可见性和设置关闭后刷新投递能力。
+12. Windows PID/创建时间锁识别与 Linux 内核文件锁，保证强制容器退出和部署回滚后新 scheduler 可以安全接管。
 
 明确边界：任意代码、Shell/exec、循环、子工作流、分布式队列和完整Agent节点不属于该特色应用；当前固定为单Gateway、单scheduler。当前事实以 `docs_design/zhice-agent-part20-visual-workflow-scheduler-design.md` 为准，原方案记录为 `docs_design/2026-08-10-visual-workflow-scheduler-design.md`。
 

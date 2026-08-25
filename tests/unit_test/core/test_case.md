@@ -1,31 +1,31 @@
-# Core Unit Test Cases
+# Core 单元测试用例
 
-## Test Target
+## 测试目标
 
-Verify shared core helpers that are not tied to a concrete LLM, tool provider, Web route, or session-store implementation.
+验证不依赖具体 LLM、Tool Provider、Web 路由或 SessionStore 实现的共享核心辅助能力。
 
-## Case Coverage
+## 用例覆盖
 
-### Case 1: Explicit turn grouping
+### 用例 1：显式回合分组
 
-- Input: adjacent messages with the same `turn_id`.
-- Expected: one `TurnGroup` with the explicit id and index.
-- Checkpoints: message order is preserved.
+- 输入：具有相同 `turn_id` 的相邻消息。
+- 预期：生成一个包含显式 ID 和序号的 `TurnGroup`。
+- 检查点：保持原始消息顺序。
 
-### Case 2: Untagged messages
+### 用例 2：无回合标记的消息
 
-- Input: messages without `turn_id` mixed with messages that have `turn_id`.
-- Expected: untagged legacy messages are grouped by user-message boundaries with deterministic in-memory ids.
-- Checkpoints: JSONL is not rewritten; explicit later Turn ids and original order remain unchanged.
+- 输入：没有 `turn_id` 的消息与具有 `turn_id` 的消息混合存在。
+- 预期：旧版无标记消息按用户消息边界分组，并生成确定性的内存 ID。
+- 检查点：不重写 JSONL；后续显式回合 ID 和原始顺序保持不变。
 
-### Case 3: Multiple explicit turns
+### 用例 3：多个显式回合
 
-- Input: adjacent explicit turns in persisted file order.
-- Expected: one group per explicit turn segment.
-- Checkpoints: grouping does not reorder messages.
+- 输入：按持久化文件顺序排列的相邻显式回合。
+- 预期：每个显式回合片段生成一个分组。
+- 检查点：分组不会重排消息。
 
-### Case 4: Next turn index
+### 用例 4：下一个回合序号
 
-- Input: sessions with explicit indices or no explicit indices.
-- Expected: explicit max index plus one wins; otherwise count lazily inferred legacy user Turns plus one.
-- Checkpoints: old JSONL stays unchanged while new writes avoid duplicate Turn indices.
+- 输入：包含显式序号或不包含显式序号的 Session。
+- 预期：优先使用最大显式序号加一；否则使用延迟推导出的旧版用户回合数加一。
+- 检查点：旧 JSONL 保持不变，新写入不会产生重复的回合序号。

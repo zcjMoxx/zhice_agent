@@ -937,7 +937,7 @@ Part 13 关闭必须满足：
 14. 自动委派没有额外 preflight LLM 调用，并受单 Turn batch 数、fast Profile 和总 deadline 约束。
 15. CLI、Web 和支持命令的外部渠道只在主帮助中展示 `/subagent`；裸命令按 `/model` 风格用 Tip 提示 `auto/off/once`，one-shot 状态原子消费且不改变安全能力。
 
-以上 15 项已满足，Part 13 已关闭；其 Tool 披露现已统一接入提前完成的 Capability Selection。当前最终验证：`python -m ruff check .` 通过；`python -m pytest --basetemp .tmp/pytest_tool_discovery_final` 为 `581 passed, 1 skipped`（66.57 秒）；`node --check web/static/app.js` 和 `node --check web/static/runtime-event-state.js` 均通过。Windows 下继续使用 repo-local basetemp；跳过项是当前环境不支持创建 symlink 的既有只读工具用例。Hook 真实 fixture 的测试 timeout 调整只用于避免 xdist 进程启动抖动，不改变运行时默认配置或 fail-closed 语义。
+以上 15 项已满足，Part 13 已关闭；其 Tool 披露现已统一接入 Capability Selection。当前验证使用 `python -m ruff check .`、全量 `python -m pytest` 与 Vue 前端 test/lint/typecheck/build；具体通过数以当次命令输出为准。Windows 下遇到系统临时目录 ACL 问题时使用 repo-local basetemp。Hook 真实 fixture 的测试 timeout 只用于避免进程启动抖动，不改变运行时默认配置或 fail-closed 语义。
 
 ## 29. 后续方向
 

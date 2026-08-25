@@ -1,6 +1,6 @@
 # ZhiCe-Agent
 
-ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码基线已完成到 Part 19 智能旅行规划；Part 18 正式 Skill Runtime、Skill source 管理与多运行形态 restricted Ops 继续作为底座：本地终端自动 supervisor、本地 Docker sidecar、服务器 systemd Ops 分别监控实际启动目标，并统一提供“监控面板 / 运维终端”双视图；本地进程、Docker sidecar、Linux systemd、Cloudflare Tunnel、服务器长期认证和宿主机权威配置链已完成真实部署或 smoke，浏览器 ttyd WebSocket/iframe、idle 后重连与故障救援继续按环境交互边界单列。主线能力包括：
+ZhiCe-Agent 是一个轻量、本地优先的 Agent Runtime。当前代码基线已完成到 Part 20 可视化工作流；Part 18 正式 Skill Runtime、Skill source 管理与多运行形态 restricted Ops 继续作为生产底座：本地终端 supervisor、本地 Docker sidecar、服务器 systemd Ops 分别监控实际启动目标，并统一提供“监控面板 / 运维终端”双视图。主线能力包括：
 
 - workspace 本地运行配置与 `zcagent init`
 - Markdown prompt 加载
@@ -16,18 +16,19 @@ ZhiCe-Agent 是一个轻量本地 Agent 内核项目。当前代码基线已完�
 - CLI、本地 Web gateway、会话 API、WebSocket 主聊天通道，以及支持安全 Markdown、KaTeX 公式和明暗曜石主题的 Vue Web UI
 - `turn_id` / `turn_index` 持久化、WebSocket turn 对齐、预算内完整 Session 历史、确定性历史查询、结构化 compaction、SQLite FTS/embedding 混合检索和 endpoint token 预算
 - Gateway / Agent 分层运行日志、Web/QQ/微信渠道启动结果、固定北京时间（UTC+08:00）终端/JSONL 时间戳和 workspace `logs/log-YYYY-MM-DD.jsonl`
-- SQLite 本地用户、角色、特权权限、可撤销登录态、唯一永久 Owner、Owner 管理权委派、默认关闭且由 Owner 独占控制的普通用户自助注册，以及个人设置
+- SQLite 本地用户、角色、特权权限、可撤销登录态、唯一永久 Owner、Owner 管理权委派、默认关闭且由 Owner 独占控制的普通用户自助注册、匿名用户名可用性检查，以及个人设置
 - 用户上下文目录、session owner/index、session 级模型偏好和 call-scoped provider
 - 登录用户基础能力、跨用户/管理/审计特权、高风险 `exec` 明确确认、独立 Runtime Activity/Security Audit 和当前 Session 自助诊断
 - CLI/Owner 共用 workspace Memory、普通用户私有 Memory、明确 list/search 的 `memory_read` 与对话授权 `memory_write`
 - 对话式 Memory 授权、Session 空闲高可信提取、一次性通知和 Memory 安全过滤
-- workspace 共享 MCP Runtime、stdio / Streamable HTTP / SSE、自动 Tool 发现、OAuth 刷新、Elicitation 和 actor-scoped artifact 导入
+- workspace 共享 MCP Runtime、stdio / Streamable HTTP / SSE、逐 Server 隔离配置校验、自动 Tool 发现、OAuth 刷新、Elicitation 和 actor-scoped artifact 导入
 - 有界并行 `delegate_tasks`、独立 child AgentLoop/Session/RuntimeEvent、能力 Profile 和 shared-readonly/worktree/shared-exclusive workspace 隔离
 - `/subagent` 的 `auto/off/once` Session 语义、Web child task 状态和可选能力结构化启动告警
 - 中性 Channel 协议、外部身份绑定、持久 conversation route/event receipt，以及 QQ 私聊/群聊 `@` WebSocket adapter
 - 微信 `channel_accounts` 所有权、本人扫码 API/UI、stdio NDJSON Node sidecar、基于腾讯 `2.4.6` 审计来源的 direct-text Transport 和多用户隔离
 - Owner-only Skills/Ops 管理入口、运行态 Ops endpoint、新窗口与 iframe 回退，共享监控/终端双视图、本地 loopback supervisor、固定 Docker sidecar，以及宿主机 Caddy/dashboard/ttyd、restricted `zhice-ops-shell`、复用既有 Cloudflare Tunnel 的服务器长期签名 Cookie 登录、loopback ttyd Basic Auth 和跨 Digest 持久配置链
 - 智能旅行规划特色应用：地图/天气/交通/网页/小红书只读来源、quick/deep、正式 optimizer Skill、`TravelPlanV1`、用户隔离 Store/API、`travel.plan_ready` 和 Vue `/travel`
+- 可视化工作流特色应用：独立 SQLite/APScheduler/DAG Runtime、受限 Tool/LLM 节点、本人邮件/QQ/微信投递、用户连接、受限 Node-RED 交换和响应式 Vue Flow `/workflows`
 
 当前仍保持轻量边界：已有本地多用户、QQ/微信渠道、私有镜像部署和受限单机 Ops，但不等于生产级托管平台；项目没有面向公网的 OAuth/SSO、组织/租户、多 workspace 隔离、跨 Turn 后台 Agent Job、depth > 1、自动 worktree merge、Skill 市场、多服务器管理、多 profile 初始化、keyring/Secret Manager、CLI Session 管理或宿主机通用 Shell。Part 12 的 turn/context/LLM/tool RuntimeEvent 与 Hook 安全边界继续有效；Part 18 在独立 SkillExecutor 中增加 `skill.*` 和 ProgressSink，不从 `exec.command` 猜 Skill。Web 侧继续使用同端口 `WebSocket /ws` 作为主聊天通道，REST/SSE 保留为兼容接口；主 Web 只投影独立 Ops URL，不代理 PTY/WebSocket、Docker、日志或重启。
 
@@ -48,9 +49,9 @@ Tool capability selection 已从原可靠性路线提前进入当前基线。每
 - 第十四部分外部渠道已实现第一版 QQ 闭环，入口是 `docs_design/zhice-agent-part14-external-channel-design.md`，初始边界见 `docs_design/2026-07-23-qq-external-channel-boundary-design.md`，跨渠道 Session、用户解绑和 QQ Markdown 收敛见 `docs_design/2026-07-23-cross-channel-session-binding-and-qq-markdown-design.md`。QQ SDK 仅位于 transport 层；未知身份在 LLM 前拒绝，群聊按触发用户隔离 Session，高风险确认转私聊或 Web。
 - 第十四部分实现二微信 ClawBot 已落地，当前口径见 `docs_design/zhice-agent-part14-external-channel-design.md`，完整取舍和真实 POC 证据见 `docs_design/2026-07-24-weixin-clawbot-channel-design.md`。一个 Web 用户独立拥有一个微信 AI 账号，共享 Node Transport sidecar 接入现有 Channel Runtime，不引入第二套 AgentLoop。2026-07-24 已用真实微信验证 AI 标识、扫码、direct text 收发、context token、游标恢复和 notifyStop；双真实账号并发仍需第二名用户验收。
 - Part 15 完整 Session 上下文工程已进入当前代码基线，设计入口是 `docs_design/zhice-agent-part15-context-engineering-design.md`。本地第一实现不要求独立向量数据库服务：用户隔离 SQLite 保存 FTS5 文档、metadata 和 float32 embedding BLOB，Session 内用精确 cosine 与 RRF 混合排序；embedding 未配置时 health 诚实标记 degraded，但完整历史、历史查询、compaction 和 FTS 继续工作。
-- Part 16 Web 产品体验与 Vue 前端工程已实现并进入当前基线，当前活文档是 `docs_design/zhice-agent-part16-web-product-design.md`，完整方案记录见 `docs_design/2026-07-27-web-product-experience-and-vue-frontend-design.md`。Vue 3/Vite/TypeScript 源码位于 `web/frontend`，构建产物位于 `agent/web/static` 并随 Python wheel 发布；登录、聊天、Session、五栏设置、渠道连接和中文管理后台共用明暗曜石主题，同时保持现有 API、WebSocket、Session 与 RBAC 兼容。
+- Part 16 Web 产品体验与 Vue 前端工程已实现并进入当前基线，当前活文档是 `docs_design/zhice-agent-part16-web-product-design.md`。Vue 3/Vite/TypeScript 源码位于 `web/frontend`，构建产物位于 `agent/web/static` 并随 Python wheel 发布；登录、注册可用性反馈、移动端动态视口、聊天、Session、五栏设置、渠道连接、按私有域名限制的公安备案展示和中文管理后台保持同一产品口径。
 - Part 17 代码与测试已进入当前基线：Provider 错误分类/有限重试/deadline/cooldown/failover 证据、系统级诊断、MCP 动态可靠性、重启恢复和 `deploy/` 私有镜像部署链均已落地。当前活文档是 `docs_design/zhice-agent-part17-reliability-diagnostics-deployment-design.md`，完整方案记录见 `docs_design/2026-07-29-part17-runtime-reliability-diagnostics-and-deployment-design.md`；本地构建、隔离 smoke、阿里云 ACR 推送、腾讯云按 Digest 运行、Caddy HTTPS、公网健康、认证初始化和容器重启持久化均已真实验收。2026-08-04 又按 `docs_design/2026-08-04-private-registry-cloud-release-pipeline-design.md` 收敛为本地、已有镜像上云和源码完整上云三个入口；三条自动化入口均已使用本机 Git 忽略的私有配置完成真实端到端验收。
-- Milestone 19 智能旅行规划已完成代码落地：复用同一 AgentLoop，组合地图/天气/12306/网页/小红书只读 MCP、正式 `travel-planner` Skill、quick/deep 调研、`TravelPlanV1`、actor-scoped SQLite Store、Travel REST API 和 Vue 专属页面。Milestone 20 可视化工作流也已落地独立 Workflow Runtime、SQLite、APScheduler、固定 DAG 节点、用户连接、REST API 与成熟 Vue Flow 编辑器；页面包含真实 MCP Schema 表单与测试、条件分支端口、拖线补节点、连线插入、撤销/重做、自动布局、变量选择和节点运行时间线。个人邮箱固定使用用户自己的 SMTP 授权码，不接入 Gmail/Microsoft OAuth。当前活文档是 `docs_design/zhice-agent-part20-visual-workflow-scheduler-design.md`。
+- Milestone 19 智能旅行规划与 Milestone 20 可视化工作流均已完成代码落地。工作流使用独立 Workflow Runtime、SQLite、APScheduler、固定 DAG 节点、用户连接、REST API 与 Vue Flow 编辑器；草稿试运行不发布，模板默认只保留结果，外发必须显式选择并复查连接。官方通知发送到验证码确认后的“我的邮箱”，个人代发只支持用户自己的 SMTP 授权码。当前事实见 `docs_design/zhice-agent-part20-visual-workflow-scheduler-design.md`。
 - 按需 Tool 发现与动态 Capability Selection 已提前落地，设计记录见 `docs_design/2026-07-21-on-demand-tool-discovery-design.md`；它是通用运行时能力，不归入 Part 13 的业务委派判断。
 
 Subagent运行配置位于`${ZHICE_AGENT_WORKSPACE}/config/config.yml`的`subagents`分区，仓库模板为`config/config.example.yml`。缺少分区时功能默认关闭；启用后可用裸`/subagent`查看当前模式和Profile。能力不可用时，CLI、本地操作者和Owner会看到真实原因与修复建议；普通Web用户只会看到能力暂时不可用并联系管理员，不暴露内部配置。
@@ -160,7 +161,7 @@ Skill source、MCP 和 Subagent 都是可选扩展：未配置时作为 disabled
 
 工作流页面按用户任务提供五类步骤：开始、获取信息、智能处理、条件分支和发送结果。定时规则由“每天 / 每周 / 每月 / 间隔 / 单次”表单生成；天气只填写地点，火车票只填写出发地、目的地和日期，普通界面不要求经纬度、站码、Cron、MCP 名称或 JSON。当前已验证的只读来源包括 Open-Meteo 天气、高德地点、Tavily 网页、12306 余票和小红书公开笔记；没有经过审核的写操作时，页面不会显示空的“执行操作”。
 
-个人邮箱统一在“设置 → 连接与账号”管理，只支持用户自己的 SMTP 授权码，不接入 Gmail/Microsoft OAuth。工作流定义只保存连接 ID，不保存账号授权码。启用个人邮箱连接前，管理员必须在运行态 `config/.env` 设置 `ZHICE_AGENT_CREDENTIAL_ENCRYPTION_KEY`；用户选择邮箱类型后只需填写邮箱地址和授权码，QQ/163/126 自动配置安全参数，其他或企业邮箱才需要填写管理员提供的服务器设置，发件地址自动使用邮箱地址。平台官方通知邮箱独立使用 `ZHICE_SMTP_HOST`、`ZHICE_SMTP_PORT`、`ZHICE_SMTP_USERNAME`、`ZHICE_SMTP_PASSWORD` 和 `ZHICE_SMTP_FROM`。完整变量和主密钥生成命令见 `config/.env.example`，真实发送只有在“测试发送”和实际收件均成功后才算验收完成。
+“我的邮箱”和“个人代发邮箱”是两条独立连接。“我的邮箱”必须用官方 SMTP 发出的 8 位验证码确认，验证码 10 分钟过期、只能使用一次，连续发送有 60 秒倒计时；官方通知只发到该已验证地址。个人代发只支持用户自己的 SMTP 授权码，不接入 Gmail/Microsoft OAuth；工作流只保存连接 ID，不保存授权码。管理员须配置 `ZHICE_AGENT_CREDENTIAL_ENCRYPTION_KEY` 以及官方 `ZHICE_SMTP_*` 变量。QQ/163/126 自动配置安全参数，其他或企业邮箱才填写服务器设置。完整变量见 `config/.env.example`；Provider accepted 只证明提交成功，真实验收仍要确认收件。
 
 ## QQ 外部渠道
 

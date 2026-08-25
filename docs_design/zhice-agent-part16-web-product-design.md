@@ -2,7 +2,7 @@
 
 > 文档类型：当前活文档
 >
-> 当前状态：已实现并关闭
+> 当前状态：已实现并关闭；后续页面继续复用本 Part 的 Vue、响应式、主题和匿名安全投影基线
 >
 > 日期设计记录：`docs_design/2026-07-27-web-product-experience-and-vue-frontend-design.md`
 >
@@ -95,7 +95,9 @@ FastAPI 继续显式提供三个 SPA 入口。Vue Router 负责页面选择，AP
 
 ### 6.1 登录与注册
 
-桌面端在注册开放时使用品牌区和表单区横向滑动换位；移动端使用同一卡片内容切换。注册策略默认关闭且读取失败 fail closed，普通首页和 QQ 绑定认证页共用同一匿名安全投影。Owner 初始化复用视觉组件，但保留独立 URL 和安全条件。
+桌面端在注册开放时使用品牌区和表单区横向滑动换位；移动端使用同一卡片内容切换，并在 `100dvh` 内自适应短屏，不产生页面级滚动或把主操作挤出视口。注册策略默认关闭且读取失败 fail closed，普通首页和 QQ 绑定认证页共用同一匿名安全投影。格式合法的用户名显示防抖可用性检查，大小写等价的重复账号明确提示且最终仍由服务端唯一约束裁决。Owner 初始化复用视觉组件，但保留独立 URL 和安全条件。
+
+匿名站点配置只在请求 Host 精确命中 private runtime allowlist 时返回公安备案编号、展示文案和固定官方查询 URL；前端仅在登录/注册表单下方展示该安全投影。配置关闭或 Host 不匹配时不渲染，也不泄露 allowlist。
 
 ### 6.2 聊天与 Session
 
@@ -200,3 +202,5 @@ Part 17 负责运行可靠性、系统级诊断、MCP 动态可靠性和私有�
 Part 18 已复用 Part 16 的管理后台结构落地 Skill source 状态页和 Owner-only 服务器 Ops 投影；主 Web 只显示配置化独立 Ops URL，不代理终端字节流或宿主机操作。
 
 Part 19 已复用同一 Vue Router、Pinia、登录、主题、API/WebSocket client 和 RuntimeEvent reducer增加 `/travel`：结构化表单仍发送正常 Session 消息，计划正文通过 actor-scoped API 读取；地图脚本失败时保留文字路线，来源抽屉只安全跳转 HTTP(S)。当前应用口径见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。
+
+Part 20 已复用同一产品壳增加 `/workflows` 与 `/workflows/:workflowId`，并延续响应式断点、可访问状态反馈、连接设置和 typed API/store 边界；工作流领域事实见 `docs_design/zhice-agent-part20-visual-workflow-scheduler-design.md`。

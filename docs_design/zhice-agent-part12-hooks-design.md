@@ -648,7 +648,7 @@ Hook Runtime 与 RuntimeEvent 同批进入 Part 12 Definition of Done；不保�
 
 以上 17 项已满足，Part 12 已关闭。不得再以“外部 Hook Runner 后续实现”或“Skill Progress 后续补齐”重新打开 Part 12。
 
-最终验证：`python -m ruff check .` 与两个前端脚本的 `node --check` 通过；加入单 Hook 显式角色/有效权限豁免后，全量 `python -m pytest -rs --basetemp .tmp/pytest_hook_permission_scope_full` 为 500 passed、1 skipped，跳过项是当前 Windows 环境不支持创建 symlink 的既有只读工具用例。
+当前验证口径：执行 `python -m ruff check .`、全量 `python -m pytest` 和前端 test/lint/typecheck/build；具体通过数以当次命令输出为准，不在活文档固化历史快照。
 
 ## 19. 和其它部分的关系
 

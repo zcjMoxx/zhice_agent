@@ -186,6 +186,8 @@ Session、Memory、用户数据库、Context index、compaction、日志和测�
    Docker Runtime 显式安装 `gateway` WebSocket extra；微信 Sidecar 直接入口使用 Node `pathToFileURL`，并由真实子进程 NDJSON 二维码链覆盖 Linux 入口语义。
    Dockerfile 默认保留 Debian 官方源，同时允许构建脚本或 Compose 显式传入经过白名单检查的 APT 镜像主机；该参数不进入容器运行环境。
    Windows 根目录提供三个 CMD 用户入口；PowerShell 流水线位于 `pipelines/`，底层参数化脚本继续保留在 `scripts/` 供排障和非默认环境使用。
+   私有 `.env` 在 Docker build 前与唯一公开模板按字段全集和顺序校验；MCP 配置检查会阻断 degraded/unavailable；公安备案只从 private runtime 配置读取并纳入正式公网核心烟测。
+   发布成功后仅按当前不可变引用清理同一 ZhiCe-Agent registry 的旧镜像，保留当前和最近一个版本，不运行全局 image/system/volume prune。
 6. 全量 Python 与前端测试、Ruff、lint/typecheck/build、deploy 静态检查和 compose 校验已通过。
 7. Part 17 当时的真实生产验收已关闭；当前真实主站已迁入 Git 忽略的私有 `PublicUrl`。Part 18 新增的独立 Ops、宿主机权威配置和跨 Digest 保留属于新的外部验收项，不能沿用 Part 17 结果自动判定通过。
    QQ 公网部署仍要求启用账号显式设置与私有 `PublicUrl` 对齐的 HTTPS `web_base_url`，避免裸 `/bind` 继承本地 `127.0.0.1` 默认值。
@@ -209,11 +211,8 @@ Part 18 已实现正式 Skill Runtime、Skill source 管理和独立服务器 Op
 
 ## 14. 当前验证状态
 
-- `python -m ruff check .`：通过。
-- 当前全量 Python 回归：`986 passed, 2 skipped`；Ruff 通过。提交前同时修复了 Console 自动配色检测跨测试输出环境缓存导致的 ANSI 串扰。
-- 当前前端测试：`56 passed`；lint、typecheck、production build 均通过。
-- deploy 静态检查与 compose 配置校验：通过。
-- 微信 Sidecar Node 测试：`14 passed`，build 通过；真实子进程覆盖 hello、health、二维码连接与 shutdown。
+- 当前基线执行全量 Python、Ruff、前端 test/lint/typecheck/build、deploy 静态检查与 compose 校验；活文档不固化会随新增用例失真的 passed 数。
+- 微信 Sidecar 执行 Node 测试与 build；真实子进程覆盖 hello、health、二维码连接与 shutdown。
 - 既有 Docker image build/run 基线：通过，镜像内 `websockets=15.0.1`，日志包含 `[weixin] channel ready`，Gateway routes 包含 `/ws`。2026-07-31 新增的可配置 APT 镜像参数已通过静态测试，真实参数化构建由本地部署教学流程继续验收。
 - 私有 registry push 与真实云端 deploy：已完成；云端镜像锁定不可变 Digest，Gateway 只在宿主机 loopback 暴露 10086，公网由 Caddy 80/443 提供 HTTPS。
 - 三入口真实端到端验收：改名前的三条等价流水线全部退出码 `0`；当前 `build-and-deploy-local` 对应 build/smoke/Compose healthy，`deploy-existing-image-to-cloud` 与 `build-and-deploy-cloud` 对应 ACR push、Paramiko 五脚本原子同步、sudo 部署、远端 running/healthy 和云服务器侧公网 HTTPS `status=ok`。

@@ -142,7 +142,7 @@ search_notes
 get_note_detail
 ```
 
-发布、评论、点赞、收藏和删除在 Server Catalog 层不存在。适配器要求受控 upstream URL、可选独立 Authorization、隔离 Cookie volume、进程级限流、结果上限和登录失效降级；所有正文标记为 `untrusted_content`。仓库保留上游项目链接、Apache-2.0 许可证快照和只读改造说明，但不 vendoring 上游可执行文件。
+发布、评论、点赞、收藏和删除在 Server Catalog 层不存在。适配器要求受控 upstream URL、隔离 Cookie volume、进程级限流、结果上限和登录失效降级；upstream 身份只使用 Cookie，不保留或发送独立 Authorization。所有正文标记为 `untrusted_content`。仓库保留上游项目链接、Apache-2.0 许可证快照和只读改造说明，但不 vendoring 上游可执行文件。
 
 Owner 登录管理位于“管理后台 → MCP 与 Skills → 外部平台账号 → 小红书”；`xhs-readonly` 的连接、Catalog、调用统计和服务重启仍位于“MCP 服务监控”。本地扫码由 Cookie 内容稳定更新驱动：登录助手写入后先重载 Gateway-owned sidecar，再通过只读登录 Tool 复检。管理 API 兼容 MCP structured content 与兼容 text content 形成的连续 JSON 文档，仅缓存 authenticated/auth_required/unavailable 等安全状态；Cookie 值、路径、PID、二维码和原始 Tool 输出均不进入前端或审计。
 

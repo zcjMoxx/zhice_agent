@@ -1,4 +1,4 @@
-# App / Web gateway tests
+# App / Web Gateway 测试说明
 
 ## 测试目标
 
@@ -25,6 +25,7 @@
 - 新对话模型预选：登录用户可在无 Session 时只读获取默认模型目录且不创建 Session；偏好写入仍要求 actor-owned Session，前端在首次发送创建 Session 后再落盘草稿预选模型。
 - 空消息、缺失字段和非法 session id 返回 `REQUEST_VALIDATION_FAILED`，字段问题放入安全的 `details.issues`。
 - HTTP 错误统一返回 `error.status/code/message/request_id/details`，body status 与真实 HTTP status 一致，body request_id 与 `X-Request-ID` 一致。
+- 通知邮箱冷却错误映射为 HTTP 429 与 `NOTIFICATION_EMAIL_VERIFICATION_RATE_LIMITED`，并在安全 `details.retry_after_seconds` 中保留前端倒计时所需秒数。
 - runtime 抛出配置、LLM 和未知错误时返回领域化稳定错误码，不暴露堆栈。
 - core 测试只使用 `agent.core.loop` 和 `agent.core.context` 新路径。
 - gateway 测试确认不再保留 `agent/gateway.py` 顶层兼容导出模块。
@@ -42,12 +43,12 @@
 - gateway `--check` 仍只做配置检查，不启动 HTTP 服务。
 - Web/API 层不反向进入 AgentLoop 之外的业务分支。
 
-## Part 7 Turn Coverage
+## 第 7 部分：回合覆盖
 
-- WebRuntime accepts an optional `turn_id` and passes it to AgentLoop.
-- WebSocket accepted, text, done, stopped, and error events carry the aligned turn id.
-- Session history API exposes optional message turn fields.
-- SSE status, delta, done, stopped, and error payloads carry one consistent turn id.
+- WebRuntime 接受可选的 `turn_id`，并将其传递给 AgentLoop。
+- WebSocket 的 accepted、text、done、stopped 和 error 事件携带对齐后的回合 ID。
+- Session 历史 API 公开可选的消息回合字段。
+- SSE 的 status、delta、done、stopped 和 error 载荷携带同一个一致的回合 ID。
 - WS 使用 `runtime_event` 信封转发 RuntimeEvent；SSE 使用 `event: runtime`，`skill.*` 的 `skill_run_id` 也必须原样保留，且均保持旧 text/status/interaction 兼容。
 - 浏览器 RuntimeEvent reducer 按 turn_id + sequence 忽略旧状态，并在 terminal turn Event 清理运行状态。
 - Subagent child RuntimeEvent 按 root session/turn 归并，并按 agent/task 维护独立 sequence 与并行任务状态，不能跨 child 用同一 sequence 覆盖。
@@ -57,19 +58,19 @@
 - Subagent unavailable 且 Session 为 auto 时，普通 Web Turn 注入只返回通用不可用文案的 `delegate_tasks` facade，内部 cause 仅写日志与 trace；它不创建 child，防止模型用其它 Tool 冒充明确的子代理请求。
 - Web LLM-facing ToolProvider 首轮只暴露 `discover_tools`；发现后才按当前 actor 可见集合动态增加 schema，未激活业务 Tool 不能执行。
 
-## Part 8 Logging Coverage
+## 第 8 部分：日志覆盖
 
-- Gateway logging options split Agent lifecycle log, HTTP access log, HTTP server log, and workspace trace log.
-- Terminal Agent log lines use fixed Beijing time `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields` without milliseconds；TTY 下 WARNING 整行使用高亮红色，ERROR/CRITICAL 整行使用红色，普通日志继续按组件着色。
-- Workspace trace writes JSONL with `+08:00` timestamps to Beijing-date `logs/log-YYYY-MM-DD.jsonl`, with `component` and no full internal logger name.
+- Gateway 日志选项分别控制 Agent 生命周期日志、HTTP 访问日志、HTTP 服务日志和工作区追踪日志。
+- 终端 Agent 日志行使用固定的北京时间格式 `[YYYY-MM-DD HH:MM:SS] | LEVEL | component.event | fields`，不包含毫秒；TTY 下 WARNING 整行使用高亮红色，ERROR/CRITICAL 整行使用红色，普通日志继续按组件着色。
+- 工作区追踪使用 `+08:00` 时间戳写入按北京时间日期命名的 `logs/log-YYYY-MM-DD.jsonl`，记录 `component`，但不记录完整的内部 logger 名称。
 - 本地 Ops supervisor 的受控 Gateway child 可在 PIPE 后恢复原终端 ANSI 配色；`NO_COLOR` 仍具有最高优先级。
-- Logging configuration is idempotent and can disable terminal Agent logs while keeping trace on.
-- Preview helpers redact sensitive fields, collapse multiline text, and truncate long values.
-- WebRuntime relies on `turn.start/done` for ordinary chat lifecycle and only keeps Web stop/error, cancel, Session mutation, real model changes, and background Memory extraction events.
-- Tool terminal lines render `TOOL name | START/DONE/FAILED`, use username and turn index, and hide full session/request/tool-call ids while JSONL trace retains them.
-- WebSocket chat does not propagate the derived `ws-{turn_id}` value as a second Agent request identity.
+- 日志配置具有幂等性，可以关闭终端 Agent 日志，同时保留追踪日志。
+- 预览辅助函数会脱敏敏感字段、折叠多行文本并截断过长值。
+- WebRuntime 依赖 `turn.start/done` 表示普通聊天生命周期，只保留 Web stop/error、取消、Session 变更、真实模型变更和后台 Memory 提取事件。
+- Tool 终端行渲染为 `TOOL name | START/DONE/FAILED`，使用用户名和回合序号，隐藏完整的 Session、请求及工具调用 ID，同时在 JSONL 追踪中保留这些字段。
+- WebSocket 聊天不会把派生的 `ws-{turn_id}` 值作为第二个 Agent 请求标识继续传递。
 
-## Part 9 Auth Coverage
+## 第 9 部分：认证覆盖
 
 - Web bootstrap 创建唯一 Owner、设置 cookie 并直接登录；已有普通用户不阻塞 Owner 初始化，已有 Owner 后重复 bootstrap 返回 409。
 - Owner 初始化页面仅通过 `/_setup` 提供；未配置 setup token 或 Owner 已存在时返回 404，普通首页不展示入口。
@@ -101,7 +102,7 @@
 - Web Session 列表标明 Web、CLI、QQ 私聊、QQ群聊来源；QQ群聊在 Web 只读并可派生新的 Web Session。
 - 服务端拒绝 Web 直接向 QQ 群 Session 发送普通消息或 slash command，不能只依赖前端禁用输入框。
 
-## Part 16 Vue Web Product Coverage
+## 第 16 部分：Vue Web 产品覆盖
 
 - Vue 3/Vite/TypeScript、Vue Router、Pinia、Vitest、Vue Test Utils、Lucide Vue 与 CSS Design Tokens 由 `web/frontend` 管理；构建产物提交到 `agent/web/static`。
 - typed API client 保留稳定 HTTP error，typed WebSocket client 保留 hello/message/stop/confirmation/MCP elicitation frame；RuntimeEvent reducer 覆盖乱序、终态和 child 独立 sequence。
@@ -119,14 +120,14 @@
 - 小红书登录检查兼容 MCP structured content 与 text content 形成的连续 JSON 文档；真实 success/OK 结果缓存为 authenticated，页面刷新不再误判为 unavailable。
 - 匿名账号可用性接口只返回布尔值；已存在账号按大小写等价判断，非法格式同样返回不可用且不泄露账号资料。
 
-## Part 18B Skill 与 Ops Web 投影覆盖
+## 第 18B 部分：Skill 与 Ops Web 投影覆盖
 
 - `GET /api/admin/skills/sources`独立要求`skill.sources.read`，只返回持久source状态、安全错误摘要和当前actor可见Skill，不泄露路径、仓库URL或原始stderr。
 - 单source同步继续独立要求`skill.sync`；索引刷新要求source读取权限；两者拒绝非法source名并只记录source、结果和安全错误类型审计。
 - 被显式授予Skill权限的Admin可管理source；普通用户拒绝；`GET /api/admin/operations/terminal`即使对Admin也拒绝，只允许唯一Owner。
 - Ops API只投影`enabled/configured/url/presentation/mode/target_type/target_name`，运行态 endpoint 优先于静态配置；不代理日志、Docker 动作、重启、终端字节流或宿主机认证信息。
 
-## Part 10 Memory Coverage
+## 第 10 部分：Memory 覆盖
 
 - `/memory` 只展示当前 actor 的长期 Memory；Session Summary 和手动提取子命令均已删除。
 - Owner Web 与 CLI 使用全局 Memory，普通用户使用各自目录；Web turn 绑定 Memory Tool、候选策略和 confirmation broker。

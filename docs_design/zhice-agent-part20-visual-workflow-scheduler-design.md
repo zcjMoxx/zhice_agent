@@ -1,64 +1,87 @@
 # ZhiCe-Agent Part 20：可视化工作流、调度与用户连接
 
-> 文档类型：当前活文档
+> 文档类型：当前活文档。本文只描述最新代码基线；带日期设计文档保留当时的方案与实施留痕。
 >
-> 当前状态：WorkflowDefinitionV1、SQLite 真值、不可变发布版本、DAG 校验与执行器、APScheduler 重建、用户连接、邮件 Provider、本人 QQ/微信主动通知 Provider、工作流/连接 REST API、RuntimeEvent 和 Vue Flow 产品页已进入当前代码基线。天气、地点、网页、12306 和小红书只读查询已通过当前普通账号的真实页面测试；个人邮箱已收敛为 SMTP 授权码；QQ 使用官方 C2C 主动文本接口，微信复用 Owner 已绑定账号的最近一对一会话安全引用和持久化 Outbox。发布与立即运行会先保存当前画布，并在必要时生成和发布下一不可变版本，界面明确区分未保存、待发布和已发布状态。
+> 当前状态：Part 20 已完成。独立 Workflow Runtime、SQLite 真值、不可变发布版本、受限 DAG 执行、APScheduler 调度、用户连接、本人邮件/QQ/微信投递、REST API、RuntimeEvent、受限 Node-RED 交换格式和 Vue Flow 产品页均已进入当前代码基线。
 >
-> 日期设计记录：`docs_design/2026-08-10-visual-workflow-scheduler-design.md`、`docs_design/2026-08-21-workflow-overview-detail-navigation-design.md`、`docs_design/2026-08-21-workflow-user-facing-productization-design.md`、`docs_design/2026-08-21-workflow-friendly-tool-input-design.md`、`docs_design/2026-08-22-workflow-product-completion-design.md`、`docs_design/2026-08-22-workflow-smtp-only-email-design.md`、`docs_design/2026-08-22-workflow-readable-output-editor-usability-design.md`、`docs_design/2026-08-22-workflow-qq-active-notification-design.md`
+> 安全边界：工作流不进入聊天 Session，不提供任意代码、Shell/exec、循环、子工作流、完整 Agent 节点或多副本 scheduler。
 
 ## 1. 当前定位
 
-Part 20 是独立于聊天 AgentLoop 的后台自动化运行面：
+Part 20 是独立于聊天 `AgentLoop` 的后台自动化运行面：
 
 ```text
-/workflows workflow overview
-  -> /workflows/:workflowId Vue Flow editor
-  -> owner-scoped Workflow REST API
+/workflows 工作流总览
+  -> /workflows/:workflowId Vue Flow 编辑器
+  -> actor-scoped Workflow REST API
   -> WorkflowRuntime
        -> WorkflowStore (state/workflows.sqlite3)
        -> WorkflowScheduler (APScheduler MemoryJobStore)
-       -> WorkflowExecutor (stable DAG layers)
-       -> fixed node handlers / current providers
+       -> WorkflowExecutor (稳定 DAG 分层执行)
+       -> 固定节点处理器与当前 Provider
 ```
 
-工作流定义、发布版本、计划和运行历史不进入 Session。调度器只负责“何时触发”，Gateway 启动时从 SQLite 重建 active schedule；同一 workspace 只允许一个 scheduler。
+工作流定义、草稿、发布版本、调度状态和运行历史不写入 Session。SQLite 是定义和运行状态真值；APScheduler 只负责“何时触发”，Gateway 启动时从 SQLite 重建 active schedule。
 
-## 2. 已落地边界
+同一 workspace 只允许一个 scheduler。Windows 通过 PID 与进程创建时间识别陈旧锁和 PID 复用；Linux 使用内核持有的文件锁，不信任容器重建后残留的同 PID 文本。部署回滚即使遇到上一个容器被强制移除，也能由新容器安全取得锁。
 
-- `WorkflowDefinitionV1` 固定支持 schedule trigger、MCP Query/Action、LLM Transform、Template、Condition、官方通知、个人邮件、本人 QQ 和本人微信通知节点。
-- 发布前校验节点/边上限、端口、孤立动作、条件分支和有向无环；已发布版本不可覆盖。
-- MCP Query 与 Action 使用独立 allowlist；每次发布和运行重新经过当前 actor、权限、Tool schema 与连接 ownership。
-- LLM Transform 仅调用 `LLMProvider` 转换上游数据，不开放 Tool，不创建聊天 Session。
-- APScheduler 使用固定 `workflow:{workflow_id}`、MemoryJobStore、`max_instances=1`、coalesce 和 misfire grace；支持 date、interval、cron 与 IANA timezone。
-- 个人 SMTP 授权码只经用户连接 Store 和 Provider 使用，以 AES-GCM 加密；API 和运行摘要不返回授权码。
-- 本人 QQ 通知只解析工作流所有者当前生效的绑定，普通界面和工作流 JSON 不包含 `openid`、机器人账号或凭据；发布与运行都会复查绑定、C2C 能力和在线状态。
-- 本人微信通知同样只解析工作流 Owner 当前生效的绑定，不允许填写微信号、联系人或群；发布与运行复查绑定、Adapter 状态和最近入站会话上下文，发送复用微信分段、稳定 delivery id、持久化 Outbox 和恢复机制，Python 侧只保存 Sidecar 安全引用。
-- Vue 页面提供与旅游规划统一应用壳的工作流总览、独立 `/workflows/:workflowId` 详情路由、节点注册目录、可显式拖动/滚轮/方向按钮平移的连线画布、MiniMap、Controls、专用属性表单、变量选择器、拖线补节点、连线插入节点、撤销/重做、自动布局、键盘操作、动作确认、保存/发布/启停/立即运行和节点级运行时间线。普通界面统一使用中文产品文案，不显示 Tool name、schema key、状态枚举或 run/node ID；原始值只在协议和显式高级配置中保留。
+## 2. 领域协议与持久化
 
-## 3. 安全和管理边界
+- `WorkflowDefinitionV1` 固定支持 `schedule_trigger`、`mcp_query`、`mcp_action`、`llm_transform`、`template`、`condition`、`official_notification`、`personal_email`、`qq_notification` 和 `weixin_notification`。
+- 发布前校验节点/边上限、唯一触发器、端口、孤立动作、条件 true/false 分支和有向无环；已发布版本不可覆盖。
+- 修改已发布工作流会创建下一草稿版本；重复保存停留在同一草稿版本，发布相同内容幂等。
+- “保存草稿”“发布并启用”“立即测试”语义分离。立即测试运行最新已保存草稿，不发布、不替换线上版本；发布和运行前端动作会先保存当前画布并处理版本冲突。
+- Store 对运行、节点执行、输入/输出安全摘要、外部投递内容与回执进行 owner-scoped 持久化；缺失或越权统一返回稳定领域错误。
+- 受限 Node-RED 导入/导出只接受智策审核过的固定节点；Function、exec、文件系统、任意 HTTP 等外部节点一律拒绝。认证、所有权、版本和执行仍由智策 Runtime 掌控。
 
-- 普通登录用户可使用本人基础工作流；跨用户读取、修改、执行和连接引用均拒绝。
-- viewer、developer、admin 的内置基线包含个人工作流、调度、自我通知和本人邮箱发送；外部写操作、社交发布和跨用户管理不下放。
-- 管理员可管理异常状态，但不能借管理权限使用他人的个人连接或读取 token。
-- Action、个人邮件、官方通知和本人 QQ/微信通知的 timeout/transport error 不由 DAG 自动重放；QQ Provider 接受只记录 `accepted`，微信仅在 Sidecar 确认且 Outbox 标记 `sent` 后返回成功。
-- 不提供任意 Python、JavaScript、Shell、exec、循环、子工作流、完整 Agent 或多副本 scheduler。
+## 3. Tool、LLM 与数据流
 
-## 4. 运行与验证
+- `GET /api/workflow-tools` 每次按当前 actor 交集计算真实 Tool Catalog、Query/Action allowlist、参数 schema 与 hash；选项不来自静态样例。
+- 发布和运行都重新检查 actor、权限、Tool 是否仍存在、allowlist、schema hash 与连接 ownership。未重新审核的 Action 不可执行。
+- Query 节点可通过 `POST /api/workflow-tools/test` 走真实 `UserScopedToolProvider` 做一次只读预览；Action 节点不提供免确认测试。
+- 天气地点、高德地点、12306 出发到达地和小红书笔记链接使用受限 helper 转成目标 Tool 参数；helper 仍经过 Query allowlist 和当前 actor 权限。
+- Tool 结构化失败归一为鉴权、超时、限流或来源不可用；外部 Action 结果未知时不自动重放。
+- `llm_transform` 只调用 `LLMProvider` 转换唯一直接前驱的不可信数据，不开放 Tool、不创建聊天 Session，并支持受限 JSON Schema 输出。
+- 智能处理与发送节点始终消费画布上的唯一直接前驱；执行器覆盖遗留的陈旧 `source_ref`，避免节点插入后发送旧来源或原始 Provider JSON。
+- `template`、官方通知、个人邮件、QQ 和微信使用统一的“附加说明 + 前序结果”正文组合，并在外发前经共享 Markdown-to-plain renderer 转成可读纯文本。
 
-Python 默认测试覆盖定义、Store、执行、连接加密/ownership、Provider 结果和调度重启恢复。前端执行 `lint`、`typecheck`、Vitest 与生产构建。真实外部 smoke 需要：
+## 4. 调度与运行
 
-- 个人邮箱类型、邮箱地址、授权码及测试收件箱；QQ/163/126 的 SMTP 安全参数自动配置，其他或企业邮箱才展示服务器设置，发件地址由邮箱账号自动生成；
-- Owner 审核进入 Action allowlist 的测试 MCP Tool 与明确允许产生的外部副作用。
-## 编辑器与真实工具目录
+- 调度支持 date、interval、cron 和 IANA timezone；普通界面用“单次 / 每天 / 每周 / 每月 / 间隔”表单生成协议值。
+- APScheduler 使用固定 `workflow:{workflow_id}`、MemoryJobStore、`max_instances=1`、coalesce 和 misfire grace；启动、暂停、恢复与 Gateway 重启都从 SQLite 权威状态收敛。
+- DAG 按稳定拓扑层执行；条件节点只放行命中的分支，取消信号和节点失败写入结构化运行状态。
+- 外部写操作、个人邮件和本人 QQ/微信通知不因 timeout 或 transport error 自动重试；未知外部结果保持 outcome unknown。
+- 运行详情展示节点时间线、实际发送内容的有界安全副本和 Provider 回执。长内容可展开和复制，但凭据、内部 `safe_*` 字段、run/node ID 与原始异常不进入普通界面。
 
-当前编辑器采用 Vue Flow，并吸收本地 FlowGram 参考实现中的节点注册表、schema 表单、history、snap、node panel、drag-line-end、line add button、auto layout、变量引用和运行态反馈模式；没有直接引入 React/FlowGram 包。工作流首页与编辑器分离，支持保存返回、删除、模板创建、画布双向平移、受控缩放、拖线补节点、连线插节点、撤销/重做、自动布局、键盘复制粘贴和条件 true/false 可见端口。Java 参考工程中的画布解析/持久化/策略分层只作为结构对照，Python 侧仍以 WorkflowDefinitionV1、SQLite Store 和独立 DAG Executor 为唯一运行实现。
+## 5. 用户连接与通知
 
-MCP 节点的选项不来自静态示例 JSON。`GET /api/workflow-tools` 每次按当前 Actor 重新交集计算实际注册 Tool 和 Workflow Query/Action allowlist，并返回当前参数 schema 与 hash。发布和运行均要求 schema hash 一致。只读 Query 节点可通过 `POST /api/workflow-tools/test` 走当前 Actor、UserScopedToolProvider 和 allowlist 执行一次真实测试；Action 节点不提供免确认测试。
+- 普通登录用户只管理本人的工作流和连接；管理员不能借跨用户管理权限使用他人的个人连接或读取 token。
+- “我的邮箱”是已验证的本人通知地址。官方 SMTP 发送 8 位验证码，挑战只保存加盐摘要、10 分钟过期、单次消费；连续请求有 60 秒冷却，API 用 `429 NOTIFICATION_EMAIL_VERIFICATION_RATE_LIMITED` 和 `retry_after_seconds` 驱动前端倒计时。
+- 官方通知节点只向当前 owner 已验证的“我的邮箱”发送；缺少官方 SMTP 或未验证地址时保持明确不可用。
+- 个人邮箱只支持用户自己的 SMTP 授权码，以 AES-GCM 加密保存。QQ/163/126 自动配置安全参数，其他或企业邮箱显式填写服务器；工作流只保存 connection id，不保存授权码。
+- 本人 QQ 通知只解析当前 owner 生效的绑定并复查 C2C 能力和在线状态；工作流 JSON 不包含 openid、机器人账号或凭据。
+- 本人微信通知只解析 owner 当前生效的绑定、Adapter 状态和最近一对一入站上下文；发送复用稳定 delivery id、持久化 Outbox 和恢复机制，不接受微信号、联系人或群。
+- 工作流页在窗口重新获得焦点、页面重新可见或连接设置关闭后刷新 capability，避免用户刚完成绑定仍看到陈旧不可用状态；微信状态统一映射为用户可读中文。
 
-新增信息节点不会自动绑定目录第一项，用户必须明确选择天气、车票、地点、网页或小红书等任务。服务来源仅在选中后作为弱提示，中文字段表单集中计算未选能力、schema 变化、必填参数缺失和动作确认等阻塞项；发布与立即运行按钮和“可以发布”状态使用同一前端就绪结果，后端仍执行权威校验。外部写操作仅在当前 actor 的真实 action catalog 与 allowlist 交集非空时出现。
+## 6. Vue Flow 产品交互
 
-默认表单进一步采用任务输入而不是 MCP 协议输入：天气预报只填写地点和可选天数，由隐藏的受限 geocode helper 在每次运行时解析坐标并生成动态日期；历史天气填写地点与日期；小红书搜索使用中文排序/类型选项，详情使用完整笔记链接。适配结果最终仍必须通过目标 MCP schema。Open-Meteo 只读 HTTP 客户端不继承终端代理，避免本机代理导致 TLS 中断。
+- 总览与 `/workflows/:workflowId` 详情路由共用旅行应用壳；编辑器提供节点目录、MiniMap、Controls、专用表单、变量选择、拖线连接、连线插入、撤销/重做、自动布局、复制粘贴和节点运行时间线。
+- 桌面端支持拖动、滚轮、`Alt + 滚轮` 横向移动和方向按钮；移动端支持点击节点后再点目标节点连线、空白右键/双击取消连接、紧凑问题入口和视口内连线插入/删除动作。
+- 节点详情由节点点击或编辑操作打开；不保留脱离画布的“节点详情”图标。开始平移或点空白画布会关闭详情气泡，但不会误取消正常连接模式。
+- 手工保存成功后按钮持续显示“已保存到工作流”确认；画布重新进入且 store 仍持有同一工作流时立即恢复节点，不等待 id 再次变化。
+- 顶部状态统一区分未保存、待发布、已发布和配置问题；移动端用紧凑状态控件打开同一权威问题列表。
+- 模板直接创建可编辑的完整普通节点蓝图。安全默认出口固定为“保留结果”，不会因当前 QQ 可用而静默改成外发；用户必须显式选择官方邮箱、个人邮箱、QQ 或微信并满足连接/同意条件。
+- 普通界面使用中文任务字段，不展示 Tool name、schema key、状态枚举或内部 ID；高级协议值只在显式高级配置中保留。
 
-查询预览最多等待 30 秒，结构化来源错误会映射为鉴权失效、超时、限流或暂不可用的中文提示。智能处理和发送结果节点以画布唯一直接前驱为数据来源，前端不再要求普通用户选择内部变量，执行器也会以真实前驱输出覆盖遗留引用。运行完成后前端重新读取 SQLite 真值；执行记录对外发节点展示发送内容安全摘要和渠道投递回执，长内容在界面截断并可展开/复制，数据库内部的 `safe_*` 字段和敏感凭据不进入普通产品界面。`template`、官方通知、个人邮件、QQ 和微信统一使用“附加说明 + 前序结果”的正文组合规则；外部邮件与通知在调用 Provider 前通过共享 Markdown-to-plain renderer 转为结构清楚的纯文本，避免客户端直接展示 Markdown 标记。
+## 7. 权限与非目标
 
-工作流模板采用可复制的完整蓝图，而不是创建前向导：点击模板会直接创建并打开包含触发、获取、处理和结果出口的全部普通节点与连线。当前用户已绑定 QQ 且渠道在线时，模板默认使用“发送到我的 QQ”；否则保留个人邮箱出口，用户仍可在画布切换为保留结果、通知邮箱或个人邮箱。待配置节点显示明确状态，顶部问题清单可定位到节点；模板生成后可以与空白工作流一样移动、删除、换类型、重连和继续扩展。天气模板的智能处理预置“生成生活建议”，可编辑带伞、穿衣、出行、通勤方式和体感偏好。
+- viewer、developer、admin 的基础权限均可管理本人工作流、调度和自我通知；跨用户读取、修改、执行和连接引用拒绝。
+- MCP Action、个人邮件和本人 QQ/微信需要显式同意时间；发布与每次运行都复查当前授权条件。
+- 不支持任意 Python、JavaScript、Shell、exec、循环、子工作流、分布式队列、完整 Agent 节点、任意收件平台身份或多 Gateway scheduler。
+- 真实外部副作用验收必须使用明确测试账号、收件箱和 allowlist；“Provider accepted”不等于最终送达。
+
+## 8. 验证基线
+
+默认 Python 测试覆盖 schema、Store、草稿/发布/试运行、DAG、调度锁恢复、Tool 输入适配、连接加密与 ownership、通知重检、外部 outcome unknown、Node-RED 限制和稳定 API 错误。前端覆盖 store 冲突恢复、模板默认值、画布连接、移动交互、保存反馈、capability 刷新和运行详情，并执行 lint、typecheck、Vitest 与 production build。
+
+真实外部 smoke 单列执行：只读来源需要对应运行态服务和登录态；官方通知需要已配置官方 SMTP 与真实验证码收件箱；个人邮件需要用户 SMTP 授权码；QQ/微信需要 owner 当前有效绑定与在线上下文；Action 需要 Owner 审核后的真实 allowlist 和明确允许的副作用。

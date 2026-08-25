@@ -8,7 +8,7 @@
 >
 > 设计依据：`docs_design/2026-07-06-next-stage-sequencing-design.md`、`docs_design/2026-07-08-user-auth-permission-boundary-design.md`、`docs_design/2026-07-10-session-model-preference-scope-design.md`、`docs_design/2026-07-10-owner-admin-delegation-design.md`、`docs_design/2026-07-11-password-change-reauthentication-design.md`、`docs_design/2026-07-16-authenticated-user-baseline-capabilities-design.md`
 >
-> 当前状态：第九部分身份与特权边界已落地。登录用户默认拥有账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 等基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。Owner 是 CLI 本地 workspace operator 在 Web 端的登录身份：认证表示不同，但共用全局 workspace、sessions、metadata 和 Memory，不拥有独立的 `contexts/users/{owner_id}`。当前用户管理支持已停用非 Owner 账号的用户名二次确认永久删除；普通自助注册默认关闭并由 Owner 独占控制。Vue 工程化前端已由 Part 16 落地；通用审批流、OAuth/SSO 和多租户仍不在当前范围。
+> 当前状态：第九部分身份与特权边界已落地。登录用户默认拥有账号自身、本人 Session、聊天、模型、安全工具、已安装 Skill、诊断和本人 Memory 等基础能力；RBAC 只保留跨用户管理、系统管理、审计、危险执行和全局 Skill 同步等特权。Owner 是 CLI 本地 workspace operator 在 Web 端的登录身份：认证表示不同，但共用全局 workspace、sessions、metadata 和 Memory，不拥有独立的 `contexts/users/{owner_id}`。当前用户管理支持已停用非 Owner 账号的用户名二次确认永久删除；普通自助注册默认关闭并由 Owner 独占控制，开放后提供匿名、布尔值、大小写等价的用户名可用性检查。Vue 工程化前端已由 Part 16 落地；通用审批流、OAuth/SSO 和多租户仍不在当前范围。
 
 ---
 
@@ -816,7 +816,9 @@ GET/PATCH /api/admin/auth/registration-policy  # Owner only
 
 关闭时前端登录页和 QQ 绑定认证页都不展示注册切换，`POST /api/auth/register` 独立返回 `403 AUTH_REGISTRATION_DISABLED` 并记录拒绝审计，不能通过直接调用接口绕过。管理员手工创建账号不受影响。策略保存在 `auth.sqlite3.auth_settings`，跨 Gateway 和容器重启保留；读取异常 fail closed。
 
-开放后，请求仍只接受 `username`、`password`。服务端令 `display_name = username`，并固定调用 `create_user(..., role_keys=["viewer"])`；客户端额外提交的显示名、角色或权限字段不会改变派生显示名和最终角色。注册成功后创建 HttpOnly cookie 并自动登录，用户可在 Account settings 修改显示名。重复用户名返回 `409 USER_USERNAME_ALREADY_EXISTS`。当前仍未实现验证码、限流、邀请、反滥用和账号验证能力，因此生产公网建议保持关闭，仅在明确时间窗口内开放。
+开放后，请求仍只接受 `username`、`password`。服务端令 `display_name = username`，并固定调用 `create_user(..., role_keys=["viewer"])`；客户端额外提交的显示名、角色或权限字段不会改变派生显示名和最终角色。注册成功后创建 HttpOnly cookie 并自动登录，用户可在 Account settings 修改显示名。重复用户名返回 `409 USER_USERNAME_ALREADY_EXISTS`。
+
+匿名 `GET /api/auth/username-availability` 只返回 `available: bool`：非法格式返回不可用，已存在用户名按大小写等价判断，不返回用户 id、显示名、角色或存在原因。前端在格式合法后延迟 300ms 检查，慢响应不能覆盖新输入；接口不可用时保持“待确认”，最终注册仍由服务端唯一约束裁决。当前仍未实现注册验证码、注册限流、邀请、反滥用和账号验证能力，因此生产公网建议保持关闭，仅在明确时间窗口内开放。
 
 ### 9.3 登录 API
 

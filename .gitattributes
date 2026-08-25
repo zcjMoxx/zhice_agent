@@ -3,3 +3,4 @@ agent/web/static/index.html text eol=lf
 agent/operations/static/*.html text eol=lf
 deploy/scripts/*.sh text eol=lf
 deploy/patches/*.patch text eol=lf
+deploy/ops/*.env text eol=lf

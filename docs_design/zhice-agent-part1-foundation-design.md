@@ -4,13 +4,13 @@
 >
 > 文档类型：阶段活文档。本文档始终按当前代码和当前阶段口径维护。
 >
-> 开发范围：Milestone 0 项目骨架 + Message/Session 基础模型
+> 当前状态：Milestone 0 项目骨架与 Message/Session 基础模型已实现；本文维护当前底座边界，不再作为待开发提案。
 
 ---
 
-## 1. 第一部分要开发什么
+## 1. 第一部分当前交付
 
-第一部分建议开发“可运行底座”，目标是让 ZhiCe-Agent 从空仓库变成一个能启动、能读取配置、能加载 Prompt、能保存会话消息的最小 Python 项目。
+第一部分交付“可运行底座”，使 ZhiCe-Agent 具备启动、配置加载、Prompt 加载和 Session 消息持久化能力。
 
 这一部分不接真实 LLM，也不实现工具调用。它主要为后续 AgentLoop、LLMProvider、ToolRegistry、SkillLoader 打地基。
 
