@@ -18,6 +18,7 @@ from agent.app.runtime import (
     _travel_forecast_window_context,
 )
 from agent.applications.travel.config import TravelConfig
+from agent.applications.travel.drafts import travel_plan_draft_revision
 from agent.applications.travel.service import TravelApplicationService
 from agent.applications.travel.subagents import (
     TRAVEL_FINAL_ROUTE_PROFILE,
@@ -201,6 +202,78 @@ def test_persisted_finalizer_plans_restore_every_valid_tool_call_in_order():
     assert _persisted_travel_finalizer_plans(messages) == plans
 
 
+def test_persisted_finalizer_plans_replay_bounded_repairs_in_order():
+    initial = {"schema_version": "1", "unknowns": ["旧值"]}
+    repaired = {"schema_version": "1", "unknowns": ["新值"]}
+    messages = [
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[{
+                "id": "call-initial",
+                "type": "function",
+                "function": {
+                    "name": "finalize_travel_plan",
+                    "arguments": json.dumps(
+                        {"plan": initial, "selected_candidate_id": "candidate-a"}
+                    ),
+                },
+            }],
+        ),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[{
+                "id": "call-repair",
+                "type": "function",
+                "function": {
+                    "name": "finalize_travel_plan",
+                    "arguments": json.dumps(
+                        {
+                            "draft_revision": travel_plan_draft_revision(initial),
+                            "repairs": [
+                                {"op": "set", "path": "/unknowns/0", "value": "新值"}
+                            ],
+                        }
+                    ),
+                },
+            }],
+        ),
+    ]
+
+    assert _persisted_travel_finalizer_plans(messages) == [initial, repaired]
+    attempts = _persisted_travel_finalizer_attempts(
+        messages,
+        weather_source_verified=False,
+        transit_source_verified=False,
+    )
+    assert [item["plan"] for item in attempts] == [initial, repaired]
+    assert [item["selected_candidate_id"] for item in attempts] == [
+        "candidate-a",
+        "candidate-a",
+    ]
+
+
+def test_persisted_finalizer_attempts_drop_drafts_before_successful_save():
+    plan = {"schema_version": "1", "unknowns": []}
+    messages = [
+        _finalizer_message("call-plan", plan),
+        Message(
+            role="tool",
+            content=json.dumps({"status": "success", "output": '{"status":"success"}'}),
+            name="finalize_travel_plan",
+            tool_call_id="call-plan",
+            metadata={"is_error": False, "code": "OK"},
+        ),
+    ]
+
+    assert _persisted_travel_finalizer_attempts(
+        messages,
+        weather_source_verified=False,
+        transit_source_verified=False,
+    ) == []
+
+
 def test_persisted_finalizer_attempts_only_trust_sources_completed_before_plan():
     weather_plan = {"schema_version": "1", "marker": "weather"}
     route_plan = {"schema_version": "1", "marker": "route"}
@@ -226,11 +299,13 @@ def test_persisted_finalizer_attempts_only_trust_sources_completed_before_plan()
     assert attempts == [
         {
             "plan": weather_plan,
+            "selected_candidate_id": "",
             "live_weather_verified": True,
             "transit_verified": False,
         },
         {
             "plan": route_plan,
+            "selected_candidate_id": "",
             "live_weather_verified": True,
             "transit_verified": True,
         },

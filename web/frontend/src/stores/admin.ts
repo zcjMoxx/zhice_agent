@@ -13,7 +13,7 @@ export const useAdminStore = defineStore("admin", {
     xhsStatus: null as XhsReadonlyAdminStatus | null,
     xhsAction: "" as "" | "check" | "login" | "restart",
     hotelBrowserStatus: null as HotelBrowserAdminStatus | null,
-    hotelBrowserAction: "" as "" | "save" | "login" | "delete",
+    hotelBrowserAction: "" as "" | "check" | "save" | "login" | "delete",
     operationsTerminal: null as OperationsTerminal | null,
     registrationPolicy: null as RegistrationPolicy | null,
     registrationPolicyBusy: false,
@@ -45,6 +45,11 @@ export const useAdminStore = defineStore("admin", {
     async loadMcpStatus() { this.mcpStatus = await api.mcpStatus(); },
     async loadXhsStatus() { this.xhsStatus = await api.xhsAdminStatus(); },
     async loadHotelBrowserStatus() { this.hotelBrowserStatus = await api.hotelBrowserAdminStatus(); },
+    async checkHotelBrowserLogin() {
+      this.hotelBrowserAction = "check";
+      try { this.hotelBrowserStatus = await api.checkHotelBrowserLogin(); }
+      finally { this.hotelBrowserAction = ""; }
+    },
     async checkXhsLogin() {
       this.xhsAction = "check";
       try { this.xhsStatus = await api.checkXhsAdminLogin(); }

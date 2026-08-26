@@ -119,6 +119,7 @@ export const api = {
   startXhsAdminLogin: () => request<XhsReadonlyAdminStatus>("/api/admin/external-platforms/xhs/login", { method: "POST", cache: "no-store" }),
   restartXhsAdminSidecar: () => request<XhsReadonlyAdminStatus>("/api/admin/mcp/xhs-readonly/restart", { method: "POST", cache: "no-store" }),
   hotelBrowserAdminStatus: () => request<HotelBrowserAdminStatus>("/api/admin/external-platforms/ctrip/status", { cache: "no-store" }),
+  checkHotelBrowserLogin: () => request<HotelBrowserAdminStatus>("/api/admin/external-platforms/ctrip/check-login", { method: "POST", cache: "no-store" }),
   saveHotelBrowserCredentials: (username: string, password: string) => request<HotelBrowserAdminStatus>("/api/admin/external-platforms/ctrip/credentials", { method: "PUT", body: JSON.stringify({ username, password }), cache: "no-store" }),
   deleteHotelBrowserCredentials: () => request<HotelBrowserAdminStatus>("/api/admin/external-platforms/ctrip/credentials", { method: "DELETE", cache: "no-store" }),
   startHotelBrowserLogin: () => request<HotelBrowserAdminStatus>("/api/admin/external-platforms/ctrip/login", { method: "POST", cache: "no-store" }),

@@ -1198,6 +1198,10 @@ def test_hotel_browser_credentials_are_owner_only_and_never_returned(tmp_path):
         "/api/admin/external-platforms/ctrip/credentials",
         json={"username": "traveller@example.com", "password": "secret-password"},
     )
+    runtime.hotel_accounts.login_in_progress = False
+    runtime.hotel_accounts.state = "unknown"
+    runtime.hotel_accounts.code = "HOTEL_AUTH_NOT_CHECKED"
+    checked = client.post("/api/admin/external-platforms/ctrip/check-login")
     started = client.post("/api/admin/external-platforms/ctrip/login")
     deleted = client.delete("/api/admin/external-platforms/ctrip/credentials")
 
@@ -1206,9 +1210,11 @@ def test_hotel_browser_credentials_are_owner_only_and_never_returned(tmp_path):
     assert "server_id" not in initial.json()
     assert saved.json()["credential_configured"] is True
     assert saved.json()["account_hint"] == "tr***@example.com"
+    assert checked.json()["state"] == "authenticated"
+    assert checked.json()["code"] == "OK"
     assert started.json()["login_in_progress"] is True
     assert deleted.json()["credential_configured"] is False
-    serialized = initial.text + saved.text + started.text + deleted.text
+    serialized = initial.text + saved.text + checked.text + started.text + deleted.text
     assert "traveller@example.com" not in serialized
     assert "secret-password" not in serialized
     assert str(tmp_path) not in serialized
@@ -1222,12 +1228,15 @@ def test_hotel_browser_credentials_are_owner_only_and_never_returned(tmp_path):
         "/api/admin/external-platforms/ctrip/credentials",
         json={"username": "other", "password": "another-secret"},
     )
+    check_denied = client.post("/api/admin/external-platforms/ctrip/check-login")
 
     assert denied.status_code == 403
     assert denied.json()["error"]["details"] == {"required_role": "owner"}
+    assert check_denied.status_code == 403
     actions = {item["action"] for item in store.list_audit_events(limit=50)}
     assert {
         "external_platform.ctrip.credentials_saved",
+        "external_platform.ctrip.login_checked",
         "external_platform.ctrip.login_started",
         "external_platform.ctrip.credentials_deleted",
     }.issubset(actions)
@@ -1312,6 +1321,8 @@ class _FakeHotelAccountSupervisor:
         self.configured = False
         self.hint = ""
         self.login_in_progress = False
+        self.state = "not_configured"
+        self.code = "HOTEL_CREDENTIALS_NOT_CONFIGURED"
 
     def admin_snapshot(self):
         return {
@@ -1319,16 +1330,12 @@ class _FakeHotelAccountSupervisor:
             "state": (
                 "login_pending"
                 if self.login_in_progress
-                else "unknown"
-                if self.configured
-                else "not_configured"
+                else self.state
             ),
             "code": (
                 "HOTEL_LOGIN_STARTED"
                 if self.login_in_progress
-                else "HOTEL_AUTH_NOT_CHECKED"
-                if self.configured
-                else "HOTEL_CREDENTIALS_NOT_CONFIGURED"
+                else self.code
             ),
             "message": "safe status",
             "credential_store_supported": True,
@@ -1336,6 +1343,7 @@ class _FakeHotelAccountSupervisor:
             "account_hint": self.hint,
             "credentials_updated_at": "2026-08-14T05:00:00+00:00" if self.configured else "",
             "browser_supported": True,
+            "check_in_progress": False,
             "login_supported": True,
             "login_in_progress": self.login_in_progress,
             "login_mode": "password_with_manual_verification_fallback",
@@ -1347,18 +1355,31 @@ class _FakeHotelAccountSupervisor:
         assert password == "secret-password"
         self.configured = True
         self.hint = "tr***@example.com"
+        self.state = "unknown"
+        self.code = "HOTEL_AUTH_RECHECK_PENDING"
         return "HOTEL_CREDENTIALS_SAVED"
+
+    def check_login(self):
+        if not self.configured:
+            return "HOTEL_CREDENTIALS_NOT_CONFIGURED"
+        self.state = "authenticated"
+        self.code = "OK"
+        return "OK"
 
     def start_login(self):
         if not self.configured:
             return "HOTEL_CREDENTIALS_NOT_CONFIGURED"
         self.login_in_progress = True
+        self.state = "login_pending"
+        self.code = "HOTEL_LOGIN_STARTED"
         return "HOTEL_LOGIN_STARTED"
 
     def delete_credentials(self):
         self.configured = False
         self.hint = ""
         self.login_in_progress = False
+        self.state = "not_configured"
+        self.code = "HOTEL_CREDENTIALS_NOT_CONFIGURED"
         return "HOTEL_CREDENTIALS_DELETED"
 
 

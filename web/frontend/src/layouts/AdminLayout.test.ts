@@ -4,6 +4,7 @@ import { createMemoryHistory, createRouter } from "vue-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/stores/auth";
+import { useAdminStore } from "@/stores/admin";
 import AdminLayout from "./AdminLayout.vue";
 
 function response(payload: unknown): Response {
@@ -63,6 +64,7 @@ describe("AdminLayout", () => {
       if (url.startsWith("/api/admin/external-platforms/xhs/status")) return Promise.resolve(response({ platform_id: "xhs", state: "unknown", code: "XHS_AUTH_NOT_CHECKED", message: "not checked", enabled: true, login_supported: true, login_in_progress: false, restart_supported: true, cookie_updated_at: "2026-08-14T04:42:18Z" }));
       if (url.startsWith("/api/admin/external-platforms/ctrip/credentials") && init?.method === "PUT") return Promise.resolve(response({ platform_id: "ctrip", state: "login_pending", code: "HOTEL_LOGIN_STARTED", message: "started", credential_store_supported: true, credential_configured: true, account_hint: "tr***@example.com", credentials_updated_at: "2026-08-14T05:00:00Z", browser_supported: true, login_supported: true, login_in_progress: true, login_mode: "password_with_manual_verification_fallback", last_checked_at: "" }));
       if (url.startsWith("/api/admin/external-platforms/ctrip/credentials") && init?.method === "DELETE") return Promise.resolve(response({ platform_id: "ctrip", state: "not_configured", code: "HOTEL_CREDENTIALS_NOT_CONFIGURED", message: "deleted", credential_store_supported: true, credential_configured: false, account_hint: "", credentials_updated_at: "", browser_supported: true, login_supported: true, login_in_progress: false, login_mode: "password_with_manual_verification_fallback", last_checked_at: "" }));
+      if (url.startsWith("/api/admin/external-platforms/ctrip/check-login")) return Promise.resolve(response({ platform_id: "ctrip", state: "authenticated", code: "OK", message: "logged in", credential_store_supported: true, credential_configured: true, account_hint: "tr***@example.com", credentials_updated_at: "2026-08-14T05:00:00Z", browser_supported: true, check_in_progress: false, login_supported: true, login_in_progress: false, login_mode: "password_headless", last_checked_at: "2026-08-26T08:00:00Z" }));
       if (url.startsWith("/api/admin/external-platforms/ctrip/login")) return Promise.resolve(response({ platform_id: "ctrip", state: "login_pending", code: "HOTEL_LOGIN_STARTED", message: "started", credential_store_supported: true, credential_configured: true, account_hint: "tr***@example.com", credentials_updated_at: "2026-08-14T05:00:00Z", browser_supported: true, login_supported: true, login_in_progress: true, login_mode: "password_with_manual_verification_fallback", last_checked_at: "" }));
       if (url.startsWith("/api/admin/external-platforms/ctrip/status")) return Promise.resolve(response({ platform_id: "ctrip", state: "not_configured", code: "HOTEL_CREDENTIALS_NOT_CONFIGURED", message: "not configured", credential_store_supported: true, credential_configured: false, account_hint: "", credentials_updated_at: "", browser_supported: true, login_supported: true, login_in_progress: false, login_mode: "password_with_manual_verification_fallback", last_checked_at: "" }));
       if (url.startsWith("/api/admin/mcp/status")) return Promise.resolve(response({ status: "ok", catalog_version: 4, generated_at: 1, active_calls: 1, catalog_refresh_count: 2, list_changed_count: 1, reconnect_count: 3, servers: [mcpServer("tavily", { state: "degraded", error_code: "MCP_TRANSPORT_ERROR", call_count: 5, success_count: 3, failure_count: 1, cancelled_count: 1, last_tool_error_code: "MCP_TOOL_TIMEOUT", last_connection_state: "degraded", last_connection_reason_code: "MCP_TRANSPORT_ERROR" }), mcpServer("open-meteo"), mcpServer("amap-maps"), mcpServer("12306"), mcpServer("xhs-readonly", { tool_count: 3 })] }));
@@ -186,9 +188,26 @@ describe("AdminLayout", () => {
     expect((inputs[1].element as HTMLInputElement).value).toBe("");
     expect(card.text()).not.toContain("secret-password");
     expect(card.find(".platform-credential-form").exists()).toBe(false);
-    expect(card.text()).toContain("更新账号密码");
-    await card.findAll(".platform-account-actions button").find((button) => button.text().includes("更新账号密码"))!.trigger("click");
+    expect(card.text()).toContain("管理账号");
+    const admin = useAdminStore();
+    admin.hotelBrowserStatus = {
+      ...admin.hotelBrowserStatus!,
+      state: "authenticated",
+      code: "OK",
+      check_in_progress: false,
+      login_in_progress: false,
+      login_mode: "password_headless",
+    };
+    await flushPromises();
+    await card.findAll(".platform-account-actions button").find((button) => button.text().includes("检查登录"))!.trigger("click");
+    await flushPromises();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/admin/external-platforms/ctrip/check-login",
+      expect.objectContaining({ method: "POST" }),
+    );
+    await card.findAll(".platform-account-actions button").find((button) => button.text().includes("管理账号"))!.trigger("click");
     expect(card.find(".platform-credential-form").exists()).toBe(true);
+    expect(card.text()).toContain("删除凭据");
     mounted.unmount();
   });
 

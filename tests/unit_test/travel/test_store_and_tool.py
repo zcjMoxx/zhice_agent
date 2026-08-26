@@ -6,8 +6,14 @@ from datetime import date
 
 import pytest
 
+import agent.applications.travel.service as travel_service_module
 import agent.applications.travel.tools as travel_tools_module
 from agent.applications.travel.config import TravelConfig
+from agent.applications.travel.drafts import (
+    TravelDraftRepairError,
+    apply_travel_plan_repairs,
+    travel_plan_draft_revision,
+)
 from agent.applications.travel.schemas import TravelPlanV1
 from agent.applications.travel.service import TravelApplicationError, TravelApplicationService
 from agent.applications.travel.store import TravelPlanStore, TravelPlanStoreError
@@ -344,6 +350,383 @@ def test_finalizer_reconciles_persisted_return_train_without_live_ledger():
     assert reconciled["transport_options"][0]["departure"] == plan["transport_options"][0]["departure"]
     assert reconciled["days"][-1]["activities"][-1]["end"] == "14:30"
     assert "60分钟进站缓冲" in reconciled["days"][-1]["fallback_plan"]
+
+
+def test_finalizer_reconciles_all_blank_transport_sources_without_model_retries(tmp_path):
+    resolver = FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path)
+    service = TravelApplicationService(TravelConfig(enabled=True), resolver)
+    actor = _actor("user-a")
+    tool = service.tools_for_actor(actor)[0]
+    plan = plan_payload()
+    estimate = deepcopy(plan["transport_options"][0])
+    estimate.update(
+        {
+            "source": "",
+            "mode": "高铁待复核",
+            "summary": "未开售，使用规划估算",
+            "evidence_ids": [],
+        }
+    )
+    mapped = deepcopy(plan["transport_options"][0])
+    mapped.update(
+        {
+            "name": "高德核验接驳",
+            "mode": "公交",
+            "summary": "按地图结果接驳",
+            "evidence_ids": ["ev-map"],
+        }
+    )
+    mapped.pop("source")
+    preserved = deepcopy(plan["transport_options"][0])
+    preserved.update(
+        {
+            "name": "已有来源",
+            "mode": "步行",
+            "source": "人工确认",
+            "summary": "短距离步行",
+            "evidence_ids": [],
+        }
+    )
+    plan["transport_options"] = [estimate, mapped, preserved]
+
+    result = tool.execute_with_context(
+        {"plan": plan},
+        ToolExecutionContext(
+            actor=actor,
+            session_id="session-a",
+            turn_id="turn-a",
+            turn_index=1,
+            channel="web",
+        ),
+    )
+
+    assert not result.is_error
+    saved = service.get_plan(actor, json.loads(result.output)["plan_id"])
+    assert [item["source"] for item in saved.data["transport_options"]] == [
+        "planning_estimate",
+        "高德地图",
+        "人工确认",
+    ]
+
+
+def test_transport_source_reconciliation_labels_referenced_rail_evidence():
+    plan = {
+        "transport_options": [{"source": "", "evidence_ids": ["ev-rail"]}],
+        "evidence": [
+            {
+                "evidence_id": "ev-rail",
+                "source_type": "official_api",
+                "provider": "铁路 12306",
+                "title": "G8606 实时余票",
+                "source_url": "https://kyfw.12306.cn/otn/leftTicket/init",
+            }
+        ],
+    }
+
+    reconciled = travel_service_module.reconcile_transport_option_sources(plan)
+
+    assert reconciled["transport_options"][0]["source"] == "12306 已核验查询"
+    assert plan["transport_options"][0]["source"] == ""
+
+
+def test_transport_reconciliation_fills_names_deduplicates_without_truncating_draft():
+    options = [
+        {
+            "name": "",
+            "mode": "公交",
+            "from": f"起点 {index}",
+            "to": f"终点 {index}",
+            "source": "",
+            "evidence_ids": [],
+        }
+        for index in range(24)
+    ]
+    options.append(deepcopy(options[0]))
+
+    reconciled = travel_service_module.reconcile_transport_option_sources(
+        {"transport_options": options, "evidence": []}
+    )
+
+    assert len(reconciled["transport_options"]) == 24
+    assert all(item["name"] and item["source"] for item in reconciled["transport_options"])
+    assert len({(item["from"], item["to"]) for item in reconciled["transport_options"]}) == 24
+
+
+def test_service_reconciles_blank_transport_source_at_persistence_boundary(tmp_path):
+    resolver = FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path)
+    service = TravelApplicationService(TravelConfig(enabled=True), resolver)
+    actor = _actor("user-a")
+    plan = plan_payload()
+    plan["transport_options"][0]["source"] = ""
+
+    saved = service.finalize(
+        actor,
+        plan,
+        source_session_id="session-a",
+        source_turn_id="turn-a",
+    )
+
+    assert saved.data["transport_options"][0]["source"] == "planning_estimate"
+
+
+def test_travel_plan_draft_repairs_apply_multiple_operations_without_mutating_source():
+    plan = {
+        "transport_options": [{"name": "", "mode": "高铁"}, {"name": "旧项"}],
+        "unknowns": ["待补"],
+    }
+    revision = travel_plan_draft_revision(plan)
+
+    repaired = apply_travel_plan_repairs(
+        plan,
+        [
+            {"op": "set", "path": "/transport_options/0/name", "value": "G8606"},
+            {"op": "remove", "path": "/transport_options/1"},
+            {"op": "set", "path": "/unknowns/-", "value": "出发前复核"},
+        ],
+    )
+
+    assert revision == travel_plan_draft_revision(plan)
+    assert travel_plan_draft_revision(repaired) != revision
+    assert plan["transport_options"][0]["name"] == ""
+    assert repaired["transport_options"] == [{"name": "G8606", "mode": "高铁"}]
+    assert repaired["unknowns"] == ["待补", "出发前复核"]
+
+
+@pytest.mark.parametrize(
+    ("repair", "code"),
+    [
+        ({"op": "set", "path": "/request/origin", "value": "北京"}, "TRAVEL_PLAN_REPAIR_PATH_DENIED"),
+        ({"op": "remove", "path": "/transport_options/99"}, "TRAVEL_PLAN_REPAIR_PATH_MISSING"),
+        ({"op": "set", "path": "/transport_options/00/name", "value": "x"}, "TRAVEL_PLAN_REPAIR_PATH_INVALID"),
+    ],
+)
+def test_travel_plan_draft_repairs_fail_closed(repair, code):
+    with pytest.raises(TravelDraftRepairError) as caught:
+        apply_travel_plan_repairs(
+            {"transport_options": [{"name": "现有方案"}]},
+            [repair],
+        )
+
+    assert caught.value.code == code
+
+
+def test_finalizer_returns_all_structural_issues_then_accepts_one_batched_repair(tmp_path):
+    resolver = FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path)
+    service = TravelApplicationService(TravelConfig(enabled=True), resolver)
+    actor = _actor("user-a")
+    tool = service.tools_for_actor(actor)[0]
+    invalid = plan_payload()
+    budget = invalid.pop("budget")
+    generated_at = invalid.pop("generated_at")
+    context = ToolExecutionContext(
+        actor=actor,
+        session_id="session-draft",
+        turn_id="turn-draft",
+        turn_index=1,
+        channel="web",
+    )
+
+    failed = tool.execute_with_context({"plan": invalid}, context)
+
+    assert failed.is_error
+    payload = json.loads(failed.output)
+    assert payload["status"] == "repair_required"
+    fields = {item["field"] for item in payload["issues"]}
+    assert {"plan.budget", "plan.generated_at"}.issubset(fields)
+
+    repaired = tool.execute_with_context(
+        {
+            "draft_revision": payload["draft_revision"],
+            "repairs": [
+                {"op": "set", "path": "/budget", "value": budget},
+                {"op": "set", "path": "/generated_at", "value": generated_at},
+            ],
+        },
+        context,
+    )
+
+    assert not repaired.is_error
+    assert json.loads(repaired.output)["plan_id"].startswith("travel-plan-")
+    assert service.source_ledger.plan_attempts("session-draft") == []
+
+
+def test_finalizer_repair_rejects_stale_revision_and_protected_request_path(tmp_path):
+    resolver = FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path)
+    service = TravelApplicationService(TravelConfig(enabled=True), resolver)
+    actor = _actor("user-a")
+    tool = service.tools_for_actor(actor)[0]
+    invalid = plan_payload()
+    invalid.pop("budget")
+    context = ToolExecutionContext(
+        actor=actor,
+        session_id="session-conflict",
+        turn_id="turn-conflict",
+        turn_index=1,
+        channel="web",
+    )
+    failed = tool.execute_with_context({"plan": invalid}, context)
+    revision = json.loads(failed.output)["draft_revision"]
+
+    stale = tool.execute_with_context(
+        {"draft_revision": "sha256:" + "0" * 64, "repairs": []},
+        context,
+    )
+    denied = tool.execute_with_context(
+        {
+            "draft_revision": revision,
+            "repairs": [{"op": "set", "path": "/request/origin", "value": "北京"}],
+        },
+        context,
+    )
+
+    assert stale.metadata["code"] == "TRAVEL_PLAN_DRAFT_CONFLICT"
+    assert stale.metadata["draft_revision"] == revision
+    assert denied.metadata["code"] == "TRAVEL_PLAN_REPAIR_PATH_DENIED"
+
+
+def test_finalizer_durable_draft_blocks_full_resubmit_and_survives_service_restart(tmp_path):
+    resolver = FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path)
+    actor = _actor("user-a")
+    context = ToolExecutionContext(
+        actor=actor,
+        session_id="session-durable-draft",
+        turn_id="turn-durable-draft",
+        turn_index=1,
+        channel="web",
+    )
+    invalid = plan_payload()
+    budget = invalid.pop("budget")
+    first_service = TravelApplicationService(TravelConfig(enabled=True), resolver)
+    failed = first_service.tools_for_actor(actor)[0].execute_with_context(
+        {"plan": invalid}, context
+    )
+    revision = json.loads(failed.output)["draft_revision"]
+
+    restarted_service = TravelApplicationService(TravelConfig(enabled=True), resolver)
+    blocked = restarted_service.tools_for_actor(actor)[0].execute_with_context(
+        {"plan": plan_payload()}, context
+    )
+    repaired = restarted_service.tools_for_actor(actor)[0].execute_with_context(
+        {
+            "draft_revision": revision,
+            "repairs": [{"op": "set", "path": "/budget", "value": budget}],
+        },
+        context,
+    )
+
+    assert blocked.metadata["code"] == "TRAVEL_PLAN_DRAFT_EXISTS"
+    assert blocked.metadata["draft_revision"] == revision
+    assert not repaired.is_error
+    assert restarted_service.get_plan_draft(actor, context.session_id) is None
+
+
+def test_finalizer_repair_cannot_resubmit_candidate_id(tmp_path):
+    resolver = FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path)
+    service = TravelApplicationService(TravelConfig(enabled=True), resolver)
+    actor = _actor("user-a")
+    context = ToolExecutionContext(
+        actor=actor,
+        session_id="session-candidate-draft",
+        turn_id="turn-candidate-draft",
+        turn_index=1,
+        channel="web",
+    )
+    invalid = plan_payload()
+    invalid.pop("budget")
+    failed = service.tools_for_actor(actor)[0].execute_with_context(
+        {"plan": invalid, "selected_candidate_id": "candidate-a"}, context
+    )
+    revision = json.loads(failed.output)["draft_revision"]
+
+    rejected = service.tools_for_actor(actor)[0].execute_with_context(
+        {
+            "draft_revision": revision,
+            "repairs": [],
+            "selected_candidate_id": "candidate-a",
+        },
+        context,
+    )
+
+    assert rejected.metadata["code"] == "TRAVEL_PLAN_DRAFT_CANDIDATE_MISMATCH"
+
+
+def test_final_plan_persistence_rejects_stale_draft_revision(tmp_path):
+    resolver = FilesystemUserContextResolver(tmp_path / "contexts", workspace_dir=tmp_path)
+    service = TravelApplicationService(TravelConfig(enabled=True), resolver)
+    actor = _actor("user-a")
+    first = plan_payload()
+    first["assumptions"] = ["revision one"]
+    initial = service.save_plan_draft(
+        actor,
+        "session-final-cas",
+        first,
+        selected_candidate_id="",
+        expected_revision=None,
+    )
+    second = deepcopy(first)
+    second["assumptions"] = ["revision two"]
+    service.save_plan_draft(
+        actor,
+        "session-final-cas",
+        second,
+        selected_candidate_id="",
+        expected_revision=initial["draft_revision"],
+    )
+
+    with pytest.raises(TravelApplicationError) as caught:
+        service.finalize(
+            actor,
+            plan_payload(),
+            source_session_id="session-final-cas",
+            source_turn_id="turn-final-cas",
+            expected_draft_revision=initial["draft_revision"],
+        )
+
+    assert caught.value.code == "TRAVEL_PLAN_DRAFT_CONFLICT"
+    assert service.list_plans(actor) == []
+
+
+def test_transport_reconciliation_preserves_invalid_items_and_merges_duplicate_evidence():
+    plan = {
+        "transport_options": [
+            {
+                "name": "线路 A",
+                "mode": "公交",
+                "from": "起点",
+                "to": "终点",
+                "source": "模型声称来源",
+                "evidence_ids": ["ev-map"],
+            },
+            {
+                "name": "线路 A 重复",
+                "mode": "公交",
+                "from": "起点",
+                "to": "终点",
+                "source": "另一个错误来源",
+                "evidence_ids": ["ev-web"],
+            },
+            "invalid-item",
+        ],
+        "evidence": [
+            {
+                "evidence_id": "ev-map",
+                "source_type": "official_api",
+                "provider": "高德地图",
+            },
+            {
+                "evidence_id": "ev-web",
+                "source_type": "web_article",
+                "provider": "Tavily",
+            },
+        ],
+    }
+
+    reconciled = travel_service_module.reconcile_transport_option_sources(plan)
+
+    assert len(reconciled["transport_options"]) == 2
+    assert reconciled["transport_options"][0]["evidence_ids"] == ["ev-map", "ev-web"]
+    assert reconciled["transport_options"][0]["source"] == "高德地图 / Tavily"
+    assert reconciled["transport_options"][1] == "invalid-item"
 
 
 def test_structured_ledger_adds_missing_return_direction_from_12306_rows():
@@ -871,6 +1254,7 @@ def test_travel_finalize_inherits_selected_activity_identity_without_forcing_rou
     )
     selected_plan = plan_payload()
     candidate = _candidate_from_plan("balanced", selected_plan, recommended=True)
+    candidate["days"][1]["places"] = candidate["days"][1]["places"][:1]
     service.save_candidate_review(
         actor,
         session_id="session-travel",
@@ -1123,10 +1507,17 @@ def test_travel_finalize_requires_forecast_inside_available_window(tmp_path, mon
         "mcp__open-meteo__get_forecast",
         ToolResult(output='{"daily":{"time":["2026-10-01"]}}', metadata={"code": "MCP_OK"}),
     )
-    for item in plan["weather_summary"]:
+    revision = json.loads(missing_forecast.output)["draft_revision"]
+    historical_weather = deepcopy(plan["weather_summary"])
+    for item in historical_weather:
         item["freshness"] = "historical"
     discarded_forecast = service.tools_for_actor(actor)[0].execute_with_context(
-        {"plan": plan},
+        {
+            "draft_revision": revision,
+            "repairs": [
+                {"op": "set", "path": "/weather_summary", "value": historical_weather}
+            ],
+        },
         ToolExecutionContext(
             actor=actor,
             session_id="session-travel",
@@ -1160,9 +1551,20 @@ def test_travel_finalize_merges_live_weather_from_cross_turn_ledger_attempt(tmp_
             "transit_verified": True,
         }],
     )
+    restored = service.source_ledger.plan_attempts("session-travel")[0]
 
     result = service.tools_for_actor(actor)[0].execute_with_context(
-        {"plan": current},
+        {
+            "draft_revision": restored["draft_revision"],
+            "repairs": [
+                {
+                    "op": "set",
+                    "path": "/weather_summary",
+                    "value": current["weather_summary"],
+                },
+                {"op": "set", "path": "/evidence", "value": current["evidence"]},
+            ],
+        },
         ToolExecutionContext(
             actor=actor,
             session_id="session-travel",
@@ -2148,6 +2550,7 @@ def test_finalize_tool_schema_publishes_strict_request_and_evidence_fields(tmp_p
         route_schema["properties"]["transit_legs"]["items"]["required"]
     )
     assert transport_schema["additionalProperties"] is False
+    assert "source" not in transport_schema["required"]
     assert {"service_name", "departure", "arrival", "price_cny_per_person"}.issubset(
         transport_schema["properties"]
     )
@@ -2224,7 +2627,10 @@ def test_finalize_tool_error_includes_safe_field_path(tmp_path):
 
     assert result.is_error
     assert result.metadata["field"] == "evidence[0].source_url"
-    assert result.output.startswith("evidence[0].source_url:")
+    payload = json.loads(result.output)
+    assert payload["status"] == "repair_required"
+    assert payload["draft_revision"].startswith("sha256:")
+    assert {item["field"] for item in payload["issues"]} >= {"evidence[0].source_url"}
 
 
 def _actor(user_id: str | None) -> ActorContext:

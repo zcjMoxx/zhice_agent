@@ -1,6 +1,6 @@
 # 旅行数据源账号自动登录设计
 
-> 说明：当前代码已将携程账号管理 API 移至 `/api/admin/external-platforms/ctrip/*`，携程保持内置只读 Tool，不作为 MCP Server。管理页当前边界见 `docs_design/2026-08-16-runtime-config-prompt-example-convergence-design.md`。
+> 说明：当前代码已将携程账号管理 API 移至 `/api/admin/external-platforms/ctrip/*`，携程保持内置只读 Tool，不作为 MCP Server。旅行查询不再自动提交密码，启动只做无副作用登录态检查，服务器登录默认使用 headless Chromium；当前边界见 `docs_design/2026-08-26-ctrip-login-state-convergence-design.md` 和 Part 19 活文档。
 
 ## 背景
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+from contextlib import nullcontext
 from datetime import date
 from unittest.mock import MagicMock
 
@@ -87,6 +89,128 @@ def test_hotel_credential_changes_stop_existing_login_first(monkeypatch, tmp_pat
 
     assert configured_when_stopped == [False, True]
     assert store.configured("ctrip") is False
+
+
+def test_hotel_login_check_reads_profile_without_submitting_credentials(monkeypatch, tmp_path):
+    store = EnvironmentPlatformCredentialStore(tmp_path, environ={})
+    store.save("ctrip", "traveller@example.com", "secret-password")
+    monkeypatch.setattr(
+        "agent.applications.travel.hotel_accounts._playwright_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "agent.applications.travel.hotel_accounts.check_ctrip_login",
+        lambda workspace: {
+            "state": "authenticated",
+            "code": "OK",
+            "message": "The Ctrip account is logged in.",
+        },
+    )
+    supervisor = HotelAccountSupervisor(tmp_path, credential_store=store)
+
+    assert supervisor.check_login() == "OK"
+
+    snapshot = supervisor.admin_snapshot()
+    assert snapshot["state"] == "authenticated"
+    assert snapshot["code"] == "OK"
+    assert snapshot["check_in_progress"] is False
+
+
+def test_hotel_startup_check_runs_once_without_blocking(monkeypatch, tmp_path):
+    store = EnvironmentPlatformCredentialStore(tmp_path, environ={})
+    store.save("ctrip", "traveller@example.com", "secret-password")
+    release = threading.Event()
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "agent.applications.travel.hotel_accounts._playwright_available",
+        lambda: True,
+    )
+
+    def checked(workspace):
+        calls.append(workspace)
+        release.wait(timeout=2)
+        return {
+            "state": "auth_required",
+            "code": "HOTEL_AUTH_REQUIRED",
+            "message": "Login required.",
+        }
+
+    monkeypatch.setattr(
+        "agent.applications.travel.hotel_accounts.check_ctrip_login",
+        checked,
+    )
+    supervisor = HotelAccountSupervisor(tmp_path, credential_store=store)
+
+    assert supervisor.start_initial_check() == "HOTEL_AUTH_CHECK_STARTED"
+    assert supervisor.start_initial_check() == "HOTEL_AUTH_CHECK_ALREADY_STARTED"
+    assert supervisor.admin_snapshot()["check_in_progress"] is True
+    release.set()
+    deadline = time.monotonic() + 2
+    while supervisor.admin_snapshot()["check_in_progress"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert len(calls) == 1
+    assert supervisor.admin_snapshot()["code"] == "HOTEL_AUTH_REQUIRED"
+
+
+def test_server_login_helper_defaults_to_headless(monkeypatch, tmp_path):
+    store = EnvironmentPlatformCredentialStore(tmp_path, environ={})
+    store.save("ctrip", "traveller@example.com", "secret-password")
+    commands: list[list[str]] = []
+    process = MagicMock()
+    process.poll.return_value = None
+    process.wait.return_value = 1
+    tree = MagicMock(process=process)
+    monkeypatch.setattr(
+        "agent.applications.travel.hotel_accounts._playwright_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "agent.applications.travel.hotel_accounts._headed_browser_available",
+        lambda: False,
+    )
+
+    def spawned(command, **kwargs):
+        commands.append(command)
+        return tree
+
+    monkeypatch.setattr(
+        "agent.applications.travel.hotel_accounts.ManagedProcessTree.spawn",
+        spawned,
+    )
+    supervisor = HotelAccountSupervisor(tmp_path, credential_store=store)
+
+    assert supervisor.start_login() == "HOTEL_LOGIN_STARTED"
+    assert commands and "--headed" not in commands[0]
+    assert supervisor.admin_snapshot()["login_mode"] == "password_headless"
+
+
+def test_ctrip_query_requires_existing_session_without_password_retry(monkeypatch, tmp_path):
+    context = MagicMock()
+    page = MagicMock()
+    context.pages = [page]
+    monkeypatch.setattr(ctrip, "_exclusive_profile", lambda workspace: nullcontext())
+    monkeypatch.setattr(
+        ctrip,
+        "_persistent_context",
+        lambda workspace, headless: nullcontext(context),
+    )
+    monkeypatch.setattr(ctrip, "_is_logged_in", lambda current_page: False)
+    monkeypatch.setattr(
+        ctrip,
+        "_submit_password_login",
+        lambda *args: pytest.fail("hotel queries must not submit saved credentials"),
+    )
+
+    with pytest.raises(ctrip.HotelBrowserError) as raised:
+        ctrip.search_ctrip_hotels(
+            tmp_path,
+            city="上海",
+            checkin="2026-09-01",
+            checkout="2026-09-02",
+        )
+
+    assert raised.value.code == "HOTEL_AUTH_REQUIRED"
 
 
 def test_ctrip_query_rejects_unsupported_occupancy_before_browser(tmp_path):

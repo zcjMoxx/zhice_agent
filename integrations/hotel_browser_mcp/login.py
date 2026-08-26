@@ -15,11 +15,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--manual-timeout-seconds", type=int, default=300)
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Open a visible browser only when the caller has a desktop display.",
+    )
     args = parser.parse_args()
     try:
         result = login_ctrip(
             args.workspace,
-            headless=False,
+            headless=not args.headed,
             manual_timeout_seconds=max(30, min(args.manual_timeout_seconds, 600)),
         )
     except HotelBrowserError as exc:

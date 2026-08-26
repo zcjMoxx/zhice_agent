@@ -219,17 +219,18 @@ def sudo_deploy(
     port: int,
     public_url: str,
     ops_url: str,
-    skip_external_smoke: bool = False,
+    run_smoke: bool = False,
     timeout_seconds: float = 1200,
 ) -> tuple[str, str]:
     inner = (
         f"sh {shlex.quote(posixpath.join(current_dir, 'deploy.sh'))} "
         f"{shlex.quote(digest)} {port} {shlex.quote(public_url)} {shlex.quote(ops_url)} "
-        f"{'1' if skip_external_smoke else '0'} && "
+        f"{'1' if run_smoke else '0'} && "
         f"sh {shlex.quote(posixpath.join(current_dir, 'ops', 'install.sh'))} "
-        f"{shlex.quote(public_url)} {shlex.quote(ops_url)} && "
-        f"sh {shlex.quote(posixpath.join(current_dir, 'status.sh'))}"
+        f"{shlex.quote(public_url)} {shlex.quote(ops_url)}"
     )
+    if run_smoke:
+        inner += f" && sh {shlex.quote(posixpath.join(current_dir, 'status.sh'))}"
     command = f"sudo -S -p '' sh -c {shlex.quote(inner)}"
     transport = client.get_transport()
     if transport is None:
@@ -327,7 +328,7 @@ def main() -> int:
     deploy_parser.add_argument("--release-id", required=True)
     deploy_parser.add_argument("--digest", required=True)
     deploy_parser.add_argument("--port", type=int, required=True)
-    deploy_parser.add_argument("--skip-external-smoke", action="store_true")
+    deploy_parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
 
     password = ""
@@ -365,16 +366,19 @@ def main() -> int:
                 args.port,
                 public_url,
                 ops_url,
-                args.skip_external_smoke,
+                args.smoke,
             )
-            verified_health_url = verify_public_health(client, public_url)
+            verified_health_url = verify_public_health(client, public_url) if args.smoke else ""
         finally:
             client.close()
         if out:
             sys.stdout.write(out)
         if err:
             sys.stderr.write(err)
-        print(f"Remote public HTTPS health passed: {verified_health_url}")
+        if verified_health_url:
+            print(f"Remote public HTTPS health passed: {verified_health_url}")
+        else:
+            print("Remote deployment smoke skipped by default")
         return 0
     except Exception as exc:
         message = str(exc)

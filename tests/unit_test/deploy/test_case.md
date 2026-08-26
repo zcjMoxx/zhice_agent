@@ -45,8 +45,8 @@
 - `deploy/build-and-deploy-local.cmd` 是根目录双击入口，实际无参数 PowerShell 编排位于 `deploy/pipelines/build-and-deploy-local.ps1`，`deploy/scripts/` 只保留底层脚本；流水线固定串联 Docker 检查、阿里云 APT 构建、`10087` smoke、Compose `--no-build` 更新和有界 health 等待，失败不删除命名卷，也不执行 registry push。
 - `deploy/build-and-deploy-local.cmd` 是 Windows 双击薄入口，只定位并调用同名 pipeline、保留退出码和暂停窗口，不复制 Docker 流程、不提升权限或修改系统 Execution Policy。
 - `deploy/pipelines/deploy-existing-image-to-cloud.ps1` 复用已经存在的 `zhice-agent:local`，不执行 build，默认不重复 smoke；只有显式 `-Smoke` 才调用隔离烟测，然后进入共享云端发布。
-- `deploy/pipelines/build-and-deploy-cloud.ps1` 从当前源码 build、smoke 后调用共享云端发布，不调用本地 Compose；两个云端 CMD 都是指向同名 `pipelines/` 编排的双击薄入口。
-- 两个云端入口共享不可跳过的核心部署验收，并只允许通过 `-SkipExternalSmoke` 跳过告警型外部集成检查；开关经 PowerShell、Paramiko helper 到远端 `deploy.sh` 使用固定 `0/1` 传递。
+- `deploy/pipelines/build-and-deploy-cloud.ps1` 从当前源码 build 后调用共享云端发布，不调用本地 Compose；两个云端 CMD 都是指向同名 `pipelines/` 编排的双击薄入口。
+- 两个云端入口默认跳过本地镜像、XHS readiness、主容器 health、核心工作流、外部依赖和公网 health smoke；只有显式 `-Smoke` 才恢复完整验收，正向开关经 PowerShell、Paramiko helper 到远端 `deploy.sh` 使用固定 `0/1` 传递。
 - `deployment_smoke.py` 使用固定低权限账号经真实 HTTPS API 覆盖工作流创建、读取、草稿更新、发布、执行、结果历史和删除；核心失败保留原错误并触发容器/runtime 回滚，外部高德、Tavily、12306、小红书、LLM、SMTP 检查相互独立并只记录 `warning/skipped`。
 - 12306 外部烟测使用当前 MCP schema 的 `fromStation/toStation` 车站代码与 ISO 次日日期，不再发送旧版中文站名字段。
 - 小红书只读烟测对单次瞬时超时进行一次有界重试，恢复时记录 `passed_after_retry`，连续失败仍保留非回滚告警。

@@ -92,6 +92,20 @@ def test_runtime_confirms_complete_draft_and_rejects_incomplete_state(tmp_path):
     assert ambiguous.value.code == "TRAVEL_LOCATION_CLARIFICATION_REQUIRED"
 
 
+def test_runtime_rejects_planning_when_travel_is_disabled(tmp_path):
+    access = _SessionAccess(channel="travel")
+    runtime = _runtime(tmp_path, access)
+    runtime.travel_service = SimpleNamespace(
+        config=SimpleNamespace(enabled=False),
+    )
+
+    with pytest.raises(TravelApplicationError) as captured:
+        runtime.confirm_travel_planning(_actor(), "travel-disabled", _draft())
+
+    assert captured.value.code == "TRAVEL_DISABLED"
+    assert access.store.metadata == {}
+
+
 def test_candidate_stage_continuation_requires_fixed_three_lane_delegation(tmp_path):
     access = _SessionAccess(channel="travel")
     access.store.update_metadata("travel-a", {"travel_phase": "planning"})

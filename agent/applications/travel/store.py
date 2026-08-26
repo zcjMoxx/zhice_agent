@@ -66,6 +66,26 @@ class TravelCandidateReview:
         }
 
 
+@dataclass(frozen=True)
+class TravelPlanDraft:
+    """Server-owned failed finalizer draft isolated by owner and Session."""
+
+    session_id: str
+    owner_user_id: str
+    revision: str
+    selected_candidate_id: str
+    plan: dict[str, Any]
+    created_at: str
+    updated_at: str
+
+    def to_attempt(self) -> dict[str, Any]:
+        return {
+            "plan": dict(self.plan),
+            "draft_revision": self.revision,
+            "selected_candidate_id": self.selected_candidate_id,
+        }
+
+
 class TravelPlanStoreError(RuntimeError):
     """Structured storage failure with a public-safe code."""
 
@@ -95,6 +115,7 @@ class TravelPlanStore:
         source_session_id: str,
         source_turn_id: str,
         title: str,
+        expected_draft_revision: str | None = None,
     ) -> TravelPlanV1:
         """Insert one already-validated plan, never overwriting another plan id."""
 
@@ -114,6 +135,23 @@ class TravelPlanStore:
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                if expected_draft_revision is not None:
+                    draft = connection.execute(
+                        """
+                        SELECT revision FROM travel_plan_drafts
+                        WHERE session_id=? AND owner_user_id=?
+                        """,
+                        (source_session_id, owner_user_id),
+                    ).fetchone()
+                    if (
+                        draft is None
+                        or str(draft["revision"]) != expected_draft_revision
+                    ):
+                        connection.rollback()
+                        raise TravelPlanStoreError(
+                            "TRAVEL_PLAN_DRAFT_CONFLICT",
+                            "Travel plan draft changed before final persistence.",
+                        )
                 connection.execute(
                     """
                     INSERT INTO travel_plans (
@@ -134,6 +172,10 @@ class TravelPlanStore:
                         now,
                         now,
                     ),
+                )
+                connection.execute(
+                    "DELETE FROM travel_plan_drafts WHERE session_id=? AND owner_user_id=?",
+                    (source_session_id, owner_user_id),
                 )
                 connection.commit()
         except sqlite3.IntegrityError as exc:
@@ -358,6 +400,149 @@ class TravelPlanStore:
         except sqlite3.Error as exc:
             raise TravelPlanStoreError("TRAVEL_SOURCE_UNAVAILABLE", "Candidate review storage is unavailable.") from exc
 
+    def save_draft(
+        self,
+        owner_user_id: str,
+        session_id: str,
+        plan: dict[str, Any],
+        revision: str,
+        selected_candidate_id: str,
+        *,
+        expected_revision: str | None,
+    ) -> TravelPlanDraft:
+        """Create or compare-and-swap one server-owned finalizer draft."""
+
+        if not owner_user_id or not session_id:
+            raise TravelPlanStoreError(
+                "TRAVEL_PLAN_ACCESS_DENIED", "Travel plan draft identity is incomplete."
+            )
+        if not revision.startswith("sha256:") or len(revision) != 71:
+            raise TravelPlanStoreError(
+                "TRAVEL_PLAN_DRAFT_INVALID", "Travel plan draft revision is invalid."
+            )
+        try:
+            encoded = json.dumps(
+                plan, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            )
+        except (TypeError, ValueError) as exc:
+            raise TravelPlanStoreError(
+                "TRAVEL_PLAN_DRAFT_INVALID", "Travel plan draft is not valid JSON."
+            ) from exc
+        now = _utc_now()
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if expected_revision is None:
+                    connection.execute(
+                        """
+                        INSERT INTO travel_plan_drafts (
+                          session_id, owner_user_id, revision, selected_candidate_id,
+                          plan_json, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            owner_user_id,
+                            revision,
+                            selected_candidate_id,
+                            encoded,
+                            now,
+                            now,
+                        ),
+                    )
+                else:
+                    cursor = connection.execute(
+                        """
+                        UPDATE travel_plan_drafts
+                        SET revision=?, selected_candidate_id=?, plan_json=?, updated_at=?
+                        WHERE session_id=? AND owner_user_id=? AND revision=?
+                        """,
+                        (
+                            revision,
+                            selected_candidate_id,
+                            encoded,
+                            now,
+                            session_id,
+                            owner_user_id,
+                            expected_revision,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        connection.rollback()
+                        raise TravelPlanStoreError(
+                            "TRAVEL_PLAN_DRAFT_CONFLICT",
+                            "Travel plan draft changed before the repair was saved.",
+                        )
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise TravelPlanStoreError(
+                "TRAVEL_PLAN_DRAFT_CONFLICT",
+                "A server-owned travel plan draft already exists for this Session.",
+            ) from exc
+        except sqlite3.Error as exc:
+            raise TravelPlanStoreError(
+                "TRAVEL_SOURCE_UNAVAILABLE", "Travel plan draft storage is unavailable."
+            ) from exc
+        saved = self.get_draft(owner_user_id, session_id)
+        if saved is None:
+            raise TravelPlanStoreError(
+                "TRAVEL_SOURCE_UNAVAILABLE", "Travel plan draft storage is unavailable."
+            )
+        return saved
+
+    def get_draft(self, owner_user_id: str, session_id: str) -> TravelPlanDraft | None:
+        """Load one draft only when its trusted owner and Session both match."""
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT session_id, owner_user_id, revision, selected_candidate_id,
+                           plan_json, created_at, updated_at
+                    FROM travel_plan_drafts
+                    WHERE session_id=? AND owner_user_id=?
+                    """,
+                    (session_id, owner_user_id),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise TravelPlanStoreError(
+                "TRAVEL_SOURCE_UNAVAILABLE", "Travel plan draft storage is unavailable."
+            ) from exc
+        if row is None:
+            return None
+        try:
+            plan = json.loads(str(row["plan_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TravelPlanStoreError(
+                "TRAVEL_PLAN_DRAFT_INVALID", "Stored travel plan draft is invalid."
+            ) from exc
+        if not isinstance(plan, dict):
+            raise TravelPlanStoreError(
+                "TRAVEL_PLAN_DRAFT_INVALID", "Stored travel plan draft is invalid."
+            )
+        return TravelPlanDraft(
+            session_id=str(row["session_id"]),
+            owner_user_id=str(row["owner_user_id"]),
+            revision=str(row["revision"]),
+            selected_candidate_id=str(row["selected_candidate_id"]),
+            plan=plan,
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    def clear_draft(self, owner_user_id: str, session_id: str) -> None:
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM travel_plan_drafts WHERE session_id=? AND owner_user_id=?",
+                    (session_id, owner_user_id),
+                )
+                connection.commit()
+        except sqlite3.Error as exc:
+            raise TravelPlanStoreError(
+                "TRAVEL_SOURCE_UNAVAILABLE", "Travel plan draft storage is unavailable."
+            ) from exc
+
     def _initialize(self) -> None:
         try:
             with self._connect() as connection:
@@ -392,6 +577,18 @@ class TravelPlanStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_travel_candidate_reviews_owner
                       ON travel_candidate_reviews(owner_user_id, updated_at DESC);
+                    CREATE TABLE IF NOT EXISTS travel_plan_drafts (
+                      session_id TEXT NOT NULL,
+                      owner_user_id TEXT NOT NULL,
+                      revision TEXT NOT NULL,
+                      selected_candidate_id TEXT NOT NULL,
+                      plan_json TEXT NOT NULL,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      PRIMARY KEY (session_id, owner_user_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_travel_plan_drafts_owner
+                      ON travel_plan_drafts(owner_user_id, updated_at DESC);
                     """
                 )
         except sqlite3.Error as exc:

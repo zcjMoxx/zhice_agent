@@ -12,9 +12,20 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
+from jsonschema import Draft202012Validator
+
+from agent.applications.travel.drafts import (
+    MAX_REPAIR_OPERATIONS,
+    TravelDraftRepairError,
+    apply_travel_plan_repairs,
+)
 from agent.applications.travel.presentation import travel_plan_summary
 from agent.applications.travel.requirements import TravelRequirementDraft
-from agent.applications.travel.service import TravelApplicationError, TravelApplicationService
+from agent.applications.travel.service import (
+    TravelApplicationError,
+    TravelApplicationService,
+    reconcile_transport_option_sources,
+)
 from agent.protocols.tool import ToolExecutionContext, ToolResult
 from agent.tools.base import BaseTool
 
@@ -145,8 +156,8 @@ _ROUTE_SEGMENT_SCHEMA = {
 _TRANSPORT_OPTION_SCHEMA = {
     "type": "object",
     "properties": {
-        "name": {"type": "string"},
-        "mode": {"type": "string"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "mode": {"type": "string", "minLength": 1, "maxLength": 100},
         "from": {"type": "string"},
         "to": {"type": "string"},
         "service_name": {"type": "string"},
@@ -160,7 +171,7 @@ _TRANSPORT_OPTION_SCHEMA = {
         "summary": {"type": "string"},
         "evidence_ids": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["name", "mode", "source", "evidence_ids"],
+    "required": ["name", "mode", "evidence_ids"],
     "additionalProperties": False,
 }
 _STAY_RECOMMENDATION_SCHEMA = {
@@ -560,12 +571,13 @@ class ConfirmAndStartTravelPlanningTool(BaseTool):
 
 
 class FinalizeTravelPlanTool(BaseTool):
-    """Validate and persist a complete TravelPlanV1 for the current actor."""
+    """Validate a first full plan or repair the server-owned failed draft."""
 
     name = "finalize_travel_plan"
     description = (
-        "Validate and save a complete sourced TravelPlanV1 for the current user. "
-        "Call only after travel research, optimization, and quality gates pass."
+        "Validate and save a sourced TravelPlanV1 for the current user. Submit plan only on the "
+        "first attempt. After a repair_required error, submit draft_revision plus all needed "
+        "JSON Pointer repairs without regenerating the complete plan."
     )
     parameters = {
         "type": "object",
@@ -627,8 +639,48 @@ class FinalizeTravelPlanTool(BaseTool):
                 "description": "Candidate confirmed by the user when candidate review was required.",
                 "maxLength": 100,
             },
+            "draft_revision": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "description": "Current server-owned draft revision returned by a failed attempt.",
+            },
+            "repairs": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": MAX_REPAIR_OPERATIONS,
+                "description": "All known corrections for the current draft; never resend plan.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op": {"type": "string", "enum": ["set", "remove"]},
+                        "path": {"type": "string", "minLength": 2, "maxLength": 300},
+                        "value": {},
+                    },
+                    "required": ["op", "path"],
+                    "additionalProperties": False,
+                },
+            },
         },
-        "required": ["plan"],
+        "oneOf": [
+            {
+                "required": ["plan"],
+                "not": {
+                    "anyOf": [
+                        {"required": ["draft_revision"]},
+                        {"required": ["repairs"]},
+                    ]
+                },
+            },
+            {
+                "required": ["draft_revision", "repairs"],
+                "not": {
+                    "anyOf": [
+                        {"required": ["plan"]},
+                        {"required": ["selected_candidate_id"]},
+                    ]
+                },
+            },
+        ],
         "additionalProperties": False,
     }
 
@@ -651,9 +703,64 @@ class FinalizeTravelPlanTool(BaseTool):
     ) -> ToolResult:
         """Use trusted actor/session/turn facts and emit one plan-ready event."""
 
-        if not isinstance(args, dict) or set(args) - {"plan", "selected_candidate_id"} or "plan" not in args:
-            return _error("TRAVEL_PLAN_SCHEMA_INVALID", "A single plan object is required.")
-        raw_plan = args["plan"]
+        allowed = {"plan", "selected_candidate_id", "draft_revision", "repairs"}
+        if not isinstance(args, dict) or set(args) - allowed:
+            return _error("TRAVEL_PLAN_SCHEMA_INVALID", "Finalizer arguments are invalid.")
+        has_plan = "plan" in args
+        has_repairs = "draft_revision" in args or "repairs" in args
+        if has_plan == has_repairs:
+            return _error(
+                "TRAVEL_PLAN_SCHEMA_INVALID",
+                "Submit either the first complete plan or draft_revision with repairs.",
+            )
+        try:
+            durable_draft = self.service.get_plan_draft(context.actor, context.session_id)
+        except TravelApplicationError as exc:
+            return _application_tool_error(exc)
+        cached_attempts = self.service.source_ledger.plan_attempts(context.session_id)
+        latest = durable_draft or (cached_attempts[0] if cached_attempts else None)
+        selected_candidate_id = str(args.get("selected_candidate_id") or "").strip()
+        if has_plan:
+            if latest is not None:
+                return _draft_error(
+                    "TRAVEL_PLAN_DRAFT_EXISTS",
+                    "A failed server-owned draft already exists; repair it instead of resending plan.",
+                    draft_revision=str(latest.get("draft_revision") or ""),
+                )
+            raw_plan = args["plan"]
+            expected_revision: str | None = None
+        else:
+            if "selected_candidate_id" in args:
+                return _draft_error(
+                    "TRAVEL_PLAN_DRAFT_CANDIDATE_MISMATCH",
+                    "A repair must reuse the candidate already bound to the server-owned draft.",
+                    draft_revision=str((latest or {}).get("draft_revision") or ""),
+                )
+            if latest is None:
+                return _error(
+                    "TRAVEL_PLAN_DRAFT_MISSING",
+                    "No failed server-owned travel plan draft is available; submit the first complete plan.",
+                )
+            latest_revision = str(latest.get("draft_revision") or "")
+            supplied_revision = str(args.get("draft_revision") or "").strip()
+            if supplied_revision != latest_revision:
+                return _draft_error(
+                    "TRAVEL_PLAN_DRAFT_CONFLICT",
+                    "Travel plan draft changed; apply repairs to the latest revision.",
+                    draft_revision=latest_revision,
+                )
+            inherited_candidate_id = str(latest.get("selected_candidate_id") or "").strip()
+            selected_candidate_id = inherited_candidate_id
+            expected_revision = latest_revision if durable_draft is not None else None
+            try:
+                raw_plan = apply_travel_plan_repairs(latest["plan"], args.get("repairs"))
+            except TravelDraftRepairError as exc:
+                return _draft_error(
+                    exc.code,
+                    exc.message,
+                    field=exc.field,
+                    draft_revision=latest_revision,
+                )
         if isinstance(raw_plan, dict):
             raw_plan = _coerce_plan_route_numeric_strings(raw_plan)
             raw_plan = _sanitize_plan_evidence_urls(raw_plan)
@@ -687,15 +794,45 @@ class FinalizeTravelPlanTool(BaseTool):
                 )
                 raw_plan = _reconcile_observed_stay_budget(raw_plan)
                 raw_plan = _reconcile_persisted_transport_envelope(raw_plan)
+        attempt: dict[str, Any] | None = None
+        if isinstance(raw_plan, dict):
+            raw_plan = reconcile_transport_option_sources(raw_plan)
+            try:
+                attempt = self.service.save_plan_draft(
+                    context.actor,
+                    context.session_id,
+                    raw_plan,
+                    selected_candidate_id=selected_candidate_id,
+                    expected_revision=expected_revision,
+                )
+            except TravelApplicationError as exc:
+                if exc.code == "TRAVEL_PLAN_DRAFT_CONFLICT":
+                    try:
+                        newest = self.service.get_plan_draft(context.actor, context.session_id)
+                    except TravelApplicationError as refresh_exc:
+                        return _application_tool_error(refresh_exc)
+                    return _draft_error(
+                        exc.code,
+                        exc.message,
+                        draft_revision=str((newest or {}).get("draft_revision") or ""),
+                    )
+                return _application_tool_error(exc)
+            structural_issues = _plan_schema_issues(raw_plan)
+            if structural_issues:
+                return _repair_required_payload(
+                    code="TRAVEL_PLAN_SCHEMA_INVALID",
+                    message="Travel plan draft has structural issues.",
+                    issues=structural_issues,
+                    attempt=attempt,
+                )
+        if context.channel == "travel":
             research_error = _research_completion_error(
                 self.service.source_ledger.snapshot(context.session_id),
                 raw_plan,
             )
             if research_error is not None:
-                if isinstance(raw_plan, dict):
-                    self.service.source_ledger.remember_plan_attempt(
-                        context.session_id, raw_plan
-                    )
+                if attempt is not None:
+                    return _research_error_with_draft(research_error, attempt)
                 return research_error
         try:
             plan = self.service.finalize(
@@ -703,14 +840,27 @@ class FinalizeTravelPlanTool(BaseTool):
                 raw_plan,
                 source_session_id=context.session_id,
                 source_turn_id=context.turn_id,
-                selected_candidate_id=str(args.get("selected_candidate_id") or "").strip(),
+                selected_candidate_id=selected_candidate_id,
                 require_candidate_review=context.channel == "travel",
+                expected_draft_revision=(
+                    str(attempt.get("draft_revision") or "")
+                    if attempt is not None
+                    else None
+                ),
             )
         except TravelApplicationError as exc:
-            if isinstance(raw_plan, dict):
-                self.service.source_ledger.remember_plan_attempt(
-                    context.session_id, raw_plan
+            if exc.code == "TRAVEL_PLAN_DRAFT_CONFLICT":
+                try:
+                    newest = self.service.get_plan_draft(context.actor, context.session_id)
+                except TravelApplicationError as refresh_exc:
+                    return _application_tool_error(refresh_exc)
+                return _draft_error(
+                    exc.code,
+                    exc.message,
+                    draft_revision=str((newest or {}).get("draft_revision") or ""),
                 )
+            if attempt is not None and exc.status_code < 500:
+                return _repair_required_error(exc, raw_plan, attempt)
             metadata = {"code": exc.code, "tool_name": self.name}
             if exc.field:
                 metadata["field"] = exc.field
@@ -1465,6 +1615,166 @@ def _candidate_budget_items(value: object) -> list[dict[str, Any]]:
             }
         )
     return result
+
+def _repair_required_error(
+    exc: TravelApplicationError,
+    raw_plan: dict[str, Any],
+    attempt: dict[str, Any],
+) -> ToolResult:
+    issues = _plan_schema_issues(raw_plan)
+    domain_issue = {
+        "field": exc.field or "plan",
+        "message": exc.message,
+    }
+    if domain_issue not in issues:
+        issues.append(domain_issue)
+    return _repair_required_payload(
+        code=exc.code,
+        message=exc.message,
+        issues=issues,
+        attempt=attempt,
+        field=exc.field,
+    )
+
+
+def _repair_required_payload(
+    *,
+    code: str,
+    message: str,
+    issues: list[dict[str, str]],
+    attempt: dict[str, Any],
+    field: str = "",
+) -> ToolResult:
+    revision = str(attempt.get("draft_revision") or "")
+    payload = {
+        "status": "repair_required",
+        "code": code,
+        "draft_revision": revision,
+        "issues": issues[:80],
+        "repair_mode": "json_pointer",
+        "message": (
+            "Submit draft_revision and one repairs array containing all known corrections; "
+            "do not resend the complete plan."
+        ),
+    }
+    metadata: dict[str, Any] = {
+        "code": code,
+        "tool_name": FinalizeTravelPlanTool.name,
+        "draft_revision": revision,
+        "issues": issues[:80],
+    }
+    if field:
+        metadata["field"] = field
+    elif message:
+        metadata["message"] = message
+    return ToolResult(
+        output=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        is_error=True,
+        metadata=metadata,
+    )
+
+
+def _research_error_with_draft(
+    result: ToolResult,
+    attempt: dict[str, Any],
+) -> ToolResult:
+    revision = str(attempt.get("draft_revision") or "")
+    metadata = dict(result.metadata)
+    metadata["draft_revision"] = revision
+    payload = {
+        "status": "research_required",
+        "code": str(metadata.get("code") or "TRAVEL_RESEARCH_INCOMPLETE"),
+        "draft_revision": revision,
+        "message": result.output,
+        "next": (
+            "Complete only the requested research lane, then call finalize_travel_plan with "
+            "this draft_revision and repairs (an empty array is allowed). Do not resend plan."
+        ),
+    }
+    return ToolResult(
+        output=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        is_error=True,
+        metadata=metadata,
+    )
+
+
+def _plan_schema_issues(raw_plan: dict[str, Any]) -> list[dict[str, str]]:
+    schema = FinalizeTravelPlanTool.parameters["properties"]["plan"]
+    issues: list[dict[str, str]] = []
+    for error in sorted(
+        Draft202012Validator(schema).iter_errors(raw_plan),
+        key=lambda item: tuple(str(part) for part in item.absolute_path),
+    ):
+        path = list(error.absolute_path)
+        if error.validator == "required" and isinstance(error.validator_value, list):
+            missing = [key for key in error.validator_value if key not in error.instance]
+            for key in missing:
+                issue = {
+                    "field": _plan_issue_path([*path, str(key)]),
+                    "message": f"'{key}' is a required property",
+                }
+                if issue not in issues:
+                    issues.append(issue)
+                if len(issues) >= 79:
+                    return issues
+            continue
+        issue = {"field": _plan_issue_path(path), "message": error.message}
+        if issue not in issues:
+            issues.append(issue)
+        if len(issues) >= 79:
+            break
+    return issues
+
+
+def _plan_issue_path(parts: list[Any]) -> str:
+    rendered = "plan"
+    for part in parts:
+        if isinstance(part, int):
+            rendered += f"[{part}]"
+        else:
+            rendered += f".{part}"
+    return rendered
+
+
+def _draft_error(
+    code: str,
+    message: str,
+    *,
+    draft_revision: str = "",
+    field: str = "",
+) -> ToolResult:
+    payload = {
+        "status": "error",
+        "code": code,
+        "message": message,
+    }
+    metadata: dict[str, Any] = {"code": code, "tool_name": FinalizeTravelPlanTool.name}
+    if draft_revision:
+        payload["draft_revision"] = draft_revision
+        metadata["draft_revision"] = draft_revision
+    if field:
+        payload["field"] = field
+        metadata["field"] = field
+    return ToolResult(
+        output=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        is_error=True,
+        metadata=metadata,
+    )
+
+
+def _application_tool_error(exc: TravelApplicationError) -> ToolResult:
+    metadata: dict[str, Any] = {
+        "code": exc.code,
+        "tool_name": FinalizeTravelPlanTool.name,
+    }
+    if exc.field:
+        metadata["field"] = exc.field
+    return ToolResult(
+        output=exc.message,
+        is_error=True,
+        metadata=metadata,
+    )
+
 
 def _error(code: str, message: str) -> ToolResult:
     return ToolResult(

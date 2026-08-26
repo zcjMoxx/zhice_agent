@@ -227,6 +227,7 @@ def test_private_env_field_contract_is_checked_before_image_build() -> None:
     assert build_script.index("function Get-DotEnvKeys") < build_script.index(
         '$modelsPath = Join-Path $privateRoot "models.json"'
     )
+    assert 'Read-DotEnvValue -Path $privateEnvPath -Name "ZHICE_DEPLOY_SMOKE_' not in build_script
 
 
 def test_compose_persists_runtime_channel_and_xhs_state_only() -> None:
@@ -496,14 +497,16 @@ def test_cloud_entrypoints_separate_existing_image_and_full_release() -> None:
 
     assert '$imageName = "zhice-agent"' in full
     assert '$imageTag = "local"' in full
+    assert "[switch]$Smoke" in full
     assert "& $buildScript" in full
-    assert "& $smokeScript" in full
+    assert full.index("if ($Smoke)") < full.index("& $smokeScript")
     assert "& $releaseScript" in full
+    assert "-Smoke:$Smoke" in full
     assert "docker compose" not in full
 
     assert r".\deploy\pipelines\deploy-existing-image-to-cloud.ps1" in readme
     assert r".\deploy\pipelines\build-and-deploy-cloud.ps1" in readme
-    assert "默认不再次 smoke" in readme
+    assert "均默认跳过" in readme
 
 
 def test_shared_cloud_release_uses_paramiko_digest_and_https() -> None:
@@ -534,7 +537,8 @@ def test_shared_cloud_release_uses_paramiko_digest_and_https() -> None:
     assert "Paramiko is unavailable" in script
     assert '$remoteDeployArgs = @("--config", $ConfigPath, "deploy"' in script
     assert '"--ops-dir", $opsRoot' in script
-    assert '"--skip-external-smoke"' in script
+    assert '"--smoke"' in script
+    assert "if ($Smoke)" in script
     assert "ssh @" not in script
     assert "scp @" not in script
     assert 'Invoke-RestMethod -UseBasicParsing -Uri "${publicUrl}/health"' in script
@@ -542,6 +546,7 @@ def test_shared_cloud_release_uses_paramiko_digest_and_https() -> None:
     assert "password=" not in script.lower()
     assert "Local public HTTPS health passed" in script
     assert "remote public HTTPS health already passed" in script
+    assert "Skipping container, workflow, external service, and public health smoke by default" in script
     assert 'throw "Public health check failed' not in script
 
 
@@ -566,6 +571,7 @@ def test_remote_ops_helper_keeps_password_out_of_process_arguments() -> None:
     assert "sh -n" in helper
     assert "mv -Tf" in helper
     assert "def verify_public_health" in helper
+    assert 'deploy_parser.add_argument("--smoke", action="store_true")' in helper
     assert 'PYTHON_SCRIPT_NAMES = ("deployment_smoke.py",)' in helper
     assert "curl --fail --silent --show-error --max-time 20 --" in helper
     assert helper.index("sudo_deploy(") < helper.index("verify_public_health(")
@@ -598,6 +604,8 @@ def test_remote_operations_scripts_have_safe_maintenance_semantics() -> None:
     assert "rm -f -- /state/workflow-scheduler.lock" in deploy
     assert "rollback\n  rollback_xhs" in deploy
     assert "deployment_smoke.py" in deploy
+    assert 'if [ "$RUN_SMOKE" -eq 1 ]; then' in deploy
+    assert "Container readiness, workflow, external service, and public health smoke skipped by default" in deploy
     assert deploy.index("deployment_smoke.py") < deploy.index('docker rm "$PREVIOUS_NAME"')
     assert "prune_success_history" in deploy
     assert "sed -n '6,$p'" in deploy

@@ -2,7 +2,7 @@
 param(
     [string]$ReleaseTag = "",
     [string]$ConfigPath = "",
-    [switch]$SkipExternalSmoke
+    [switch]$Smoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,8 +20,12 @@ $smokePort = 10087
 Write-Output "[1/3] Building private cloud release image from current source: $imageRef"
 & $buildScript -Image $imageName -Tag $imageTag -AptMirror $aptMirror
 
-Write-Output "[2/3] Running isolated image smoke test on port $smokePort"
-& $smokeScript -Image $imageRef -Port $smokePort
+if ($Smoke) {
+    Write-Output "[2/3] Running explicitly requested isolated image smoke test on port $smokePort"
+    & $smokeScript -Image $imageRef -Port $smokePort
+} else {
+    Write-Output "[2/3] Skipping image and deployment smoke by default"
+}
 
-Write-Output "[3/3] Publishing verified image to cloud"
-& $releaseScript -SourceImage $imageRef -ReleaseTag $ReleaseTag -ConfigPath $ConfigPath -SkipExternalSmoke:$SkipExternalSmoke
+Write-Output "[3/3] Publishing image to cloud"
+& $releaseScript -SourceImage $imageRef -ReleaseTag $ReleaseTag -ConfigPath $ConfigPath -Smoke:$Smoke

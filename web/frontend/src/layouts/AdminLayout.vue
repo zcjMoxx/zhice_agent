@@ -184,6 +184,7 @@ async function loadTab(next: string) {
       if (auth.isOwner) loads.push(admin.loadXhsStatus(), admin.loadHotelBrowserStatus());
       await Promise.all(loads);
       convergeXhsAdminStatus();
+      convergeHotelAdminStatus();
     }
     if (next === "monitor") {
       const loads: Promise<unknown>[] = [];
@@ -435,9 +436,25 @@ async function saveHotelCredentials() {
     actionStatus.value = admin.hotelBrowserStatus?.login_in_progress
       ? tr("凭据已保存到运行配置，正在自动登录携程", "Credentials were saved to runtime configuration and Ctrip login is running")
       : hotelActionMessage(admin.hotelBrowserStatus?.code || "HOTEL_LOGIN_START_FAILED");
-    if (admin.hotelBrowserStatus?.login_in_progress) watchHotelLogin();
+    if (admin.hotelBrowserStatus?.login_in_progress) watchHotelStatus();
   } catch (error) {
     failure.value = errorMessage(error);
+  }
+}
+async function checkHotelLogin(silent = false) {
+  if (!silent) {
+    failure.value = "";
+    actionStatus.value = "";
+  }
+  try {
+    await admin.checkHotelBrowserLogin();
+    if (!silent) {
+      actionStatus.value = admin.hotelBrowserStatus?.state === "authenticated"
+        ? tr("携程账号已登录", "Ctrip account is logged in")
+        : hotelActionMessage(admin.hotelBrowserStatus?.code || "HOTEL_AUTH_CHECK_FAILED");
+    }
+  } catch (error) {
+    if (!silent) failure.value = errorMessage(error);
   }
 }
 async function startHotelLogin() {
@@ -449,8 +466,10 @@ async function startHotelLogin() {
       failure.value = hotelActionMessage(admin.hotelBrowserStatus?.code || "HOTEL_LOGIN_START_FAILED");
       return;
     }
-    actionStatus.value = tr("正在使用已保存凭据登录；需要验证时会保留可见浏览器", "Signing in with saved credentials; a visible browser remains open if verification is required");
-    watchHotelLogin();
+    actionStatus.value = admin.hotelBrowserStatus.login_mode === "password_headless"
+      ? tr("正在服务器浏览器中使用已保存凭据登录", "Signing in with saved credentials in the server browser")
+      : tr("正在使用已保存凭据登录；需要验证时会保留可见浏览器", "Signing in with saved credentials; a visible browser remains open if verification is required");
+    watchHotelStatus();
   } catch (error) { failure.value = errorMessage(error); }
 }
 async function deleteHotelCredentials() {
@@ -468,22 +487,41 @@ async function deleteHotelCredentials() {
     actionStatus.value = tr("已删除保存的携程账号密码", "Saved Ctrip credentials were deleted");
   } catch (error) { failure.value = errorMessage(error); }
 }
-function watchHotelLogin() {
+function convergeHotelAdminStatus() {
+  if (admin.hotelBrowserStatus?.check_in_progress || admin.hotelBrowserStatus?.login_in_progress) {
+    watchHotelStatus(true);
+  }
+}
+function watchHotelStatus(silent = false) {
   if (hotelLoginTimer) clearInterval(hotelLoginTimer);
   hotelLoginTimer = setInterval(async () => {
     if (admin.hotelBrowserAction) return;
     try {
       await admin.loadHotelBrowserStatus();
-      if (admin.hotelBrowserStatus?.login_in_progress) return;
+      if (admin.hotelBrowserStatus?.check_in_progress || admin.hotelBrowserStatus?.login_in_progress) return;
       if (hotelLoginTimer) clearInterval(hotelLoginTimer);
       hotelLoginTimer = undefined;
-      actionStatus.value = admin.hotelBrowserStatus?.state === "authenticated"
-        ? tr("携程账号登录成功，后续查询会自动复用", "Ctrip login succeeded and will be reused for later queries")
-        : hotelActionMessage(admin.hotelBrowserStatus?.code || "HOTEL_LOGIN_FAILED");
+      if (!silent) {
+        actionStatus.value = admin.hotelBrowserStatus?.state === "authenticated"
+          ? tr("携程账号登录成功，后续查询会自动复用", "Ctrip login succeeded and will be reused for later queries")
+          : hotelActionMessage(admin.hotelBrowserStatus?.code || "HOTEL_LOGIN_FAILED");
+      }
     } catch {
       // Explicit actions continue to use the normal page error surface.
     }
   }, 2500);
+}
+function hotelPrimaryIsCheck() {
+  return ["unknown", "authenticated"].includes(admin.hotelBrowserStatus?.state || "unknown");
+}
+function hotelPrimaryLabel() {
+  if (admin.hotelBrowserStatus?.check_in_progress || admin.hotelBrowserAction === "check") return tr("检查中…", "Checking…");
+  if (admin.hotelBrowserStatus?.login_in_progress || admin.hotelBrowserAction === "login") return tr("登录中…", "Signing in…");
+  return hotelPrimaryIsCheck() ? tr("检查登录", "Check login") : tr("使用已保存凭据登录", "Sign in with saved credentials");
+}
+async function runHotelPrimaryAction() {
+  if (hotelPrimaryIsCheck()) await checkHotelLogin();
+  else await startHotelLogin();
 }
 function hotelStateLabel(value: string | undefined) {
   return ({ authenticated: tr("已登录", "Logged in"), auth_required: tr("需要验证", "Verification required"), login_pending: tr("登录中", "Signing in"), not_configured: tr("未配置", "Not configured"), unavailable: tr("不可用", "Unavailable"), unknown: tr("未检查", "Not checked") } as Record<string, string>)[value || "unknown"];
@@ -494,9 +532,15 @@ function hotelActionMessage(code: string) {
     HOTEL_CREDENTIAL_STORE_UNAVAILABLE: tr("运行配置中的凭据保存不可用", "Runtime environment credential storage is unavailable"),
     HOTEL_CREDENTIALS_EXTERNALLY_MANAGED: tr("凭据由服务器环境变量或部署 Secret 管理，请在部署配置中修改", "Credentials are managed by environment variables or deployment Secrets; update the deployment configuration"),
     HOTEL_CREDENTIALS_NOT_CONFIGURED: tr("请先保存携程账号密码", "Save the Ctrip account credentials first"),
-    HOTEL_MANUAL_VERIFICATION_REQUIRED: tr("携程要求验证码或安全验证，请在弹出的浏览器中完成", "Ctrip requires manual verification in the opened browser"),
+    HOTEL_AUTH_REQUIRED: tr("携程登录态已失效，请使用已保存凭据重新登录", "The Ctrip session has expired; sign in again with saved credentials"),
+    HOTEL_AUTH_CHECK_FAILED: tr("携程登录态检查失败", "The Ctrip login state could not be checked"),
+    HOTEL_AUTH_CHECK_IN_PROGRESS: tr("携程登录态正在检查，请稍后再登录", "The Ctrip login state is being checked; try signing in shortly"),
+    HOTEL_MANUAL_VERIFICATION_REQUIRED: admin.hotelBrowserStatus?.login_mode === "password_headless"
+      ? tr("携程要求验证码或安全验证；服务器不能弹出验证窗口，请在本地图形环境完成登录", "Ctrip requires manual verification. The server cannot open a verification window; complete login in a local desktop environment")
+      : tr("携程要求验证码或安全验证，请在打开的浏览器中完成", "Ctrip requires manual verification in the opened browser"),
     HOTEL_LOGIN_VERIFICATION_TIMEOUT: tr("携程安全验证等待超时，请重新登录", "Ctrip verification timed out; start login again"),
     HOTEL_LOGIN_START_FAILED: tr("携程登录助手启动失败", "The Ctrip login helper could not be started"),
+    HOTEL_BROWSER_START_FAILED: tr("携程浏览器进程启动失败", "The Ctrip browser process could not be started"),
     HOTEL_LOGIN_FAILED: tr("携程登录未完成", "Ctrip login did not complete"),
   } as Record<string, string>)[code] || tr("携程账号操作未完成", "The Ctrip account action did not complete");
 }
@@ -673,20 +717,23 @@ function toggleTimelineEvent(evidenceId: unknown) {
               <dl class="platform-account-facts"><dt>{{ tr('认证方式', 'Authentication') }}</dt><dd>{{ tr('账号登录', 'Account login') }}</dd></dl>
               <section class="platform-account-panel">
                 <header><span><LockKeyhole :size="15" /><strong>{{ tr('携程账号登录', 'Ctrip account login') }}</strong></span><b>{{ admin.hotelBrowserStatus.account_hint || tr('未保存账号', 'No account saved') }}</b></header>
-                <p>{{ admin.hotelBrowserStatus.credential_configured ? tr('登录态会自动复用；仅查询酒店与账号观察价。', 'The session is reused automatically for read-only hotel and account-observed prices.') : tr('首次保存账号密码后自动登录，安全验证需要在弹出窗口完成。', 'Save credentials once to sign in; complete any security verification in the opened browser.') }}</p>
+                <p>{{ admin.hotelBrowserStatus.credential_configured ? tr('启动时只检查并复用现有登录态；仅在你明确登录时才会提交已保存凭据。', 'Startup only checks and reuses the existing session. Saved credentials are submitted only when you explicitly sign in.') : tr('首次保存账号密码后会自动登录；服务器需要人工验证时会明确提示。', 'Saving credentials the first time starts sign-in; the server reports clearly when manual verification is required.') }}</p>
                 <form v-if="!admin.hotelBrowserStatus.credential_configured || hotelCredentialsOpen" class="platform-credential-form" autocomplete="off" @submit.prevent="saveHotelCredentials">
                   <input v-model="hotelCredentials.username" name="ctrip-account" autocomplete="off" maxlength="320" required :placeholder="tr('携程手机号、用户名或邮箱', 'Ctrip phone, username, or email')" />
                   <input v-model="hotelCredentials.password" name="ctrip-password" type="password" autocomplete="new-password" maxlength="4096" required :placeholder="admin.hotelBrowserStatus.credential_configured ? tr('输入新密码替换已保存凭据', 'Enter a new password to replace saved credentials') : tr('携程登录密码', 'Ctrip login password')" />
                   <button type="submit" :disabled="Boolean(admin.hotelBrowserAction) || !admin.hotelBrowserStatus.credential_store_supported">{{ admin.hotelBrowserAction === 'save' ? tr('保存中…', 'Saving…') : admin.hotelBrowserStatus.credential_configured ? tr('保存并重新登录', 'Save and sign in again') : tr('保存并自动登录', 'Save and sign in') }}</button>
+                  <div v-if="admin.hotelBrowserStatus.credential_configured" class="platform-account-actions">
+                    <button type="button" :disabled="Boolean(admin.hotelBrowserAction)" @click="hotelCredentialsOpen = false">{{ tr('取消', 'Cancel') }}</button>
+                    <button type="button" :disabled="Boolean(admin.hotelBrowserAction) || admin.hotelBrowserStatus.credential_source === 'environment'" @click="deleteHotelCredentials">{{ admin.hotelBrowserAction === 'delete' ? tr('删除中…', 'Deleting…') : tr('删除凭据', 'Delete credentials') }}</button>
+                  </div>
                 </form>
-                <small>{{ tr('凭据更新', 'Credentials updated') }}：{{ fmt(admin.hotelBrowserStatus.credentials_updated_at) }} · {{ admin.hotelBrowserStatus.browser_supported ? tr('浏览器已就绪', 'Browser ready') : tr('缺少浏览器依赖', 'Browser dependency missing') }}</small>
-                <div class="platform-account-actions">
-                  <button type="button" :disabled="Boolean(admin.hotelBrowserAction) || !admin.hotelBrowserStatus.login_supported || !admin.hotelBrowserStatus.credential_configured" @click="startHotelLogin">{{ admin.hotelBrowserStatus.login_in_progress ? tr('登录中…', 'Signing in…') : admin.hotelBrowserStatus.state === 'authenticated' ? tr('重新登录', 'Sign in again') : tr('使用已保存凭据登录', 'Sign in with saved credentials') }}</button>
-                  <button v-if="admin.hotelBrowserStatus.credential_configured && admin.hotelBrowserStatus.credential_store_supported" type="button" :disabled="Boolean(admin.hotelBrowserAction)" @click="hotelCredentialsOpen = !hotelCredentialsOpen">{{ hotelCredentialsOpen ? tr('取消更新', 'Cancel update') : tr('更新账号密码', 'Update credentials') }}</button>
-                  <button type="button" :disabled="Boolean(admin.hotelBrowserAction) || !admin.hotelBrowserStatus.credential_configured || admin.hotelBrowserStatus.credential_source === 'environment'" @click="deleteHotelCredentials">{{ admin.hotelBrowserAction === 'delete' ? tr('删除中…', 'Deleting…') : tr('删除凭据', 'Delete credentials') }}</button>
+                <small>{{ tr('凭据更新', 'Credentials updated') }}：{{ fmt(admin.hotelBrowserStatus.credentials_updated_at) }} · {{ admin.hotelBrowserStatus.browser_supported ? tr('浏览器组件已安装', 'Browser component installed') : tr('缺少浏览器依赖', 'Browser dependency missing') }}</small>
+                <div v-if="admin.hotelBrowserStatus.credential_configured && !hotelCredentialsOpen" class="platform-account-actions">
+                  <button type="button" :disabled="Boolean(admin.hotelBrowserAction) || admin.hotelBrowserStatus.check_in_progress || admin.hotelBrowserStatus.login_in_progress || !admin.hotelBrowserStatus.login_supported" @click="runHotelPrimaryAction">{{ hotelPrimaryLabel() }}</button>
+                  <button v-if="admin.hotelBrowserStatus.credential_store_supported" type="button" :disabled="Boolean(admin.hotelBrowserAction) || admin.hotelBrowserStatus.check_in_progress || admin.hotelBrowserStatus.login_in_progress" @click="hotelCredentialsOpen = true">{{ tr('管理账号', 'Manage account') }}</button>
                 </div>
               </section>
-              <div v-if="admin.hotelBrowserStatus.code && !['OK','HOTEL_AUTH_NOT_CHECKED','HOTEL_CREDENTIALS_NOT_CONFIGURED'].includes(admin.hotelBrowserStatus.code)" class="source-safe-error"><code>{{ admin.hotelBrowserStatus.code }}</code><span>{{ hotelActionMessage(admin.hotelBrowserStatus.code) }}</span></div>
+              <div v-if="admin.hotelBrowserStatus.code && !['OK','HOTEL_AUTH_NOT_CHECKED','HOTEL_AUTH_CHECK_STARTED','HOTEL_LOGIN_STARTED','HOTEL_CREDENTIALS_NOT_CONFIGURED'].includes(admin.hotelBrowserStatus.code)" class="source-safe-error"><code>{{ admin.hotelBrowserStatus.code }}</code><span>{{ hotelActionMessage(admin.hotelBrowserStatus.code) }}</span></div>
             </article>
           </div>
         </section>

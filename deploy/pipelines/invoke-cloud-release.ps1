@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$SourceImage,
     [string]$ReleaseTag = "",
     [string]$ConfigPath = "",
-    [switch]$SkipExternalSmoke
+    [switch]$Smoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -184,20 +184,24 @@ Write-Output "[cloud 4/6] Uploading versioned remote operations scripts"
 $remoteScripts | ForEach-Object { Write-Verbose "Validated remote operations script: $_" }
 Write-Output "[cloud 5/6] Switching scripts atomically and deploying immutable image digest"
 $remoteDeployArgs = @("--config", $ConfigPath, "deploy", "--scripts-dir", $scriptsRoot, "--ops-dir", $opsRoot, "--release-id", $ReleaseTag, "--digest", $digest, "--port", $port)
-if ($SkipExternalSmoke) { $remoteDeployArgs += "--skip-external-smoke" }
+if ($Smoke) { $remoteDeployArgs += "--smoke" }
 & python $remoteOpsHelper @remoteDeployArgs
 if ($LASTEXITCODE -ne 0) { throw "Remote operations sync or cloud deployment failed" }
 
-Write-Output "[cloud 6/6] Verifying public HTTPS health"
-try {
-    $health = Invoke-RestMethod -UseBasicParsing -Uri "${publicUrl}/health" -TimeoutSec 20
-    if ([string]$health.status -eq "ok") {
-        Write-Output "Local public HTTPS health passed"
-    } else {
-        Write-Warning "Local public health returned unexpected status; remote public HTTPS health already passed. Check local proxy, DNS, and TLS settings."
+if ($Smoke) {
+    Write-Output "[cloud 6/6] Verifying public HTTPS health"
+    try {
+        $health = Invoke-RestMethod -UseBasicParsing -Uri "${publicUrl}/health" -TimeoutSec 20
+        if ([string]$health.status -eq "ok") {
+            Write-Output "Local public HTTPS health passed"
+        } else {
+            Write-Warning "Local public health returned unexpected status; remote public HTTPS health already passed. Check local proxy, DNS, and TLS settings."
+        }
+    } catch {
+        Write-Warning "Local public health check failed at ${publicUrl}/health; remote public HTTPS health already passed. Check local proxy, DNS, and TLS settings."
     }
-} catch {
-    Write-Warning "Local public health check failed at ${publicUrl}/health; remote public HTTPS health already passed. Check local proxy, DNS, and TLS settings."
+} else {
+    Write-Output "[cloud 6/6] Skipping container, workflow, external service, and public health smoke by default"
 }
 
 Write-Output "Cloud deployment passed"

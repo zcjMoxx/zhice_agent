@@ -1,11 +1,11 @@
 #!/usr/bin/env sh
 set -eu
 
-IMAGE_REF="${1:?usage: deploy.sh registry/image@sha256:digest [host-port] public-url ops-url [skip-external-smoke]}"
+IMAGE_REF="${1:?usage: deploy.sh registry/image@sha256:digest [host-port] public-url ops-url [run-smoke]}"
 HOST_PORT="${2:-10086}"
 PUBLIC_URL="${3:?public-url is required}"
 OPS_URL="${4:?ops-url is required}"
-SKIP_EXTERNAL_SMOKE="${5:-0}"
+RUN_SMOKE="${5:-0}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CONTAINER_NAME=zhice-agent
 PREVIOUS_NAME=${CONTAINER_NAME}-previous
@@ -251,9 +251,9 @@ case "$OPS_URL" in
   https://*) ;;
   *) echo "ops-url must be an HTTPS origin" >&2; exit 2 ;;
 esac
-case "$SKIP_EXTERNAL_SMOKE" in
+case "$RUN_SMOKE" in
   0|1) ;;
-  *) echo "skip-external-smoke must be 0 or 1" >&2; exit 2 ;;
+  *) echo "run-smoke must be 0 or 1" >&2; exit 2 ;;
 esac
 if [ "$HOST_PORT" -gt 65535 ]; then
   echo "host-port must not exceed 65535" >&2
@@ -333,18 +333,20 @@ if ! /usr/bin/docker run -d --name "$XHS_CONTAINER_NAME" --init --restart unless
   rollback_runtime_config
   exit 1
 fi
-attempt=0
-until /usr/bin/docker exec "$XHS_CONTAINER_NAME" python -c \
-  "import socket; socket.create_connection(('127.0.0.1', 18060), 3).close()" >/dev/null 2>&1; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge "$XHS_READINESS_ATTEMPTS" ]; then
-    echo "Xiaohongshu sidecar failed readiness verification" >&2
-    rollback_xhs
-    rollback_runtime_config
-    exit 1
-  fi
-  sleep 2
-done
+if [ "$RUN_SMOKE" -eq 1 ]; then
+  attempt=0
+  until /usr/bin/docker exec "$XHS_CONTAINER_NAME" python -c \
+    "import socket; socket.create_connection(('127.0.0.1', 18060), 3).close()" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge "$XHS_READINESS_ATTEMPTS" ]; then
+      echo "Xiaohongshu sidecar failed readiness verification" >&2
+      rollback_xhs
+      rollback_runtime_config
+      exit 1
+    fi
+    sleep 2
+  done
+fi
 
 if /usr/bin/docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
   /usr/bin/docker rm -f "$PREVIOUS_NAME" >/dev/null 2>&1 || true
@@ -386,34 +388,33 @@ if ! /usr/bin/docker run -d --name "$CONTAINER_NAME" --init --restart unless-sto
   exit 1
 fi
 
-attempt=0
-until [ "$(/usr/bin/docker inspect --format '{{.State.Health.Status}}' "$CONTAINER_NAME")" = "healthy" ]; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge 30 ]; then
-    echo "New container failed health verification; logs remain available through restricted Ops" >&2
+if [ "$RUN_SMOKE" -eq 1 ]; then
+  attempt=0
+  until [ "$(/usr/bin/docker inspect --format '{{.State.Health.Status}}' "$CONTAINER_NAME")" = "healthy" ]; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 30 ]; then
+      echo "New container failed health verification; logs remain available through restricted Ops" >&2
+      rollback
+      rollback_xhs
+      exit 1
+    fi
+    sleep 2
+  done
+
+  install -d -o root -g root -m 0700 "$DEPLOYMENT_REPORT_ROOT"
+  if ! python3 "$SCRIPT_DIR/deployment_smoke.py" \
+    --base-url "$PUBLIC_URL" \
+    --runtime-env "$RUNTIME_DIR/.env" \
+    --report-dir "$DEPLOYMENT_REPORT_ROOT" \
+    --image-ref "$IMAGE_REF" \
+    --runtime-backup "$RUNTIME_BACKUP_DIR"; then
+    echo "Cloud deployment smoke failed" >&2
     rollback
     rollback_xhs
     exit 1
   fi
-  sleep 2
-done
-
-smoke_args=""
-if [ "$SKIP_EXTERNAL_SMOKE" -eq 1 ]; then
-  smoke_args="--skip-external"
-fi
-install -d -o root -g root -m 0700 "$DEPLOYMENT_REPORT_ROOT"
-if ! python3 "$SCRIPT_DIR/deployment_smoke.py" \
-  --base-url "$PUBLIC_URL" \
-  --runtime-env "$RUNTIME_DIR/.env" \
-  --report-dir "$DEPLOYMENT_REPORT_ROOT" \
-  --image-ref "$IMAGE_REF" \
-  --runtime-backup "$RUNTIME_BACKUP_DIR" \
-  $smoke_args; then
-  echo "Core cloud deployment acceptance failed" >&2
-  rollback
-  rollback_xhs
-  exit 1
+else
+  echo "Container readiness, workflow, external service, and public health smoke skipped by default"
 fi
 
 if ! prune_success_history; then

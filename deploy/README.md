@@ -95,11 +95,11 @@ HOME=/home/zhice
 /etc/zhice-agent/runtime-backups/
 ```
 
-三个文件分别以只读 bind mount 进入容器原路径。缺少任一文件、出现 symlink 或校验失败都会 fail closed；新容器或 sidecar 健康检查失败时，会同时恢复上一容器和上一份 runtime 配置。本地 Windows Compose 仍使用镜像内私有基线，不依赖 Linux `/etc` 路径。
+三个文件分别以只读 bind mount 进入容器原路径。缺少任一文件、出现 symlink 或校验失败都会 fail closed；显式启用 `-Smoke` 后，新容器或 sidecar 健康检查失败会同时恢复上一容器和上一份 runtime 配置。默认云发布不等待 readiness/health，仅在 Docker 启动命令本身失败时执行即时回滚。本地 Windows Compose 仍使用镜像内私有基线，不依赖 Linux `/etc` 路径。
 
-完整云发布还要求 `deploy/private/.env` 配置 `ZHICE_DEPLOY_SMOKE_USERNAME` 和 `ZHICE_DEPLOY_SMOKE_PASSWORD`。管理员必须提前创建同名低权限 viewer 账号；建议用户名固定为 `deployment-smoke`，密码使用独立强随机值，不得复用 Owner/Admin 凭据。新版本健康后，部署脚本先经正式公网 URL 验证匿名 `/api/site` 已按该域名返回合法公安备案配置，再创建、保存、读取、发布、执行并删除一个确定性临时工作流；备案或核心工作流验收失败都会恢复旧容器和旧 runtime。
+显式启用云发布 `-Smoke` 时，`deploy/private/.env` 必须配置 `ZHICE_DEPLOY_SMOKE_USERNAME` 和 `ZHICE_DEPLOY_SMOKE_PASSWORD`。管理员必须提前创建同名低权限 viewer 账号；建议用户名固定为 `deployment-smoke`，密码使用独立强随机值，不得复用 Owner/Admin 凭据。新版本健康后，部署脚本先经正式公网 URL 验证匿名 `/api/site` 已按该域名返回合法公安备案配置，再创建、保存、读取、发布、执行并删除一个确定性临时工作流；该显式 smoke 中的备案或核心工作流验收失败会恢复旧容器和旧 runtime。
 
-高德、Tavily、12306、小红书、默认 LLM 和 SMTP 属于告警型外部验收，失败会写入报告但不回滚。两个云端 PowerShell 入口都可显式传入 `-SkipExternalSmoke`，核心工作流验收不可跳过。脱敏报告保存在 `/etc/zhice-agent/deployment-reports/`；成功后保留最近 5 份 runtime 备份、30 份报告，以及当前和最近一个 ZhiCe-Agent 镜像。镜像清理只匹配本次发布的固定仓库，不处理其他仓库、数据卷或构建缓存；失败部署不清理历史现场。
+云发布默认跳过 sidecar readiness、主容器 health、核心工作流、高德、Tavily、12306、小红书、默认 LLM、SMTP 和公网 health。两个云端 PowerShell 入口只有显式传入 `-Smoke` 才执行完整验收；其中核心失败会回滚，外部依赖失败写入告警。脱敏报告保存在 `/etc/zhice-agent/deployment-reports/`；成功后保留最近 5 份 runtime 备份、30 份报告，以及当前和最近一个 ZhiCe-Agent 镜像。镜像清理只匹配本次发布的固定仓库，不处理其他仓库、数据卷或构建缓存；失败部署不清理历史现场。
 
 ## 三个日常入口
 
@@ -108,8 +108,8 @@ HOME=/home/zhice
 | 入口 | 输入 | 行为 |
 | --- | --- | --- |
 | `build-and-deploy-local` | 当前源码与私有配置 | 重新构建镜像、smoke、本地 Compose 部署 |
-| `deploy-existing-image-to-cloud` | 已验证的本地 `zhice-agent:local` | 不构建镜像；生成 release tag、推送 ACR、按 Digest 云端部署；默认不重复 smoke |
-| `build-and-deploy-cloud` | 当前源码与私有配置 | 重新构建镜像、smoke、推送 ACR、按 Digest 云端部署 |
+| `deploy-existing-image-to-cloud` | 已验证的本地 `zhice-agent:local` | 不构建镜像；生成 release tag、推送 ACR、按 Digest 云端部署；默认不 smoke |
+| `build-and-deploy-cloud` | 当前源码与私有配置 | 重新构建镜像、推送 ACR、按 Digest 云端部署；默认不 smoke |
 
 Windows 资源管理器可以分别双击：
 
@@ -127,13 +127,14 @@ deploy\build-and-deploy-cloud.cmd
 .\deploy\pipelines\build-and-deploy-cloud.ps1
 ```
 
-已有镜像入口的契约是“操作者已经确认该本地镜像可发布”，因此默认不再次 smoke；来源不确定时可显式执行：
+两个云端入口均默认跳过本地镜像、容器 readiness/health、核心工作流、MCP/外部服务和公网 health smoke。需要完整验证时显式执行：
 
 ```powershell
 .\deploy\pipelines\deploy-existing-image-to-cloud.ps1 -Smoke
+.\deploy\pipelines\build-and-deploy-cloud.ps1 -Smoke
 ```
 
-完整云端入口不会调用本地 Compose，不会顺带重建本地正式容器。
+默认入口返回时只证明镜像已推送、Docker 启动命令已接受且 Ops 已安装，不证明服务已经 ready。完整云端入口不会调用本地 Compose，不会顺带重建本地正式容器。
 
 ## 云端目标配置
 
@@ -192,7 +193,7 @@ SSH 登录密码可用于该用户的 sudo；若两者不同，当前一键流�
 python -m pip install ".[deploy]"
 ```
 
-Dockerfile 安装 `.[gateway,qq,hotel-browser]` 和 Playwright bundled Chromium，保证容器内携程只读酒店查询可用；它仍不会把只供发布端使用的 Paramiko 打入运行镜像。Linux 容器显式使用 bundled Chromium，不依赖系统 Chrome。浏览器安装与 `/opt/zhice` 权限收敛固定在同一 layer，跨 stage 运行产物直接使用 `COPY --chown`，避免后续递归改权把 Chromium 复制成额外的大层。携程浏览器 profile 位于 `state/browser_profiles/ctrip`，随 `zhice-state` 命名卷跨重启保留；账号密码继续通过 `deploy/private/.env` 或平台 Secret 注入，不能写入仓库。
+Dockerfile 安装 `.[gateway,qq,hotel-browser]` 和 Playwright bundled Chromium，保证容器内携程只读酒店查询可用；它仍不会把只供发布端使用的 Paramiko 打入运行镜像。Linux 容器显式使用 bundled Chromium，不依赖系统 Chrome；服务器登录 helper 默认 headless，不要求 X Server。Gateway 启动仅用该浏览器检查并复用已有 profile，不提交密码；账号密码只由 Owner 明确登录动作消费。浏览器安装与 `/opt/zhice` 权限收敛固定在同一 layer，跨 stage 运行产物直接使用 `COPY --chown`，避免后续递归改权把 Chromium 复制成额外的大层。携程浏览器 profile 位于 `state/browser_profiles/ctrip`，随 `zhice-state` 命名卷跨重启保留；账号密码继续通过 `deploy/private/.env` 或平台 Secret 注入，不能写入仓库。
 `deploy` extra 支持 Paramiko `2.8` 至 `3.x`；流水线通过 helper 的安全 preflight 检查依赖，helper 只精确抑制 Paramiko 导入阶段的 `CryptographyDeprecationWarning`，普通导入异常仍会明确提示安装 `.[deploy]`。远端 sudo/deploy 等待最多 1200 秒，超时会关闭 SSH channel 并失败退出，避免一键发布永久挂起。小红书 sidecar 首次启动会下载并解压约 140–190 MB 的固定浏览器，部署与固定拓扑重启均允许最多 15 分钟就绪；后续复用 `zhice-xhs-cache` 命名卷，失败前输出最多 80 行、64 KiB 的有界日志。云端 sidecar 覆盖主镜像的 Gateway 健康检查，固定探测容器内 `127.0.0.1:18060`，避免业务已就绪却被 Docker 标为 unhealthy。
 
 ## 底层推送与云端部署
@@ -217,7 +218,7 @@ sudo sh restart.sh
 
 `deploy.sh` 固定启动名为 `zhice-agent` 的一个容器、一个 Gateway 进程和一个 worker，并在新容器健康检查失败时恢复上一容器。浏览器、环境变量和运维终端都不能覆盖容器名。脚本用当前镜像初始化 `zhice-weixin-credentials` 的 `zhice:zhice` 所有权和 `0700` 目录权限，且不会删除该卷；微信扫码凭据因此能跨容器重建和镜像升级保留。Gateway 只绑定宿主机 `127.0.0.1:10086`，公网必须通过 Caddy/Nginx 的 80/443 进入；TLS、可信代理头和访问控制由云端反向代理负责。
 
-共享 `pipelines/invoke-cloud-release.ps1` 通过 Python Paramiko helper 自动同步六个远端运维脚本和公开 Ops 安装资产、执行部署、安装/升级 root-owned Ops 服务并读取远端状态。部署与 status 成功后，同一 Paramiko 连接会从云服务器执行受控 `curl --fail --silent --show-error --max-time 20` 访问 `${PublicUrl}/health`，解析 JSON 并强制要求 `status=ok`；该远端公网 HTTPS 检查失败仍会使发布失败。本机随后再做一次附加 health 检查：成功会明确输出 passed；若本机代理、TUN DNS 或 TLS 环境异常，或返回状态异常，只输出 warning，因为远端公网链路已经通过。`RemoteOpsDir` 不是 Docker 部署目录：镜像、容器和命名卷仍由 Docker 管理。任一 build、smoke、push、SSH、远端容器健康、Ops 安装或远端公网 HTTPS 步骤失败都会以非零退出码结束；容器健康失败由 `deploy.sh` 恢复上一容器，数据卷不会删除。
+共享 `pipelines/invoke-cloud-release.ps1` 通过 Python Paramiko helper 自动同步六个远端运维脚本和公开 Ops 安装资产、执行部署并安装/升级 root-owned Ops 服务。默认不读取容器状态、不等待 readiness/health、不执行 acceptance，也不请求公网 health。显式 `-Smoke` 时才读取远端状态，并由同一 Paramiko 连接从云服务器执行受控 `curl --fail --silent --show-error --max-time 20` 访问 `${PublicUrl}/health`，解析 JSON并强制要求 `status=ok`；本机随后再做一次附加 health 检查。`RemoteOpsDir` 不是 Docker 部署目录：镜像、容器和命名卷仍由 Docker 管理。build、push、SSH、Docker 启动或 Ops 安装失败仍以非零退出；显式 smoke 中的核心验证失败由 `deploy.sh` 恢复上一容器，数据卷不会删除。
 
 也可以用 `docker compose -f deploy/docker-compose.yml up -d --build` 做单机开发验证；正式云端发布仍应使用 digest。
 

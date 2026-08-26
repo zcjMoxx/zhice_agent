@@ -307,14 +307,14 @@ def test_sudo_deploy_sends_password_only_to_stdin_and_redacts_output() -> None:
     assert "deploy.sh" in channel.command
     assert "ops/install.sh" in channel.command
     assert channel.command.index("deploy.sh") < channel.command.index("ops/install.sh")
-    assert channel.command.index("ops/install.sh") < channel.command.index("status.sh")
+    assert "status.sh" not in channel.command
     assert " 0 &&" in channel.command
     assert password not in out
     assert "[REDACTED]" in out
     assert err == ""
 
 
-def test_sudo_deploy_can_skip_only_external_smoke() -> None:
+def test_sudo_deploy_runs_status_only_when_smoke_is_explicit() -> None:
     channel = FakeChannel(b"ok\n")
 
     remote_ops.sudo_deploy(
@@ -329,6 +329,7 @@ def test_sudo_deploy_can_skip_only_external_smoke() -> None:
     )
 
     assert " 1 &&" in channel.command
+    assert channel.command.index("ops/install.sh") < channel.command.index("status.sh")
 
 
 def test_sudo_deploy_times_out_and_closes_channel() -> None:

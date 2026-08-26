@@ -399,9 +399,10 @@ class HotelBrowserAdminStatusResponse(BaseModel):
     credential_source: str = ""
     credentials_updated_at: str = ""
     browser_supported: bool = False
+    check_in_progress: bool = False
     login_supported: bool = False
     login_in_progress: bool = False
-    login_mode: str = "password_with_manual_verification_fallback"
+    login_mode: str = "password_headless"
     last_checked_at: str = ""
 
 

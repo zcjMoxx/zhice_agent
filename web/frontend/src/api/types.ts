@@ -181,9 +181,10 @@ export interface HotelBrowserAdminStatus {
   credential_source: "workspace_env" | "environment" | "";
   credentials_updated_at: string;
   browser_supported: boolean;
+  check_in_progress: boolean;
   login_supported: boolean;
   login_in_progress: boolean;
-  login_mode: "password_with_manual_verification_fallback";
+  login_mode: "password_with_manual_verification_fallback" | "password_headless";
   last_checked_at: string;
 }
 

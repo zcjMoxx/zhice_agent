@@ -104,14 +104,6 @@ function Read-DotEnvValue {
 
 $amapJsApiKey = Read-DotEnvValue -Path $privateEnvPath -Name "VITE_AMAP_JS_API_KEY"
 $amapJsSecurityCode = Read-DotEnvValue -Path $privateEnvPath -Name "VITE_AMAP_JS_SECURITY_CODE"
-$smokeUsername = Read-DotEnvValue -Path $privateEnvPath -Name "ZHICE_DEPLOY_SMOKE_USERNAME"
-$smokePassword = Read-DotEnvValue -Path $privateEnvPath -Name "ZHICE_DEPLOY_SMOKE_PASSWORD"
-if ($smokeUsername -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$') {
-    throw "Invalid private deployment smoke username"
-}
-if ($smokePassword.Length -lt 12) {
-    throw "Private deployment smoke password must contain at least 12 characters"
-}
 
 $forbidden = @("contexts", "logs", ".tmp", ".git")
 foreach ($name in $forbidden) {

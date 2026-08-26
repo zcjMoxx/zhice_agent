@@ -22,6 +22,11 @@ from agent.applications.travel import (
     load_travel_config,
 )
 from agent.applications.travel.config import TravelConfig, TravelConfigurationError
+from agent.applications.travel.drafts import (
+    TravelDraftRepairError,
+    apply_travel_plan_repairs,
+    travel_plan_draft_revision,
+)
 from agent.applications.travel.history import project_travel_progress
 from agent.applications.travel.hotel_accounts import HotelAccountSupervisor
 from agent.applications.travel.progress import TravelProgressHookRuntime
@@ -404,6 +409,7 @@ def _persisted_travel_finalizer_plans(
     """Return Finalizer plan arguments in durable Session order."""
 
     plans: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
     for message in messages:
         if message.role != "assistant":
             continue
@@ -422,9 +428,18 @@ def _persisted_travel_finalizer_plans(
                 )
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
-            plan = arguments.get("plan") if isinstance(arguments, dict) else None
+            if not isinstance(arguments, dict):
+                continue
+            plan = arguments.get("plan")
             if isinstance(plan, dict):
-                plans.append(plan)
+                current = plan
+            elif current is not None:
+                repaired = _replay_travel_plan_repairs(current, arguments)
+                if repaired is current:
+                    continue
+                current = repaired
+            if current is not None:
+                plans.append(current)
     return plans
 
 
@@ -436,8 +451,17 @@ def _persisted_travel_finalizer_attempts(
 ) -> list[dict[str, Any]]:
     """Recover Finalizer drafts with source verification available at that point."""
 
+    last_success_index = -1
+    for index, message in enumerate(messages):
+        if _travel_finalizer_result_succeeded(message):
+            last_success_index = index
+    if last_success_index >= 0:
+        messages = messages[last_success_index + 1 :]
+
     delegate_calls: dict[str, dict[str, str]] = {}
     attempts: list[dict[str, Any]] = []
+    current_plan: dict[str, Any] | None = None
+    selected_candidate_id = ""
     weather_ready = False
     route_ready = False
     for message in messages:
@@ -466,11 +490,24 @@ def _persisted_travel_finalizer_attempts(
                             if isinstance(task, dict) and str(task.get("id") or "").strip()
                         }
                 elif name == "finalize_travel_plan":
-                    plan = arguments.get("plan") if isinstance(arguments, dict) else None
+                    if not isinstance(arguments, dict):
+                        continue
+                    plan = arguments.get("plan")
                     if isinstance(plan, dict):
+                        current_plan = plan
+                        selected_candidate_id = str(
+                            arguments.get("selected_candidate_id") or ""
+                        ).strip()
+                    elif current_plan is not None:
+                        repaired = _replay_travel_plan_repairs(current_plan, arguments)
+                        if repaired is current_plan:
+                            continue
+                        current_plan = repaired
+                    if current_plan is not None:
                         attempts.append(
                             {
-                                "plan": plan,
+                                "plan": current_plan,
+                                "selected_candidate_id": selected_candidate_id,
                                 "live_weather_verified": weather_ready,
                                 "transit_verified": route_ready,
                             }
@@ -499,6 +536,42 @@ def _persisted_travel_finalizer_attempts(
             and TRAVEL_FINAL_ROUTE_PROFILE in completed_profiles
         )
     return attempts
+
+
+def _travel_finalizer_result_succeeded(message: Message) -> bool:
+    if (
+        message.role != "tool"
+        or str(message.name or "").casefold() != "finalize_travel_plan"
+    ):
+        return False
+    metadata = message.metadata if isinstance(message.metadata, dict) else {}
+    code = str(metadata.get("code") or "").strip().upper()
+    if metadata.get("is_error") is True:
+        return False
+    if code == "OK":
+        return True
+    try:
+        stored = json.loads(message.content)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(stored, dict) or str(stored.get("status") or "").casefold() != "success":
+        return False
+    stored_metadata = stored.get("metadata")
+    return isinstance(stored_metadata, dict) and (
+        str(stored_metadata.get("code") or "").strip().upper() == "OK"
+    )
+
+
+def _replay_travel_plan_repairs(
+    current: dict[str, Any], arguments: dict[str, Any]
+) -> dict[str, Any]:
+    revision = str(arguments.get("draft_revision") or "").strip()
+    if revision != travel_plan_draft_revision(current):
+        return current
+    try:
+        return apply_travel_plan_repairs(current, arguments.get("repairs"))
+    except TravelDraftRepairError:
+        return current
 
 
 def _travel_finalization_repair_profiles(
@@ -1056,6 +1129,15 @@ class WebRuntime:
     ) -> dict[str, str]:
         """Validate the reviewed draft and atomically open formal planning capabilities."""
 
+        if (
+            self.travel_service is not None
+            and not self.travel_service.config.enabled
+        ):
+            raise TravelApplicationError(
+                "TRAVEL_DISABLED",
+                "Travel planning is not enabled for this workspace.",
+                status_code=503,
+            )
         resolved = self._resolve_travel_session(actor, session_id)
         state = resolved.store.load(session_id)
         location_clarifications = state.metadata.get("travel_location_clarifications", [])
@@ -1204,6 +1286,7 @@ class WebRuntime:
             )
         if self.travel_service is not None:
             self.travel_service.clear_candidate_review(actor, session_id)
+            self.travel_service.clear_plan_draft(actor, session_id)
             self.travel_service.source_ledger.clear(session_id)
         self.delete_session(actor, session_id)
 
@@ -1523,8 +1606,9 @@ class WebRuntime:
                     "本轮只调用一次 delegate_tasks，并且只创建一个 "
                     "travel-final-weather 任务；按服务端日期窗口查询 get_forecast，"
                     "禁止查询历史天气、铁路、住宿、路线、网页或社区来源。"
-                    "天气结果返回后复用已有完整计划草稿，更新 weather_summary 与 evidence，"
-                    "并在同一轮立即再次调用 finalize_travel_plan；不得只返回文字说明。"
+                    "天气结果返回后复用服务端草稿，使用上一轮返回的 draft_revision 和空 repairs "
+                    "立即再次调用 finalize_travel_plan，让服务端合并 weather_summary 与 evidence；"
+                    "禁止重新提交完整 plan，也不得只返回文字说明。"
                 )
             if TRAVEL_FINAL_ROUTE_PROFILE in repair_profiles:
                 return (
@@ -1535,15 +1619,16 @@ class WebRuntime:
                     "再查一次公交；仍为空则查询一次高德驾车，作为出租车/网约车兜底，"
                     "保留真实距离和时长，禁止伪造公交线路或站点。公交有结果时逐条保留线路号、"
                     "上下车站、时长和距离；禁止查询天气、铁路、住宿、网页或社区来源。"
-                    "路线结果返回后复用已有完整计划草稿，替换对应 planning estimate，"
-                    "并在同一轮立即再次调用 finalize_travel_plan；不得只返回文字说明。"
+                    "路线结果返回后复用服务端草稿，使用上一轮返回的 draft_revision 和空 repairs "
+                    "立即再次调用 finalize_travel_plan，让服务端替换对应 planning estimate；"
+                    "禁止重新提交完整 plan，也不得只返回文字说明。"
                 )
             if research is not None and not research.missing_attempts:
                 return (
                     "所选方案的住宿与路线子任务已经完成，不要再次调用 delegate_tasks，"
-                    "也不要重新查询外部来源。复用本 Session 历史中的 Child 结果和已有计划草稿，"
-                    "修正上一轮 Finalizer 返回的具体字段或证据问题，然后立即再次调用 "
-                    "finalize_travel_plan；禁止用普通文字提前结束。"
+                    "也不要重新查询外部来源。复用服务端草稿和上一轮返回的 draft_revision，"
+                    "把全部 issues 放进同一个 repairs 数组后立即再次调用 finalize_travel_plan；"
+                    "禁止重新提交完整 plan，也禁止用普通文字提前结束。"
                 )
         return self.prompt_loader.load("travel_planning_continuation")
 
@@ -2225,6 +2310,14 @@ class WebRuntime:
                         tools,
                         self.travel_service.source_ledger,
                         session_id,
+                        candidate_review_tool=next(
+                            (
+                                tool
+                                for tool in travel_domain_tools
+                                if tool.name == "request_travel_candidate_review"
+                            ),
+                            None,
+                        ),
                     )
                 travel_research_delegation_active = True
         elif (
@@ -3632,6 +3725,7 @@ def build_web_runtime(
     runtime.channel_identity = identity
     runtime.channel_config = channel_config
     runtime.channel_weixin_binding = weixin_binding
+    hotel_accounts.start_initial_check()
     return runtime
 
 

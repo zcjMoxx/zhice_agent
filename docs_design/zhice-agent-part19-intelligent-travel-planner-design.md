@@ -52,6 +52,7 @@ Travel Vue page / ordinary chat
 
 - AgentLoop 仍只负责加载上下文、调用 LLM、调度 Tool、回填结果和保存 Session。
 - `finalize_travel_plan` 是内部领域 Tool，不访问外部服务；它只校验、重写 owner/id、持久化并发出事件。
+- `finalize_travel_plan` 首次接受完整终稿；失败后服务端在 actor-scoped 旅行 SQLite 中有界保存带 SHA-256 revision 的规范草稿，并一次返回全部 JSON Schema 结构 issue 与当前领域 issue。后续同名 Tool 只接受 revision 和一个受限 JSON Pointer `repairs` 数组，可批量 `set/remove`，不得再提交完整 plan；revision 条件更新冲突 fail closed，跨 Turn/重启继续读取服务端规范草稿，旧 Session 历史重放仅作为升级兼容路径。Tool 合并后及 `TravelApplicationService.finalize()` 持久化边界仍幂等归一交通来源：铁路证据固定标为 12306，其他外部证据固定使用 provider，无外部证据透明标为规划估算；名称只在车次或起终点与方式可推导时补齐，语义重复项合并 evidence。非对象、无语义名称和超过 20 项不再静默删除、造占位或截断，而是进入批量 issue 后由一次 repair 明确修正。
 - 外部事实继续经过 MCP ToolProvider；Skill 脚本不 import `agent.*`，不访问网络、Session、Memory 或 Secret。
 - 旅行页面通过现有 WebSocket 创建 `channel=travel` 的应用 Session，仍由 SessionStore 保存完整上下文并进入正常 AgentLoop；普通聊天 Session 列表不投影该应用 Session，因此内部 Tool/assistant JSON 不在聊天界面展示。页面不从 Markdown 反向解析计划 JSON。
 - 不购票、不预订、不支付、不承诺实时房态、成交价或第三方 SLA。
@@ -152,9 +153,9 @@ Owner 登录管理位于“管理后台 → MCP 与 Skills → 外部平台账�
 
 旅行应用 Prompt 与 `tool_use_policy.md`、`skills_intro.md`、`memory_policy.md` 等核心协议 Prompt 会在 Gateway 构建 Web runtime 前从仓库受信模板原子同步到运行 workspace；同步只覆盖代码耦合清单，不覆盖 `identity.md` 和其它用户可定制 Prompt，避免普通重启继续加载初始化时期的旧工具、Skill 或旅行规则。
 
-酒店只读浏览适配器位于 `integrations/hotel_browser_mcp/`，支持由 operator 配置平台账号并复用登录态查询指定日期住宿；账号和 Secret 只由运行环境注入，不进入计划或前端。旅行应用通过内置 `search_travel_hotels` Tool 直接复用该适配器，不再要求 operator 额外声明 `hotel-browser` MCP server；外部 MCP 运行方式仅保留为可选互操作入口。服务未启用、登录失败或没有指定日期可核验结果时，计划只能使用带 `planning_estimate` 状态的估算，不得把酒店 POI、搜索摘要或模型值展示为实时观察价。若指定日期查询已成功，finalizer 会拒绝仍使用规划估算或缺少携程价格 evidence 的住宿卡。
+酒店只读浏览适配器位于 `integrations/hotel_browser_mcp/`，支持由 operator 配置平台账号并复用登录态查询指定日期住宿；账号和 Secret 只由运行环境注入，不进入计划或前端。Gateway 启动后对已配置账号只执行一次后台 profile 检查，不提交密码；Owner 可显式检查登录或使用保存凭据登录。有图形会话时登录助手允许可见人工验证，服务器容器默认使用 headless Chromium，不依赖 X Server。旅行应用通过内置 `search_travel_hotels` Tool 直接复用已认证 profile，不再要求 operator 额外声明 `hotel-browser` MCP server，也不会在旅行查询中静默提交密码重登；登录失效返回结构化认证错误。外部 MCP 运行方式仅保留为可选互操作入口。服务未启用、登录失败或没有指定日期可核验结果时，计划只能使用带 `planning_estimate` 状态的估算，不得把酒店 POI、搜索摘要或模型值展示为实时观察价。若指定日期查询已成功，finalizer 会拒绝仍使用规划估算或缺少携程价格 evidence 的住宿卡。
 
-管理页把携程只展示在独立“外部平台账号”区域，不进入 MCP Server 数、Catalog 或 MCP 卡片。小红书与携程账号安全投影统一走 `/api/admin/external-platforms/*`，而小红书 MCP 服务重启仍走 MCP 技术接口。
+管理页把携程只展示在独立“外部平台账号”区域，不进入 MCP Server 数、Catalog 或 MCP 卡片。小红书与携程账号安全投影统一走 `/api/admin/external-platforms/*`；携程顶层操作收敛为状态感知的“检查登录/使用已保存凭据登录”和“管理账号”，更新、取消与删除位于管理区。小红书 MCP 服务重启仍走 MCP 技术接口。
 
 ## 4. quick 与 deep
 

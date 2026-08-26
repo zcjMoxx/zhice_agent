@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.applications.travel.config import TravelConfig
+from agent.applications.travel.drafts import travel_plan_draft_revision
 from agent.applications.travel.presentation import travel_plan_title
 from agent.applications.travel.schemas import TravelPlanV1, TravelValidationError
 from agent.applications.travel.source_ledger import TravelSourceLedger
@@ -110,6 +111,7 @@ class TravelApplicationService:
         source_turn_id: str,
         selected_candidate_id: str = "",
         require_candidate_review: bool = False,
+        expected_draft_revision: str | None = None,
     ) -> TravelPlanV1:
         """Validate, re-own, and atomically persist one model-produced plan."""
 
@@ -129,6 +131,8 @@ class TravelApplicationService:
                     "Final plan does not preserve the selected candidate itinerary.",
                     status_code=409,
                 )
+        if isinstance(raw_plan, dict):
+            raw_plan = reconcile_transport_option_sources(raw_plan)
         try:
             plan = TravelPlanV1.from_dict(
                 raw_plan,
@@ -149,6 +153,7 @@ class TravelApplicationService:
                 source_session_id=source_session_id,
                 source_turn_id=source_turn_id,
                 title=travel_plan_title(owned.request),
+                expected_draft_revision=expected_draft_revision,
             )
             return saved
         except TravelPlanStoreError as exc:
@@ -194,6 +199,59 @@ class TravelApplicationService:
         )
         root = Path(context.root_dir).resolve()
         return TravelPlanStore(root)
+
+    def get_plan_draft(
+        self, actor: ActorContext, session_id: str
+    ) -> dict[str, Any] | None:
+        """Load the durable server-owned finalizer draft for one actor Session."""
+
+        owner_user_id = self._owner_user_id(actor)
+        try:
+            draft = self.store_for_actor(actor).get_draft(owner_user_id, session_id)
+        except TravelPlanStoreError as exc:
+            raise _application_error_from_store(exc) from exc
+        return draft.to_attempt() if draft is not None else None
+
+    def save_plan_draft(
+        self,
+        actor: ActorContext,
+        session_id: str,
+        plan: dict[str, Any],
+        *,
+        selected_candidate_id: str,
+        expected_revision: str | None,
+    ) -> dict[str, Any]:
+        """Persist then cache one normalized draft using optimistic concurrency."""
+
+        owner_user_id = self._owner_user_id(actor)
+        revision = travel_plan_draft_revision(plan)
+        try:
+            draft = self.store_for_actor(actor).save_draft(
+                owner_user_id,
+                session_id,
+                plan,
+                revision,
+                str(selected_candidate_id or "").strip(),
+                expected_revision=expected_revision,
+            )
+        except TravelPlanStoreError as exc:
+            raise _application_error_from_store(exc) from exc
+        attempt = self.source_ledger.remember_plan_attempt(
+            session_id,
+            draft.plan,
+            selected_candidate_id=draft.selected_candidate_id,
+        )
+        attempt["draft_revision"] = draft.revision
+        return attempt
+
+    def clear_plan_draft(self, actor: ActorContext, session_id: str) -> None:
+        """Remove incomplete finalizer state when its owning Session is deleted."""
+
+        owner_user_id = self._owner_user_id(actor)
+        try:
+            self.store_for_actor(actor).clear_draft(owner_user_id, session_id)
+        except TravelPlanStoreError as exc:
+            raise _application_error_from_store(exc) from exc
 
     def save_candidate_review(
         self,
@@ -326,7 +384,22 @@ def _plan_id(value: str) -> str:
 
 
 def _application_error_from_store(exc: TravelPlanStoreError) -> TravelApplicationError:
-    status = 404 if exc.code in {"TRAVEL_PLAN_NOT_FOUND", "TRAVEL_CANDIDATE_REVIEW_NOT_FOUND"} else 403 if exc.code == "TRAVEL_PLAN_ACCESS_DENIED" else 400 if exc.code in {"TRAVEL_CANDIDATE_REVIEW_INVALID", "TRAVEL_CANDIDATE_SELECTION_INVALID"} else 500
+    status = (
+        404
+        if exc.code in {"TRAVEL_PLAN_NOT_FOUND", "TRAVEL_CANDIDATE_REVIEW_NOT_FOUND"}
+        else 403
+        if exc.code == "TRAVEL_PLAN_ACCESS_DENIED"
+        else 409
+        if exc.code == "TRAVEL_PLAN_DRAFT_CONFLICT"
+        else 400
+        if exc.code
+        in {
+            "TRAVEL_CANDIDATE_REVIEW_INVALID",
+            "TRAVEL_CANDIDATE_SELECTION_INVALID",
+            "TRAVEL_PLAN_DRAFT_INVALID",
+        }
+        else 500
+    )
     return TravelApplicationError(exc.code, exc.message, status_code=status)
 
 
@@ -334,7 +407,9 @@ def _plan_matches_candidate(raw_plan: object, candidate: dict[str, Any]) -> bool
     if not isinstance(raw_plan, dict):
         return False
     plan_days = raw_plan.get("days")
-    candidate_days = candidate.get("days")
+    itinerary = candidate.get("itinerary")
+    itinerary_days = itinerary.get("days") if isinstance(itinerary, dict) else None
+    candidate_days = itinerary_days if isinstance(itinerary_days, list) else candidate.get("days")
     if not isinstance(plan_days, list) or not isinstance(candidate_days, list):
         return False
     if len(plan_days) != len(candidate_days):
@@ -352,7 +427,16 @@ def _plan_matches_candidate(raw_plan: object, candidate: dict[str, Any]) -> bool
             for item in activities
             if isinstance(item, dict)
         ] if isinstance(activities, list) else []
-        expected_places = [str(item).strip() for item in expected.get("places", [])]
+        expected_activities = expected.get("activities")
+        expected_places = (
+            [
+                str(item.get("place") or "").strip()
+                for item in expected_activities
+                if isinstance(item, dict)
+            ]
+            if isinstance(expected_activities, list)
+            else [str(item).strip() for item in expected.get("places", [])]
+        )
         if planned_places != expected_places:
             return False
     return True
@@ -395,3 +479,149 @@ def _merge_candidate_identity(raw_plan: object, candidate: dict[str, Any]) -> ob
         if "daily_budget" in skeleton:
             planned["daily_budget"] = skeleton["daily_budget"]
     return merged
+
+
+def reconcile_transport_option_sources(raw_plan: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize model-draft transport cards before strict persistence."""
+
+    plan = deepcopy(raw_plan)
+    options = plan.get("transport_options")
+    evidence = plan.get("evidence")
+    if not isinstance(options, list):
+        return plan
+    evidence_by_id = (
+        {
+            str(item.get("evidence_id") or "").strip(): item
+            for item in evidence
+            if isinstance(item, dict) and str(item.get("evidence_id") or "").strip()
+        }
+        if isinstance(evidence, list)
+        else {}
+    )
+    reconciled: list[Any] = []
+    fingerprint_indices: dict[tuple[Any, ...], int] = {}
+    for option in options:
+        if not isinstance(option, dict):
+            reconciled.append(deepcopy(option))
+            continue
+        source = option.get("source")
+        references = option.get("evidence_ids")
+        reference_ids = (
+            tuple(str(item).strip() for item in references if str(item).strip())
+            if isinstance(references, list)
+            else ()
+        )
+        referenced = [evidence_by_id[item] for item in reference_ids if item in evidence_by_id]
+        option["source"] = _transport_source_label(referenced, source)
+        name = option.get("name")
+        if not isinstance(name, str) or not name.strip():
+            route = " → ".join(
+                item
+                for item in (
+                    str(option.get("from") or "").strip(),
+                    str(option.get("to") or "").strip(),
+                )
+                if item
+            )
+            inferred_name = (
+                str(option.get("service_name") or "").strip()
+                or " ".join(
+                    item
+                    for item in (route, str(option.get("mode") or "").strip())
+                    if item
+                )
+            )
+            if inferred_name:
+                option["name"] = inferred_name[:200]
+        fingerprint = tuple(
+            str(option.get(key) or "").strip().casefold()
+            for key in (
+                "mode",
+                "from",
+                "to",
+                "service_name",
+                "departure",
+                "arrival",
+                "seat",
+                "price_cny_per_person",
+                "price_cny_total",
+            )
+        )
+        has_identity = bool(
+            str(option.get("mode") or "").strip()
+            and (
+                str(option.get("service_name") or "").strip()
+                or (
+                    str(option.get("from") or "").strip()
+                    and str(option.get("to") or "").strip()
+                )
+                or (
+                    str(option.get("departure") or "").strip()
+                    and str(option.get("arrival") or "").strip()
+                )
+            )
+        )
+        duplicate_index = fingerprint_indices.get(fingerprint) if has_identity else None
+        if duplicate_index is not None:
+            kept = reconciled[duplicate_index]
+            if isinstance(kept, dict):
+                kept_references = kept.get("evidence_ids")
+                merged_references = list(
+                    dict.fromkeys(
+                        [
+                            *(
+                                [str(item) for item in kept_references]
+                                if isinstance(kept_references, list)
+                                else []
+                            ),
+                            *reference_ids,
+                        ]
+                    )
+                )
+                kept["evidence_ids"] = merged_references
+                kept["source"] = _transport_source_label(
+                    [
+                        evidence_by_id[item]
+                        for item in merged_references
+                        if item in evidence_by_id
+                    ],
+                    kept.get("source"),
+                )
+            continue
+        if has_identity:
+            fingerprint_indices[fingerprint] = len(reconciled)
+        reconciled.append(option)
+    plan["transport_options"] = reconciled
+    return plan
+
+
+def _transport_source_label(referenced: list[dict[str, Any]], current: object) -> str:
+    external = [
+        item
+        for item in referenced
+        if str(item.get("source_type") or "") != "model_estimate"
+    ]
+    if any(
+        any(
+            marker
+            in " ".join(
+                str(item.get(key) or "")
+                for key in ("provider", "title", "source_url")
+            ).casefold()
+            for marker in ("12306", "铁路")
+        )
+        for item in external
+    ):
+        return "12306 已核验查询"
+    providers = list(
+        dict.fromkeys(
+            str(item.get("provider") or "").strip()
+            for item in external
+            if str(item.get("provider") or "").strip()
+        )
+    )
+    if providers:
+        return " / ".join(providers[:3])[:200]
+    if isinstance(current, str) and current.strip():
+        return current.strip()[:200]
+    return "planning_estimate"

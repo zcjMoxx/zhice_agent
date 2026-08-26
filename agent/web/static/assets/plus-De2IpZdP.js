@@ -1,2 +1,0 @@
-import{c as e}from"./QuickPreferences.vue_vue_type_script_setup_true_lang-BtLxkjPB.js";const t=[["rect",{width:"18",height:"18",x:"3",y:"3",rx:"2",key:"afitv7"}],["path",{d:"M9 3v18",key:"fh3hqa"}],["path",{d:"m14 9 3 3-3 3",key:"8010ee"}]],c=e("panel-left-open",t);const a=[["path",{d:"M5 12h14",key:"1ays0h"}],["path",{d:"M12 5v14",key:"s699le"}]],h=e("plus",a);export{c as P,h as a};
-//# sourceMappingURL=plus-De2IpZdP.js.map

@@ -14,7 +14,6 @@ from typing import Any, Iterator
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from agent.applications.travel.account_credentials import (
-    CredentialStoreError,
     EnvironmentPlatformCredentialStore,
     PlatformCredential,
 )
@@ -125,24 +124,14 @@ def search_ctrip_hotels(
         )
     if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 10:
         raise HotelBrowserError("HOTEL_QUERY_INVALID", "max_results must be between 1 and 10.")
-    try:
-        credential = EnvironmentPlatformCredentialStore(root).load("ctrip")
-    except CredentialStoreError as exc:
-        raise HotelBrowserError(
-            "HOTEL_CREDENTIALS_NOT_CONFIGURED",
-            "Ctrip credentials have not been configured.",
-        ) from exc
-
     with _exclusive_profile(root):
         with _persistent_context(root, headless=True) as context:
             page = context.pages[0] if context.pages else context.new_page()
             if not _is_logged_in(page):
-                _submit_password_login(page, credential)
-                if not _wait_for_login(page, 15):
-                    raise HotelBrowserError(
-                        "HOTEL_MANUAL_VERIFICATION_REQUIRED",
-                        "Ctrip requires manual verification in the administration page.",
-                    )
+                raise HotelBrowserError(
+                    "HOTEL_AUTH_REQUIRED",
+                    "Ctrip login has expired; sign in again from the administration page.",
+                )
             result_url = _discover_city_result_url(page, city_name, query_keyword)
             dated_url = _dated_result_url(result_url, arrival, departure)
             page.goto(dated_url, wait_until="domcontentloaded", timeout=60_000)

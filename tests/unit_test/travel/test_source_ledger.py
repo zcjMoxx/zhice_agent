@@ -64,6 +64,24 @@ class _Provider:
         return ToolResult(output='{"status":"success"}', metadata={"code": "OK"})
 
 
+class _CandidateReviewTool:
+    name = "request_travel_candidate_review"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict[str, object], ToolExecutionContext]] = []
+
+    def execute_with_context(
+        self,
+        args: dict[str, object],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        self.calls.append((args, context))
+        return ToolResult(
+            output='{"status":"waiting_for_user"}',
+            metadata={"code": "TRAVEL_CANDIDATE_REVIEW_REQUIRED"},
+        )
+
+
 def test_finalizer_retry_preserves_previous_verified_transit_fields():
     previous = {
         "days": [{
@@ -597,10 +615,16 @@ def test_finalizer_plan_attempts_are_bounded_isolated_and_cleared():
     restored = ledger.plan_attempts(session_id)
 
     assert [item["plan"]["marker"] for item in restored] == list(reversed(range(2, 10)))
+    assert all(item["draft_revision"].startswith("sha256:") for item in restored)
     restored[0]["plan"]["nested"]["value"] = -1
     assert ledger.plan_attempts(session_id)[0]["plan"]["nested"]["value"] == 9
 
-    ledger.remember_plan_attempt(session_id, {"marker": 10})
+    remembered = ledger.remember_plan_attempt(
+        session_id,
+        {"marker": 10},
+        selected_candidate_id="candidate-a",
+    )
+    assert remembered["selected_candidate_id"] == "candidate-a"
     assert [item["plan"]["marker"] for item in ledger.plan_attempts(session_id)] == list(
         reversed(range(3, 11))
     )
@@ -1087,6 +1111,44 @@ def test_optimizer_result_is_persisted_as_candidate_review_without_model_copy():
         "candidate-a",
         "candidate-b",
     ]
+
+
+def test_optimizer_bridge_uses_trusted_candidate_tool_not_filtered_redispatch():
+    ledger = TravelSourceLedger()
+    delegate = _OptimizerProvider()
+    candidate_review = _CandidateReviewTool()
+    provider = require_travel_research_before_solving(
+        delegate,
+        ledger,
+        "session-candidates-direct",
+        candidate_review_tool=candidate_review,
+    )
+    context = ToolExecutionContext(
+        actor=ActorContext(
+            actor_type="user",
+            user_id="user-a",
+            username="traveller",
+            display_name="Traveller",
+            role_keys=frozenset({"viewer"}),
+            permission_keys=frozenset(),
+            channel="web",
+        ),
+        session_id="session-candidates-direct",
+        turn_id="turn-a",
+        turn_index=1,
+        channel="travel",
+    )
+
+    result = provider.execute_with_context(
+        "run_skill",
+        {"skill": "zhice-official/travel-planner", "params": {}},
+        context,
+    )
+
+    assert result.metadata["code"] == "TRAVEL_CANDIDATE_REVIEW_REQUIRED"
+    assert [name for name, _ in delegate.calls] == ["run_skill"]
+    assert len(candidate_review.calls) == 1
+    assert candidate_review.calls[0][1] is context
 
 
 class _OptimizerProvider(_Provider):

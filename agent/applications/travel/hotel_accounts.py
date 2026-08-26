@@ -18,13 +18,14 @@ from agent.applications.travel.account_credentials import (
 )
 from agent.logging_utils import log_event
 from agent.process_tree import ManagedProcessTree
+from integrations.hotel_browser_mcp.ctrip import HotelBrowserError, check_ctrip_login
 
 hotel_account_logger = logging.getLogger("zcagent.agent.travel")
 _PROVIDER = "ctrip"
 
 
 class HotelAccountSupervisor:
-    """Persist environment credentials and coordinate one visible login helper."""
+    """Persist credentials and coordinate Ctrip checks and explicit login."""
 
     def __init__(
         self,
@@ -43,7 +44,11 @@ class HotelAccountSupervisor:
         ).resolve()
         self._tree: ManagedProcessTree | None = None
         self._watcher: threading.Thread | None = None
+        self._check_thread: threading.Thread | None = None
+        self._checking = False
+        self._initial_check_started = False
         self._lock = threading.Lock()
+        self._operation_lock = threading.Lock()
 
     def admin_snapshot(self) -> dict[str, object]:
         """Return a credential-free status projection for the Owner UI."""
@@ -52,6 +57,7 @@ class HotelAccountSupervisor:
         with self._lock:
             process = self._tree.process if self._tree is not None else None
             login_in_progress = process is not None and process.poll() is None
+            check_in_progress = self._checking
         configured = self.store.configured(_PROVIDER)
         state = "login_pending" if login_in_progress else str(status.get("state") or "unknown")
         if not configured:
@@ -72,22 +78,28 @@ class HotelAccountSupervisor:
             "credential_source": self.store.source(_PROVIDER),
             "credentials_updated_at": self.store.updated_at(_PROVIDER),
             "browser_supported": _playwright_available(),
+            "check_in_progress": check_in_progress,
             "login_in_progress": login_in_progress,
             "login_supported": bool(self.store.available and _playwright_available()),
-            "login_mode": "password_with_manual_verification_fallback",
+            "login_mode": (
+                "password_with_manual_verification_fallback"
+                if _headed_browser_available()
+                else "password_headless"
+            ),
             "last_checked_at": str(status.get("updated_at") or ""),
         }
 
     def save_credentials(self, username: str, password: str) -> str:
-        """Encrypt one Ctrip credential and reset only safe login state."""
+        """Persist one Ctrip credential and reset only safe login state."""
 
-        self.stop()
-        self.store.save(_PROVIDER, username, password)
-        self._write_status(
-            "unknown",
-            "HOTEL_AUTH_RECHECK_PENDING",
-            "Credentials changed; login will be checked again.",
-        )
+        with self._operation_lock:
+            self.stop()
+            self.store.save(_PROVIDER, username, password)
+            self._write_status(
+                "unknown",
+                "HOTEL_AUTH_RECHECK_PENDING",
+                "Credentials changed; login will be checked again.",
+            )
         log_event(
             hotel_account_logger,
             logging.INFO,
@@ -99,21 +111,22 @@ class HotelAccountSupervisor:
     def delete_credentials(self) -> str:
         """Delete workspace .env credentials; keep the browser profile."""
 
-        self.stop()
-        try:
-            deleted = self.store.delete(_PROVIDER)
-        except CredentialStoreError:
+        with self._operation_lock:
+            self.stop()
+            try:
+                deleted = self.store.delete(_PROVIDER)
+            except CredentialStoreError:
+                self._write_status(
+                    "unknown",
+                    "HOTEL_CREDENTIALS_EXTERNALLY_MANAGED",
+                    "Ctrip credentials are managed by the deployment environment.",
+                )
+                return "HOTEL_CREDENTIALS_EXTERNALLY_MANAGED"
             self._write_status(
-                "unknown",
-                "HOTEL_CREDENTIALS_EXTERNALLY_MANAGED",
-                "Ctrip credentials are managed by the deployment environment.",
+                "not_configured",
+                "HOTEL_CREDENTIALS_NOT_CONFIGURED",
+                "Ctrip credentials have not been configured.",
             )
-            return "HOTEL_CREDENTIALS_EXTERNALLY_MANAGED"
-        self._write_status(
-            "not_configured",
-            "HOTEL_CREDENTIALS_NOT_CONFIGURED",
-            "Ctrip credentials have not been configured.",
-        )
         log_event(
             hotel_account_logger,
             logging.INFO,
@@ -122,6 +135,93 @@ class HotelAccountSupervisor:
             existed=deleted,
         )
         return "HOTEL_CREDENTIALS_DELETED"
+
+    def check_login(self) -> str:
+        """Check only the persistent profile; never submit saved credentials."""
+
+        if not self.store.configured(_PROVIDER):
+            return "HOTEL_CREDENTIALS_NOT_CONFIGURED"
+        if not _playwright_available():
+            return "HOTEL_BROWSER_DEPENDENCY_MISSING"
+        with self._operation_lock:
+            with self._lock:
+                process = self._tree.process if self._tree is not None else None
+                if process is not None and process.poll() is None:
+                    return "HOTEL_LOGIN_ALREADY_RUNNING"
+                self._checking = True
+            log_event(
+                hotel_account_logger,
+                logging.INFO,
+                "travel.hotel_login_check_started",
+                provider=_PROVIDER,
+            )
+            try:
+                result = check_ctrip_login(self.workspace)
+            except HotelBrowserError as exc:
+                result = {
+                    "state": "unavailable",
+                    "code": exc.code,
+                    "message": exc.message,
+                }
+            except Exception as exc:  # pragma: no cover - defensive browser boundary
+                result = {
+                    "state": "unavailable",
+                    "code": "HOTEL_AUTH_CHECK_FAILED",
+                    "message": "The Ctrip login state could not be checked.",
+                }
+                log_event(
+                    hotel_account_logger,
+                    logging.ERROR,
+                    "travel.hotel_login_check_failed",
+                    provider=_PROVIDER,
+                    error_type=type(exc).__name__,
+                )
+            finally:
+                with self._lock:
+                    self._checking = False
+            state = str(result.get("state") or "unavailable")
+            code = str(result.get("code") or "HOTEL_AUTH_CHECK_FAILED")
+            message = str(
+                result.get("message") or "The Ctrip login state could not be checked."
+            )
+            self._write_status(state, code, message)
+        log_event(
+            hotel_account_logger,
+            logging.INFO if state == "authenticated" else logging.WARNING,
+            "travel.hotel_login_check_finished",
+            provider=_PROVIDER,
+            state=state,
+            code=code,
+        )
+        return code
+
+    def start_initial_check(self) -> str:
+        """Run one non-blocking startup check when a managed account exists."""
+
+        if not self.store.configured(_PROVIDER):
+            return "HOTEL_CREDENTIALS_NOT_CONFIGURED"
+        if not _playwright_available():
+            return "HOTEL_BROWSER_DEPENDENCY_MISSING"
+        with self._lock:
+            if self._initial_check_started:
+                return "HOTEL_AUTH_CHECK_ALREADY_STARTED"
+            self._initial_check_started = True
+            thread = threading.Thread(
+                target=self._run_initial_check,
+                name="zcagent-hotel-initial-check",
+                daemon=True,
+            )
+            self._check_thread = thread
+        thread.start()
+        return "HOTEL_AUTH_CHECK_STARTED"
+
+    def _run_initial_check(self) -> None:
+        try:
+            self.check_login()
+        finally:
+            with self._lock:
+                if self._check_thread is threading.current_thread():
+                    self._check_thread = None
 
     def start_login(self) -> str:
         """Start a fixed helper that reads the environment credential itself."""
@@ -132,58 +232,64 @@ class HotelAccountSupervisor:
             return "HOTEL_CREDENTIALS_NOT_CONFIGURED"
         if not _playwright_available():
             return "HOTEL_BROWSER_DEPENDENCY_MISSING"
-        with self._lock:
-            if self._tree is not None and self._tree.process.poll() is None:
-                return "HOTEL_LOGIN_ALREADY_RUNNING"
-            self.state_dir.mkdir(parents=True, exist_ok=True)
-            self.profile_dir.mkdir(parents=True, exist_ok=True)
-            self._write_status_unlocked(
-                "login_pending",
-                "HOTEL_LOGIN_STARTED",
-                "Ctrip automatic login is running.",
-            )
-            try:
-                self._tree = ManagedProcessTree.spawn(
-                    [
-                        sys.executable,
-                        "-m",
-                        "integrations.hotel_browser_mcp.login",
-                        "--workspace",
-                        str(self.workspace),
-                    ],
-                    cwd=self.workspace,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    shell=False,
-                    **(
-                        {"creationflags": subprocess.CREATE_NO_WINDOW}
-                        if os.name == "nt"
-                        else {}
-                    ),
-                )
-            except (OSError, ValueError) as exc:
-                self._tree = None
+        with self._operation_lock:
+            with self._lock:
+                if self._checking:
+                    return "HOTEL_AUTH_CHECK_IN_PROGRESS"
+                if self._tree is not None and self._tree.process.poll() is None:
+                    return "HOTEL_LOGIN_ALREADY_RUNNING"
+                self.state_dir.mkdir(parents=True, exist_ok=True)
+                self.profile_dir.mkdir(parents=True, exist_ok=True)
                 self._write_status_unlocked(
-                    "unavailable",
-                    "HOTEL_LOGIN_START_FAILED",
-                    "The Ctrip login helper could not be started.",
+                    "login_pending",
+                    "HOTEL_LOGIN_STARTED",
+                    "Ctrip automatic login is running.",
                 )
-                log_event(
-                    hotel_account_logger,
-                    logging.ERROR,
-                    "travel.hotel_login_start_failed",
-                    provider=_PROVIDER,
-                    error_type=type(exc).__name__,
+                command = [
+                    sys.executable,
+                    "-m",
+                    "integrations.hotel_browser_mcp.login",
+                    "--workspace",
+                    str(self.workspace),
+                ]
+                if _headed_browser_available():
+                    command.append("--headed")
+                try:
+                    self._tree = ManagedProcessTree.spawn(
+                        command,
+                        cwd=self.workspace,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        shell=False,
+                        **(
+                            {"creationflags": subprocess.CREATE_NO_WINDOW}
+                            if os.name == "nt"
+                            else {}
+                        ),
+                    )
+                except (OSError, ValueError) as exc:
+                    self._tree = None
+                    self._write_status_unlocked(
+                        "unavailable",
+                        "HOTEL_LOGIN_START_FAILED",
+                        "The Ctrip login helper could not be started.",
+                    )
+                    log_event(
+                        hotel_account_logger,
+                        logging.ERROR,
+                        "travel.hotel_login_start_failed",
+                        provider=_PROVIDER,
+                        error_type=type(exc).__name__,
+                    )
+                    return "HOTEL_LOGIN_START_FAILED"
+                watcher = threading.Thread(
+                    target=self._watch_login,
+                    args=(self._tree,),
+                    name="zcagent-hotel-login",
+                    daemon=True,
                 )
-                return "HOTEL_LOGIN_START_FAILED"
-            watcher = threading.Thread(
-                target=self._watch_login,
-                args=(self._tree,),
-                name="zcagent-hotel-login",
-                daemon=True,
-            )
-            self._watcher = watcher
+                self._watcher = watcher
         watcher.start()
         log_event(
             hotel_account_logger,
@@ -204,6 +310,9 @@ class HotelAccountSupervisor:
         if watcher is not None and watcher is not threading.current_thread():
             watcher.join(timeout=2.0)
         self._watcher = None
+        check_thread = self._check_thread
+        if check_thread is not None and check_thread is not threading.current_thread():
+            check_thread.join(timeout=2.0)
 
     def _watch_login(self, tree: ManagedProcessTree) -> None:
         tree.process.wait()
@@ -259,6 +368,14 @@ def _playwright_available() -> bool:
         return importlib.util.find_spec("playwright.sync_api") is not None
     except (ImportError, ModuleNotFoundError, ValueError):
         return False
+
+
+def _headed_browser_available() -> bool:
+    """Return whether this process can open a browser visible to the operator."""
+
+    if os.name == "nt" or sys.platform == "darwin":
+        return True
+    return bool(os.getenv("DISPLAY", "").strip() or os.getenv("WAYLAND_DISPLAY", "").strip())
 
 
 __all__ = [

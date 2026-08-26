@@ -158,20 +158,20 @@ default workspace=/home/zhice/.zhice
 /home/zhice/.zhice/config/channels/weixin/accounts
 ```
 
-Session、Memory、用户数据库、Context index、compaction、日志和测试缓存不得从本地烘入镜像。微信扫码生成的账号凭据只进入独立命名卷，不与完整 `config/` 混挂。完整云发布以镜像内 `deploy/private` 三份配置为唯一来源，每次先备份并原子替换 `/etc/zhice-agent/runtime/`，再逐文件只读 bind mount；新容器、sidecar 或核心功能验收失败时同时恢复旧容器和旧 runtime。
+Session、Memory、用户数据库、Context index、compaction、日志和测试缓存不得从本地烘入镜像。微信扫码生成的账号凭据只进入独立命名卷，不与完整 `config/` 混挂。完整云发布以镜像内 `deploy/private` 三份配置为唯一来源，每次先备份并原子替换 `/etc/zhice-agent/runtime/`，再逐文件只读 bind mount；显式 `-Smoke` 时，新容器、sidecar 或核心功能验收失败会同时恢复旧容器和旧 runtime。默认发布不等待这些验证，只保留启动命令失败的即时回滚。
 
 ## 10. 部署脚本
 
 - `build-image.ps1`：校验私有文件，按需传入经过白名单检查的 APT 镜像主机，构建 Vue/微信 sidecar/运行镜像，写版本信息并扫描误带数据。
 - `deploy/*.cmd`：根目录三个 Windows 双击薄入口，名称显式区分是否构建镜像与本地/云端目标。
 - `deploy/pipelines/build-and-deploy-local.ps1`：固定使用阿里云 APT 镜像与标准镜像/端口，完成当前源码 build、隔离 smoke、Compose 更新和有界 health 验收。
-- `deploy/pipelines/deploy-existing-image-to-cloud.ps1`：复用操作者确认过的 `zhice-agent:local`，不执行 build，默认不重复 smoke，自动生成发布标签、推送私有 registry 并按 Digest 部署云端。
-- `deploy/pipelines/build-and-deploy-cloud.ps1`：从当前源码 build、隔离 smoke 后进入同一云端发布模块，不调用本地 Compose。
+- `deploy/pipelines/deploy-existing-image-to-cloud.ps1`：复用操作者确认过的 `zhice-agent:local`，不执行 build，默认不 smoke，自动生成发布标签、推送私有 registry 并按 Digest 部署云端；显式 `-Smoke` 才执行完整验证。
+- `deploy/pipelines/build-and-deploy-cloud.ps1`：从当前源码 build 后进入同一云端发布模块，不调用本地 Compose；默认不 smoke，显式 `-Smoke` 才运行本地镜像与云端完整验证。
 - `deploy/private/cloud-target.json`：Git 忽略的本机目标配置；`SshPassword` 是其中唯一允许的明文部署 Secret，只依赖本机文件权限和 Git ignore 保护，Token、其他 Secret 与私钥仍禁止进入。Paramiko 从该文件读取 SSH/sudo 共用密码，加载 `%USERPROFILE%/.ssh/known_hosts` 并以 `RejectPolicy` 校验主机密钥；sudo 密码只经 PTY 的 stdin 传入并在输出中脱敏。公开 example 的待填写值直接使用中文。
-- `deploy/pipelines/invoke-cloud-release.ps1` 与 `deploy/scripts/remote_ops.py`：继续执行不可变 Digest、versioned release 和原子 `current`，同步固定 shell/Python 部署资产，并从固定公开 allowlist 安装 root-owned Ops 资产，不另行上传私有配置。
+- `deploy/pipelines/invoke-cloud-release.ps1` 与 `deploy/scripts/remote_ops.py`：继续执行不可变 Digest、versioned release 和原子 `current`，同步固定 shell/Python 部署资产，并从固定公开 allowlist 安装 root-owned Ops 资产，不另行上传私有配置；默认跳过 status 和公网 health，显式 `-Smoke` 才执行。
 - `push-image.ps1`：推送到私有 registry 并输出 digest，不回显 Secret。
 - `run-local.ps1`：使用最终镜像完成 health、Web、配置加载和优雅退出烟测。
-- `deploy.sh`：云端按 digest 启动单实例，挂通用运行数据 volume 和独立微信账号凭据 volume；健康后执行不可跳过的真实 HTTPS 核心工作流验收，外部集成只告警；成功后保留最近 5 份 runtime 备份和 30 份脱敏报告，发布、回滚和重启均不删除凭据卷。
+- `deploy.sh`：云端按 digest 启动主容器与 XHS sidecar，挂通用运行数据 volume 和独立微信账号凭据 volume；默认不等待 readiness/health，不执行核心工作流、外部集成或公网 smoke，显式 `-Smoke` 时才完整执行并在核心失败时回滚；成功后保留最近 5 份 runtime 备份和 30 份脱敏报告，发布、回滚和重启均不删除凭据卷。
 - `stop.sh`：优雅停止。
 - `status.sh`：显示容器、版本、digest 和 health。
 - `logs.sh`：读取脱敏日志。

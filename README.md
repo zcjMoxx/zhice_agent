@@ -151,7 +151,7 @@ Skill source、MCP 和 Subagent 都是可选扩展：未配置时作为 disabled
 
 模板默认启用无 Secret 的 Open-Meteo stdio 适配器。五个旅行专用 shared-readonly Profile 由旅行应用只在旅行 Turn 内注入，不需要复制到全局 `subagents.profiles`；quick/deep 都使用同一组三路候选研究和两路选择后最终化。高德、Tavily、12306 和小红书只读 upstream 需要在运行态 `${ZHICE_AGENT_WORKSPACE}/config/config.yml`/`.env` 中配置；真实 key、Cookie 和 Authorization 不进入仓库。小红书不是 OAuth：管理员通过扫码或手机验证建立登录态，系统后续复用 Cookie；适配器 Catalog 只有登录状态、搜索和详情，写操作不存在。高德 JS 地图构建变量为 `VITE_AMAP_JS_API_KEY` 和 `VITE_AMAP_JS_SECURITY_CODE`；未配置或加载失败时页面继续显示文字路线、距离和时长。
 
-管理后台把协议状态和账号状态分开：MCP 服务监控只统计真实 Server；小红书技术状态保留在 `xhs-readonly` MCP 卡，扫码/Cookie 登录与携程账号登录位于独立“外部平台账号”区域。携程仍是旅行应用内置只读 Tool，不进入 MCP Server 数或 Catalog。
+管理后台把协议状态和账号状态分开：MCP 服务监控只统计真实 Server；小红书技术状态保留在 `xhs-readonly` MCP 卡，扫码/Cookie 登录与携程账号登录位于独立“外部平台账号”区域。携程支持独立登录态检查，Gateway 启动只检查并复用已有 profile；密码只在 Owner 明确保存或登录时提交，旅行查询不会静默重登。携程仍是旅行应用内置只读 Tool，不进入 MCP Server 数或 Catalog。
 
 服务器私有镜像固定预装 `mcp-amap`、`12306-mcp@0.3.1` 和 RedNote 兼容的小红书 Linux 二进制。云端小红书运行在独立 `zhice-xhs-readonly` sidecar 中，与主容器共享只读/读写分离的 Cookie volume，只通过 `zhice-travel` Docker 网络访问，不发布宿主机或公网端口。完整操作见 `deploy/README.md` 的“旅行外部服务”章节。
 

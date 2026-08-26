@@ -1281,6 +1281,28 @@ def read_hotel_browser_admin_status(request: Request) -> HotelBrowserAdminStatus
     return _hotel_admin_response(_hotel_account_supervisor(request).admin_snapshot())
 
 
+@router.post(
+    "/admin/external-platforms/ctrip/check-login",
+    response_model=HotelBrowserAdminStatusResponse,
+)
+def check_hotel_browser_login(request: Request) -> HotelBrowserAdminStatusResponse:
+    """Check the persistent Ctrip profile without submitting credentials."""
+
+    actor = _owner_platform_actor(request)
+    supervisor = _hotel_account_supervisor(request)
+    code = supervisor.check_login()
+    snapshot = supervisor.admin_snapshot()
+    state = str(snapshot.get("state") or "unknown")
+    _audit_hotel_admin_action(
+        request,
+        actor,
+        action="external_platform.ctrip.login_checked",
+        decision="allow" if state == "authenticated" else "error",
+        code=code,
+    )
+    return _hotel_admin_response(snapshot)
+
+
 @router.put(
     "/admin/external-platforms/ctrip/credentials",
     response_model=HotelBrowserAdminStatusResponse,
@@ -2098,11 +2120,10 @@ def _hotel_admin_response(snapshot: dict[str, object]) -> HotelBrowserAdminStatu
         credential_source=str(snapshot.get("credential_source") or ""),
         credentials_updated_at=str(snapshot.get("credentials_updated_at") or ""),
         browser_supported=bool(snapshot.get("browser_supported")),
+        check_in_progress=bool(snapshot.get("check_in_progress")),
         login_supported=bool(snapshot.get("login_supported")),
         login_in_progress=bool(snapshot.get("login_in_progress")),
-        login_mode=str(
-            snapshot.get("login_mode") or "password_with_manual_verification_fallback"
-        ),
+        login_mode=str(snapshot.get("login_mode") or "password_headless"),
         last_checked_at=str(snapshot.get("last_checked_at") or ""),
     )
 

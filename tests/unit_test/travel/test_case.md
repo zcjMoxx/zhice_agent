@@ -9,7 +9,7 @@
 ## 用例覆盖
 
 - 旅行研究 Subagent Profile：启用通用 Subagent 时自动补充交通天气、住宿景点、攻略避坑三个互斥只读 Profile，限制一个 Turn 最多三路并发和一个批次；禁用状态不被打开，operator 同名 Profile 不被覆盖。
-- 携程只读 Tool：按城市与入住日期返回压缩观察价，支持住宿类型关键词和价格区间过滤；重复查询被账本拦截，认证错误保持结构化且不盲目重试。
+- 携程只读 Tool：按城市与入住日期返回压缩观察价，支持住宿类型关键词和价格区间过滤；重复查询被账本拦截，认证错误保持结构化且不盲目重试；查询只复用已认证 profile，失效时不得静默提交保存密码。
 - 多住宿区最终化：同一候选跨不同过夜城市或区域时，允许按各自入住日期分别查询一次酒店，不能因首个城市已有结果而拦截后续真实住宿区。
 - `TravelRequestV1`：目的地、日期、总天数、人数、预算、节奏与 quick/deep 边界。
 - `EvidenceItemV1`：HTTP(S) URL、时间戳、来源类型、live/snapshot/historical/estimate/unknown 一致性、SHA-256、短摘录截断、URL/content 去重与 evidence id 重映射。
@@ -67,7 +67,7 @@
 - 小红书 Cookie 兼容：本地 supervisor 优先选择版本最高的 RedNote 兼容二进制并回退通用文件；自有 sidecar 监听 Cookie 文件签名变化后自动重启加载新登录态，外部 listener 不接管。
 - 小红书 upstream 认证只使用隔离 Cookie，不读取或发送遗留 `XHS_READONLY_UPSTREAM_AUTHORIZATION`，避免同一身份存在两套运行配置。
 - 小红书扫码闭环：Cookie 内容稳定更新后自动关闭登录助手、重载 owned sidecar，重载完成前保持 pending；同内容重写不触发重载，本地 upstream 不继承终端代理。
-- 酒店账号查询：携程账号密码从跨平台进程环境或 Git 忽略的 runtime `config/.env` 读取，进程环境优先且外部 Secret 不允许后台伪删除；Owner 状态不泄漏账号原文、密码、路径或进程信息；固定 persistent profile 由进程内锁和系统文件锁跨进程串行复用，凭据更新/删除先终止旧登录助手，验证码转人工；hotel-browser 只暴露登录检查和酒店搜索，不包含预订、支付或取消能力；目的地必须模拟真实键入并选中可见的精确城市候选，忽略隐藏模板与酒店名中的同名片段。
+- 酒店账号查询：携程账号密码从跨平台进程环境或 Git 忽略的 runtime `config/.env` 读取，进程环境优先且外部 Secret 不允许后台伪删除；Owner 状态不泄漏账号原文、密码、路径或进程信息；固定 persistent profile 由进程内锁和系统文件锁跨进程串行复用；Gateway 启动只做一次无副作用检查，服务器登录默认 headless，旅行查询不自动提交密码；凭据更新/删除先终止旧登录助手；hotel-browser 不包含预订、支付或取消能力；目的地必须模拟真实键入并选中可见的精确城市候选，忽略隐藏模板与酒店名中的同名片段。
 - 页面终态：规划中和历史计划隐藏确认按钮，进入规划或完成时清理陈旧的需求对话错误；主聊天交接草稿不等待会话列表刷新。
 - 结果格式兼容：小红书来源投影同时识别 snake_case 与 RedNote camelCase 的笔记卡片、标题和用户昵称，已返回的公开笔记必须形成可读筛选摘要。
 - 实时状态收敛：需求回复期间可脱离旧 Session 新建独立计划；回合结束会读取权威草稿补齐交接卡，旧异步读取和晚到事件不得覆盖新工作区。
@@ -196,6 +196,7 @@
 - 最终住宿/路线 Child 的 fan-in 结果只有在对应 task 为 `completed/OK` 时才映射为 lodging/maps 完成；failed、timeout、cancelled 不得误标。
 - 最终住宿复用候选携程观察、没有产生新的 lodging ToolResult 时，成功 Child Lane 仍能满足最终化编排门槛。
 - 同一 Turn 的双 Lane 完成后，外层工具定义立即从 `delegate_tasks` 切换为 `finalize_travel_plan`。
+- 最终终稿草稿与交通归一：首次完整 `finalize_travel_plan` 失败后返回 SHA-256 `draft_revision` 和批量 issues；后续只提交 revision 与一个有界 JSON Pointer `repairs` 数组，可一次修正多个字段，服务端必须拒绝重新提交完整 plan 或 candidate id。revision 过期、受保护 request/schema/身份路径、非法转义、越界数组、超大或过多操作均 fail closed；规范化草稿持久化在 actor-scoped 旅行 SQLite，revision 条件更新防并发覆盖，跨服务实例继续 repair，成功保存原子删除草稿；父 Session 重放仅兼容旧调用且成功 ToolResult 后不得复活草稿。交通来源按铁路证据、其他外部 provider 或透明 `planning_estimate` 归一；名称只在车次或起终点与方式可推导时补齐，语义重复项合并 evidence。非对象、无语义名称和超过 20 项不得静默删除、造占位或截断，必须进入 issues 后显式批量修正。
 - 父 Session 的持久化调用参数与 tool fan-in 可在重启后恢复完成类别；partial 结果只恢复成功项。
 - 显式 Lane 标记只接受最终化允许类别，并且在 finalization budget 开启前不会提前生效。
 - 接待 Tool 对当前用户 Turn 做核心字段落地校验：仅说“我想去洛阳玩”时保留洛阳目的地，拒绝模型臆造的洛阳出发、当天日期、1 人、100 元和 Schema `string` 占位，避免基调卡提前出现。

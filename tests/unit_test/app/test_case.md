@@ -116,7 +116,7 @@
 - `run_gateway` 在构造 Runtime 前取得 workspace 单实例锁；Uvicorn 启动、绑定或 lifespan 进入失败时仍幂等关闭 Runtime 并释放锁，不遗留已初始化的后台组件。
 - 删除仍有活动 Turn 的 Session 时，Runtime 先发送取消并等待 Turn 注销完成，再删除 Session 文件和索引；超时则保留 Session 并返回失败，避免后台回写形成孤儿 CLI 会话。
 - “MCP 与 Skills”将协议服务和外部账号分区：MCP 监控只统计真实 Server；小红书连接、Catalog、调用与服务重启留在 MCP 卡，扫码/Cookie 登录移入仅 Owner 可见的“外部平台账号”。非 Owner API 返回 403，响应和审计不包含 Cookie、路径、PID 或原始工具输出。
-- 携程只进入“外部平台账号”，不进入 MCP 网格、Server 数或 Catalog；与小红书账号卡双列等高。账号 API 使用 `/api/admin/external-platforms/ctrip/*` 并返回 `platform_id=ctrip`；保存接口将密码写入 Git 忽略的 runtime `config/.env` 并立即启动登录助手，Linux/Docker/云平台也可使用外部 Secret 注入；状态、删除与重登响应只返回脱敏账号提示和稳定码，非 Owner 403，审计使用 `external_platform_account` 且不记录账号或密码。
+- 携程只进入“外部平台账号”，不进入 MCP 网格、Server 数或 Catalog；与小红书账号卡双列等高。账号 API 使用 `/api/admin/external-platforms/ctrip/*` 并返回 `platform_id=ctrip`；`check-login` 只检查持久 profile、不提交密码，保存接口将密码写入 Git 忽略的 runtime `config/.env` 并立即启动显式登录助手，服务器默认 headless；状态、检查、删除与登录响应只返回脱敏账号提示和稳定码，非 Owner 403，审计使用 `external_platform_account` 且不记录账号或密码。
 - 小红书登录检查兼容 MCP structured content 与 text content 形成的连续 JSON 文档；真实 success/OK 结果缓存为 authenticated，页面刷新不再误判为 unavailable。
 - 匿名账号可用性接口只返回布尔值；已存在账号按大小写等价判断，非法格式同样返回不可用且不泄露账号资料。
 

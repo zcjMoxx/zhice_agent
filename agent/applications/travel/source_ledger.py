@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
+from agent.applications.travel.drafts import travel_plan_draft_revision
 from agent.protocols.tool import Tool, ToolExecutionContext, ToolProvider, ToolResult
 
 TRAVEL_SOURCE_CATEGORIES = frozenset(
@@ -648,6 +649,8 @@ class TravelSourceLedger:
         safe = [
             {
                 "plan": deepcopy(attempt["plan"]),
+                "draft_revision": travel_plan_draft_revision(attempt["plan"]),
+                "selected_candidate_id": str(attempt.get("selected_candidate_id") or "").strip(),
                 "live_weather_verified": bool(attempt.get("live_weather_verified")),
                 "transit_verified": bool(attempt.get("transit_verified")),
             }
@@ -660,21 +663,29 @@ class TravelSourceLedger:
             state = self._sessions.setdefault(session_id, _SessionSources())
             state.plan_attempts = safe
 
-    def remember_plan_attempt(self, session_id: str, plan: dict[str, Any]) -> None:
+    def remember_plan_attempt(
+        self,
+        session_id: str,
+        plan: dict[str, Any],
+        *,
+        selected_candidate_id: str = "",
+    ) -> dict[str, Any]:
         """Keep one failed Finalizer draft for deterministic cross-Turn fact merging."""
 
         if not session_id or not isinstance(plan, dict):
-            return
+            return {}
+        attempt = {
+            "plan": deepcopy(plan),
+            "draft_revision": travel_plan_draft_revision(plan),
+            "selected_candidate_id": str(selected_candidate_id or "").strip(),
+        }
         with self._lock:
             state = self._sessions.setdefault(session_id, _SessionSources())
-            state.plan_attempts.append(
-                {
-                    "plan": deepcopy(plan),
-                    "live_weather_verified": state.forecast_successful,
-                    "transit_verified": state.verified_transit_available,
-                }
-            )
+            attempt["live_weather_verified"] = state.forecast_successful
+            attempt["transit_verified"] = state.verified_transit_available
+            state.plan_attempts.append(deepcopy(attempt))
             del state.plan_attempts[:-_MAX_PLAN_ATTEMPTS]
+        return deepcopy(attempt)
 
     def plan_attempts(self, session_id: str) -> list[dict[str, Any]]:
         """Return isolated newest-first failed Finalizer drafts for one Session."""
@@ -890,10 +901,12 @@ class TravelResearchRequiredToolProvider:
         delegate: ToolProvider,
         ledger: TravelSourceLedger,
         session_id: str,
+        candidate_review_tool: Tool | None = None,
     ) -> None:
         self._delegate = delegate
         self._ledger = ledger
         self._session_id = session_id
+        self._candidate_review_tool = candidate_review_tool
 
     def definitions(self) -> list[dict[str, Any]]:
         definitions = self._delegate.definitions()
@@ -934,6 +947,8 @@ class TravelResearchRequiredToolProvider:
         review_args = _candidate_review_args(name, args, result)
         if review_args is None:
             return result
+        if self._candidate_review_tool is not None:
+            return self._candidate_review_tool.execute_with_context(review_args, context)
         if callable(contextual):
             return contextual("request_travel_candidate_review", review_args, context)
         return result
@@ -1036,10 +1051,16 @@ def require_travel_research_before_solving(
     provider: ToolProvider,
     ledger: TravelSourceLedger,
     session_id: str,
+    candidate_review_tool: Tool | None = None,
 ) -> ToolProvider:
     """Return a parent-provider decorator enforcing research before optimizer use."""
 
-    return TravelResearchRequiredToolProvider(provider, ledger, session_id)
+    return TravelResearchRequiredToolProvider(
+        provider,
+        ledger,
+        session_id,
+        candidate_review_tool=candidate_review_tool,
+    )
 
 
 def require_travel_finalization_before_saving(
