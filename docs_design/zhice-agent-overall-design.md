@@ -267,7 +267,7 @@ SQLite 已用于 auth、session index、external identity、channel account、co
 
 ### 3.1 当前实现目标
 
-当前代码库已经落地的是一个多用户、多入口、多渠道共享同一 Agent 内核的本地优先系统，核心能力是：
+当前代码库已经落地的是一个多用户、多入口、多渠道共享同一 Agent 内核、面向本地运行与私有部署的系统，核心 Runtime 保持轻量，核心能力是：
 
 ```text
 ZhiCe-Agent（CLI + Web + QQ + 微信）：
@@ -304,10 +304,11 @@ ZhiCe-Agent（CLI + Web + QQ + 微信）：
 能通过 `deploy/` 私有覆盖层、Dockerfile、compose 和运维脚本组装私有运行镜像，
 能通过 `zcagent init` 生成运行时文件，
 能在私有 host allowlist 命中时匿名展示受控公安备案信息，而不泄露 allowlist 或私有配置，
+能通过独立旅行 Intake Agent、阶段化 Subagent、只读外部来源、正式 optimizer Skill、服务端 revision 草稿和 `TravelPlanV1` 运行本人智能旅行规划，
 能通过独立 WorkflowRuntime、SQLite、APScheduler 和固定 DAG 节点运行本人可视化工作流，并以已验证通知邮箱、个人 SMTP、本人 QQ 或本人微信显式投递结果。
 ```
 
-这就是当前代码基线。ZhiCe-Agent 已经不是聊天原型，而是具备身份、权限、长期 Memory、外部 Tool、运行扩展、子任务编排和多渠道接入的完整本地优先 Agent Runtime。
+这就是当前代码基线。ZhiCe-Agent 已经不是聊天原型，而是具备身份、权限、长期 Memory、外部 Tool、运行扩展、子任务编排、多渠道接入和特色应用的可私有部署 Agent Runtime。
 
 ### 3.2 当前目录结构
 
@@ -327,10 +328,13 @@ zhice_agent/
 |   |   +-- runtime.py
 |   |   +-- api/
 |   |   +-- services/
+|   +-- applications/
+|   |   +-- travel/
 |   +-- auth/
 |   +-- channels/
 |   |   +-- qq/
 |   |   +-- weixin/
+|   +-- connections/
 |   +-- context/
 |   +-- core/
 |   +-- embedding/
@@ -338,17 +342,22 @@ zhice_agent/
 |   +-- llm/
 |   +-- mcp/
 |   +-- memory/
+|   +-- operations/
 |   +-- presentation/
 |   +-- protocols/
 |   +-- session/
 |   +-- skills/
 |   +-- subagents/
 |   +-- tools/
+|   +-- workflows/
 |   +-- web/static/           # committed production build in Python wheel
 +-- skill_repo/
 |   +-- skills/
 +-- integrations/
+|   +-- hotel_browser_mcp/
+|   +-- open_meteo_mcp/
 |   +-- weixin_sidecar/
+|   +-- xhs_readonly_mcp/
 +-- web/
 |   +-- frontend/              # Vue 3 / Vite / TypeScript source
 +-- docs_design/
@@ -358,7 +367,7 @@ zhice_agent/
 +-- README.md
 ```
 
-这份目录结构是当前轻量形态。项目已经从 CLI-only 演进到带本地 auth/RBAC 的 Web gateway：`AgentLoop` 和 `ContextBuilder` 位于 `agent/core/`，身份/权限/用户 Session 服务位于 `agent/auth/`，HTTP/WS 壳位于 `agent/app/`，Vue source 位于 `web/frontend/`，production build 位于 `agent/web/static/` 并随 Python wheel 发布。当前不保留 `agent/gateway.py`、`agent/loop.py` 或 `agent/context.py` 兼容导出层。
+这份目录结构是当前核心轻量形态。项目已经从 CLI-only 演进到带本地 auth/RBAC 的 Web gateway：`AgentLoop` 和 `ContextBuilder` 位于 `agent/core/`，身份/权限/用户 Session 服务位于 `agent/auth/`，旅行与工作流分别位于 `agent/applications/travel/` 和 `agent/workflows/`，HTTP/WS 壳位于 `agent/app/`，Vue source 位于 `web/frontend/`，production build 位于 `agent/web/static/` 并随 Python wheel 发布。当前不保留 `agent/gateway.py`、`agent/loop.py` 或 `agent/context.py` 兼容导出层。
 
 参考大型 Agent 项目时，更应该吸收它的边界思想，而不是直接复制目录重量：
 
@@ -1333,7 +1342,7 @@ CLI --workspace
 ${ZHICE_AGENT_WORKSPACE}/
 +-- config/
 |   +-- models.json      # chat/compaction/embedding endpoint 与路由
-|   +-- config.yml       # context/skills/subagents/channels/hooks/mcp/travel/operations
+|   +-- config.yml       # site/context/skills/subagents/channels/hooks/mcp/logging/travel/workflows/official_email/operations
 |   +-- .env             # runtime env，不定义 workspace
 +-- prompts/
 +-- contexts/
@@ -1361,7 +1370,7 @@ ${ZHICE_AGENT_WORKSPACE}/
 - 顶层 `"default": "endpoint_name"` 或 `"default": {"ref": "endpoint_name"}` 只作为别名，不是必须存在的真实 endpoint。
 - `zcagent init` 完成提示必须区分核心与可选配置：LLM endpoint 是聊天前置条件；预算字段已有默认值；Skill source、MCP、Subagent 和 Hook 只在显式启用时配置。已有非法 endpoint 文件应提示直接编辑，普通 `init` 不会覆盖现有文件。
 - 普通 `zcagent init` 默认从唯一公开模板 `config/.env.example` 补齐 `${workspace}/config/.env`；已有 env 保留，`--force` 覆盖，`--write-env` 仅作为兼容参数且不再改变生成结果。
-- Channels、MCP、Subagents、Hooks、Context 和 Travel 都位于 workspace `config/config.yml` 的独立分区；分区缺失时按对应模块的安全默认或 disabled 处理。
+- Site、Context、Skills、Subagents、Channels、Hooks、MCP、Logging、Travel、Workflows、Official Email 和 Operations 都位于 workspace `config/config.yml` 的独立分区；分区缺失时按对应模块的安全默认或 disabled 处理。
 - MCP 根结构错误或全部 Server 非法时 unavailable；单个 Server 配置非法时 degraded 并保留其它合法 Server。`${VAR}` 要求非空，只有显式 `${VAR:-}` 才允许可选空值；`gateway --check` 对 degraded/unavailable 配置失败。
 - `site.public_security_record` 只在显式 private runtime 配置中启用，要求 14 位编号、展示文案包含编号和不带 scheme/port/path 的精确 host allowlist；匿名 `/api/site` 只在 Host 命中时返回固定官方查询 URL。
 - `models.json` 的 embedding route/endpoint 缺失时上下文 capability 标记为 degraded，但完整历史、确定性历史查询、compaction 和 FTS/BM25 继续工作。
@@ -1916,7 +1925,7 @@ Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费
 
 1. `TravelRequestV1`、`EvidenceItemV1`、`TravelPlanV1` 与 fake fixture。
 2. 官方 `travel-planner` Skill 和不访问网络的可执行 optimizer。
-3. 高德地图、Tavily、12306查询型 MCP、Open-Meteo只读适配和全部真实 smoke。
+3. 高德地图、Tavily、12306查询型 MCP、Open-Meteo只读适配和需凭据显式执行的真实 smoke。
 4. `xhs-readonly-mcp`、上游许可证保留、Cookie隔离、限流和只读Catalog。
 5. quick模式和最多三个child的deep模式、部分失败合并。
 6. `finalize_travel_plan`、用户隔离 Store、API 和 `travel.plan_ready` RuntimeEvent。
@@ -1924,7 +1933,7 @@ Part 17 不重新实现 Part 15 的索引或 Part 16 的管理页面，只消费
 
 明确边界：不购票、不预订、不支付，不把攻略生成封装成单个MCP Tool，不用无来源模型知识伪造实时事实。当前方案以 `docs_design/2026-08-10-intelligent-travel-planner-application-design.md` 为准。
 
-当前实现：`agent/applications/travel/` 已落地三类领域协议、证据去重、owner-scoped Store、service 和 `finalize_travel_plan`；`skill_repo/skills/travel-planner` 已落地严格 runtime schema 与纯计算 optimizer；`integrations/open_meteo_mcp` 和 `integrations/xhs_readonly_mcp` 已落地只读适配；`/api/travel/plans`、`travel.plan_ready` 和 Vue `/travel` 已接通。默认单元/Vue 测试和本地 Fake MCP Web→AgentLoop→Skill→Store 集成已覆盖；真实高德、Tavily、12306、小红书登录态和高德 JS 浏览器 smoke 必须在提供运行时凭据后单列执行。当前事实见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。
+当前实现：`agent/applications/travel/` 已落地 Intake Agent、阶段互斥旅行 Profile、来源调用账本、`TravelPlanV1`、按完整 `content_hash` 去重的 evidence、owner-scoped Store/service 和 `finalize_travel_plan`。终稿首次接受完整计划；失败后由服务端持久化带 SHA-256 revision 的规范草稿，后续只接受有界 JSON Pointer repairs，使用 optimistic concurrency 跨 Turn/重启修复，并在 Tool 合并与最终持久化边界确定性归一交通来源和证据。`skill_repo/skills/travel-planner` 已落地严格 runtime schema 与纯计算 optimizer；`integrations/open_meteo_mcp`、`integrations/xhs_readonly_mcp` 和 `integrations/hotel_browser_mcp` 已落地只读适配，携程同时作为旅行应用内置只读 Tool 复用已认证 profile；`/api/travel/plans`、`travel.plan_ready` 和 Vue `/travel` 已接通。默认单元/Vue 测试和本地 Fake MCP Web→AgentLoop→Skill→Store 集成已覆盖；真实高德、Tavily、12306、小红书、携程和高德 JS 浏览器 smoke 必须在提供运行时凭据或登录态后显式单列执行。当前事实见 `docs_design/zhice-agent-part19-intelligent-travel-planner-design.md`。
 
 ### Milestone 20：拖拽工作流、定时调度与用户连接（已实现）
 
@@ -2039,6 +2048,32 @@ Subagent 验收：
 4. SQLite FTS5/BM25、embedding 精确 cosine、entity、anchor 与 recency 混合排序真实可用；EmbeddingProvider 缺失时诚实降级。
 5. `context.selection`、compaction、index、retrieval 和 history query trace 能解释选择来源与失败原因。
 6. Session JSONL 保持完整真值，派生索引可重建；旧 Session 懒回填、clear/delete、用户隔离、跨渠道和 Subagent 边界通过测试。
+
+Web 产品面验收：
+
+1. Vue 3/Vite/TypeScript 是唯一正式 Web 前端，FastAPI 同源服务生产 build，登录、聊天、Session、设置、渠道连接和管理后台使用同一认证与错误协议。
+2. WebSocket 是主聊天通道；REST/SSE 只保留兼容边界。长会话阅读位置、移动端动态视口、安全 Markdown/KaTeX、主题和失败优先诊断通过前端测试。
+3. 前端源码、`package-lock.json` 与 `agent/web/static` 生产构建保持一致，构建产物随 Python wheel 发布。
+
+可靠性、部署与 Skill Runtime 验收：
+
+1. Provider 错误分类、有限重试、总 deadline、cooldown、attempts 证据、MCP 动态刷新、遗留 Turn 恢复和系统诊断均有默认自动验证。
+2. 本地镜像构建与隔离 smoke、私有 registry、按 Digest 云部署、Caddy HTTPS、持久 volume 和宿主机权威配置链已有真实验收；云发布默认不执行 readiness/health、核心工作流、外部集成或公网 smoke，只有显式 `-Smoke` 才运行完整验证并在核心失败时回滚。
+3. 指令型/可执行型 Skill、显式 runtime、`ndjson-v1`、SkillExecutor、ProgressSink、source 状态、权限过滤和 restricted Ops 保持独立边界，不能从 `exec.command` 推断 Skill。
+
+智能旅行规划验收：
+
+1. 旅行 Intake、需求草稿、候选研究、用户选择、optimizer、来源守卫、服务端 revision 草稿修复、结构化计划持久化和 Vue 完成页由默认 Fake 全链覆盖。
+2. evidence 按完整 `content_hash` 去重，交通与住宿来源在领域边界归一；终稿 repair 使用服务端 revision 和有界 JSON Pointer 操作，不重新提交整份失败计划。
+3. 高德、Tavily、12306、小红书、携程和地图浏览器能力只在显式凭据、账号登录态和真实环境可用时报告通过；默认测试和容器健康不能替代真实业务 E2E。
+4. 不购票、不预订、不支付，不把规划估算冒充实时价格或实时交通事实。
+
+可视化工作流验收：
+
+1. WorkflowRuntime 以 SQLite 为真值，APScheduler 只负责触发；草稿试运行、不可变发布版本、DAG 校验、单 scheduler 恢复和本人资源隔离通过测试。
+2. Tool/LLM/Template/Condition/通知节点、查询/动作双 allowlist、schema hash、连接所有权、额度、Activity/Audit 和 RuntimeEvent 保持统一执行边界。
+3. 工作流支持已验证通知邮箱、用户本人 SMTP、QQ 和微信投递；受限 Node-RED 交换只接受审核节点，拒绝 Function、exec、文件系统和任意 HTTP 节点。
+4. 任意代码、Shell、循环、子工作流、分布式队列和完整 Agent 节点不属于当前实现。
 
 ---
 
