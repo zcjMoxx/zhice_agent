@@ -4,7 +4,9 @@
 >
 > 当前状态：Part 20 已完成。独立 Workflow Runtime、SQLite 真值、不可变发布版本、受限 DAG 执行、APScheduler 调度、用户连接、本人邮件/QQ/微信投递、REST API、RuntimeEvent、受限 Node-RED 交换格式和 Vue Flow 产品页均已进入当前代码基线。
 >
-> 安全边界：工作流不进入聊天 Session，不提供任意代码、Shell/exec、循环、子工作流、完整 Agent 节点或多副本 scheduler。
+> 安全边界：工作流不进入聊天 Session，不提供任意代码、Shell/exec、任意图循环、子工作流、完整 Agent 节点或多副本 scheduler；条件节点只允许对直接上游的无副作用节点执行 1 至 5 次有限重试。
+>
+> 可靠性口径：Open-Meteo 只读请求对瞬时传输失败、超时、429 和 5xx 做有界重试；天气模板声明节点级有限重试。调度运行历史保存真实触发类型和计划时间，通知与外部写操作仍不自动重放。实现背景见 `2026-08-31-scheduled-weather-reliability-design.md`。
 
 ## 1. 当前定位
 
@@ -28,7 +30,7 @@ Part 20 是独立于聊天 `AgentLoop` 的后台自动化运行面：
 ## 2. 领域协议与持久化
 
 - `WorkflowDefinitionV1` 固定支持 `schedule_trigger`、`mcp_query`、`mcp_action`、`llm_transform`、`template`、`condition`、`official_notification`、`personal_email`、`qq_notification` 和 `weixin_notification`。
-- 发布前校验节点/边上限、唯一触发器、端口、孤立动作、条件 true/false 分支和有向无环；已发布版本不可覆盖。
+- 发布前校验节点/边上限、唯一触发器、端口、孤立动作、条件 true/false 分支和有向无环；状态条件只能检查直接上游，自动重试目标只能是只读查询或纯处理节点，已发布版本不可覆盖。
 - 修改已发布工作流会创建下一草稿版本；重复保存停留在同一草稿版本，发布相同内容幂等。
 - “保存草稿”“发布并启用”“立即测试”语义分离。立即测试运行最新已保存草稿，不发布、不替换线上版本；发布和运行前端动作会先保存当前画布并处理版本冲突。
 - Store 对运行、节点执行、输入/输出安全摘要、外部投递内容与回执进行 owner-scoped 持久化；缺失或越权统一返回稳定领域错误。
@@ -49,7 +51,7 @@ Part 20 是独立于聊天 `AgentLoop` 的后台自动化运行面：
 
 - 调度支持 date、interval、cron 和 IANA timezone；普通界面用“单次 / 每天 / 每周 / 每月 / 间隔”表单生成协议值。
 - APScheduler 使用固定 `workflow:{workflow_id}`、MemoryJobStore、`max_instances=1`、coalesce 和 misfire grace；启动、暂停、恢复与 Gateway 重启都从 SQLite 权威状态收敛。
-- DAG 按稳定拓扑层执行；条件节点只放行命中的分支，取消信号和节点失败写入结构化运行状态。
+- DAG 按稳定拓扑层执行；条件节点可比较输出或检查直接上游状态。受控上游失败可按 1 至 5 次上限重试，恢复后走 true 分支，耗尽后走 false 分支；每次尝试、取消信号和节点失败均写入结构化运行状态。
 - 外部写操作、个人邮件和本人 QQ/微信通知不因 timeout 或 transport error 自动重试；未知外部结果保持 outcome unknown。
 - 运行详情展示节点时间线、实际发送内容的有界安全副本和 Provider 回执。长内容可展开和复制，但凭据、内部 `safe_*` 字段、run/node ID 与原始异常不进入普通界面。
 
@@ -77,11 +79,11 @@ Part 20 是独立于聊天 `AgentLoop` 的后台自动化运行面：
 
 - viewer、developer、admin 的基础权限均可管理本人工作流、调度和自我通知；跨用户读取、修改、执行和连接引用拒绝。
 - MCP Action、个人邮件和本人 QQ/微信需要显式同意时间；发布与每次运行都复查当前授权条件。
-- 不支持任意 Python、JavaScript、Shell、exec、循环、子工作流、分布式队列、完整 Agent 节点、任意收件平台身份或多 Gateway scheduler。
+- 不支持任意 Python、JavaScript、Shell、exec、任意图循环、子工作流、分布式队列、完整 Agent 节点、任意收件平台身份或多 Gateway scheduler。有限重试不会覆盖 MCP Action、邮件、QQ/微信通知等有副作用节点。
 - 真实外部副作用验收必须使用明确测试账号、收件箱和 allowlist；“Provider accepted”不等于最终送达。
 
 ## 8. 验证基线
 
-默认 Python 测试覆盖 schema、Store、草稿/发布/试运行、DAG、调度锁恢复、Tool 输入适配、连接加密与 ownership、通知重检、外部 outcome unknown、Node-RED 限制和稳定 API 错误。前端覆盖 store 冲突恢复、模板默认值、画布连接、移动交互、保存反馈、capability 刷新和运行详情，并执行 lint、typecheck、Vitest 与 production build。
+默认 Python 测试覆盖 schema、Store、草稿/发布/试运行、DAG、状态条件有限重试、调度锁恢复、Tool 输入适配、连接加密与 ownership、通知重检、外部 outcome unknown、Node-RED 限制和稳定 API 错误。前端覆盖 store 冲突恢复、模板默认值、画布连接、状态重试配置、移动交互、保存反馈、capability 刷新和运行详情，并执行 lint、typecheck、Vitest 与 production build。
 
 真实外部 smoke 单列执行：只读来源需要对应运行态服务和登录态；官方通知需要已配置官方 SMTP 与真实验证码收件箱；个人邮件需要用户 SMTP 授权码；QQ/微信需要 owner 当前有效绑定与在线上下文；Action 需要 Owner 审核后的真实 allowlist 和明确允许的副作用。

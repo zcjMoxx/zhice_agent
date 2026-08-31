@@ -156,7 +156,14 @@ const configurationIssueItems = computed<ConfigurationIssue[]>(() => {
     if ((node.type === "llm_transform" || outputNodeTypes.has(node.type as WorkflowNodeType)) && incoming.has(node.id) && !directInput) addIssue(tr(`“${node.label}”只能连接一个上一步`, `Connect exactly one previous step to “${node.label}”`), node.id);
     if (node.type === "llm_transform" && !config.instruction) addIssue(tr(`“${node.label}”的整理方式还不完整`, `Complete the task for “${node.label}”`), node.id);
     if (node.type === "template" && !config.content && !directInput) addIssue(tr(`“${node.label}”需要连接一个上一步`, `Connect a previous step to “${node.label}”`), node.id);
-    if (node.type === "condition" && (!config.left || !config.operator || (config.operator !== "is_empty" && (config.right === "" || config.right === undefined)))) addIssue(tr(`“${node.label}”的判断条件还不完整`, `Complete the condition for “${node.label}”`), node.id);
+    if (node.type === "condition" && config.check_mode !== "status" && (!config.left || !config.operator || (config.operator !== "is_empty" && (config.right === "" || config.right === undefined)))) addIssue(tr(`“${node.label}”的判断条件还不完整`, `Complete the condition for “${node.label}”`), node.id);
+    if (node.type === "condition" && config.check_mode === "status") {
+      const sourceId = directPredecessorId(editorSnapshot.value, node.id);
+      const source = nodes.value.find((item) => item.id === sourceId);
+      if (!sourceId || config.status_node_id !== sourceId) addIssue(tr(`“${node.label}”需要重新选择检查上一步状态`, `Select the direct previous step again for “${node.label}”`), node.id);
+      if (config.retry_on_failure && !["mcp_query", "llm_transform", "template"].includes(String(source?.type || ""))) addIssue(tr(`“${node.label}”的上一步会产生外部操作，不能自动重试`, `The previous step has external effects and cannot be retried`), node.id);
+      if (config.retry_on_failure && (Number(config.max_attempts) < 1 || Number(config.max_attempts) > 5)) addIssue(tr(`“${node.label}”的最大尝试次数应为 1 到 5`, `Maximum attempts for “${node.label}” must be 1 to 5`), node.id);
+    }
     if (node.type === "condition") {
       const branches = new Set(edges.value.filter((edge) => edge.source === node.id).map((edge) => edge.sourceHandle));
       if (!branches.has("true") || !branches.has("false")) addIssue(tr(`“${node.label}”需要分别连接“是”和“否”两个后续步骤`, `Connect both branches for “${node.label}”`), node.id);
@@ -280,7 +287,7 @@ function nodeSummary(type: string, config: Record<string, unknown>): string {
     return tool ? workflowToolName(tool) : tr("请选择工具", "Select a tool");
   }
   if (type === "llm_transform") return ({ advice: "生成生活建议", summary: "生成摘要", key_points: "提取重点", rewrite: "润色改写", classify: "分类整理", custom: "自定义整理" } as Record<string, string>)[String(config.task || "")] || tr("请选择整理方式", "Choose a task");
-  if (type === "condition") return ({ eq: "等于", ne: "不等于", contains: "包含", gt: "大于", gte: "大于或等于", lt: "小于", lte: "小于或等于", is_empty: "为空" } as Record<string, string>)[String(config.operator || "")] || tr("配置判断条件", "Configure condition");
+  if (type === "condition") return config.check_mode === "status" ? tr("检查上一步是否成功", "Check previous step status") : ({ eq: "等于", ne: "不等于", contains: "包含", gt: "大于", gte: "大于或等于", lt: "小于", lte: "小于或等于", is_empty: "为空" } as Record<string, string>)[String(config.operator || "")] || tr("配置判断条件", "Configure condition");
   if (outputNodeTypes.has(type as WorkflowNodeType)) return type === "personal_email" ? tr("SMTP 发送", "Send via SMTP") : type === "qq_notification" ? tr("QQ 通知", "QQ notification") : type === "weixin_notification" ? tr("微信通知", "Weixin notification") : type === "official_notification" ? tr("邮箱通知", "Email notification") : tr("仅作记录", "Record only");
   return tr("等待配置", "Not configured");
 }
@@ -297,7 +304,7 @@ function defaultConfig(type: WorkflowNodeType): Record<string, unknown> {
     case "mcp_action": return { tool_name: "", input_schema_hash: "", arguments: {}, published_consent_at: "" };
     case "llm_transform": return { task: "summary", tone: "plain", output_length: "medium", advice_topics: ["umbrella", "clothing", "travel"], commute_mode: "general", temperature_preference: "normal", additional_instruction: "", instruction: "将上一步数据整理成普通用户可直接阅读的中文纯文本；不要输出 Markdown、JSON、内部字段名或代码；保留关键事实、日期、单位和必要建议", input: "" };
     case "template": return { delivery_mode: "result", content: "", source_ref: "", template: "", variables: {} };
-    case "condition": return { left: "", operator: "contains", right: "" };
+    case "condition": return { check_mode: "value", left: "", operator: "contains", right: "", status_node_id: "", retry_on_failure: false, max_attempts: 3 };
     case "official_notification": return { delivery_mode: "notification", subject: "工作流通知", content: "", source_ref: "", body: "" };
     case "personal_email": return { delivery_mode: "email", connection_id: "", to: "", subject: "工作流结果", content: "", source_ref: "", body: "" };
     case "qq_notification": return { delivery_mode: "qq", content: "", source_ref: "", body: "", send_consent_at: "" };
@@ -856,6 +863,16 @@ function selectResult(field: string, event: Event) {
   if (selected.value.type === "template") syncTemplateConfig(selected.value.data.config);
   if (outputNodeTypes.has(selected.value.type as WorkflowNodeType)) syncDeliveryConfig(selected.value.data.config, selected.value.type as WorkflowNodeType);
 }
+function setConditionMode(event: Event) {
+  if (!selected.value || selected.value.type !== "condition") return;
+  const config = selected.value.data.config;
+  config.check_mode = (event.target as HTMLSelectElement).value;
+  if (config.check_mode === "status") {
+    config.status_node_id = directPredecessorId(editorSnapshot.value, selected.value.id) || "";
+    config.retry_on_failure = Boolean(config.retry_on_failure);
+    config.max_attempts = Math.min(5, Math.max(1, Number(config.max_attempts || 3)));
+  }
+}
 function isResultReference(value: unknown): boolean { return typeof value === "string" && value.startsWith("${nodes."); }
 function syncScheduleConfig() {
   if (!selected.value || selected.value.type !== "schedule_trigger") return;
@@ -1312,9 +1329,18 @@ async function testSelectedTool() {
             </details>
           </template>
           <template v-else-if="selected.type === 'condition'">
-            <label>{{ tr('判断哪个步骤的结果', 'Result to check') }}<select :value="selected.data.config.left" @change="selectResult('left', $event)"><option value="">{{ tr('请选择前面的步骤', 'Choose a previous step') }}</option><option v-for="option in variableOptions" :key="option.nodeId" :value="option.value">{{ option.label }}</option></select></label>
-            <label>{{ tr('判断方式', 'Operator') }}<select v-model="selected.data.config.operator"><option value="eq">{{ tr('等于', 'Equals') }}</option><option value="ne">{{ tr('不等于', 'Does not equal') }}</option><option value="contains">{{ tr('包含', 'Contains') }}</option><option value="is_empty">{{ tr('没有内容', 'Is empty') }}</option><option value="gt">{{ tr('大于', 'Greater than') }}</option><option value="gte">{{ tr('大于或等于', 'Greater than or equal') }}</option><option value="lt">{{ tr('小于', 'Less than') }}</option><option value="lte">{{ tr('小于或等于', 'Less than or equal') }}</option></select></label>
-            <label v-if="selected.data.config.operator !== 'is_empty'">{{ tr('要比较的内容', 'Compare with') }}<input v-model="selected.data.config.right" :placeholder="tr('输入文字或数字', 'Enter text or a number')" /></label>
+            <label>{{ tr('判断类型', 'Condition type') }}<select :value="selected.data.config.check_mode || 'value'" @change="setConditionMode"><option value="value">{{ tr('判断上一步的结果内容', 'Check previous result value') }}</option><option value="status">{{ tr('检查上一步是否成功', 'Check whether previous step succeeded') }}</option></select></label>
+            <template v-if="selected.data.config.check_mode !== 'status'">
+              <label>{{ tr('判断哪个步骤的结果', 'Result to check') }}<select :value="selected.data.config.left" @change="selectResult('left', $event)"><option value="">{{ tr('请选择前面的步骤', 'Choose a previous step') }}</option><option v-for="option in variableOptions" :key="option.nodeId" :value="option.value">{{ option.label }}</option></select></label>
+              <label>{{ tr('判断方式', 'Operator') }}<select v-model="selected.data.config.operator"><option value="eq">{{ tr('等于', 'Equals') }}</option><option value="ne">{{ tr('不等于', 'Does not equal') }}</option><option value="contains">{{ tr('包含', 'Contains') }}</option><option value="is_empty">{{ tr('没有内容', 'Is empty') }}</option><option value="gt">{{ tr('大于', 'Greater than') }}</option><option value="gte">{{ tr('大于或等于', 'Greater than or equal') }}</option><option value="lt">{{ tr('小于', 'Less than') }}</option><option value="lte">{{ tr('小于或等于', 'Less than or equal') }}</option></select></label>
+              <label v-if="selected.data.config.operator !== 'is_empty'">{{ tr('要比较的内容', 'Compare with') }}<input v-model="selected.data.config.right" :placeholder="tr('输入文字或数字', 'Enter text or a number')" /></label>
+            </template>
+            <template v-else>
+              <p class="workflow-field-help">{{ selectedDirectInputLabel ? tr(`检查“${selectedDirectInputLabel}”是否执行成功。`, `Check whether “${selectedDirectInputLabel}” succeeded.`) : tr('请先把条件节点连接到要检查的上一步。', 'Connect the condition to the previous step to check.') }}</p>
+              <label class="workflow-checkbox"><input v-model="selected.data.config.retry_on_failure" type="checkbox" />{{ tr('失败时重新执行上一步', 'Retry the previous step when it fails') }}</label>
+              <label v-if="selected.data.config.retry_on_failure">{{ tr('最大尝试次数（包含第一次）', 'Maximum attempts (including the first)') }}<input v-model.number="selected.data.config.max_attempts" type="number" min="1" max="5" /></label>
+              <p class="workflow-field-help">{{ tr('任一次成功走“是”分支；达到次数仍失败走“否”分支。发送消息、邮件和外部写操作不会自动重试。', 'Any success follows Yes; exhaustion follows No. Notifications, email, and external writes are never retried automatically.') }}</p>
+            </template>
             <p class="workflow-field-help">{{ tr('条件成立走“是”分支，不成立走“否”分支。', 'True follows Yes; false follows No.') }}</p>
           </template>
           <template v-else-if="selected.type === 'mcp_query'">

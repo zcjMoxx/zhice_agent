@@ -112,17 +112,15 @@ class NodeHandlers:
             self.policy.authorize_tool(self.actor, helper_name, action=False)
             helper_result = self._execute_tool(helper_name, helper_args, context)
             if helper_result.is_error:
-                raise RuntimeError("WORKFLOW_NODE_FAILED")
+                raise RuntimeError(
+                    _tool_result_error_code(helper_result.metadata, action=False)
+                )
             return _parse_tool_output(helper_result.output)
 
         prepared_args = prepare_tool_arguments(name, args, invoke_query)
         result = self._execute_tool(name, prepared_args, context)
         if result.is_error:
-            raise RuntimeError(
-                "WORKFLOW_ACTION_OUTCOME_UNKNOWN"
-                if action
-                else "WORKFLOW_SOURCE_UNAVAILABLE"
-            )
+            raise RuntimeError(_tool_result_error_code(result.metadata, action=action))
         try:
             return _validated_tool_output(_parse_tool_output(result.output))
         except RuntimeError:
@@ -254,6 +252,19 @@ def _validated_tool_output(value: Any) -> Any:
     if "RATE_LIMIT" in source_code:
         raise RuntimeError("WORKFLOW_SOURCE_RATE_LIMITED")
     raise RuntimeError("WORKFLOW_SOURCE_UNAVAILABLE")
+
+
+def _tool_result_error_code(metadata: dict[str, Any], *, action: bool) -> str:
+    if action:
+        return "WORKFLOW_ACTION_OUTCOME_UNKNOWN"
+    code = str(metadata.get("code") or "").upper()
+    if code in {"MCP_TOOL_TIMEOUT", "MCP_TOOL_CANCELLED"}:
+        return "WORKFLOW_SOURCE_TIMEOUT"
+    if code in {"MCP_SCHEMA_INVALID", "MCP_TOOL_NOT_FOUND"}:
+        return "WORKFLOW_TOOL_NEEDS_REVIEW"
+    if "RATE_LIMIT" in code:
+        return "WORKFLOW_SOURCE_RATE_LIMITED"
+    return "WORKFLOW_SOURCE_UNAVAILABLE"
 
 
 def _composed_message(value: dict[str, Any]) -> str:

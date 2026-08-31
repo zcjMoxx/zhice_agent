@@ -35,6 +35,10 @@ describe("workflow starter templates", () => {
     expect(String(advice.config.instruction)).toContain("带伞");
     expect(String(advice.config.instruction)).toContain("不超过 3 行、90 个汉字");
     expect(String(advice.config.instruction)).toContain("不要逐项说明不存在的风险");
+    expect(definition.nodes.find((node) => node.id === "weather")?.retry_policy).toEqual({
+      max_attempts: 3,
+      backoff_seconds: 5,
+    });
   });
 
   it("keeps record-only delivery as the safe default even when QQ is available", () => {

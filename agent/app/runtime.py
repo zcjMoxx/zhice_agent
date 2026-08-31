@@ -3634,7 +3634,14 @@ def build_web_runtime(
             if definition is None:
                 return
             scheduled_actor = auth_store.actor_for_user(definition.owner_user_id, channel="workflow")
-            workflow_runtime.run(scheduled_actor, workflow_id)
+            schedule = workflow_store.get_schedule(workflow_id)
+            trigger_type = str(schedule.get("trigger_type") or "scheduled") if schedule else "scheduled"
+            workflow_runtime.run(
+                scheduled_actor,
+                workflow_id,
+                trigger_type=trigger_type,
+                scheduled_for=scheduled_for,
+            )
 
         scheduler = WorkflowScheduler(
             workflow_store,

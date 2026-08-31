@@ -15,6 +15,7 @@
 - 查询预览：只读测试经过当前 `UserScopedToolProvider` 与 allowlist；非法任务输入映射为稳定 API 错误，Action 不提供免确认预览。
 - 任务输入适配：天气地点经 allowlisted geocoder 转坐标，详细地点可回退高德 POI；12306 地名转站码；小红书详情只接受安全、完整的 HTTPS 笔记链接。
 - 外部来源：天气默认生成动态两日窗口；结构化来源失败区分鉴权、超时、限流和暂不可用。
+- 定时天气可靠性：Open-Meteo 闲置连接断开、超时、429 和 5xx 采用有界重试；MCP timeout、transport、schema/not-found 和 rate-limit 保留稳定分类。
 - 发布重检：个人邮箱 ownership、QQ 当前绑定/同意、微信当前上下文/同意均在发布时复查。
 - 投递边界：Template、官方邮箱、个人邮箱、QQ、微信共用正文组合与纯文本渲染；外发节点保存有界发送内容和回执。
 - 未知结果：QQ timeout 记录 outcome unknown，只尝试一次，不自动重放可能已生效的外部操作。
@@ -23,7 +24,9 @@
 ## 调度锁覆盖
 
 - 启动时按 SQLite active schedule 重建固定 job，第二个同 workspace scheduler 被拒绝。
+- 状态条件可检查直接上游是否成功；只读/纯处理节点失败时按 1 至 5 次上限重试，恢复后走“是”分支，耗尽后走“否”分支，并拒绝自动重试通知、邮件和外部写操作。
 - date、interval、cron、timezone、暂停/恢复和重启恢复保持稳定。
+- 调度运行历史保存真实 `date`/`interval`/`cron` 触发类型和计划时间，不伪装成手动运行。
 - Windows 陈旧 PID 锁不调用不兼容的 `os.kill(pid, 0)`，不存在的进程可以安全替换。
 - Windows PID 被新进程复用时结合创建时间识别旧锁，不终止无关进程。
 - Linux 使用内核文件锁；旧容器被强制删除后，即使新容器仍是 PID 1，也能安全取得锁并完成部署回滚。

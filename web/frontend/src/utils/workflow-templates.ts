@@ -23,7 +23,7 @@ export const workflowStarterTemplates: WorkflowStarterTemplate[] = [
     requirements: "进入画布后填写：提醒时间、地点，并确认发送方式",
     nodes: [
       { id: "trigger", type: "schedule_trigger", title: "定时运行", position: { x: 80, y: 180 }, config: { trigger_type: "cron", schedule_mode: "daily", time_of_day: "" } },
-      { id: "weather", type: "mcp_query", title: "查询天气", position: { x: 360, y: 180 }, config: { tool_name: "mcp__open-meteo__get_forecast", input_schema_hash: "", arguments: { place_name: "", forecast_days: 1 } } },
+      { id: "weather", type: "mcp_query", title: "查询天气", position: { x: 360, y: 180 }, config: { tool_name: "mcp__open-meteo__get_forecast", input_schema_hash: "", arguments: { place_name: "", forecast_days: 1 } }, retry_policy: { max_attempts: 3, backoff_seconds: 5 } },
       { id: "advice", type: "llm_transform", title: "生成今日建议", position: { x: 640, y: 180 }, config: { task: "advice", tone: "friendly", output_length: "short", advice_topics: ["umbrella", "clothing", "travel"], commute_mode: "general", temperature_preference: "normal", additional_instruction: "", instruction: weatherAdvice, input: "${nodes.weather.output}" } },
       { id: "delivery", type: "template", title: "发送结果", position: { x: 920, y: 180 }, config: { content: "", source_ref: "${nodes.advice.output}", template: "{{result}}", variables: { result: "${nodes.advice.output}" } } },
     ],

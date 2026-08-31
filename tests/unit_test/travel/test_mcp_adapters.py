@@ -63,6 +63,43 @@ def test_open_meteo_out_of_forecast_window_never_calls_network(monkeypatch):
     assert called is False
 
 
+def test_open_meteo_retries_stale_transport_connection(monkeypatch):
+    calls = []
+
+    def flaky_get(*args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) == 1:
+            raise httpx.RemoteProtocolError("server disconnected idle connection")
+        return Response({"results": [{"name": "重庆", "latitude": 29.5, "longitude": 106.5}]})
+
+    monkeypatch.setenv("OPEN_METEO_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("OPEN_METEO_RETRY_BACKOFF_SECONDS", "0")
+    monkeypatch.setattr(weather._HTTP_CLIENT, "get", flaky_get)
+
+    result = weather.geocode_place("重庆")
+
+    assert result["status"] == "success"
+    assert len(calls) == 2
+
+
+def test_open_meteo_does_not_retry_non_retryable_http_error(monkeypatch):
+    calls = []
+
+    def rejected_get(*args, **kwargs):
+        calls.append((args, kwargs))
+        request = httpx.Request("GET", "https://example.invalid")
+        response = httpx.Response(400, request=request)
+        raise httpx.HTTPStatusError("bad request", request=request, response=response)
+
+    monkeypatch.setattr(weather._HTTP_CLIENT, "get", rejected_get)
+
+    result = weather.geocode_place("重庆")
+
+    assert result["code"] == "TRAVEL_SOURCE_UNAVAILABLE"
+    assert result["attempts"] == 1
+    assert len(calls) == 1
+
+
 def test_xhs_catalog_has_only_three_read_operations():
     names = set(xhs.server._tool_manager._tools)
 

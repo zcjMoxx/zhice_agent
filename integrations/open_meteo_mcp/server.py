@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
@@ -161,19 +162,36 @@ def _weather_result(payload: dict[str, Any], *, freshness: str, data_as_of: str)
 
 def _get_json(base_url: str, path: str, params: dict[str, Any]) -> dict[str, Any]:
     timeout = float(os.getenv("OPEN_METEO_TIMEOUT_SECONDS", "15"))
-    try:
-        response = _HTTP_CLIENT.get(f"{base_url.rstrip('/')}{path}", params=params, timeout=timeout)
-        response.raise_for_status()
-        payload = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        code = "TRAVEL_SOURCE_RATE_LIMITED" if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429 else "TRAVEL_SOURCE_UNAVAILABLE"
-        return {
-            "status": "error",
-            "code": code,
-            "message": "Open-Meteo request failed safely.",
-            "retrieved_at": _utc_now(),
-            "error_type": type(exc).__name__,
-        }
+    attempts = _bounded_retry_attempts(os.getenv("OPEN_METEO_MAX_ATTEMPTS", "3"))
+    backoff = _bounded_retry_backoff(os.getenv("OPEN_METEO_RETRY_BACKOFF_SECONDS", "0.5"))
+    payload: Any = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = _HTTP_CLIENT.get(
+                f"{base_url.rstrip('/')}{path}", params=params, timeout=timeout
+            )
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except (httpx.HTTPError, ValueError) as exc:
+            retryable = _retryable_weather_error(exc)
+            if retryable and attempt < attempts:
+                time.sleep(backoff * attempt)
+                continue
+            code = (
+                "TRAVEL_SOURCE_RATE_LIMITED"
+                if isinstance(exc, httpx.HTTPStatusError)
+                and exc.response.status_code == 429
+                else "TRAVEL_SOURCE_UNAVAILABLE"
+            )
+            return {
+                "status": "error",
+                "code": code,
+                "message": "Open-Meteo request failed safely.",
+                "retrieved_at": _utc_now(),
+                "error_type": type(exc).__name__,
+                "attempts": attempt,
+            }
     if not isinstance(payload, dict):
         return {
             "status": "error",
@@ -182,6 +200,28 @@ def _get_json(base_url: str, path: str, params: dict[str, Any]) -> dict[str, Any
             "retrieved_at": _utc_now(),
         }
     return payload
+
+
+def _retryable_weather_error(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and (
+        exc.response.status_code == 429 or exc.response.status_code >= 500
+    )
+
+
+def _bounded_retry_attempts(value: str) -> int:
+    try:
+        return min(5, max(1, int(value)))
+    except ValueError:
+        return 3
+
+
+def _bounded_retry_backoff(value: str) -> float:
+    try:
+        return min(10.0, max(0.0, float(value)))
+    except ValueError:
+        return 0.5
 
 
 def _base_url(env_name: str, default: str) -> str:

@@ -110,7 +110,14 @@ class WorkflowRuntime:
                 schedule["enabled"] = True
                 self.scheduler.register(schedule)
 
-    def run(self, actor: ActorContext, workflow_id: str) -> dict:
+    def run(
+        self,
+        actor: ActorContext,
+        workflow_id: str,
+        *,
+        trigger_type: str = "manual",
+        scheduled_for: str | None = None,
+    ) -> dict:
         definition = self.store.get_published(workflow_id, owner_user_id=actor.user_id)
         if definition is None:
             raise KeyError("WORKFLOW_NOT_FOUND")
@@ -119,7 +126,11 @@ class WorkflowRuntime:
             self.policy.require(actor, permission)
         executor = self.executor_factory(actor) if self.executor_factory is not None else self.executor
         try:
-            return executor.execute(definition)
+            return executor.execute(
+                definition,
+                trigger_type=trigger_type,
+                scheduled_for=scheduled_for,
+            )
         finally:
             if executor is not self.executor:
                 executor.shutdown()

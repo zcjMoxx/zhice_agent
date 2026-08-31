@@ -129,6 +129,34 @@ async function mountWorkflowPage(capabilities: WorkflowCapabilities = {}, existi
 }
 
 describe("WorkflowPage canvas interactions", () => {
+  it("configures a bounded retry from a status condition", async () => {
+    const statusWorkflow = structuredClone(workflow);
+    statusWorkflow.edges.push({ id: "query-condition", source_node_id: "query", target_node_id: "condition", source_port: "output", target_port: "input" });
+    const { wrapper } = await mountWorkflowPage({}, statusWorkflow);
+
+    await wrapper.get('[data-node-id="condition"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const mode = wrapper.findAll(".workflow-inspector select")[0];
+    await mode.setValue("status");
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.text()).toContain("检查“查天气”是否执行成功");
+    const retry = wrapper.get('.workflow-inspector input[type="checkbox"]');
+    await retry.setValue(true);
+    await wrapper.vm.$nextTick();
+    const attempts = wrapper.get('.workflow-inspector input[type="number"]');
+    await attempts.setValue("4");
+
+    const selected = (wrapper.vm as unknown as { selected: StubNode }).selected;
+    expect(selected.data.config).toMatchObject({
+      check_mode: "status",
+      status_node_id: "query",
+      retry_on_failure: true,
+      max_attempts: 4,
+    });
+    wrapper.unmount();
+  });
+
   it("hydrates saved nodes immediately when returning with the same workflow still in the store", async () => {
     const { wrapper } = await mountWorkflowPage({}, workflow);
 

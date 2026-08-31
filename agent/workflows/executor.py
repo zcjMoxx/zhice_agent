@@ -53,9 +53,76 @@ class WorkflowExecutor:
         predecessors: dict[str, list[Any]] = {node_id: [] for node_id in nodes}
         for edge in definition.edges:
             predecessors[edge.target_node_id].append(edge)
+        status_controllers = {
+            str(node.config.get("status_node_id")): node
+            for node in definition.nodes
+            if node.type == "condition"
+            and node.config.get("check_mode", "value") == "status"
+        }
         outputs: dict[str, Any] = {}
         statuses: dict[str, str] = {}
         input_summaries: dict[str, str] = {}
+
+        def prepared_inputs(node: Any) -> tuple[dict[str, Any], Any]:
+            inputs = dict(node.input_bindings)
+            direct_edges = predecessors[node.id]
+            if len(direct_edges) == 1:
+                source_output = outputs.get(direct_edges[0].source_node_id)
+                if node.type == "llm_transform":
+                    inputs["input"] = source_output
+                if node.type in {"official_notification", "personal_email", "qq_notification", "weixin_notification"} or (
+                    node.type == "template"
+                    and ("content" in node.config or "source_ref" in node.config)
+                ):
+                    inputs["source_ref"] = source_output
+            resolved_inputs = resolve_value({**node.config, **inputs}, outputs)
+            recorded_inputs: Any = resolved_inputs
+            if node.type in {"official_notification", "personal_email", "qq_notification", "weixin_notification"}:
+                recorded_inputs = {
+                    **resolved_inputs,
+                    "content": plain_delivery_message(resolved_inputs),
+                }
+            input_summaries[node.id] = safe_summary(recorded_inputs)
+            return inputs, recorded_inputs
+
+        def failure_code(node: Any, exc: Exception) -> str:
+            if isinstance(exc, TimeoutError):
+                return "WORKFLOW_ACTION_OUTCOME_UNKNOWN" if node.type in {"mcp_action", "official_notification", "personal_email", "qq_notification", "weixin_notification"} else "WORKFLOW_NODE_TIMEOUT"
+            value = str(exc)
+            return value if value.startswith(("WORKFLOW_", "CONNECTION_", "EMAIL_", "OFFICIAL_", "NOTIFICATION_")) else "WORKFLOW_NODE_FAILED"
+
+        def run_attempt(node: Any, attempt: int) -> tuple[bool, str | None]:
+            self.store.append_event(run_id, "workflow.node.started", {"node_id": node.id, "node_type": node.type, "attempt": attempt})
+            inputs, _recorded = prepared_inputs(node)
+            future = self.pool.submit(self.handlers.execute, node, inputs, outputs, run_id=run_id)
+            try:
+                result = future.result(timeout=node.timeout_seconds)
+            except Exception as exc:
+                if isinstance(exc, TimeoutError):
+                    future.cancel()
+                code = failure_code(node, exc)
+                statuses[node.id] = "failed"
+                outputs.pop(node.id, None)
+                self.store.record_node_run(run_id, node.id, node.type, "failed", attempt=attempt, input_summary=input_summaries.get(node.id, ""), error_code=code)
+                self.store.append_event(run_id, "workflow.node.failed", {"node_id": node.id, "error_code": code, "attempt": attempt})
+                return False, code
+            outputs[node.id] = result
+            statuses[node.id] = "succeeded"
+            self.store.record_node_run(run_id, node.id, node.type, "succeeded", attempt=attempt, input_summary=input_summaries[node.id], output_summary=safe_summary(result))
+            self.store.append_event(run_id, "workflow.node.completed", {"node_id": node.id, "attempt": attempt})
+            return True, None
+
+        def record_status_condition(node: Any, attempt: int) -> bool:
+            source_id = str(node.config.get("status_node_id") or "")
+            result = statuses.get(source_id) == "succeeded"
+            value = {"result": result, "status": statuses.get(source_id, "not_run")}
+            outputs[node.id] = value
+            statuses[node.id] = "succeeded"
+            input_summaries[node.id] = safe_summary({"status_node_id": source_id})
+            self.store.record_node_run(run_id, node.id, node.type, "succeeded", attempt=attempt, input_summary=input_summaries[node.id], output_summary=safe_summary(value))
+            self.store.append_event(run_id, "workflow.node.completed", {"node_id": node.id, "attempt": attempt})
+            return result
+
         try:
             for node_id in order:
                 node = nodes[node_id]
@@ -63,7 +130,12 @@ class WorkflowExecutor:
                     raise InterruptedError("WORKFLOW_CANCELLED")
                 skip = False
                 for edge in predecessors[node_id]:
-                    if statuses.get(edge.source_node_id) in {"failed", "skipped"}:
+                    checks_failed_source = (
+                        node.type == "condition"
+                        and node.config.get("check_mode", "value") == "status"
+                        and str(node.config.get("status_node_id") or "") == edge.source_node_id
+                    )
+                    if statuses.get(edge.source_node_id) in {"failed", "skipped"} and not checks_failed_source:
                         skip = True
                     source = nodes[edge.source_node_id]
                     if source.type == "condition":
@@ -75,44 +147,41 @@ class WorkflowExecutor:
                     self.store.record_node_run(run_id, node.id, node.type, "skipped")
                     self.store.append_event(run_id, "workflow.node.skipped", {"node_id": node.id})
                     continue
-                self.store.append_event(run_id, "workflow.node.started", {"node_id": node.id, "node_type": node.type})
-                inputs = dict(node.input_bindings)
-                direct_edges = predecessors[node_id]
-                if len(direct_edges) == 1:
-                    source_output = outputs.get(direct_edges[0].source_node_id)
-                    if node.type == "llm_transform":
-                        inputs["input"] = source_output
-                    if node.type in {"official_notification", "personal_email", "qq_notification", "weixin_notification"} or (
-                        node.type == "template"
-                        and ("content" in node.config or "source_ref" in node.config)
-                    ):
-                        inputs["source_ref"] = source_output
-                resolved_inputs = resolve_value({**node.config, **inputs}, outputs)
-                recorded_inputs: Any = resolved_inputs
-                if node.type in {"official_notification", "personal_email", "qq_notification", "weixin_notification"}:
-                    recorded_inputs = {
-                        **resolved_inputs,
-                        "content": plain_delivery_message(resolved_inputs),
-                    }
-                input_summaries[node.id] = safe_summary(recorded_inputs)
-                attempts = node.retry_policy.max_attempts if node.type == "mcp_query" else 1
+                if node.type == "condition" and node.config.get("check_mode", "value") == "status":
+                    self.store.append_event(run_id, "workflow.node.started", {"node_id": node.id, "node_type": node.type, "attempt": 1})
+                    passed = record_status_condition(node, 1)
+                    source_id = str(node.config.get("status_node_id") or "")
+                    if not passed and bool(node.config.get("retry_on_failure", False)):
+                        source = nodes[source_id]
+                        for attempt in range(2, int(node.config.get("max_attempts", 1)) + 1):
+                            if cancellation.is_set():
+                                raise InterruptedError("WORKFLOW_CANCELLED")
+                            self.store.append_event(run_id, "workflow.node.retrying", {"node_id": source_id, "condition_node_id": node.id, "attempt": attempt})
+                            succeeded, _code = run_attempt(source, attempt)
+                            self.store.append_event(run_id, "workflow.node.started", {"node_id": node.id, "node_type": node.type, "attempt": attempt})
+                            passed = record_status_condition(node, attempt)
+                            if succeeded and passed:
+                                break
+                    continue
+                attempts = 1 if node.id in status_controllers else (node.retry_policy.max_attempts if node.type == "mcp_query" else 1)
+                succeeded = False
+                code: str | None = None
                 for attempt in range(1, attempts + 1):
-                    future = self.pool.submit(self.handlers.execute, node, inputs, outputs, run_id=run_id)
-                    try:
-                        result = future.result(timeout=node.timeout_seconds)
-                        outputs[node.id] = result
-                        statuses[node.id] = "succeeded"
-                        self.store.record_node_run(run_id, node.id, node.type, "succeeded", attempt=attempt, input_summary=input_summaries[node.id], output_summary=safe_summary(result))
-                        self.store.append_event(run_id, "workflow.node.completed", {"node_id": node.id})
+                    succeeded, code = run_attempt(node, attempt)
+                    if succeeded:
                         break
-                    except TimeoutError as exc:
-                        future.cancel()
-                        code = "WORKFLOW_ACTION_OUTCOME_UNKNOWN" if node.type in {"mcp_action", "official_notification", "personal_email", "qq_notification", "weixin_notification"} else "WORKFLOW_NODE_TIMEOUT"
-                        raise RuntimeError(code) from exc
-                    except Exception:
-                        if attempt >= attempts:
-                            raise
-            final = "partial" if "skipped" in statuses.values() else "succeeded"
+                    if code not in {
+                        "WORKFLOW_SOURCE_UNAVAILABLE",
+                        "WORKFLOW_SOURCE_TIMEOUT",
+                        "WORKFLOW_SOURCE_RATE_LIMITED",
+                        "WORKFLOW_NODE_TIMEOUT",
+                    }:
+                        break
+                    if attempt < attempts and node.retry_policy.backoff_seconds:
+                        cancellation.wait(node.retry_policy.backoff_seconds * attempt)
+                if not succeeded and node.id not in status_controllers:
+                    raise RuntimeError(code or "WORKFLOW_NODE_FAILED")
+            final = "partial" if any(value in {"failed", "skipped"} for value in statuses.values()) else "succeeded"
             self.store.update_run(run_id, final)
             self.store.append_event(run_id, "workflow.run.completed", {"status": final})
             return {"run_id": run_id, "status": final, "outputs": outputs, "node_statuses": statuses}
@@ -123,7 +192,7 @@ class WorkflowExecutor:
         except Exception as exc:
             code = str(exc) if str(exc).startswith(("WORKFLOW_", "CONNECTION_", "EMAIL_", "OFFICIAL_", "NOTIFICATION_")) else "WORKFLOW_NODE_FAILED"
             current = next((item for item in order if item not in statuses), "")
-            if current:
+            if current and "failed" not in statuses.values():
                 node = nodes[current]
                 statuses[current] = "failed"
                 self.store.record_node_run(run_id, current, node.type, "failed", input_summary=input_summaries.get(current, ""), error_code=code)

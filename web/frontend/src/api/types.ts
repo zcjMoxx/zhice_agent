@@ -576,6 +576,7 @@ export interface WorkflowNode {
   title?: string;
   input_bindings?: Record<string, unknown>;
   timeout_seconds?: number;
+  retry_policy?: { max_attempts: number; backoff_seconds: number };
 }
 
 export interface WorkflowEdge {

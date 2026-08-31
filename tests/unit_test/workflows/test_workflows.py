@@ -13,11 +13,12 @@ from agent.workflows.executor import WorkflowExecutor, safe_summary
 from agent.workflows.nodes import (
     NodeHandlers,
     _parse_tool_output,
+    _tool_result_error_code,
     _validated_tool_output,
     resolve_reference,
 )
 from agent.workflows.runtime import WorkflowRuntime
-from agent.workflows.schemas import WorkflowDefinitionV1, WorkflowEdge, WorkflowNode
+from agent.workflows.schemas import RetryPolicy, WorkflowDefinitionV1, WorkflowEdge, WorkflowNode
 from agent.workflows.store import WorkflowStore
 from agent.workflows.tool_inputs import with_required_query_helpers
 
@@ -164,6 +165,41 @@ def test_draft_trial_run_does_not_publish_or_replace_the_active_version(tmp_path
         store.get_draft("wf", owner_user_id="other")
 
 
+def test_runtime_records_scheduled_trigger_identity(tmp_path: Path):
+    store = WorkflowStore(tmp_path / "scheduled-audit.sqlite3")
+    item = store.save_draft(definition())
+    store.publish(item)
+    policy = WorkflowAuthorizationPolicy()
+    executor = WorkflowExecutor(store, NodeHandlers(actor=actor(), policy=policy))
+    runtime = WorkflowRuntime(store, executor, policy)
+
+    result = runtime.run(
+        actor(),
+        item.workflow_id,
+        trigger_type="cron",
+        scheduled_for="2026-08-31T00:30:00+00:00",
+    )
+
+    run = store.get_run(result["run_id"], "user")
+    assert run["trigger_type"] == "cron"
+    assert run["scheduled_for"] == "2026-08-31T00:30:00+00:00"
+    executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({"code": "MCP_TOOL_TIMEOUT"}, "WORKFLOW_SOURCE_TIMEOUT"),
+        ({"code": "MCP_TRANSPORT_ERROR"}, "WORKFLOW_SOURCE_UNAVAILABLE"),
+        ({"code": "MCP_TOOL_NOT_FOUND"}, "WORKFLOW_TOOL_NEEDS_REVIEW"),
+        ({"code": "MCP_REMOTE_RATE_LIMITED"}, "WORKFLOW_SOURCE_RATE_LIMITED"),
+    ],
+)
+def test_workflow_query_preserves_mcp_failure_category(metadata, expected):
+    assert _tool_result_error_code(metadata, action=False) == expected
+    assert _tool_result_error_code(metadata, action=True) == "WORKFLOW_ACTION_OUTCOME_UNKNOWN"
+
+
 def test_editing_published_workflow_creates_next_draft_version(tmp_path: Path):
     store = WorkflowStore(tmp_path / "workflow-versions.sqlite3")
     original = store.save_draft(definition())
@@ -257,6 +293,150 @@ def test_executor_condition_skip_and_events(tmp_path: Path):
     ]
     assert store.events_after(result["run_id"])[0]["type"] == "workflow.run.started"
     assert "hunter2" not in safe_summary({"password": "hunter2"})
+
+
+def status_retry_definition(*, max_attempts: int = 3, source_type: str = "template"):
+    nodes = (
+        WorkflowNode("trigger", "schedule_trigger"),
+        WorkflowNode("work", source_type, config={"template": "work", "send_consent_at": "now"}),
+        WorkflowNode(
+            "condition",
+            "condition",
+            config={
+                "check_mode": "status",
+                "status_node_id": "work",
+                "retry_on_failure": True,
+                "max_attempts": max_attempts,
+            },
+        ),
+        WorkflowNode("yes", "template", config={"template": "yes"}),
+        WorkflowNode("no", "template", config={"template": "no"}),
+    )
+    edges = (
+        WorkflowEdge("a", "trigger", target_node_id="work"),
+        WorkflowEdge("b", "work", target_node_id="condition"),
+        WorkflowEdge("c", "condition", target_node_id="yes", condition_branch="true"),
+        WorkflowEdge("d", "condition", target_node_id="no", condition_branch="false"),
+    )
+    return WorkflowDefinitionV1("retry-wf", "user", "retry workflow", nodes, edges)
+
+
+def test_status_condition_retries_failed_upstream_until_success(tmp_path: Path):
+    workflow = status_retry_definition()
+    store = WorkflowStore(tmp_path / "status-retry.sqlite3")
+    store.save_draft(workflow)
+
+    class FlakyHandlers(NodeHandlers):
+        calls = 0
+
+        def execute(self, node, inputs, outputs, *, run_id):
+            if node.id == "work":
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("WORKFLOW_SOURCE_UNAVAILABLE")
+            return super().execute(node, inputs, outputs, run_id=run_id)
+
+    executor = WorkflowExecutor(
+        store, FlakyHandlers(actor=actor(), policy=WorkflowAuthorizationPolicy())
+    )
+    result = executor.execute(workflow)
+    executor.shutdown()
+
+    assert result["status"] == "partial"
+    assert result["node_statuses"]["work"] == "succeeded"
+    assert result["outputs"]["condition"] == {"result": True, "status": "succeeded"}
+    assert result["outputs"]["yes"] == {"text": "yes"}
+    assert result["node_statuses"]["no"] == "skipped"
+    detail = store.get_run(result["run_id"], "user")
+    work_attempts = [node for node in detail["nodes"] if node["node_id"] == "work"]
+    assert [(node["attempt"], node["status"]) for node in work_attempts] == [
+        (1, "failed"),
+        (2, "succeeded"),
+    ]
+    assert any(event["type"] == "workflow.node.retrying" for event in detail["events"])
+
+
+def test_query_retry_policy_retries_only_transient_source_failure(tmp_path: Path):
+    item = WorkflowDefinitionV1(
+        "query-retry",
+        "user",
+        "query retry",
+        (
+            WorkflowNode("trigger", "schedule_trigger"),
+            WorkflowNode(
+                "query",
+                "mcp_query",
+                retry_policy=RetryPolicy(max_attempts=3, backoff_seconds=0),
+            ),
+            WorkflowNode("result", "template", config={"template": "done"}),
+        ),
+        (
+            WorkflowEdge("a", "trigger", target_node_id="query"),
+            WorkflowEdge("b", "query", target_node_id="result"),
+        ),
+    )
+    store = WorkflowStore(tmp_path / "query-retry.sqlite3")
+    store.save_draft(item)
+
+    class FlakyHandlers(NodeHandlers):
+        calls = 0
+
+        def execute(self, node, inputs, outputs, *, run_id):
+            if node.id == "query":
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("WORKFLOW_SOURCE_UNAVAILABLE")
+                return {"status": "success"}
+            return super().execute(node, inputs, outputs, run_id=run_id)
+
+    executor = WorkflowExecutor(
+        store, FlakyHandlers(actor=actor(), policy=WorkflowAuthorizationPolicy())
+    )
+    result = executor.execute(item, trigger_type="cron")
+    executor.shutdown()
+
+    assert result["status"] == "succeeded"
+    detail = store.get_run(result["run_id"], "user")
+    assert [node["status"] for node in detail["nodes"] if node["node_id"] == "query"] == [
+        "failed",
+        "succeeded",
+    ]
+
+
+def test_status_condition_uses_false_branch_after_retry_exhaustion(tmp_path: Path):
+    workflow = status_retry_definition(max_attempts=3)
+    store = WorkflowStore(tmp_path / "status-retry-exhausted.sqlite3")
+    store.save_draft(workflow)
+
+    class FailingHandlers(NodeHandlers):
+        def execute(self, node, inputs, outputs, *, run_id):
+            if node.id == "work":
+                raise RuntimeError("WORKFLOW_SOURCE_UNAVAILABLE")
+            return super().execute(node, inputs, outputs, run_id=run_id)
+
+    executor = WorkflowExecutor(
+        store, FailingHandlers(actor=actor(), policy=WorkflowAuthorizationPolicy())
+    )
+    result = executor.execute(workflow)
+    executor.shutdown()
+
+    assert result["status"] == "partial"
+    assert result["node_statuses"]["work"] == "failed"
+    assert result["outputs"]["condition"] == {"result": False, "status": "failed"}
+    assert result["outputs"]["no"] == {"text": "no"}
+    assert result["node_statuses"]["yes"] == "skipped"
+    detail = store.get_run(result["run_id"], "user")
+    assert [node["attempt"] for node in detail["nodes"] if node["node_id"] == "work"] == [1, 2, 3]
+
+
+def test_status_retry_rejects_unsafe_or_unbounded_configuration():
+    with pytest.raises(WorkflowValidationError) as attempts_error:
+        validate_definition(status_retry_definition(max_attempts=6))
+    assert attempts_error.value.code == "WORKFLOW_SCHEMA_INVALID"
+
+    with pytest.raises(WorkflowValidationError) as unsafe_error:
+        validate_definition(status_retry_definition(source_type="qq_notification"))
+    assert unsafe_error.value.code == "WORKFLOW_RETRY_UNSAFE"
 
 
 def test_run_detail_keeps_external_content_and_delivery_receipt(tmp_path: Path):

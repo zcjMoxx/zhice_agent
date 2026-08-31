@@ -57,6 +57,34 @@ def validate_definition(definition: WorkflowDefinitionV1, *, max_nodes: int = 30
     for node in definition.nodes:
         if node.type == "condition" and branches[node.id] != {"true", "false"}:
             raise WorkflowValidationError("WORKFLOW_SCHEMA_INVALID", "condition must have true and false branches")
+        if node.type == "condition" and node.config.get("check_mode", "value") == "status":
+            source_id = str(node.config.get("status_node_id") or "")
+            source = by_id.get(source_id)
+            direct_sources = {
+                edge.source_node_id
+                for edge in definition.edges
+                if edge.target_node_id == node.id
+            }
+            if source is None or source_id not in direct_sources:
+                raise WorkflowValidationError(
+                    "WORKFLOW_SCHEMA_INVALID",
+                    "status condition must check a direct upstream node",
+                )
+            retry_enabled = bool(node.config.get("retry_on_failure", False))
+            max_attempts = node.config.get("max_attempts", 1)
+            if not isinstance(max_attempts, int) or isinstance(max_attempts, bool) or not 1 <= max_attempts <= 5:
+                raise WorkflowValidationError(
+                    "WORKFLOW_SCHEMA_INVALID", "status retry attempts must be between 1 and 5"
+                )
+            if retry_enabled and source.type not in {"mcp_query", "llm_transform", "template"}:
+                raise WorkflowValidationError(
+                    "WORKFLOW_RETRY_UNSAFE", "only side-effect-free nodes may be retried"
+                )
+            if retry_enabled and set(outgoing[source_id]) != {node.id}:
+                raise WorkflowValidationError(
+                    "WORKFLOW_RETRY_UNSAFE",
+                    "retried node must flow directly and only into its status condition",
+                )
     indegree = {node_id: incoming[node_id] for node_id in ids}
     ready = sorted(node_id for node_id, degree in indegree.items() if degree == 0)
     ordered: list[str] = []

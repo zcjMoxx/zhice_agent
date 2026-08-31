@@ -87,16 +87,16 @@ def test_connection_runtime_uses_mailbox_account_as_sender(monkeypatch, tmp_path
         host="smtp.qq.com",
         port=465,
         security="tls",
-        username=" 849534549@qq.com ",
+        username=" user@example.com ",
         app_password="authorization-code",
     )
 
-    assert item["account_display"] == "849534549@qq.com"
-    assert provider_options["username"] == "849534549@qq.com"
-    assert provider_options["from_address"] == "849534549@qq.com"
+    assert item["account_display"] == "user@example.com"
+    assert provider_options["username"] == "user@example.com"
+    assert provider_options["from_address"] == "user@example.com"
     credential = store.credential(item["id"], owner_user_id="u1")
-    assert credential["username"] == "849534549@qq.com"
-    assert credential["from_address"] == "849534549@qq.com"
+    assert credential["username"] == "user@example.com"
+    assert credential["from_address"] == "user@example.com"
 
 
 def test_connection_runtime_sends_explicit_test_email(monkeypatch, tmp_path) -> None:
